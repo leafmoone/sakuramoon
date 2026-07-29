@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "task_id": "C001",
+  "synthetic_golden": {
+    "kind": "non_production_test_fixture",
+    "resolved_bytes": 6913,
+    "resolved_sha256": "f2e33b55386d814fbf6b7df1faffe57555643528c22e47c2db8e6c4340fecc32",
+    "note": "The hash covers explicitly synthetic test probabilities and conveys no approved dropout value."
+  },
+  "files": {
+    "src/sakuramoon/__init__.py": "5981c5a47bd2f42ad7983a02aa4a3248044818e5e1ae601fab602720573b04e8",
+    "src/sakuramoon/config/__init__.py": "211fbcfe1532fe48058d81d865b878f9f8c8f700f3511693c95ea16b76ac7337",
+    "src/sakuramoon/config/load.py": "9df25ef293dc22772d493460903399bffd372a449e7ec3a829704e750702efe2",
+    "src/sakuramoon/config/redact.py": "6b6ff9da97a2f417bc64590846a02a0676fcca71e9eeefe25b1cb3ea02f90b3e",
+    "src/sakuramoon/config/resolve.py": "0145b870377ff2266f723de5ff32ed353be961cdf69984dda6b0e0dda900a922",
+    "src/sakuramoon/config/schema.py": "552b31adb80d7d146977d7ef0e24a4edc8d05d93b13479a2151c2582ad88284d",
+    "config/examples/all_options.example.toml": "e296b80a9d8406ade40954935f36e04ff4be1febc9d4a418469eb24b039163c2",
+    "tests/unit/docs/test_verify_traceability.py": "1ab40e8dd81e9ddd8045da6056915008ccbdb5e9647124e1f5c014837b43f89d"
+  },
+  "performance_artifacts_created": false
+}

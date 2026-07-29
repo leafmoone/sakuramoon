@@ -38,6 +38,12 @@ def repo_copy(tmp_path: Path) -> Path:
         ROOT / "docs/model-architecture/reviews/ROADMAP",
         model_docs / "reviews/ROADMAP",
     )
+    shutil.copytree(
+        ROOT / "src/sakuramoon",
+        root / "src/sakuramoon",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    shutil.copytree(ROOT / "config", root / "config")
     for relative in (
         "SHA256SUMS",
         "progress/IMPLEMENTATION_ROADMAP.md",
@@ -260,10 +266,10 @@ def test_archive_symlink_is_rejected(
 
 def test_reverse_module_and_config_inventory_is_required(repo_copy: Path) -> None:
     module = repo_copy / "src/sakuramoon/unmapped.py"
-    module.parent.mkdir(parents=True)
+    module.parent.mkdir(parents=True, exist_ok=True)
     module.write_text("VALUE = 1\n", encoding="utf-8")
     config = repo_copy / "config/unmapped.toml"
-    config.parent.mkdir()
+    config.parent.mkdir(exist_ok=True)
     config.write_text("unexpected = 1\n", encoding="utf-8")
 
     def mutate(data: dict[str, Any]) -> None:
@@ -278,7 +284,7 @@ def test_reverse_module_and_config_inventory_is_required(repo_copy: Path) -> Non
 
 def test_inventory_ignore_cannot_hide_production_files(repo_copy: Path) -> None:
     module = repo_copy / "src/sakuramoon/hidden.py"
-    module.parent.mkdir(parents=True)
+    module.parent.mkdir(parents=True, exist_ok=True)
     module.write_text("VALUE = 1\n", encoding="utf-8")
 
     def mutate(data: dict[str, Any]) -> None:

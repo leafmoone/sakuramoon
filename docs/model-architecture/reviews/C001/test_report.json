@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "task_id": "C001",
+  "hardware": "CPU",
+  "targeted": {
+    "command": "PYTHONPATH=src uv run --frozen pytest -q tests/unit/config tests/contracts/config",
+    "passed": 47,
+    "failed": 0,
+    "duration_seconds": 0.45
+  },
+  "ruff": {
+    "command": "uv run --frozen ruff check src/sakuramoon/config tests/unit/config tests/contracts/config",
+    "ok": true
+  },
+  "pyright": {
+    "command": "uv run --frozen pyright -p /tmp/sakuramoon-c001-pyrightconfig.json src/sakuramoon/config tests/unit/config tests/contracts/config",
+    "locked_venv": ".venv",
+    "mode": "strict",
+    "errors": 0,
+    "warnings": 0
+  },
+  "traceability": {
+    "command": "PYTHONPATH=src /root/shared-nvme/sakuramoon/.venv/bin/python tools/verify_traceability.py --format json",
+    "snapshot_scope": "clean HEAD plus C001 review-remediation diff",
+    "ok": true,
+    "requirements": 219,
+    "source_nodes": 219,
+    "production_modules": 6,
+    "runtime_config_keys": 235,
+    "archive_files": 16
+  },
+  "full_suite": {
+    "command": "PYTHONPATH=src /root/shared-nvme/sakuramoon/.venv/bin/pytest -q",
+    "snapshot_scope": "clean HEAD plus C001 review-remediation diff",
+    "passed": 80,
+    "failed": 0,
+    "duration_seconds": 10.38,
+    "evidence_scope": "post_foundation_review_remediation"
+  },
+  "main_acceptance": {
+    "secret_validation_bypass_removed": true,
+    "non_secret_tokenizer_hash_preserved": true,
+    "d001_inventory_fixture_updated": true,
+    "review_remediation_targeted_passed": true,
+    "exact_finite_toml_float_contract": true,
+    "selected_stage_enabled_contract": true,
+    "benchmark_configurable_acceptance_samples": true,
+    "immutable_model_revision_contract": true,
+    "official_mage_flow_repo_boundary": true
+  },
+  "gpu_used": false
+}

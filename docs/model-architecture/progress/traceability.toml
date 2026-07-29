@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 1
+registry_revision = 2
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 changes = []
@@ -69,6 +69,7 @@ initial_sha256 = "9a8b4fd39c5e5bf76a343f1b02e3507abddc27e98e34946a0fd0f1e98be642
 name = "governance"
 owner_tasks = [
     "D001",
+    "C001",
 ]
 config_keys = []
 modules = [
@@ -624,8 +625,8 @@ module_root = "src/sakuramoon"
 config_root = "config"
 ignored_module_paths = []
 ignored_config_paths = []
-no_modules_reason = "No production source tree exists at D001; the checker will require reverse mappings as soon as one is added."
-no_configs_reason = "No runtime config TOML exists at D001; the checker will require reverse mappings as soon as one is added."
+no_modules_reason = ""
+no_configs_reason = ""
 
 [[requirements]]
 id = "DOC-001"
@@ -790,7 +791,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "DOC-005"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "governance"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -802,26 +803,41 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:C001"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/config/load.py",
+    "src/sakuramoon/config/redact.py",
+    "src/sakuramoon/config/resolve.py",
+    "config/examples/all_options.example.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
-config_keys = []
+config_keys = [
+    "schema_version",
+    "run.*",
+    "paths.*",
+    "security.*",
+]
 modules = [
     "tools/verify_traceability.py",
+    "src/sakuramoon/__init__.py",
+    "src/sakuramoon/config/**",
 ]
 reference_modules = []
 tests = [
     "tests/unit/docs/**",
+    "tests/unit/config/**",
+    "tests/contracts/config/**",
 ]
 benchmarks = []
 artifacts = [
     "docs/model-architecture/reviews/D001/**",
+    "docs/model-architecture/reviews/C001/**",
 ]
 not_applicable_fields = [
-    "config_keys",
     "reference_modules",
     "benchmarks",
 ]
@@ -3634,6 +3650,7 @@ ai_review = ""
 infra_review = ""
 config_keys = [
     "objective.*",
+    "timestep.*",
     "evaluation.sampling.*",
 ]
 modules = [
@@ -3724,6 +3741,7 @@ ai_review = ""
 infra_review = ""
 config_keys = [
     "objective.*",
+    "cfg.*",
     "evaluation.sampling.*",
 ]
 modules = [
@@ -3769,6 +3787,7 @@ ai_review = ""
 infra_review = ""
 config_keys = [
     "objective.*",
+    "sampling.*",
     "evaluation.sampling.*",
 ]
 modules = [
@@ -8692,6 +8711,7 @@ config_keys = [
     "distributed.*",
     "checkpoint.*",
     "failure.*",
+    "compile.*",
 ]
 modules = [
     "src/sakuramoon/optim/**",

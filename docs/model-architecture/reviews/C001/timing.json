@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "task_id": "C001",
+  "phase": "implementation",
+  "started_at_utc": "2026-07-29T14:30:41Z",
+  "ended_at_utc": "2026-07-29T14:57:48Z",
+  "duration_seconds": 1627,
+  "hardware_level": "CPU",
+  "gpu_seconds": 0
+}
