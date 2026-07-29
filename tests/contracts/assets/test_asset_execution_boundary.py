@@ -29,7 +29,9 @@ def _codes(source: str, path: str = "src/sakuramoon/encoders/qwen.py") -> set[st
 def test_manifest_locks_the_two_prepared_model_directories() -> None:
     manifest = load_manifest(MANIFEST)
 
-    assert {asset.kind: asset.local_path for asset in manifest.models} == MODEL_LOCAL_PATHS
+    assert {
+        asset.kind: asset.local_path for asset in manifest.models
+    } == MODEL_LOCAL_PATHS
     assert all(asset.lock_state == "ready" for asset in manifest.models)
 
 
@@ -210,9 +212,7 @@ def fetch_dataset_shard():
     )
 """
 
-    assert "forbidden_download" in _codes(
-        source, "src/sakuramoon/data/modelscope.py"
-    )
+    assert "forbidden_download" in _codes(source, "src/sakuramoon/data/modelscope.py")
 
 
 def test_exact_d010_stdlib_https_open_shape_is_allowed() -> None:
@@ -258,7 +258,9 @@ class ModelScopeDatasetTransport:
         return response, connection
 """
 
-    assert scan_source(source, "src/sakuramoon/data/modelscope.py") == ()
+    assert _codes(source, "src/sakuramoon/data/modelscope.py") == {
+        "dataset_transport_structure_forbidden"
+    }
 
 
 def test_exact_d010_target_factories_and_verified_entrypoints_are_allowed() -> None:
@@ -326,7 +328,9 @@ class ModelScopeDatasetTransport:
         return self._follow_redirects(target, range_start=range_start)
 """
 
-    assert scan_source(source, "src/sakuramoon/data/modelscope.py") == ()
+    assert _codes(source, "src/sakuramoon/data/modelscope.py") == {
+        "dataset_transport_structure_forbidden"
+    }
 
 
 def test_exact_d010_response_access_shape_is_allowed() -> None:
@@ -356,7 +360,9 @@ def _validate_download_headers(response):
     return response.getheader("Content-Encoding"), response.getheader("Content-Range")
 """
 
-    assert scan_source(source, "src/sakuramoon/data/modelscope.py") == ()
+    assert _codes(source, "src/sakuramoon/data/modelscope.py") == {
+        "dataset_transport_structure_forbidden"
+    }
 
 
 @pytest.mark.parametrize(
@@ -592,9 +598,7 @@ class ModelScopeDatasetTransport:
         )
 """
 
-    assert "network_call_forbidden" in _codes(
-        source, "src/sakuramoon/data/other.py"
-    )
+    assert "network_call_forbidden" in _codes(source, "src/sakuramoon/data/other.py")
 
 
 def test_exact_d010_https_constructor_is_rejected_outside_locked_class() -> None:
@@ -617,7 +621,7 @@ class OtherTransport:
 
 
 def _d010_header_attack(statement: str) -> str:
-    return f'''
+    return f"""
 class ModelScopeDatasetTransport:
     def _open_get(self, target, *, range_start):
         headers = self._request_headers(target)
@@ -631,7 +635,7 @@ class ModelScopeDatasetTransport:
             headers=headers,
             encode_chunked=False,
         )
-'''
+"""
 
 
 @pytest.mark.parametrize(
@@ -642,7 +646,7 @@ class ModelScopeDatasetTransport:
         'headers.__ior__({"Host": "attacker.invalid"})',
         'operator.setitem(headers, "Host", "attacker.invalid")',
         'mapping = headers\n        mapping.__setitem__("Host", "attacker.invalid")',
-        'mutate_headers(headers)',
+        "mutate_headers(headers)",
     ],
 )
 def test_d010_audited_headers_reject_every_non_exact_mutation_or_escape(
@@ -669,7 +673,7 @@ def test_d010_audited_headers_reject_in_place_mapping_merge() -> None:
 def test_d010_network_capability_cannot_enter_opaque_calls(
     capability: str,
 ) -> None:
-    source = f'''
+    source = f"""
 import http.client
 import ssl
 class ModelScopeDatasetTransport:
@@ -691,7 +695,7 @@ class ModelScopeDatasetTransport:
             headers=headers,
             encode_chunked=False,
         )
-'''
+"""
 
     codes = _codes(source, "src/sakuramoon/data/modelscope.py")
     assert "network_capability_escape_forbidden" in codes
@@ -717,7 +721,7 @@ class ModelScopeDatasetTransport:
 def test_d010_starred_positional_expansion_preserves_network_facts(
     statement: str,
 ) -> None:
-    source = f'''
+    source = f"""
 import http.client
 import ssl
 from sakuramoon.adapters import external
@@ -740,7 +744,7 @@ class ModelScopeDatasetTransport:
             headers=headers,
             encode_chunked=False,
         )
-'''
+"""
 
     codes = _codes(source, "src/sakuramoon/data/modelscope.py")
     assert "network_capability_escape_forbidden" in codes
@@ -751,10 +755,7 @@ class ModelScopeDatasetTransport:
     "statement",
     [
         'options = {"headers": headers}\n        external(**options)',
-        (
-            'options = {"nested": {"target": target}}'
-            "\n        external(**options)"
-        ),
+        ('options = {"nested": {"target": target}}\n        external(**options)'),
         (
             'options = {"connection": connection} if range_start is None '
             "else unknown_options\n        external(**options)"
@@ -765,7 +766,7 @@ class ModelScopeDatasetTransport:
 def test_d010_keyword_expansion_preserves_nested_network_facts(
     statement: str,
 ) -> None:
-    source = f'''
+    source = f"""
 import http.client
 import ssl
 from sakuramoon.adapters import external
@@ -781,7 +782,7 @@ class ModelScopeDatasetTransport:
         if range_start is not None:
             headers["Range"] = f"bytes={{range_start}}-"
         {statement}
-'''
+"""
 
     assert "network_capability_escape_forbidden" in _codes(
         source, "src/sakuramoon/data/modelscope.py"
@@ -791,27 +792,27 @@ class ModelScopeDatasetTransport:
 @pytest.mark.parametrize(
     "adapter",
     [
-        '''operator.methodcaller(
+        """operator.methodcaller(
             "request",
             "GET",
             target.request_target,
             body=None,
             headers=headers,
             encode_chunked=False,
-        )(connection)''',
-        '''operator.attrgetter("request")(connection)(
+        )(connection)""",
+        """operator.attrgetter("request")(connection)(
             "GET",
             target.request_target,
             body=None,
             headers=headers,
             encode_chunked=False,
-        )''',
+        )""",
         'operator.methodcaller("getresponse")(connection)',
         'operator.methodcaller("close")(connection)',
     ],
 )
 def test_d010_higher_order_network_adapters_are_rejected(adapter: str) -> None:
-    source = f'''
+    source = f"""
 import http.client
 import operator
 import ssl
@@ -827,7 +828,7 @@ class ModelScopeDatasetTransport:
         if range_start is not None:
             headers["Range"] = f"bytes={{range_start}}-"
         {adapter}
-'''
+"""
 
     assert "network_capability_escape_forbidden" in _codes(
         source, "src/sakuramoon/data/modelscope.py"
@@ -866,7 +867,7 @@ def test_d010_dynamic_namespace_and_callable_reflection_is_forbidden(
     statement: str,
     expected: str,
 ) -> None:
-    source = f'''
+    source = f"""
 import http.client
 import inspect
 import operator
@@ -883,9 +884,83 @@ class ModelScopeDatasetTransport:
         if range_start is not None:
             headers["Range"] = f"bytes={{range_start}}-"
         {statement}
-'''
+"""
 
     assert expected in _codes(source, "src/sakuramoon/data/modelscope.py")
+
+
+@pytest.mark.parametrize("capability", ["headers", "target", "connection"])
+@pytest.mark.parametrize(
+    "introspection",
+    [
+        (
+            "def expose():\n"
+            "            return {capability}\n"
+            "        inspect.getclosurevars(expose).nonlocals"
+            '["{capability}"]'
+        ),
+        (
+            "def expose():\n"
+            "            return {capability}\n"
+            "        expose.__closure__[0].cell_contents"
+        ),
+        (
+            "def expose():\n"
+            "            yield {capability}\n"
+            "        generator = expose()\n"
+            "        inspect.getgeneratorlocals(generator)"
+            '["{capability}"]'
+        ),
+        (
+            "def expose(value={capability}):\n"
+            "            return value\n"
+            "        expose.__defaults__[0]"
+        ),
+        (
+            "def expose(*, value={capability}):\n"
+            "            return value\n"
+            '        expose.__kwdefaults__["value"]'
+        ),
+        (
+            "def expose(value={capability}):\n"
+            "            return value\n"
+            "        inspect.signature(expose).parameters"
+            '["value"].default'
+        ),
+        (
+            "def expose():\n"
+            "            return {capability}\n"
+            "        cell = expose.__closure__[0]\n"
+            '        object.__setattr__(cell, "cell_contents", {capability})'
+        ),
+    ],
+)
+def test_d010_closure_and_generator_namespace_introspection_is_forbidden(
+    capability: str,
+    introspection: str,
+) -> None:
+    statement = introspection.format(capability=capability)
+    source = f"""
+import http.client
+import inspect
+import ssl
+class ModelScopeDatasetTransport:
+    def _open_get(self, target, *, range_start):
+        connection = http.client.HTTPSConnection(
+            host=target.host,
+            port=target.port,
+            timeout=self._policy.connect_timeout_seconds,
+            context=ssl.create_default_context(),
+        )
+        headers = self._request_headers(target)
+        if range_start is not None:
+            headers["Range"] = f"bytes={{range_start}}-"
+        {statement}
+"""
+
+    assert "namespace_reflection_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
 
 
 def test_d010_target_constructor_alias_is_rejected() -> None:
@@ -918,12 +993,12 @@ def test_d010_read_response_length_is_locked_to_exact_bounded_shapes(
     method: str,
     length: str,
 ) -> None:
-    source = f'''
+    source = f"""
 class ModelScopeDatasetTransport:
     def {method}(self, target):
         response, connection = self._follow_redirects(target, range_start=None)
         return self._read_response(response, {length})
-'''
+"""
 
     assert "network_helper_call_forbidden" in _codes(
         source, "src/sakuramoon/data/modelscope.py"
@@ -947,6 +1022,54 @@ class ModelScopeDatasetTransport:
     assert "network_helper_call_forbidden" in _codes(
         source, "src/sakuramoon/data/modelscope.py"
     )
+
+
+@pytest.mark.parametrize(
+    "payload_setup",
+    [
+        "payload = attacker_payload",
+        "payload = bytearray()\n        payload.extend(attacker_payload)",
+    ],
+)
+def test_d010_listing_remaining_requires_a_proven_payload_upper_bound(
+    payload_setup: str,
+) -> None:
+    source = f"""
+class ModelScopeDatasetTransport:
+    def _read_listing_once(self, target):
+        response, connection = self._follow_redirects(target, range_start=None)
+        {payload_setup}
+        remaining = _LISTING_RESPONSE_LIMIT_BYTES + 1 - len(payload)
+        return self._read_response(
+            response,
+            min(self._policy.stream_chunk_bytes, remaining),
+        )
+"""
+
+    assert "network_helper_call_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
+def test_d010_listing_limit_guard_reissues_payload_upper_bound() -> None:
+    source = """
+class ModelScopeDatasetTransport:
+    def _read_listing_once(self, target):
+        response, connection = self._follow_redirects(target, range_start=None)
+        payload = bytearray()
+        payload.extend(attacker_payload)
+        if len(payload) > _LISTING_RESPONSE_LIMIT_BYTES:
+            raise DatasetTransportError("too large")
+        remaining = _LISTING_RESPONSE_LIMIT_BYTES + 1 - len(payload)
+        return self._read_response(
+            response,
+            min(self._policy.stream_chunk_bytes, remaining),
+        )
+"""
+
+    assert _codes(source, "src/sakuramoon/data/modelscope.py") == {
+        "dataset_transport_structure_forbidden"
+    }
 
 
 def test_d010_unwrapped_connection_constructor_is_rejected() -> None:
@@ -986,13 +1109,13 @@ class ModelScopeDatasetTransport:
 
 @pytest.mark.parametrize("binding", ["response", "connection"])
 def test_d010_network_bindings_reject_unverified_overwrite(binding: str) -> None:
-    source = f'''
+    source = f"""
 class ModelScopeDatasetTransport:
     def _read_listing_once(self, target):
         response, connection = self._follow_redirects(target, range_start=None)
         {binding} = attacker_controlled
         self._close_response(response, connection)
-'''
+"""
 
     assert "network_binding_assignment_forbidden" in _codes(
         source, "src/sakuramoon/data/modelscope.py"
@@ -1104,23 +1227,14 @@ def test_scope_sensitive_model_provenance_rejects_bypasses(
     "body",
     [
         "external(*[AutoModel.from_pretrained])",
-        (
-            "callbacks = (AutoModel.from_pretrained,)"
-            "\nexternal(*callbacks)"
-        ),
+        ("callbacks = (AutoModel.from_pretrained,)\nexternal(*callbacks)"),
         "external(*((AutoModel.from_pretrained,),))",
-        (
-            "external(*(callback for callback in "
-            "(AutoModel.from_pretrained,)))"
-        ),
+        ("external(*(callback for callback in (AutoModel.from_pretrained,)))"),
         (
             "callbacks = [AutoModel.from_pretrained] if enabled else unknown"
             "\nexternal(*callbacks)"
         ),
-        (
-            'options = {"callback": AutoModel.from_pretrained}'
-            "\nexternal(**options)"
-        ),
+        ('options = {"callback": AutoModel.from_pretrained}\nexternal(**options)'),
         (
             'options = {"nested": {"callback": AutoModel.from_pretrained}}'
             "\nexternal(**options)"
@@ -1130,11 +1244,11 @@ def test_scope_sensitive_model_provenance_rejects_bypasses(
 def test_argument_expansion_preserves_nested_sensitive_callables(
     body: str,
 ) -> None:
-    source = f'''
+    source = f"""
 from sakuramoon.adapters import external
 from transformers import AutoModel
 {body}
-'''
+"""
 
     assert "sensitive_callable_escape" in _codes(source)
 
@@ -1150,12 +1264,12 @@ def test_pop_extraction_preserves_sensitive_loader_fact(
     container: str,
 ) -> None:
     argument = '"model"' if container.startswith("{") and ":" in container else ""
-    source = f'''
+    source = f"""
 from transformers import AutoModel
 loaders = {container}
 loader = loaders.pop({argument})
 loader("remote/model")
-'''
+"""
 
     codes = _codes(source)
     assert "unverified_model_source" in codes
@@ -1166,14 +1280,14 @@ loader("remote/model")
 def test_loop_exit_facts_preserve_sensitive_loader_provenance(
     terminator: str,
 ) -> None:
-    source = f'''
+    source = f"""
 from transformers import AutoModel
 loader = safe_loader
 for item in values:
     loader = AutoModel.from_pretrained
     {terminator}
 loader("remote/model")
-'''
+"""
 
     codes = _codes(source)
     assert "unverified_model_source" in codes
@@ -1185,13 +1299,13 @@ def test_model_root_cannot_escape_through_argument_expansion(
     expansion: str,
 ) -> None:
     setup = 'options = {"root": root}\n' if expansion == "**options" else ""
-    source = f'''
+    source = f"""
 from sakuramoon.assets import require_runtime_assets_ready
 from sakuramoon.encoders.external import construct
 selection = require_runtime_assets_ready(config, manifest, root=repository)
 root = selection.verified_root("qwen_text_encoder")
 {setup}construct({expansion})
-'''
+"""
 
     assert "model_root_cross_module_call_forbidden" in _codes(source)
 
@@ -1406,6 +1520,116 @@ def test_reflective_class_member_resolution_is_forbidden(source: str) -> None:
     assert "callable_reflection_forbidden" in _codes(source)
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+from transformers import AutoModel
+def select(cls):
+    return cls.from_pretrained
+loader = select(AutoModel)
+loader("remote/model")
+""",
+        """
+from transformers import AutoModel
+select = lambda cls: cls.from_pretrained
+loader = select(AutoModel)
+loader("remote/model")
+""",
+    ],
+)
+def test_parameterized_model_loader_member_selection_is_forbidden(
+    source: str,
+) -> None:
+    assert "parameterized_sensitive_member_forbidden" in _codes(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+from transformers import AutoModel
+loader = type.__getattribute__(AutoModel, "from_pretrained")
+loader("remote/model")
+""",
+        """
+from functools import reduce
+from transformers import AutoModel
+loader = reduce(getattr, (AutoModel, "from_pretrained"))
+loader("remote/model")
+""",
+        """
+import inspect
+from transformers import AutoModel
+descriptor = inspect.getattr_static(AutoModel, "from_pretrained")
+loader = descriptor.__get__(None, AutoModel)
+loader("remote/model")
+""",
+    ],
+)
+def test_reflective_model_loader_adapters_are_forbidden(source: str) -> None:
+    assert "callable_reflection_forbidden" in _codes(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+import builtins
+runner = vars(builtins)["eval"]
+runner("payload")
+""",
+        """
+import builtins
+runner = getattr(builtins, input())
+runner("payload")
+""",
+    ],
+)
+def test_builtin_namespace_reflection_is_forbidden(source: str) -> None:
+    assert {
+        "namespace_reflection_forbidden",
+        "dynamic_getattr_forbidden",
+    } & _codes(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+class LocalLoader:
+    @staticmethod
+    def load(value):
+        return value
+loader = getattr(LocalLoader, method_name)
+loader("payload")
+""",
+        """
+import sakuramoon.runtime as runtime
+helper = getattr(runtime, helper_name)
+helper("reference/payload")
+""",
+    ],
+)
+def test_nonliteral_getattr_fails_closed_for_unknown_callables(
+    source: str,
+) -> None:
+    assert "dynamic_getattr_forbidden" in _codes(source)
+
+
+def test_d010_nonliteral_getattr_cannot_select_transport_methods() -> None:
+    source = """
+class ModelScopeDatasetTransport:
+    def _read_listing_once(self, target):
+        method = getattr(self, method_name)
+        return method(target)
+"""
+
+    assert "dynamic_getattr_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
 def test_object_getattribute_cannot_extract_verified_capability_members() -> None:
     source = """
 from sakuramoon.assets import require_runtime_assets_ready
@@ -1415,6 +1639,42 @@ method("qwen_text_encoder")
 """
 
     assert "capability_reflection_forbidden" in _codes(source)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """
+def expose(value=AutoModel.from_pretrained):
+    return value
+inspect.signature(expose).parameters["value"].default
+""",
+        """
+selection = require_runtime_assets_ready(config, manifest, root=repository)
+def expose():
+    return selection
+inspect.getclosurevars(expose).nonlocals["selection"]
+""",
+        """
+selection = require_runtime_assets_ready(config, manifest, root=repository)
+root = selection.verified_root("qwen_text_encoder")
+def expose(value=root):
+    return value
+expose.__defaults__[0]
+""",
+    ],
+)
+def test_callable_namespace_introspection_rejects_adjacent_security_facts(
+    body: str,
+) -> None:
+    source = f"""
+import inspect
+from sakuramoon.assets import require_runtime_assets_ready
+from transformers import AutoModel
+{body}
+"""
+
+    assert "namespace_reflection_forbidden" in _codes(source)
 
 
 @pytest.mark.parametrize(
@@ -1578,11 +1838,11 @@ register(HTTPSConnection)
 def test_dynamic_import_cannot_manufacture_unknown_sensitive_callables(
     module_name: str,
 ) -> None:
-    source = f'''
+    source = f"""
 module = __import__({module_name})
 loader = getattr(module, input())
 loader("other/model")
-'''
+"""
 
     assert "dynamic_import_forbidden" in _codes(
         source, "src/sakuramoon/runtime/imports.py"
@@ -1916,9 +2176,7 @@ commands = [
 def test_reference_execution_covers_forward_class_lambda_and_all_statement_forms(
     source: str,
 ) -> None:
-    assert "reference_process_exec" in _codes(
-        source, "src/sakuramoon/train/step.py"
-    )
+    assert "reference_process_exec" in _codes(source, "src/sakuramoon/train/step.py")
 
 
 @pytest.mark.parametrize(
@@ -1945,9 +2203,7 @@ while condition:
 def test_loop_carried_reference_provenance_reaches_execution_sink(
     source: str,
 ) -> None:
-    assert "reference_process_exec" in _codes(
-        source, "src/sakuramoon/train/step.py"
-    )
+    assert "reference_process_exec" in _codes(source, "src/sakuramoon/train/step.py")
 
 
 @pytest.mark.parametrize(
@@ -1977,9 +2233,7 @@ def configured():
 def test_reference_process_calls_in_function_definition_expressions_are_rejected(
     source: str,
 ) -> None:
-    assert "reference_process_exec" in _codes(
-        source, "src/sakuramoon/train/step.py"
-    )
+    assert "reference_process_exec" in _codes(source, "src/sakuramoon/train/step.py")
 
 
 def test_dynamic_setattr_reference_taint_is_rejected() -> None:
@@ -1999,7 +2253,9 @@ subprocess.run([holder])
     assert "reference_process_exec" in codes
 
 
-def test_production_parameterized_process_wrapper_is_denied_for_cross_module_calls() -> None:
+def test_production_parameterized_process_wrapper_is_denied_for_cross_module_calls() -> (
+    None
+):
     source = """
 import subprocess
 def execute(path):
@@ -2030,9 +2286,7 @@ from sakuramoon.runtime.paths import entrypoint
 subprocess.run(["python", entrypoint()])
 """
 
-    assert "reference_process_exec" in _codes(
-        source, "src/sakuramoon/train/step.py"
-    )
+    assert "reference_process_exec" in _codes(source, "src/sakuramoon/train/step.py")
 
 
 def test_verified_model_root_cannot_enter_an_unknown_imported_wrapper() -> None:
@@ -2095,9 +2349,7 @@ class OtherRegistry:
         return reference is not None and reference() is value
 """
 
-    assert "callable_parameter_forbidden" in _codes(
-        source, path
-    )
+    assert "callable_parameter_forbidden" in _codes(source, path)
 
 
 @pytest.mark.parametrize(
@@ -2135,7 +2387,9 @@ sys.path[:] += [path]
     assert "reference_search_path" in _codes(source, "src/sakuramoon/train/step.py")
 
 
-def test_reference_taint_reassignment_and_function_scope_do_not_false_positive() -> None:
+def test_reference_taint_reassignment_and_function_scope_do_not_false_positive() -> (
+    None
+):
     source = """
 import subprocess
 from pathlib import Path
@@ -2170,10 +2424,10 @@ subprocess.run([alias.path], check=True)
     "command",
     [
         '("git", "-C", "reference/JLT", "clean", "-fd", "status")',
-        '''(
+        """(
             "git", "-C", "reference/JLT", "-c",
             "alias.safe=!python reference/JLT/train.py", "safe"
-        )''',
+        )""",
         '("git", "-C", "reference/JLT", command)',
     ],
 )
@@ -2200,9 +2454,7 @@ def make_reference(root, relative, origin, licenses):
     subprocess.run(("git", "-C", repo, "add", "."), check=True)
 """
 
-    assert "reference_process_exec" in _codes(
-        source, "tests/unit/assets/conftest.py"
-    )
+    assert "reference_process_exec" in _codes(source, "tests/unit/assets/conftest.py")
 
 
 def test_synthetic_git_exception_accepts_the_exact_temp_root_shape() -> None:
@@ -2223,16 +2475,14 @@ def make_reference(root, relative, origin, licenses):
 def test_synthetic_git_exception_rejects_temp_root_escape(
     relative: str,
 ) -> None:
-    source = f'''
+    source = f"""
 import subprocess
 def make_reference(root, relative, origin, licenses):
     repo = root / {relative}
     subprocess.run(("git", "-C", str(repo), "add", "."), check=True)
-'''
+"""
 
-    assert "reference_process_exec" in _codes(
-        source, "tests/unit/assets/conftest.py"
-    )
+    assert "reference_process_exec" in _codes(source, "tests/unit/assets/conftest.py")
 
 
 @pytest.mark.parametrize(
@@ -2247,13 +2497,13 @@ def test_synthetic_git_helper_requires_safe_relative_call_argument(
     relative: str,
     expected: str | None,
 ) -> None:
-    source = f'''
+    source = f"""
 import subprocess
 def make_reference(root, relative, origin, licenses):
     repo = root / relative
     subprocess.run(("git", "-C", str(repo), "add", "."), check=True)
 make_reference(tmp_path, {relative}, origin, licenses)
-'''
+"""
 
     codes = _codes(source, "tests/unit/assets/conftest.py")
     if expected is None:
@@ -2262,7 +2512,41 @@ make_reference(tmp_path, {relative}, origin, licenses)
         assert expected in codes
 
 
-def test_unrelated_method_names_and_read_only_metadata_are_not_false_positives() -> None:
+def test_synthetic_git_helper_cannot_escape_through_higher_order_call() -> None:
+    source = """
+import subprocess
+def make_reference(root, relative, origin, licenses):
+    repo = root / relative
+    subprocess.run(("git", "-C", str(repo), "add", "."), check=True)
+def invoke(fn, *args):
+    return fn(*args)
+invoke(make_reference, tmp_path, "../../reference", origin, licenses)
+"""
+
+    assert "synthetic_git_helper_escape_forbidden" in _codes(
+        source, "tests/unit/assets/conftest.py"
+    )
+
+
+def test_synthetic_git_helper_cannot_be_recovered_from_globals() -> None:
+    source = """
+import subprocess
+def make_reference(root, relative, origin, licenses):
+    repo = root / relative
+    subprocess.run(("git", "-C", str(repo), "add", "."), check=True)
+globals()["make_reference"](
+    tmp_path, "../../reference", origin, licenses
+)
+"""
+
+    assert "namespace_reflection_forbidden" in _codes(
+        source, "tests/unit/assets/conftest.py"
+    )
+
+
+def test_unrelated_method_names_and_read_only_metadata_are_not_false_positives() -> (
+    None
+):
     source = """
 class Reporter:
     def run(self, value):
@@ -2305,7 +2589,9 @@ def test_repository_scanner_includes_its_own_tool_and_current_tree_is_clean() ->
     assert scan_repository(ROOT) == ()
 
 
-def test_repository_scanner_rejects_source_symlinks_before_reading(tmp_path: Path) -> None:
+def test_repository_scanner_rejects_source_symlinks_before_reading(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "src").mkdir()
     outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
     outside.write_text("SENTINEL = 'must not be read'\n", encoding="utf-8")
@@ -2315,7 +2601,9 @@ def test_repository_scanner_rejects_source_symlinks_before_reading(tmp_path: Pat
         python_sources(tmp_path)
 
 
-def test_repository_scanner_rejects_symlinked_source_directories(tmp_path: Path) -> None:
+def test_repository_scanner_rejects_symlinked_source_directories(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "src").mkdir()
     outside = tmp_path.parent / f"{tmp_path.name}-outside-dir"
     outside.mkdir()

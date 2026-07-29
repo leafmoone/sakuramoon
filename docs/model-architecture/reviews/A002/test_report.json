@@ -3,7 +3,7 @@
   "task_id": "A002",
   "hardware": "CPU",
   "candidate": {
-    "base_commit": "70981e19510c5a6c7d7889d6042b5e8a55887931",
+    "base_commit": "9081104ba0a87ce72efbeac3125f975b7e3fb71d",
     "overlaid_paths": [
       "tools/asset_execution_boundary.py",
       "tests/contracts/assets/test_asset_execution_boundary.py"
@@ -13,34 +13,34 @@
       "D010",
       "A002 documentation and evidence"
     ],
-    "worktree": "/root/shared-nvme/sakuramoon-a002-sixth-RjGb3v/repo",
+    "worktree": "/root/shared-nvme/sakuramoon-a002-seventh-3klJXh/repo",
     "diff_check": "passed"
   },
   "review_remediation": {
-    "reviewed_commit": "70981e19510c5a6c7d7889d6042b5e8a55887931",
+    "reviewed_commit": "9081104ba0a87ce72efbeac3125f975b7e3fb71d",
     "ai_verdict": "FAIL_changes_required",
     "infra_verdict": "FAIL_changes_required",
-    "status": "sixth_remediation_complete_pending_independent_rereview"
+    "status": "seventh_remediation_complete_pending_independent_rereview"
   },
   "boundary_contract": {
     "command": "uv run --frozen pytest -q tests/contracts/assets/test_asset_execution_boundary.py",
-    "passed": 232,
+    "passed": 271,
     "failed": 0,
-    "wall_duration_seconds": 20.186,
-    "pytest_reported_duration_seconds": 19.56
+    "wall_duration_seconds": 22.012,
+    "pytest_reported_duration_seconds": 21.41
   },
   "full_suite": {
     "command": "uv run --frozen pytest -q",
-    "passed": 430,
+    "passed": 469,
     "failed": 0,
-    "wall_duration_seconds": 40.693,
-    "pytest_reported_duration_seconds": 40.05
+    "wall_duration_seconds": 47.145,
+    "pytest_reported_duration_seconds": 46.55
   },
   "scanner_self_check": {
     "command": "uv run --frozen python -c '<scan_repository and python_sources>'",
     "python_sources": 28,
     "violations": 0,
-    "wall_duration_seconds": 18.682,
+    "wall_duration_seconds": 20.488,
     "includes_scanner_itself": true,
     "ignored_notebook_checkpoints_excluded": true,
     "execution_scope": "preflight and validation only; not called by the training hot path"
@@ -49,19 +49,19 @@
     "command": "uv run python -c '<scan_repository and python_sources>'",
     "python_sources": 36,
     "violations": 0,
-    "wall_duration_seconds": 28.165,
+    "wall_duration_seconds": 30.096,
     "notes": "Includes concurrent frozen D010; static compatibility only, not remote WebDataset streaming evidence."
   },
   "ruff": {
     "command": "uv run --frozen ruff check .",
     "ok": true,
-    "wall_duration_seconds": 0.279
+    "wall_duration_seconds": 0.257
   },
   "pyright": {
     "command": "uv run --frozen pyright",
     "errors": 0,
     "warnings": 0,
-    "wall_duration_seconds": 4.244
+    "wall_duration_seconds": 3.713
   },
   "traceability": {
     "command": "uv run --frozen python tools/verify_traceability.py",
@@ -72,19 +72,19 @@
     "production_modules": 12,
     "runtime_config_keys": 235,
     "errors": [],
-    "wall_duration_seconds": 1.176,
+    "wall_duration_seconds": 1.075,
     "registry_revision": 11,
-    "registry_unchanged_reason": "sixth remediation did not add or move a requirement and did not change mapping, path, or status"
+    "registry_unchanged_reason": "seventh remediation did not add or move a requirement and did not change mapping, path, or status"
   },
   "environment": {
-    "source_isolation": "detached git worktree at 70981e1 with only the two A002 code/test paths overlaid",
+    "source_isolation": "detached git worktree at 9081104 with only the two A002 code/test paths overlaid",
     "dependency_environment": "main checkout locked uv .venv reused by symlink",
     "dependency_materialization_attempted": false
   },
   "validation_notes": [
-    "Starred positional and nonliteral keyword expansions retain recursive security facts across known and unknown calls.",
-    "Finite container widening preserves network/model-root/sensitive/asset/dataset summaries and converges across loop back-edges.",
-    "Break/continue, pop extraction, namespace/code/frame reflection, callable adapters, relative star imports, Git call-site paths, and D010 remaining overwrite are covered by negative contracts.",
+    "The complete frozen D010 transport class has a normalized-AST SHA-256 pin, with generic provenance retained as a second layer.",
+    "Closure/default/signature namespaces, parameterized loader selection, reflective adapters, builtin namespace recovery, and all nonliteral production getattr calls fail closed outside exact audited tuples.",
+    "Synthetic Git helper escape and D010 payload-upper-bound loss are covered by negative contracts; exact safe direct calls and the terminating listing-size guard remain positive contracts.",
     "The shared D010 scan establishes static compatibility only; D010 remote streaming gates remain open in D010."
   ],
   "gpu_used": false,

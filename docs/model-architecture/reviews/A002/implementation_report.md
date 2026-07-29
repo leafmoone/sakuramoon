@@ -4,7 +4,7 @@
 
 A002 已将用户确认的两条资产执行边界写入现行决定、仓库规则、路线图与资产策略，并通过合同测试建立机器保护。实现没有读取或执行 `reference/` 内容、没有读取 `.env`、没有下载/哈希/加载模型、没有使用 GPU，也没有创建性能占位。
 
-首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17`、`70981e19510c5a6c7d7889d6042b5e8a55887931` 后的独立 AI/Infra 审查均提出 changes required。现已完成 `review_remediation.md` 所列第六轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
+首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17`、`70981e19510c5a6c7d7889d6042b5e8a55887931`、`9081104ba0a87ce72efbeac3125f975b7e3fb71d` 后的独立 AI/Infra 审查均提出 changes required。现已完成 `review_remediation.md` 所列第七轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
 
 ## 实现摘要
 
@@ -67,3 +67,18 @@ A002 已将用户确认的两条资产执行边界写入现行决定、仓库规
 - 结果：232/232 boundary contracts（19.56 秒 pytest、20.186 秒 wall）、430/430 full tests（40.05/40.693 秒）、28 Python sources/0 violations（18.682 秒）、Ruff PASS（0.279 秒）、strict Pyright 0 errors/0 warnings（4.244 秒）、traceability 221 requirements/source nodes PASS（1.176 秒）。
 - Shared compatibility：冻结 D010 所在共享树扫描 36 Python sources、0 violations，用时 28.165 秒。Scanner 只在 preflight/验证阶段运行，不进入训练 step 热路径；该结果不是 D010 远端 WebDataset 流式证据。
 - 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有模型/数据下载、GPU 工作或性能 artifact。状态保持第六轮修复完成、等待独立 AI/Infra 复审。
+
+## 第七轮修复摘要
+
+- `src/sakuramoon/data/modelscope.py::ModelScopeDatasetTransport` 的完整 normalized AST 被固定 SHA-256 锁定；任意方法、closure、default、descriptor 或控制流结构变化都会先触发结构违规。该 pin 忽略格式/source location，同时保留全部通用 provenance 规则作为第二层防护。
+- Production namespace/reflection 限制覆盖 closure vars、generator/coroutine locals、callable defaults/kwdefaults/signature parameters、closure cell、`type.__getattribute__`、`functools.reduce` 与 `inspect.getattr_static`。参数化 helper/lambda 选择 `from_pretrained` 和所有非 literal `getattr` 默认失败。
+- `vars` 与动态 `getattr` 仅给当前 fingerprint reader 和 asset binding 比较的精确调用 tuple 放行；`vars(builtins)["eval"]`、`getattr(builtins, input())`、未知本地/`sakuramoon` callable 与 D010 dynamic method 均被负合同覆盖。
+- Synthetic Git `make_reference` 作为专用 security capability 传播，不能进入 `invoke(fn, *args)` 等高阶调用；fixture 中 `globals()` 等 execution namespace 恢复也被拒绝。直接安全相对路径调用保持正例。
+- Listing payload 新增 upper-bound fact：空 `bytearray()` 初始有界，任何 append/extend/insert/update mutation 清除该 fact；只有精确 `len(payload) > limit` 且超限分支确定终止时，继续分支重新获得 bound。`remaining` 必须同时满足精确算式和 payload bound 才能成为 nonnegative read length。
+
+## 第七轮验证结论
+
+- Clean candidate：base `9081104ba0a87ce72efbeac3125f975b7e3fb71d`，只叠加 `tools/asset_execution_boundary.py` 与 `tests/contracts/assets/test_asset_execution_boundary.py`；并行 D001/D010 与全部 A002 evidence edits 均排除。
+- 结果：271/271 boundary contracts（21.41 秒 pytest、22.012 秒 wall）、469/469 full tests（46.55/47.145 秒）、28 Python sources/0 violations（20.488 秒）、Ruff PASS（0.257 秒）、strict Pyright 0 errors/0 warnings（3.713 秒）、traceability 221 requirements/source nodes PASS（1.075 秒）。
+- Shared compatibility：冻结 D010 所在共享树扫描 36 Python sources、0 violations，用时 30.096 秒。Scanner 只在 preflight/验证阶段运行，不进入 forward/backward/update；该结果不是 D010 远端 WebDataset 流式证据。
+- 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有联网、模型/数据下载、GPU 工作或性能 artifact。状态保持第七轮修复完成、等待独立 AI/Infra 复审。

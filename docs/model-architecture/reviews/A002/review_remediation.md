@@ -121,3 +121,18 @@ These remain failure verdicts until the original independent reviewers rereview 
 - The shared tree containing frozen D010 separately scanned 36 Python sources with zero violations in 28.165 seconds. The scanner is a preflight/validation check and does not enter the training forward/backward/update hot path. D010 still owns real remote WebDataset streaming and task-level byte/range/file evidence.
 - No `.env`, model, database, dataset/cache, or `reference/` payload was read. No model/data download, GPU work, or performance artifact was performed; the clean candidate reused the existing locked uv environment.
 - Status: sixth remediation complete, pending independent AI and Infra rereview and main-agent acceptance.
+
+## Seventh remediation: post-`9081104` independent review
+
+- The frozen `ModelScopeDatasetTransport` class now has a whole-class normalized-AST SHA-256 pin (`226d16422aa57d5fcd8c7b1a05ef4cc07f52296f1d21c29e78c40ef23b1567f9`). Formatting and source locations are excluded, but any structural rewrite fails. The generic provenance analysis remains an independent second layer.
+- Namespace recovery is denied through closure vars/cells, generator or coroutine locals, callable defaults/kwdefaults, signatures and execution namespace attributes. `type.__getattribute__`, `functools.reduce`, and `inspect.getattr_static` cannot select production callables. A helper or lambda parameter cannot select `from_pretrained`.
+- Nonliteral `getattr` fails closed for local classes, unknown `sakuramoon` modules, builtins, and D010 methods. The only allowances are exact asset-binding comparisons; the only argument-taking `vars` allowances are exact asset/data fingerprint readers. Builtin namespace recovery through `vars(builtins)` remains denied.
+- The synthetic Git `make_reference` function is a non-escapable security capability. Passing it through `invoke(fn, *args)` or recovering it through the fixture module's `globals()` is rejected, while exact direct calls still require a proven safe relative literal.
+- D010 listing length provenance now proves the payload upper bound. Empty `bytearray()` initialization creates the fact, container mutation kills it, and only the exact terminating oversize guard reissues it on the continuing path. The textual `remaining` expression alone can no longer authorize a negative or otherwise unbounded read.
+
+## Seventh-remediation clean validation and remaining gates
+
+- The detached candidate used base `9081104ba0a87ce72efbeac3125f975b7e3fb71d` and overlaid only `tools/asset_execution_boundary.py` and `tests/contracts/assets/test_asset_execution_boundary.py`; concurrent D001/D010 and all evidence edits were excluded.
+- Results: 271/271 boundary contracts in 21.41 seconds pytest-reported time (22.012 wall), 469/469 full tests in 46.55 seconds (47.145 wall), 28 Python sources with zero violations in 20.488 seconds, full Ruff pass in 0.257 seconds, strict Pyright with zero errors/warnings in 3.713 seconds, and traceability verification in 1.075 seconds for 221 requirements/source nodes, 16 archives, 12 production modules, and 235 runtime config keys.
+- The shared tree containing frozen D010 separately scanned 36 Python sources with zero violations in 30.096 seconds. This remains static compatibility evidence only; D010 owns real remote WebDataset streaming, byte/range/file-safety, and task evidence.
+- No `.env`, model, database, dataset/cache, or `reference/` payload was read. No network access, model/data download, GPU work, or performance artifact was performed. Status remains pending independent AI and Infra rereview and main-agent acceptance.

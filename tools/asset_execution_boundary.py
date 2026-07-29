@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 import re
 import stat
@@ -13,6 +14,9 @@ from pathlib import Path
 MODEL_ASSET_IDS = frozenset({"qwen_text_encoder", "mage_vae"})
 DATASET_TRANSPORT_PATH = "src/sakuramoon/data/modelscope.py"
 DATASET_TRANSPORT_CLASS = "ModelScopeDatasetTransport"
+_DATASET_TRANSPORT_CLASS_AST_SHA256 = (
+    "226d16422aa57d5fcd8c7b1a05ef4cc07f52296f1d21c29e78c40ef23b1567f9"
+)
 
 _MODEL_LOADER_PREFIXES = ("diffusers.", "modelscope.", "transformers.")
 _DOWNLOAD_CALLS = frozenset(
@@ -79,7 +83,11 @@ _NAMESPACE_REFLECTION_CALLS = frozenset(
         "builtins.locals",
         "builtins.vars",
         "inspect.currentframe",
+        "inspect.getclosurevars",
+        "inspect.getcoroutinelocals",
         "inspect.getargvalues",
+        "inspect.getgeneratorlocals",
+        "inspect.signature",
         "inspect.stack",
         "inspect.trace",
         "sys._current_frames",
@@ -89,7 +97,20 @@ _NAMESPACE_REFLECTION_CALLS = frozenset(
 _FRAME_NAMESPACE_ATTRIBUTES = frozenset(
     {
         "ag_frame",
+        "builtins",
+        "cell_contents",
         "cr_frame",
+        "globals",
+        "nonlocals",
+        "unbound",
+        "__builtins__",
+        "__closure__",
+        "__code__",
+        "__defaults__",
+        "__globals__",
+        "__kwdefaults__",
+        "default",
+        "parameters",
         "f_back",
         "f_builtins",
         "f_code",
@@ -179,9 +200,7 @@ _SEARCH_PATH_CALLS = frozenset(
 )
 _REF = "reference"
 _UNKNOWN_EXTERNAL = "unknown-external-provenance"
-_REFERENCE_RE = re.compile(
-    r"(?<![A-Za-z0-9_])reference(?![A-Za-z0-9_])", re.IGNORECASE
-)
+_REFERENCE_RE = re.compile(r"(?<![A-Za-z0-9_])reference(?![A-Za-z0-9_])", re.IGNORECASE)
 _SKIPPED_SOURCE_DIRECTORIES = frozenset({".ipynb_checkpoints", "__pycache__"})
 _AUDITED_PARAMETER_SINK_FUNCTIONS = frozenset(
     {
@@ -202,6 +221,31 @@ _AUDITED_PARAMETER_CALLS = frozenset(
             "contains",
             "reference",
         ),
+    }
+)
+_AUDITED_VARS_CALLS = frozenset(
+    {
+        (
+            "src/sakuramoon/assets/inspect.py",
+            "_stat_fingerprint",
+            "value",
+        ),
+        (
+            "src/sakuramoon/data/manifest.py",
+            "_verified_manifest_fingerprint",
+            "identity",
+        ),
+    }
+)
+_AUDITED_DYNAMIC_GETATTR_CALLS = frozenset(
+    {
+        (
+            "src/sakuramoon/assets/bindings.py",
+            "require_runtime_assets_match_snapshot",
+            base,
+            "name",
+        )
+        for base in ("config.qwen", "config.vae")
     }
 )
 _AUDITED_OBJECT_GETATTRIBUTE_CALLS = frozenset(
@@ -307,6 +351,8 @@ class _Fact:
     network_target: bool = False
     sensitive_callable_maybe: bool = False
     bounded_nonnegative: bool = False
+    listing_payload_bounded: bool = False
+    synthetic_git_helper: bool = False
     test_safe_relative: bool = False
     test_root_holder: bool = False
     test_root_path: bool = False
@@ -427,7 +473,9 @@ def _sensitive_callable(value: _Callable | None) -> bool:
         or name in _DYNAMIC_CODE_CALLS
         or name in _PROCESS_EXACT
         or name.startswith(_NETWORK_CALL_PREFIXES)
-        or name.startswith(("asyncio.create_subprocess_", "os.exec", "os.posix_spawn", "os.spawn"))
+        or name.startswith(
+            ("asyncio.create_subprocess_", "os.exec", "os.posix_spawn", "os.spawn")
+        )
         or name
         in {
             "subprocess.Popen",
@@ -457,8 +505,12 @@ def _fact_children(fact: _Fact) -> tuple[_Fact, ...]:
 
 
 def _fact_contains_sensitive_callable(fact: _Fact) -> bool:
-    return fact.sensitive_callable_maybe or _sensitive_callable(fact.callable) or any(
-        _fact_contains_sensitive_callable(child) for child in _fact_children(fact)
+    return (
+        fact.sensitive_callable_maybe
+        or _sensitive_callable(fact.callable)
+        or any(
+            _fact_contains_sensitive_callable(child) for child in _fact_children(fact)
+        )
     )
 
 
@@ -492,17 +544,25 @@ def _fact_contains_security_capability(fact: _Fact) -> bool:
         or fact.capability_class
         or fact.selection
         or fact.model_root is not None
+        or fact.synthetic_git_helper
         or _fact_contains_dataset_capability(fact)
         or any(
-            _fact_contains_security_capability(child)
-            for child in _fact_children(fact)
+            _fact_contains_security_capability(child) for child in _fact_children(fact)
         )
     )
 
 
+def _fact_contains_synthetic_git_helper(fact: _Fact) -> bool:
+    return fact.synthetic_git_helper or any(
+        _fact_contains_synthetic_git_helper(child) for child in _fact_children(fact)
+    )
+
+
 def _fact_contains_model_root(fact: _Fact) -> bool:
-    return fact.model_root_maybe or fact.model_root is not None or any(
-        _fact_contains_model_root(child) for child in _fact_children(fact)
+    return (
+        fact.model_root_maybe
+        or fact.model_root is not None
+        or any(_fact_contains_model_root(child) for child in _fact_children(fact))
     )
 
 
@@ -511,9 +571,7 @@ def _fact_contains_asset_capability(fact: _Fact) -> bool:
         fact.asset_capability_maybe
         or fact.capability_class
         or fact.selection
-        or any(
-        _fact_contains_asset_capability(child) for child in _fact_children(fact)
-        )
+        or any(_fact_contains_asset_capability(child) for child in _fact_children(fact))
     )
 
 
@@ -524,8 +582,7 @@ def _fact_contains_dataset_capability(fact: _Fact) -> bool:
         or fact.dataset_selection
         or fact.dataset_shard
         or any(
-            _fact_contains_dataset_capability(child)
-            for child in _fact_children(fact)
+            _fact_contains_dataset_capability(child) for child in _fact_children(fact)
         )
     )
 
@@ -544,11 +601,10 @@ def _without_network_capabilities(fact: _Fact) -> _Fact:
                 for key, value in callable_value.bound_keywords
             ),
         )
-        if (
-            callable_value.name.startswith(_NETWORK_CALL_PREFIXES)
-            or callable_value.name.endswith(
-                (":_ValidatedHttpTarget", "._ValidatedHttpTarget")
-            )
+        if callable_value.name.startswith(
+            _NETWORK_CALL_PREFIXES
+        ) or callable_value.name.endswith(
+            (":_ValidatedHttpTarget", "._ValidatedHttpTarget")
         ):
             callable_value = None
     return replace(
@@ -565,8 +621,7 @@ def _without_network_capabilities(fact: _Fact) -> _Fact:
         network_target=False,
         items=tuple(_without_network_capabilities(item) for item in fact.items),
         mapping=tuple(
-            (key, _without_network_capabilities(value))
-            for key, value in fact.mapping
+            (key, _without_network_capabilities(value)) for key, value in fact.mapping
         ),
     )
 
@@ -584,11 +639,11 @@ def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
             same_callable = _Callable("ambiguous-sensitive.*")
     same_root = left.model_root if left.model_root == right.model_root else None
     same_config = left.config_path if left.config_path == right.config_path else None
-    literal_known = left.literal_known and right.literal_known and left.literal == right.literal
+    literal_known = (
+        left.literal_known and right.literal_known and left.literal == right.literal
+    )
     instance_class = (
-        left.instance_class
-        if left.instance_class == right.instance_class
-        else None
+        left.instance_class if left.instance_class == right.instance_class else None
     )
     network_instance_maybe: str | None = None
     network_classes = {
@@ -624,9 +679,7 @@ def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
     if not container_items_unknown and left.items:
         items = tuple(
             _merge_facts(left_item, right_item)
-            for left_item, right_item in zip(
-                left.items, right.items, strict=True
-            )
+            for left_item, right_item in zip(left.items, right.items, strict=True)
         )
     left_mapping_keys = tuple(key for key, _ in left.mapping)
     right_mapping_keys = tuple(key for key, _ in right.mapping)
@@ -654,8 +707,7 @@ def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
         selection=left.selection and right.selection,
         model_root=same_root,
         model_root_maybe=(
-            _fact_contains_model_root(left)
-            or _fact_contains_model_root(right)
+            _fact_contains_model_root(left) or _fact_contains_model_root(right)
         ),
         config_path=same_config,
         dataset_capability_maybe=(
@@ -665,7 +717,9 @@ def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
         dataset_manifest=left.dataset_manifest and right.dataset_manifest,
         dataset_selection=left.dataset_selection and right.dataset_selection,
         dataset_shard=left.dataset_shard and right.dataset_shard,
-        object_place=left.object_place if left.object_place == right.object_place else None,
+        object_place=left.object_place
+        if left.object_place == right.object_place
+        else None,
         instance_class=instance_class,
         network_instance_maybe=network_instance_maybe,
         network_capability_maybe=(
@@ -674,20 +728,16 @@ def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
         ),
         network_headers=left.network_headers and right.network_headers,
         network_query=(
-            left.network_query
-            if left.network_query == right.network_query
-            else None
+            left.network_query if left.network_query == right.network_query else None
         ),
         network_target=left.network_target and right.network_target,
-        sensitive_callable_maybe=(
-            left_contains_sensitive or right_contains_sensitive
+        sensitive_callable_maybe=(left_contains_sensitive or right_contains_sensitive),
+        bounded_nonnegative=(left.bounded_nonnegative and right.bounded_nonnegative),
+        listing_payload_bounded=(
+            left.listing_payload_bounded and right.listing_payload_bounded
         ),
-        bounded_nonnegative=(
-            left.bounded_nonnegative and right.bounded_nonnegative
-        ),
-        test_safe_relative=(
-            left.test_safe_relative and right.test_safe_relative
-        ),
+        synthetic_git_helper=(left.synthetic_git_helper or right.synthetic_git_helper),
+        test_safe_relative=(left.test_safe_relative and right.test_safe_relative),
         test_root_holder=left.test_root_holder and right.test_root_holder,
         test_root_path=left.test_root_path and right.test_root_path,
         container_items_unknown=container_items_unknown,
@@ -736,7 +786,11 @@ class _Analyzer:
     def _function_identifier(
         self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
     ) -> str:
-        name = node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else "<lambda>"
+        name = (
+            node.name
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            else "<lambda>"
+        )
         return f"local:{self.path}:{node.lineno}:{node.col_offset}:{name}"
 
     def _class_identifier(self, node: ast.ClassDef) -> str:
@@ -773,7 +827,9 @@ class _Analyzer:
             return f"{base}[{key!r}]" if isinstance(key, (str, bool)) else f"{base}[*]"
         return None
 
-    def _attribute_chain(self, node: ast.Attribute) -> tuple[str, tuple[str, ...]] | None:
+    def _attribute_chain(
+        self, node: ast.Attribute
+    ) -> tuple[str, tuple[str, ...]] | None:
         parts: list[str] = []
         current: ast.AST = node
         while isinstance(current, ast.Attribute):
@@ -792,9 +848,7 @@ class _Analyzer:
                 if isinstance(node.value, str):
                     fact = replace(
                         fact,
-                        test_safe_relative=_safe_test_relative_literal(
-                            node.value
-                        ),
+                        test_safe_relative=_safe_test_relative_literal(node.value),
                     )
                 return fact
             return _Fact(literal_known=True)
@@ -828,6 +882,21 @@ class _Analyzer:
                         config_path=(*root_fact.config_path, *attributes),
                     )
             base = self._eval(node.value, env)
+            if (
+                self.path.startswith("src/sakuramoon/")
+                and node.attr == "from_pretrained"
+                and any(_parameter_index(marker) is not None for marker in base.taints)
+            ):
+                self.add(
+                    node,
+                    "parameterized_sensitive_member_forbidden",
+                    "a parameter may not select a model loader member",
+                )
+                return _Fact(
+                    taints=base.taints,
+                    callable=_Callable("ambiguous-sensitive.*"),
+                    sensitive_callable_maybe=True,
+                )
             if base.test_root_holder and node.attr == "root":
                 return _Fact(
                     taints=base.taints,
@@ -882,10 +951,7 @@ class _Analyzer:
             place = self._place(node, env)
             if place is not None and place in env.values:
                 return env.values[place]
-            if (
-                isinstance(node.value, ast.Attribute)
-                and node.value.attr == "__dict__"
-            ):
+            if isinstance(node.value, ast.Attribute) and node.value.attr == "__dict__":
                 base = self._eval(node.value.value, env)
                 key = _literal(node.slice)
                 if base.callable is not None and isinstance(key, str):
@@ -901,10 +967,9 @@ class _Analyzer:
                 for item_key, item_fact in base.mapping:
                     if item_key == raw_key:
                         return item_fact
-            if (
-                self.path.startswith("src/sakuramoon/")
-                and _fact_contains_security_capability(base)
-            ):
+            if self.path.startswith(
+                "src/sakuramoon/"
+            ) and _fact_contains_security_capability(base):
                 self.add(
                     node,
                     "ambiguous_sensitive_container_access",
@@ -930,9 +995,7 @@ class _Analyzer:
                 for item in node.keys
             )
             value_facts = tuple(self._eval(item, env) for item in node.values)
-            taints = _union_taints(
-                item.taints for item in (*key_facts, *value_facts)
-            )
+            taints = _union_taints(item.taints for item in (*key_facts, *value_facts))
             mapping: list[tuple[str | bool | int | None, _Fact]] = []
             for key_node, value_fact in zip(node.keys, value_facts, strict=True):
                 if isinstance(key_node, ast.Constant) and (
@@ -941,7 +1004,9 @@ class _Analyzer:
                 ):
                     mapping.append((key_node.value, value_fact))
             return _Fact(taints=taints, mapping=tuple(mapping))
-        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+        if isinstance(
+            node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+        ):
             comprehension_env = env.clone()
             aggregate = _Fact()
             for generator in node.generators:
@@ -972,7 +1037,9 @@ class _Analyzer:
             if isinstance(literal, str):
                 return _fact_literal(literal)
             return _Fact(
-                taints=_union_taints(self._eval(item, env).taints for item in node.values)
+                taints=_union_taints(
+                    self._eval(item, env).taints for item in node.values
+                )
             )
         if isinstance(node, ast.FormattedValue):
             return self._eval(node.value, env)
@@ -996,7 +1063,9 @@ class _Analyzer:
         if isinstance(node, ast.UnaryOp):
             return self._eval(node.operand, env)
         if isinstance(node, ast.IfExp):
-            return _merge_facts(self._eval(node.body, env), self._eval(node.orelse, env))
+            return _merge_facts(
+                self._eval(node.body, env), self._eval(node.orelse, env)
+            )
         if isinstance(node, ast.NamedExpr):
             fact = self._eval(node.value, env)
             self._assign(node.target, fact, env)
@@ -1029,7 +1098,9 @@ class _Analyzer:
             if not isinstance(keyword.value, ast.Dict):
                 unknown = True
                 continue
-            for key_node, value_node in zip(keyword.value.keys, keyword.value.values, strict=True):
+            for key_node, value_node in zip(
+                keyword.value.keys, keyword.value.values, strict=True
+            ):
                 key = _literal(key_node)
                 if not isinstance(key, str):
                     unknown = True
@@ -1040,11 +1111,19 @@ class _Analyzer:
     def _effective_arguments(
         self, call: ast.Call, callable_value: _Callable, env: _Environment
     ) -> tuple[tuple[_Fact, ...], dict[str, _Fact], bool, tuple[_Fact, ...]]:
-        positional = (*callable_value.bound_args, *(self._eval(item, env) for item in call.args))
+        positional = (
+            *callable_value.bound_args,
+            *(self._eval(item, env) for item in call.args),
+        )
         keywords = dict(callable_value.bound_keywords)
         current, unknown, expansions = self._keywords(call, env)
         keywords.update(current)
-        return positional, keywords, callable_value.unknown_keywords or unknown, expansions
+        return (
+            positional,
+            keywords,
+            callable_value.unknown_keywords or unknown,
+            expansions,
+        )
 
     def _record_sink(
         self,
@@ -1062,7 +1141,9 @@ class _Analyzer:
             if index is not None:
                 self.context.sink_parameters.setdefault(code, set()).add(index)
                 if direct:
-                    self.context.direct_sink_parameters.setdefault(code, set()).add(index)
+                    self.context.direct_sink_parameters.setdefault(code, set()).add(
+                        index
+                    )
 
     def _actual_parameter_facts(
         self,
@@ -1148,9 +1229,7 @@ class _Analyzer:
             taints=frozenset({f"parameter:{parameter_markers[0]}"})
         ):
             return actual[parameter_markers[0]]
-        taints = {
-            marker for marker in fact.taints if _parameter_index(marker) is None
-        }
+        taints = {marker for marker in fact.taints if _parameter_index(marker) is None}
         for index in parameter_markers:
             taints.update(actual[index].taints)
         return replace(fact, taints=frozenset(taints))
@@ -1158,7 +1237,9 @@ class _Analyzer:
     def _model_loader(self, name: str) -> bool:
         while name.endswith(".__call__"):
             name = name.removesuffix(".__call__")
-        return name.endswith(".from_pretrained") and name.startswith(_MODEL_LOADER_PREFIXES)
+        return name.endswith(".from_pretrained") and name.startswith(
+            _MODEL_LOADER_PREFIXES
+        )
 
     def _capability_class_fact(self, fact: _Fact) -> bool:
         return fact.capability_class or (
@@ -1193,6 +1274,28 @@ class _Analyzer:
             )
             in _AUDITED_OBJECT_GETATTRIBUTE_CALLS
         )
+
+    def _vars_call_allowed(self, call: ast.Call) -> bool:
+        if len(call.args) != 1 or call.keywords:
+            return False
+        receiver = self._place(call.args[0], _Environment())
+        return (
+            self.path,
+            self.context.name,
+            receiver,
+        ) in _AUDITED_VARS_CALLS
+
+    def _dynamic_getattr_call_allowed(self, call: ast.Call) -> bool:
+        if len(call.args) != 2 or call.keywords:
+            return False
+        receiver = self._place(call.args[0], _Environment())
+        attribute = self._place(call.args[1], _Environment())
+        return (
+            self.path,
+            self.context.name,
+            receiver,
+            attribute,
+        ) in _AUDITED_DYNAMIC_GETATTR_CALLS
 
     def _reject_opaque_security_capability(
         self,
@@ -1239,14 +1342,10 @@ class _Analyzer:
 
     def _tls_policy_target(self, node: ast.AST) -> bool:
         place = self._place(node, _Environment())
-        return place is not None and place.endswith(
-            (".check_hostname", ".verify_mode")
-        )
+        return place is not None and place.endswith((".check_hostname", ".verify_mode"))
 
     @staticmethod
-    def _same_statements(
-        statements: list[ast.stmt], expected_source: str
-    ) -> bool:
+    def _same_statements(statements: list[ast.stmt], expected_source: str) -> bool:
         expected = ast.parse(expected_source).body
         return ast.dump(ast.Module(body=statements, type_ignores=[])) == ast.dump(
             ast.Module(body=expected, type_ignores=[])
@@ -1257,7 +1356,7 @@ class _Analyzer:
     ) -> bool:
         return self._same_statements(
             node.body,
-            '''
+            """
 headers = {
     "Accept": "application/json, application/octet-stream",
     "Accept-Encoding": "identity",
@@ -1268,7 +1367,7 @@ if target.send_authorization:
     headers["Authorization"] = f"Bearer {token}"
     headers["Cookie"] = f"m_session_id={token}"
 return headers
-''',
+""",
         )
 
     def _dataset_open_get_range_shape_allowed(
@@ -1290,25 +1389,22 @@ return headers
             ):
                 header_writes.append(candidate)
         expected = ast.parse(
-            '''
+            """
 if range_start is not None:
     headers["Range"] = f"bytes={range_start}-"
-'''
+"""
         ).body[0]
-        return (
-            len(header_writes) == 1
-            and any(
-                ast.dump(candidate, include_attributes=False)
-                == ast.dump(expected, include_attributes=False)
-                for candidate in ast.walk(node)
-            )
+        return len(header_writes) == 1 and any(
+            ast.dump(candidate, include_attributes=False)
+            == ast.dump(expected, include_attributes=False)
+            for candidate in ast.walk(node)
         )
 
     def _dataset_open_get_constructor_shape_allowed(
         self, node: ast.FunctionDef | ast.AsyncFunctionDef
     ) -> bool:
         expected = ast.parse(
-            '''
+            """
 try:
     connection = http.client.HTTPSConnection(
         host=target.host,
@@ -1320,7 +1416,7 @@ except (OSError, ValueError):
     raise DatasetTransportError(
         "ModelScope HTTPS client could not be initialized"
     ) from None
-'''
+"""
         ).body[0]
         return bool(node.body) and ast.dump(
             node.body[0], include_attributes=False
@@ -1345,10 +1441,7 @@ except (OSError, ValueError):
         ):
             return (
                 "listing"
-                if tuple(
-                    self._place(item, _Environment())
-                    for item in mapping.values
-                )
+                if tuple(self._place(item, _Environment()) for item in mapping.values)
                 == (
                     "manifest.source.revision",
                     None,
@@ -1364,10 +1457,7 @@ except (OSError, ValueError):
         ):
             return (
                 "shard"
-                if tuple(
-                    self._place(item, _Environment())
-                    for item in mapping.values
-                )
+                if tuple(self._place(item, _Environment()) for item in mapping.values)
                 == ("manifest.source.revision", "shard.path")
                 else None
             )
@@ -1382,8 +1472,7 @@ except (OSError, ValueError):
             or self.class_context is not None
             or call.args
             or keywords is None
-            or set(keywords)
-            != {"host", "port", "request_target", "send_authorization"}
+            or set(keywords) != {"host", "port", "request_target", "send_authorization"}
             or self._place(keywords["port"], _Environment()) != "_HTTPS_PORT"
         ):
             return False
@@ -1442,9 +1531,7 @@ except (OSError, ValueError):
             == "ssl.create_default_context"
         )
 
-    def _dataset_http_member_allowed(
-        self, call: ast.Call, env: _Environment
-    ) -> bool:
+    def _dataset_http_member_allowed(self, call: ast.Call, env: _Environment) -> bool:
         if self.path != DATASET_TRANSPORT_PATH or not isinstance(
             call.func, ast.Attribute
         ):
@@ -1455,8 +1542,7 @@ except (OSError, ValueError):
         if keywords is None:
             return False
         connection_verified = (
-            env.get("connection").instance_class
-            == "http.client.HTTPSConnection"
+            env.get("connection").instance_class == "http.client.HTTPSConnection"
         )
         response_verified = (
             env.get("response").instance_class == "http.client.HTTPResponse"
@@ -1471,8 +1557,7 @@ except (OSError, ValueError):
                         and _literal(call.args[0]) == "GET"
                         and self._place(call.args[1], _Environment())
                         == "target.request_target"
-                        and set(keywords)
-                        == {"body", "encode_chunked", "headers"}
+                        and set(keywords) == {"body", "encode_chunked", "headers"}
                         and isinstance(keywords["body"], ast.Constant)
                         and keywords["body"].value is None
                         and self._place(keywords["headers"], _Environment())
@@ -1525,7 +1610,11 @@ except (OSError, ValueError):
                     and not keywords
                     and self._place(call.args[0], _Environment()) == "length"
                 )
-        if self.class_context is None and method == "getheader" and receiver == "response":
+        if (
+            self.class_context is None
+            and method == "getheader"
+            and receiver == "response"
+        ):
             allowed_headers = {
                 "_parse_content_length": {"Content-Length"},
                 "_validate_download_headers": {
@@ -1542,9 +1631,7 @@ except (OSError, ValueError):
             )
         return False
 
-    def _dataset_http_helper_allowed(
-        self, call: ast.Call, env: _Environment
-    ) -> bool:
+    def _dataset_http_helper_allowed(self, call: ast.Call, env: _Environment) -> bool:
         if (
             self.path != DATASET_TRANSPORT_PATH
             or self.class_context != DATASET_TRANSPORT_CLASS
@@ -1602,17 +1689,19 @@ except (OSError, ValueError):
             if (
                 len(call.args) != 2
                 or places[0] != "response"
-                or env.get("response").instance_class
-                != "http.client.HTTPResponse"
+                or env.get("response").instance_class != "http.client.HTTPResponse"
                 or keywords
             ):
                 return False
             length = call.args[1]
             if self.context.name == "_read_listing_once":
-                return self._same_expression(
-                    length,
-                    "min(self._policy.stream_chunk_bytes, remaining)",
-                ) and env.get("remaining").bounded_nonnegative
+                return (
+                    self._same_expression(
+                        length,
+                        "min(self._policy.stream_chunk_bytes, remaining)",
+                    )
+                    and env.get("remaining").bounded_nonnegative
+                )
             if self.context.name == "download_locked_shard_to_staging":
                 return (
                     isinstance(length, ast.Constant)
@@ -1639,7 +1728,10 @@ except (OSError, ValueError):
     def _dataset_target_factory_allowed(
         self, call: ast.Call, env: _Environment
     ) -> bool:
-        if self.path != DATASET_TRANSPORT_PATH or self.class_context != DATASET_TRANSPORT_CLASS:
+        if (
+            self.path != DATASET_TRANSPORT_PATH
+            or self.class_context != DATASET_TRANSPORT_CLASS
+        ):
             return False
         places = tuple(self._place(item, _Environment()) for item in call.args)
         if call.keywords:
@@ -1690,16 +1782,14 @@ except (OSError, ValueError):
                 self.class_context is None
                 and self.context.name == "_validate_download_headers"
                 and places == ("response",)
-                and env.get("response").instance_class
-                == "http.client.HTTPResponse"
+                and env.get("response").instance_class == "http.client.HTTPResponse"
             )
         if call.func.id == "_validate_download_headers":
             return (
                 self.class_context == DATASET_TRANSPORT_CLASS
                 and self.context.name == "download_locked_shard_to_staging"
                 and places == ("response", "downloaded", "shard.bytes")
-                and env.get("response").instance_class
-                == "http.client.HTTPResponse"
+                and env.get("response").instance_class == "http.client.HTTPResponse"
             )
         return False
 
@@ -1768,6 +1858,7 @@ except (OSError, ValueError):
         self,
         node: ast.Assign,
         target: ast.AST,
+        env: _Environment,
     ) -> bool:
         return (
             self.path == DATASET_TRANSPORT_PATH
@@ -1776,10 +1867,41 @@ except (OSError, ValueError):
             and len(node.targets) == 1
             and isinstance(target, ast.Name)
             and target.id == "remaining"
+            and env.get("payload").listing_payload_bounded
             and self._same_expression(
                 node.value,
                 "_LISTING_RESPONSE_LIMIT_BYTES + 1 - len(payload)",
             )
+        )
+
+    def _dataset_listing_payload_initialization(
+        self,
+        node: ast.Assign,
+        target: ast.AST,
+    ) -> bool:
+        return (
+            self.path == DATASET_TRANSPORT_PATH
+            and self.class_context == DATASET_TRANSPORT_CLASS
+            and self.context.name == "_read_listing_once"
+            and len(node.targets) == 1
+            and isinstance(target, ast.Name)
+            and target.id == "payload"
+            and self._same_expression(node.value, "bytearray()")
+        )
+
+    def _dataset_listing_payload_upper_bound_guard(
+        self,
+        node: ast.If,
+    ) -> bool:
+        return (
+            self.path == DATASET_TRANSPORT_PATH
+            and self.class_context == DATASET_TRANSPORT_CLASS
+            and self.context.name == "_read_listing_once"
+            and self._same_expression(
+                node.test,
+                "len(payload) > _LISTING_RESPONSE_LIMIT_BYTES",
+            )
+            and self._statements_definitely_terminate(node.body)
         )
 
     def _reject_dataset_header_write(
@@ -1822,9 +1944,7 @@ except (OSError, ValueError):
         if isinstance(target, (ast.Tuple, ast.List)):
             for index, item in enumerate(target.elts):
                 item_fact = fact.items[index] if index < len(fact.items) else fact
-                self._reject_dataset_network_binding_assignment(
-                    node, item, item_fact
-                )
+                self._reject_dataset_network_binding_assignment(node, item, item_fact)
             return
         if not isinstance(target, ast.Name) or target.id not in {
             "connection",
@@ -1836,9 +1956,8 @@ except (OSError, ValueError):
             if target.id == "connection"
             else "http.client.HTTPResponse"
         )
-        if (
-            fact.instance_class == expected
-            or (fact.literal_known and fact.literal is None)
+        if fact.instance_class == expected or (
+            fact.literal_known and fact.literal is None
         ):
             return
         self.add(
@@ -1846,6 +1965,27 @@ except (OSError, ValueError):
             "network_binding_assignment_forbidden",
             "network response and connection bindings require exact audited provenance",
         )
+
+    def _reject_namespace_assignment(
+        self,
+        node: ast.Assign | ast.AnnAssign | ast.AugAssign,
+        target: ast.AST,
+    ) -> None:
+        if not self.path.startswith("src/sakuramoon/"):
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for item in target.elts:
+                self._reject_namespace_assignment(node, item)
+            return
+        if (
+            isinstance(target, ast.Attribute)
+            and target.attr in _FRAME_NAMESPACE_ATTRIBUTES
+        ):
+            self.add(
+                node,
+                "namespace_reflection_forbidden",
+                "production code may not mutate callable or closure namespaces",
+            )
 
     def _git_shape(self, call: ast.Call) -> tuple[str | None, ...] | None:
         if not call.args or not isinstance(call.args[0], (ast.List, ast.Tuple)):
@@ -1917,10 +2057,15 @@ except (OSError, ValueError):
             "tests/unit/assets/test_inspect.py",
             "test_reference_origin_diagnostic_redacts_credentials",
         ):
-            return (
-                shape == ("git", "-C", None, "remote", "set-url", "origin", None)
-                and has_trusted_root_provenance(2)
-            )
+            return shape == (
+                "git",
+                "-C",
+                None,
+                "remote",
+                "set-url",
+                "origin",
+                None,
+            ) and has_trusted_root_provenance(2)
         if location == (
             "tests/unit/assets/test_inspect.py",
             "test_reference_git_audit_disables_hostile_local_configuration",
@@ -1987,36 +2132,30 @@ except (OSError, ValueError):
                 network_capability_maybe=(
                     current.network_capability_maybe
                     or any(
-                        _fact_contains_network_capability(item)
-                        for item in added_facts
+                        _fact_contains_network_capability(item) for item in added_facts
                     )
                 ),
                 sensitive_callable_maybe=(
                     current.sensitive_callable_maybe
                     or any(
-                        _fact_contains_sensitive_callable(item)
-                        for item in added_facts
+                        _fact_contains_sensitive_callable(item) for item in added_facts
                     )
                 ),
+                listing_payload_bounded=False,
                 model_root_maybe=(
                     current.model_root_maybe
-                    or any(
-                        _fact_contains_model_root(item)
-                        for item in added_facts
-                    )
+                    or any(_fact_contains_model_root(item) for item in added_facts)
                 ),
                 asset_capability_maybe=(
                     current.asset_capability_maybe
                     or any(
-                        _fact_contains_asset_capability(item)
-                        for item in added_facts
+                        _fact_contains_asset_capability(item) for item in added_facts
                     )
                 ),
                 dataset_capability_maybe=(
                     current.dataset_capability_maybe
                     or any(
-                        _fact_contains_dataset_capability(item)
-                        for item in added_facts
+                        _fact_contains_dataset_capability(item) for item in added_facts
                     )
                 ),
             ),
@@ -2027,10 +2166,10 @@ except (OSError, ValueError):
         call: ast.Call,
         env: _Environment,
     ) -> _Fact | None:
-        if (
-            not isinstance(call.func, ast.Attribute)
-            or call.func.attr not in {"pop", "popitem"}
-        ):
+        if not isinstance(call.func, ast.Attribute) or call.func.attr not in {
+            "pop",
+            "popitem",
+        }:
             return None
         receiver = self._place(call.func.value, env)
         container = self._eval(call.func.value, env)
@@ -2083,9 +2222,7 @@ except (OSError, ValueError):
             if call.args and isinstance(call.args[0], ast.Constant):
                 index = call.args[0].value
                 if type(index) is int:
-                    normalized = (
-                        index if index >= 0 else len(container.items) + index
-                    )
+                    normalized = index if index >= 0 else len(container.items) + index
                     if 0 <= normalized < len(container.items):
                         if receiver is not None:
                             env.assign(
@@ -2152,7 +2289,10 @@ except (OSError, ValueError):
                 "_path": "path",
                 "_identity": "after",
             }
-        if constructor == "VerifiedAssetSelection" and self.context.name == "_selection":
+        if (
+            constructor == "VerifiedAssetSelection"
+            and self.context.name == "_selection"
+        ):
             return values == {
                 "manifest_revision": "snapshot.manifest.manifest_revision",
                 "manifest_sha256": "snapshot.sha256",
@@ -2184,7 +2324,10 @@ except (OSError, ValueError):
                 (extracted,),
             )
             return extracted
-        if isinstance(call.func, ast.Attribute) and call.func.attr in _DATASET_HTTP_HELPERS:
+        if (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr in _DATASET_HTTP_HELPERS
+        ):
             allowed_helper = self._dataset_http_helper_allowed(call, env)
             if self.path.startswith("src/sakuramoon/") and not allowed_helper:
                 self.add(
@@ -2213,19 +2356,17 @@ except (OSError, ValueError):
         ):
             allowed_member = self._dataset_http_member_allowed(call, env)
             receiver = self._place(call.func.value, _Environment())
-            is_dataset_file_descriptor_call = (
-                receiver == "os" and call.func.attr in {"close", "read"}
-            )
+            is_dataset_file_descriptor_call = receiver == "os" and call.func.attr in {
+                "close",
+                "read",
+            }
             if (
                 (
-                    (
-                        self.path == DATASET_TRANSPORT_PATH
-                        and not is_dataset_file_descriptor_call
-                    )
-                    or call.func.attr in _NETWORK_EXECUTION_MEMBER_NAMES
+                    self.path == DATASET_TRANSPORT_PATH
+                    and not is_dataset_file_descriptor_call
                 )
-                and not allowed_member
-            ):
+                or call.func.attr in _NETWORK_EXECUTION_MEMBER_NAMES
+            ) and not allowed_member:
                 self.add(
                     call,
                     "network_call_forbidden",
@@ -2266,9 +2407,7 @@ except (OSError, ValueError):
                 else _Fact()
             )
             argument_facts = tuple(self._eval(item, env) for item in call.args)
-            keyword_facts = tuple(
-                self._eval(item.value, env) for item in call.keywords
-            )
+            keyword_facts = tuple(self._eval(item.value, env) for item in call.keywords)
             taints = function_fact.taints | _union_taints(
                 (
                     *(item.taints for item in argument_facts),
@@ -2330,8 +2469,7 @@ except (OSError, ValueError):
                 self.path.startswith("src/sakuramoon/")
                 and name.endswith(f":{factory_name}")
                 and not (
-                    isinstance(call.func, ast.Name)
-                    and call.func.id == factory_name
+                    isinstance(call.func, ast.Name) and call.func.id == factory_name
                 )
             ):
                 self.add(
@@ -2362,7 +2500,9 @@ except (OSError, ValueError):
             allowed_network = False
             if name == "http.client.HTTPSConnection":
                 allowed_network = self._dataset_https_connection_allowed(call, env)
-            elif name.startswith(tuple(f"{item}." for item in _NETWORK_INSTANCE_CLASSES)):
+            elif name.startswith(
+                tuple(f"{item}." for item in _NETWORK_INSTANCE_CLASSES)
+            ):
                 allowed_network = self._dataset_http_member_allowed(call, env)
             if self.path.startswith("src/sakuramoon/") and not allowed_network:
                 self.add(
@@ -2376,9 +2516,8 @@ except (OSError, ValueError):
                 return _Fact(instance_class="http.client.HTTPResponse")
             if allowed_network:
                 return _Fact()
-        if (
-            self.path.startswith("src/sakuramoon/")
-            and name.startswith("modelscope_hub.HubApi.")
+        if self.path.startswith("src/sakuramoon/") and name.startswith(
+            "modelscope_hub.HubApi."
         ):
             self.add(
                 call,
@@ -2389,12 +2528,28 @@ except (OSError, ValueError):
         while reflection_name.endswith(".__call__"):
             reflection_name = reflection_name.removesuffix(".__call__")
         if (
-            self.path.startswith("src/sakuramoon/")
+            (
+                self.path.startswith("src/sakuramoon/")
+                or self.path == "tests/unit/assets/conftest.py"
+            )
             and reflection_name in _NAMESPACE_REFLECTION_CALLS
-            and (
-                reflection_name != "builtins.vars" or not call.args
+            and not (
+                reflection_name == "builtins.vars" and self._vars_call_allowed(call)
             )
         ):
+            if (
+                reflection_name == "builtins.vars"
+                and call.args
+                and (
+                    _fact_contains_security_capability(self._eval(call.args[0], env))
+                    or self._capability_class_fact(self._eval(call.args[0], env))
+                )
+            ):
+                self.add(
+                    call,
+                    "capability_reflection_forbidden",
+                    "capability exports may not be accessed through reflection mappings",
+                )
             self.add(
                 call,
                 "namespace_reflection_forbidden",
@@ -2405,11 +2560,11 @@ except (OSError, ValueError):
                 sensitive_callable_maybe=True,
                 capability_class=True,
             )
-        if (
-            self.path.startswith("src/sakuramoon/")
-            and reflection_name
-            in {"operator.attrgetter", "operator.methodcaller"}
-        ):
+        if self.path.startswith("src/sakuramoon/") and reflection_name in {
+            "functools.reduce",
+            "operator.attrgetter",
+            "operator.methodcaller",
+        }:
             self.add(
                 call,
                 "callable_reflection_forbidden",
@@ -2418,9 +2573,22 @@ except (OSError, ValueError):
             return _Fact(callable=_Callable("ambiguous-sensitive.*"))
         if (
             self.path.startswith("src/sakuramoon/")
-            and reflection_name == "builtins.object.__getattribute__"
-            and not self._object_getattribute_allowed(call)
+            and reflection_name
+            in {
+                "builtins.object.__getattribute__",
+                "builtins.type.__getattribute__",
+            }
+            and (
+                reflection_name != "builtins.object.__getattribute__"
+                or not self._object_getattribute_allowed(call)
+            )
         ):
+            if reflection_name == "builtins.type.__getattribute__":
+                self.add(
+                    call,
+                    "callable_reflection_forbidden",
+                    "type.__getattribute__ may not resolve production callables",
+                )
             self.add(
                 call,
                 "capability_reflection_forbidden",
@@ -2433,27 +2601,64 @@ except (OSError, ValueError):
             )
         if (
             self.path.startswith("src/sakuramoon/")
-            and reflection_name
-            in {"builtins.vars", "inspect.getattr_static"}
+            and reflection_name == "builtins.object.__setattr__"
+            and len(call.args) >= 2
+            and _literal(call.args[1]) in _FRAME_NAMESPACE_ATTRIBUTES
+        ):
+            self.add(
+                call,
+                "namespace_reflection_forbidden",
+                "production code may not mutate callable or closure namespaces",
+            )
+            return _Fact(
+                network_capability_maybe=True,
+                sensitive_callable_maybe=True,
+                capability_class=True,
+            )
+        if (
+            self.path.startswith("src/sakuramoon/")
+            and reflection_name == "inspect.getattr_static"
+        ):
+            if call.args and (
+                _fact_contains_security_capability(self._eval(call.args[0], env))
+                or self._capability_class_fact(self._eval(call.args[0], env))
+            ):
+                self.add(
+                    call,
+                    "capability_reflection_forbidden",
+                    "capability exports may not be accessed through static reflection",
+                )
+            self.add(
+                call,
+                "callable_reflection_forbidden",
+                "static attribute reflection is not auditable in production",
+            )
+            return _Fact(
+                callable=_Callable("ambiguous-sensitive.*"),
+                sensitive_callable_maybe=True,
+            )
+        if (
+            self.path.startswith("src/sakuramoon/")
+            and reflection_name == "builtins.vars"
             and call.args
         ):
             reflected = self._eval(call.args[0], env)
             reflected_name = (
-                reflected.callable.name
-                if reflected.callable is not None
-                else ""
+                reflected.callable.name if reflected.callable is not None else ""
             )
-            if (
-                _fact_contains_security_capability(reflected)
-                or reflected_name.startswith("sakuramoon.assets")
-            ):
+            if _fact_contains_security_capability(
+                reflected
+            ) or reflected_name.startswith("sakuramoon.assets"):
                 self.add(
                     call,
                     "capability_reflection_forbidden",
                     "capability exports may not be accessed through reflection mappings",
                 )
                 return _Fact(capability_class=True)
-        if self.path.startswith("src/sakuramoon/") and reflection_name == "builtins.type":
+        if (
+            self.path.startswith("src/sakuramoon/")
+            and reflection_name == "builtins.type"
+        ):
             type_arguments = tuple(self._eval(item, env) for item in call.args)
             if len(type_arguments) >= 2 and any(
                 self._capability_class_fact(item)
@@ -2547,8 +2752,8 @@ except (OSError, ValueError):
                 )
 
         if name in self.classes:
-            positional, keywords, unknown_keywords, expansions = self._effective_arguments(
-                call, callable_value, env
+            positional, keywords, unknown_keywords, expansions = (
+                self._effective_arguments(call, callable_value, env)
             )
             argument_facts = (*positional, *keywords.values(), *expansions)
             self._reject_network_capability_escape(
@@ -2557,10 +2762,7 @@ except (OSError, ValueError):
                 argument_facts,
             )
             self._reject_opaque_security_capability(call, argument_facts)
-            if any(
-                _fact_contains_sensitive_callable(item)
-                for item in argument_facts
-            ):
+            if any(_fact_contains_sensitive_callable(item) for item in argument_facts):
                 self.add(
                     call,
                     "sensitive_callable_escape",
@@ -2589,6 +2791,50 @@ except (OSError, ValueError):
                 and isinstance(attribute_fact.literal, str)
                 else None
             )
+            if (
+                self.path.startswith("src/sakuramoon/")
+                and attribute is None
+                and not self._dynamic_getattr_call_allowed(call)
+            ):
+                reflected_name = (
+                    base_fact.callable.name if base_fact.callable is not None else ""
+                )
+                if (
+                    _fact_contains_security_capability(base_fact)
+                    or reflected_name.startswith("sakuramoon.assets")
+                    or reflected_name in {"builtins.object", "builtins.type"}
+                ):
+                    self.add(
+                        call,
+                        "capability_reflection_forbidden",
+                        "dynamic reflection over capability exports is forbidden",
+                    )
+                self.add(
+                    call,
+                    "dynamic_getattr_forbidden",
+                    "nonliteral attribute selection is not auditable in production",
+                )
+                return _Fact(
+                    callable=_Callable("ambiguous-sensitive.*"),
+                    sensitive_callable_maybe=True,
+                )
+            if (
+                self.path.startswith("src/sakuramoon/")
+                and attribute == "from_pretrained"
+                and any(
+                    _parameter_index(marker) is not None for marker in base_fact.taints
+                )
+            ):
+                self.add(
+                    call,
+                    "parameterized_sensitive_member_forbidden",
+                    "a parameter may not select a model loader member",
+                )
+                return _Fact(
+                    taints=base_fact.taints,
+                    callable=_Callable("ambiguous-sensitive.*"),
+                    sensitive_callable_maybe=True,
+                )
             class_identifier = base_fact.instance_class
             if (
                 class_identifier is None
@@ -2598,28 +2844,24 @@ except (OSError, ValueError):
                 class_identifier = base_fact.callable.name
             class_member = (
                 self.classes.get(class_identifier, {}).get(attribute)
-                if class_identifier is not None
-                and isinstance(attribute, str)
+                if class_identifier is not None and isinstance(attribute, str)
                 else None
             )
-            if (
-                self.path.startswith("src/sakuramoon/")
-                and (
-                    _fact_contains_security_capability(base_fact)
-                    or (
-                        class_member is not None
-                        and _fact_contains_security_capability(class_member)
-                    )
-                    or (
-                        self.path == DATASET_TRANSPORT_PATH
-                        and self.class_context == DATASET_TRANSPORT_CLASS
-                        and base_place == "self"
-                        and attribute
-                        in (
-                            _DATASET_HTTP_HELPERS
-                            | _DATASET_TARGET_FACTORIES
-                            | _NETWORK_MEMBER_NAMES
-                        )
+            if self.path.startswith("src/sakuramoon/") and (
+                _fact_contains_security_capability(base_fact)
+                or (
+                    class_member is not None
+                    and _fact_contains_security_capability(class_member)
+                )
+                or (
+                    self.path == DATASET_TRANSPORT_PATH
+                    and self.class_context == DATASET_TRANSPORT_CLASS
+                    and base_place == "self"
+                    and attribute
+                    in (
+                        _DATASET_HTTP_HELPERS
+                        | _DATASET_TARGET_FACTORIES
+                        | _NETWORK_MEMBER_NAMES
                     )
                 )
             ):
@@ -2631,9 +2873,8 @@ except (OSError, ValueError):
                 return _Fact(callable=_Callable("ambiguous-sensitive.*"))
             if base is not None and isinstance(attribute, str):
                 return _Fact(callable=_Callable(f"{base.name}.{attribute}"))
-            if (
-                base_fact.instance_class in _NETWORK_INSTANCE_CLASSES
-                and isinstance(attribute, str)
+            if base_fact.instance_class in _NETWORK_INSTANCE_CLASSES and isinstance(
+                attribute, str
             ):
                 return _Fact(
                     callable=_Callable(
@@ -2700,9 +2941,7 @@ except (OSError, ValueError):
             bound_facts = (*bound_args, *keywords.values(), *expansions)
             self._reject_network_capability_escape(call, env, bound_facts)
             self._reject_opaque_security_capability(call, bound_facts)
-            if any(
-                _fact_contains_sensitive_callable(item) for item in bound_facts
-            ):
+            if any(_fact_contains_sensitive_callable(item) for item in bound_facts):
                 self.add(
                     call,
                     "sensitive_callable_escape",
@@ -2721,16 +2960,17 @@ except (OSError, ValueError):
             call, callable_value, env
         )
         argument_facts = (*positional, *keywords.values(), *expansions)
+        if any(_fact_contains_synthetic_git_helper(item) for item in argument_facts):
+            self.add(
+                call,
+                "synthetic_git_helper_escape_forbidden",
+                "the synthetic Git helper may not enter a higher-order call",
+            )
         if (
             self.path == "tests/unit/assets/conftest.py"
-            and name.startswith(
-                "local:tests/unit/assets/conftest.py:"
-            )
+            and name.startswith("local:tests/unit/assets/conftest.py:")
             and name.endswith(":make_reference")
-            and (
-                len(positional) < 2
-                or not positional[1].test_safe_relative
-            )
+            and (len(positional) < 2 or not positional[1].test_safe_relative)
         ):
             self.add(
                 call,
@@ -2749,10 +2989,7 @@ except (OSError, ValueError):
             env,
             argument_facts,
         )
-        if any(
-            _fact_contains_sensitive_callable(item)
-            for item in argument_facts
-        ):
+        if any(_fact_contains_sensitive_callable(item) for item in argument_facts):
             self.add(
                 call,
                 "sensitive_callable_escape",
@@ -2776,9 +3013,7 @@ except (OSError, ValueError):
                     "reference_cross_module_call_forbidden",
                     "reference provenance may not cross an unaudited module call",
                 )
-            if any(
-                _fact_contains_model_root(item) for item in argument_facts
-            ):
+            if any(_fact_contains_model_root(item) for item in argument_facts):
                 self.add(
                     call,
                     "model_root_cross_module_call_forbidden",
@@ -2837,25 +3072,54 @@ except (OSError, ValueError):
                 ),
             )
             if source.model_root not in MODEL_ASSET_IDS:
-                self.add(call, "unverified_model_source", "model source is not a live A001 verified root")
+                self.add(
+                    call,
+                    "unverified_model_source",
+                    "model source is not a live A001 verified root",
+                )
             local_only = keywords.get("local_files_only", _Fact())
             if not local_only.literal_known or local_only.literal is not True:
-                self.add(call, "model_network_enabled", "model loader must set local_files_only=True")
+                self.add(
+                    call,
+                    "model_network_enabled",
+                    "model loader must set local_files_only=True",
+                )
             if "trust_remote_code" in keywords:
-                self.add(call, "remote_code_option_forbidden", "trust_remote_code is forbidden")
+                self.add(
+                    call,
+                    "remote_code_option_forbidden",
+                    "trust_remote_code is forbidden",
+                )
             if "cache_dir" in keywords:
                 self.add(call, "model_cache_option_forbidden", "cache_dir is forbidden")
             if unknown_keywords:
-                self.add(call, "unknown_model_loader_kwargs", "model loader contains unprovable **kwargs")
+                self.add(
+                    call,
+                    "unknown_model_loader_kwargs",
+                    "model loader contains unprovable **kwargs",
+                )
         elif canonical.endswith(".*") and canonical.startswith(
             (*_MODEL_LOADER_PREFIXES, "huggingface_hub.")
         ):
-            self.add(call, "ambiguous_sensitive_callable", "computed callable cannot be proven safe")
+            self.add(
+                call,
+                "ambiguous_sensitive_callable",
+                "computed callable cannot be proven safe",
+            )
         elif canonical in _DOWNLOAD_CALLS:
-            self.add(call, "forbidden_download", f"download API is not the locked dataset transport: {canonical}")
+            self.add(
+                call,
+                "forbidden_download",
+                f"download API is not the locked dataset transport: {canonical}",
+            )
 
         if canonical in _DYNAMIC_IMPORT_CALLS:
-            self._record_sink(call, "reference_dynamic_import", all_taints, "dynamically imports reference code")
+            self._record_sink(
+                call,
+                "reference_dynamic_import",
+                all_taints,
+                "dynamically imports reference code",
+            )
             if self.path.startswith("src/sakuramoon/"):
                 self.add(
                     call,
@@ -2864,7 +3128,12 @@ except (OSError, ValueError):
                 )
                 return _Fact(callable=_Callable("ambiguous-sensitive.*"))
         if canonical in _DYNAMIC_CODE_CALLS:
-            self._record_sink(call, "reference_dynamic_exec", all_taints, "dynamically executes reference code")
+            self._record_sink(
+                call,
+                "reference_dynamic_exec",
+                all_taints,
+                "dynamically executes reference code",
+            )
             if self.path.startswith("src/sakuramoon/"):
                 self.add(
                     call,
@@ -2875,15 +3144,27 @@ except (OSError, ValueError):
                     network_capability_maybe=True,
                     sensitive_callable_maybe=True,
                 )
-        is_process = canonical in _PROCESS_EXACT or canonical.startswith(_PROCESS_PREFIXES)
+        is_process = canonical in _PROCESS_EXACT or canonical.startswith(
+            _PROCESS_PREFIXES
+        )
         if canonical.endswith(".*") and canonical.startswith(
             ("asyncio.", "os.", "subprocess.")
         ):
             is_process = True
         if is_process and not self._safe_test_git(call, canonical, env):
-            self._record_sink(call, "reference_process_exec", all_taints, "passes reference data to a process")
+            self._record_sink(
+                call,
+                "reference_process_exec",
+                all_taints,
+                "passes reference data to a process",
+            )
         if canonical in _SEARCH_PATH_CALLS:
-            self._record_sink(call, "reference_search_path", all_taints, "injects reference into Python search paths")
+            self._record_sink(
+                call,
+                "reference_search_path",
+                all_taints,
+                "injects reference into Python search paths",
+            )
 
         self._mutate_container(call, env, all_taints)
         if canonical in {"builtins.setattr", "setattr"} and len(call.args) >= 3:
@@ -2935,7 +3216,12 @@ except (OSError, ValueError):
         if place is None:
             return
         if place == "sys.path" or place.startswith("sys.path["):
-            self._record_sink(target, "reference_search_path", fact.taints, "assigns reference into sys.path")
+            self._record_sink(
+                target,
+                "reference_search_path",
+                fact.taints,
+                "assigns reference into sys.path",
+            )
         if (
             isinstance(target, ast.Name)
             and fact.object_place is None
@@ -3039,14 +3325,20 @@ except (OSError, ValueError):
         if arguments.vararg is not None:
             index = len(parameter_names)
             parameter_names = (*parameter_names, arguments.vararg.arg)
-            env.assign(arguments.vararg.arg, _Fact(taints=frozenset({f"parameter:{index}"})))
+            env.assign(
+                arguments.vararg.arg, _Fact(taints=frozenset({f"parameter:{index}"}))
+            )
         if arguments.kwarg is not None:
             index = len(parameter_names)
             parameter_names = (*parameter_names, arguments.kwarg.arg)
-            env.assign(arguments.kwarg.arg, _Fact(taints=frozenset({f"parameter:{index}"})))
+            env.assign(
+                arguments.kwarg.arg, _Fact(taints=frozenset({f"parameter:{index}"}))
+            )
         return env, parameter_names
 
-    def _function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, outer: _Environment) -> _Fact:
+    def _function(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef, outer: _Environment
+    ) -> _Fact:
         identifier = self._function_identifier(node)
         if (
             self.path == DATASET_TRANSPORT_PATH
@@ -3079,9 +3371,7 @@ except (OSError, ValueError):
                     "dataset_connection_factory_forbidden",
                     "HTTPS construction must use the exact redacted initialization guard",
                 )
-        env, parameter_names = self._parameter_environment(
-            node.args, outer, node.name
-        )
+        env, parameter_names = self._parameter_environment(node.args, outer, node.name)
         previous = self.context
         self.context = _FunctionContext(node.name, parameter_names)
         self._block(node.body, env)
@@ -3089,7 +3379,10 @@ except (OSError, ValueError):
             parameters=parameter_names,
             return_fact=self.context.return_fact or _Fact(),
             sink_parameters=tuple(
-                sorted((code, tuple(sorted(indices))) for code, indices in self.context.sink_parameters.items())
+                sorted(
+                    (code, tuple(sorted(indices)))
+                    for code, indices in self.context.sink_parameters.items()
+                )
             ),
         )
         if (
@@ -3104,13 +3397,18 @@ except (OSError, ValueError):
             )
         self.context = previous
         self.summaries[identifier] = summary
-        return _Fact(callable=_Callable(identifier))
+        return _Fact(
+            callable=_Callable(identifier),
+            synthetic_git_helper=(
+                self.path == "tests/unit/assets/conftest.py"
+                and self.class_context is None
+                and node.name == "make_reference"
+            ),
+        )
 
     def _lambda(self, node: ast.Lambda, outer: _Environment) -> _Fact:
         identifier = self._function_identifier(node)
-        env, parameter_names = self._parameter_environment(
-            node.args, outer, "<lambda>"
-        )
+        env, parameter_names = self._parameter_environment(node.args, outer, "<lambda>")
         previous = self.context
         self.context = _FunctionContext("<lambda>", parameter_names)
         return_fact = self._eval(node.body, env)
@@ -3124,7 +3422,10 @@ except (OSError, ValueError):
                 )
             ),
         )
-        if self.path.startswith("src/sakuramoon/") and self.context.direct_sink_parameters:
+        if (
+            self.path.startswith("src/sakuramoon/")
+            and self.context.direct_sink_parameters
+        ):
             self.add(
                 node,
                 "parameterized_execution_wrapper_forbidden",
@@ -3165,7 +3466,9 @@ except (OSError, ValueError):
                     collect(item)
 
         for statement in statements:
-            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if isinstance(
+                statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
                 names.add(statement.name)
             elif isinstance(statement, ast.Assign):
                 for target in statement.targets:
@@ -3176,6 +3479,19 @@ except (OSError, ValueError):
 
     def _class(self, node: ast.ClassDef, env: _Environment) -> _Fact:
         identifier = self._class_identifier(node)
+        if (
+            self.path == DATASET_TRANSPORT_PATH
+            and node.name == DATASET_TRANSPORT_CLASS
+            and hashlib.sha256(
+                ast.dump(node, include_attributes=False).encode("utf-8")
+            ).hexdigest()
+            != _DATASET_TRANSPORT_CLASS_AST_SHA256
+        ):
+            self.add(
+                node,
+                "dataset_transport_structure_forbidden",
+                "the frozen dataset transport class normalized AST changed",
+            )
         for decorator in node.decorator_list:
             self._eval(decorator, env)
         for base_node in node.bases:
@@ -3202,8 +3518,7 @@ except (OSError, ValueError):
         self._block(node.body, class_env)
         self.class_context = previous_class
         self.classes[identifier] = {
-            name: class_env.get(name)
-            for name in self._declared_class_names(node.body)
+            name: class_env.get(name) for name in self._declared_class_names(node.body)
         }
         return _Fact(callable=_Callable(identifier))
 
@@ -3220,7 +3535,9 @@ except (OSError, ValueError):
                     _Fact(callable=_Callable(self._class_identifier(statement))),
                 )
 
-    def _bind_pattern(self, pattern: ast.pattern, fact: _Fact, env: _Environment) -> None:
+    def _bind_pattern(
+        self, pattern: ast.pattern, fact: _Fact, env: _Environment
+    ) -> None:
         if isinstance(pattern, ast.MatchAs):
             if pattern.pattern is not None:
                 self._bind_pattern(pattern.pattern, fact, env)
@@ -3308,9 +3625,7 @@ except (OSError, ValueError):
         return _merge_environments(normal_exit, *break_exits)
 
     @classmethod
-    def _statements_definitely_terminate(
-        cls, statements: list[ast.stmt]
-    ) -> bool:
+    def _statements_definitely_terminate(cls, statements: list[ast.stmt]) -> bool:
         if not statements:
             return False
         final = statements[-1]
@@ -3369,19 +3684,21 @@ except (OSError, ValueError):
                             "transformers",
                             "urllib.request",
                         )
-                    ) or (
-                        node.level > 0
-                        and node.module.split(".")[-1] == "assets"
-                    ):
+                    ) or (node.level > 0 and node.module.split(".")[-1] == "assets"):
                         self.add(
                             node,
                             "sensitive_star_import_forbidden",
                             "star import from a model/download package is not auditable",
                         )
                 else:
-                    env.assign(item.asname or item.name, _Fact(callable=_Callable(f"{node.module}.{item.name}")))
+                    env.assign(
+                        item.asname or item.name,
+                        _Fact(callable=_Callable(f"{node.module}.{item.name}")),
+                    )
             if _is_reference_text(node.module):
-                self.add(node, "reference_import", "engineering code imports reference code")
+                self.add(
+                    node, "reference_import", "engineering code imports reference code"
+                )
         elif isinstance(node, ast.Assign):
             if (
                 self.path == DATASET_TRANSPORT_PATH
@@ -3395,11 +3712,12 @@ except (OSError, ValueError):
                 )
             fact = self._eval(node.value, env)
             for target in node.targets:
-                if self._dataset_bounded_remaining_assignment(node, target):
+                self._reject_namespace_assignment(node, target)
+                if self._dataset_bounded_remaining_assignment(node, target, env):
                     fact = replace(fact, bounded_nonnegative=True)
-                self._reject_dataset_network_binding_assignment(
-                    node, target, fact
-                )
+                if self._dataset_listing_payload_initialization(node, target):
+                    fact = replace(fact, listing_payload_bounded=True)
+                self._reject_dataset_network_binding_assignment(node, target, fact)
                 if self._reject_dataset_header_write(node, target, env):
                     fact = _without_network_capabilities(fact)
                 if self.path.startswith("src/sakuramoon/") and self._tls_policy_target(
@@ -3414,9 +3732,8 @@ except (OSError, ValueError):
         elif isinstance(node, ast.AnnAssign):
             if node.value is not None:
                 fact = self._eval(node.value, env)
-                self._reject_dataset_network_binding_assignment(
-                    node, node.target, fact
-                )
+                self._reject_namespace_assignment(node, node.target)
+                self._reject_dataset_network_binding_assignment(node, node.target, fact)
                 if self._reject_dataset_header_write(node, node.target, env):
                     fact = _without_network_capabilities(fact)
                 if self.path.startswith("src/sakuramoon/") and self._tls_policy_target(
@@ -3431,6 +3748,7 @@ except (OSError, ValueError):
         elif isinstance(node, ast.AugAssign):
             target_fact = self._eval(node.target, env)
             value_fact = self._eval(node.value, env)
+            self._reject_namespace_assignment(node, node.target)
             rejected_header_write = self._reject_dataset_header_write(
                 node, node.target, env
             )
@@ -3481,6 +3799,12 @@ except (OSError, ValueError):
             self._eval(node.test, env)
             body = env.clone()
             other = env.clone()
+            if self._dataset_listing_payload_upper_bound_guard(node):
+                payload = other.get("payload")
+                other.assign(
+                    "payload",
+                    replace(payload, listing_payload_bounded=True),
+                )
             self._block(node.body, body)
             self._block(node.orelse, other)
             continuing: list[_Environment] = []
@@ -3497,9 +3821,7 @@ except (OSError, ValueError):
             body = env.clone()
             self._block(node.body, body)
             self._block(node.orelse, body)
-            if not self._statements_definitely_terminate(
-                [*node.body, *node.orelse]
-            ):
+            if not self._statements_definitely_terminate([*node.body, *node.orelse]):
                 branches.append(body)
             for handler in node.handlers:
                 branch = env.clone()
@@ -3539,7 +3861,11 @@ except (OSError, ValueError):
             if isinstance(statement, ast.Import):
                 for item in statement.names:
                     if _is_reference_text(item.name):
-                        self.add(statement, "reference_import", "engineering code imports reference code")
+                        self.add(
+                            statement,
+                            "reference_import",
+                            "engineering code imports reference code",
+                        )
             current = self._statement(statement, current)
             if self._statements_definitely_terminate([statement]):
                 break
@@ -3549,7 +3875,9 @@ except (OSError, ValueError):
 
     def analyze(self, tree: ast.Module) -> tuple[BoundaryViolation, ...]:
         max_passes = 3 + sum(
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef))
+            isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+            )
             for node in ast.walk(tree)
         )
         converged = False
@@ -3609,11 +3937,15 @@ def _assert_safe_source_path(root: Path, path: Path) -> None:
     for part in relative.parts:
         current = current / part
         if current.is_symlink():
-            raise SourceBoundaryError(f"source path contains symlink: {relative.as_posix()}")
+            raise SourceBoundaryError(
+                f"source path contains symlink: {relative.as_posix()}"
+            )
     try:
         path.resolve(strict=True).relative_to(root.resolve(strict=True))
     except (OSError, ValueError) as exc:
-        raise SourceBoundaryError(f"source path is missing or escapes root: {relative.as_posix()}") from exc
+        raise SourceBoundaryError(
+            f"source path is missing or escapes root: {relative.as_posix()}"
+        ) from exc
 
 
 def _read_source(root: Path, path: Path) -> str:
@@ -3630,9 +3962,7 @@ def _read_source(root: Path, path: Path) -> str:
         | getattr(os, "O_NOFOLLOW", 0)
     )
     file_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     )
     directory_descriptor = -1
     descriptor = -1
@@ -3683,13 +4013,21 @@ def _read_source(root: Path, path: Path) -> str:
             follow_symlinks=False,
         )
     except (OSError, UnicodeError) as exc:
-        raise SourceBoundaryError("source path changed or could not be decoded") from exc
+        raise SourceBoundaryError(
+            "source path changed or could not be decoded"
+        ) from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
         if directory_descriptor >= 0:
             os.close(directory_descriptor)
-    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+    if (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ) != (
         before.st_dev,
         before.st_ino,
         before.st_size,
@@ -3716,7 +4054,9 @@ def python_sources(root: Path) -> tuple[Path, ...]:
             try:
                 entries = tuple(os.scandir(directory))
             except OSError as exc:
-                raise SourceBoundaryError("source directory cannot be enumerated") from exc
+                raise SourceBoundaryError(
+                    "source directory cannot be enumerated"
+                ) from exc
             for entry in entries:
                 path = Path(entry.path)
                 if entry.is_symlink():
@@ -3749,4 +4089,8 @@ def scan_repository(root: Path) -> tuple[BoundaryViolation, ...]:
     violations: list[BoundaryViolation] = []
     for path in python_sources(resolved_root):
         violations.extend(scan_file(resolved_root, path))
-    return tuple(sorted(violations, key=lambda item: (item.path, item.line, item.code, item.detail)))
+    return tuple(
+        sorted(
+            violations, key=lambda item: (item.path, item.line, item.code, item.detail)
+        )
+    )
