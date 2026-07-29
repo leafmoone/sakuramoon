@@ -1,6 +1,6 @@
 # R001 实现报告
 
-状态：实现完成，待独立审查。实现代理未创建 commit，未执行 R002 或后续任务。
+状态：实现完成；commit `664fda71faed5e5d7d26d5fd06754af1a20b721f` 的独立 AI 审查通过，Infra 审查的唯一证据计数 blocker 已修正，待原 Infra reviewer 复审与主代理验收。实现代理未创建 commit，未执行 R002 或后续任务。
 
 ## 实现范围
 
@@ -42,13 +42,16 @@
 - **通过：** 完整索引禁入路径/扩展名检查为 0；包含放错目录的 `*.bin` 权重与 `*.db` 数据库防线。最大 indexed 文件是 6,018,805-byte 的既有会话追溯文本，不是模型、DB 或数据资产。
 - **通过：** 19 项迁移 SHA-256 全部通过，证明 archive/current/source 的受校验内容没有被修改。
 - **通过：** R001 不改变训练或运行热路径，没有产生 GPU、吞吐、显存或 before/after benchmark 主张；按现行证据规则不生成性能占位文件。
-- **通过：** registry 9→10，canonical source revision/hash/changelog 不变；独立 checker 、221 个 requirement/source 映射、41 项针对性测试、195 项全量测试、Ruff 与严格 Pyright 全部通过。
+- **通过：** 在 immutable clean commit `664fda71faed5e5d7d26d5fd06754af1a20b721f` 上，registry 9→10 且 canonical source revision/hash/changelog 不变；checker 通过 221 requirements/221 source nodes、16 archive files、12 production modules、235 runtime config keys（0.732s）。
+- **通过：** 同一 clean commit 的针对性 suite 为 41 passed/11.32s，资产边界 suite 为 5 passed/0.17s，全量 suite 为 187 passed/14.79s，Ruff 通过/0.174s，Pyright 为 0 errors、0 warnings/3.58s。
+- **证据纠正：** 先前的 `production_modules=13` 与 `195 passed/15.82s` 来自共享 dirty worktree，不是 commit `664fda71…` 的可复现证据；独立 Infra 审查已用上述 clean-commit 计数纠正，本报告不再将无效 dirty-tree run 用于验收。
 
 ## 已知事项
 
-- 独立 AI/模型正确性与 Infra/性能审查尚未执行，任务保持“待独立审查”。
+- 独立 AI/模型正确性审查对 `664fda71…` 给出 PASS；Infra/性能审查的唯一 blocker 是 clean commit 计数证据错记，已修正但仍等待原 reviewer 复审，不提前声称 Infra PASS。
 - 违规的普通任务性能占位及其引用已清理，修复结果保持待独立复审与主代理验收。
 - `DOC-001`/`DOC-002` 追踪归属已补全，但只标记为 `implemented`；未产生独立 AI/Infra 复审结论，不提前标记 `verified`。
 - 最终 tracked manifest 会随独立审查证据增加而变化；审查/主代理应在最终提交前刷新并重跑 secret/ignore 检查。
 - 初始提交中的只读迁移/source 文件原本含尾随空格，因此全索引 `git diff --check` 对首次导入不适用；R001 允许修改路径的 scoped check 通过，且迁移 SHA-256 保持一致。
 - JLT 本地参考工作树有未跟踪 `.ipynb_checkpoints/`；`reference/` 整体忽略，该状态不进入根索引，也不改变锁定 HEAD。
+- AI reviewer 的一次可选全量 run 因外部 `GIT_DIR/GIT_WORK_TREE` 注入污染了共享 `.git/config`；主代理已精确清除并确认 HEAD/index/ref 不变。该 run 无效且不计入 R001 验证数据。

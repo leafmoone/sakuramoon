@@ -1,8 +1,10 @@
 {
   "schema_version": 1,
   "task_id": "R001",
-  "generated_at_utc": "2026-07-29T19:07:42Z",
+  "generated_at_utc": "2026-07-29T19:30:07Z",
   "status": "passed",
+  "review_status": "ai_pass_infra_evidence_correction_pending_rereview",
+  "reviewed_commit": "664fda71faed5e5d7d26d5fd06754af1a20b721f",
   "hardware_level": "CPU",
   "gpu_used": false,
   "summary": {
@@ -107,7 +109,7 @@
       "id": "remediation-asset-boundary-contract",
       "command": "PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -q -p no:cacheprovider tests/contracts/assets/test_asset_boundary.py",
       "result": "passed",
-      "evidence": "5 passed in 0.18s; an earlier no-PYTHONPATH collection attempt executed no tests and was corrected for the repository src layout"
+      "evidence": "immutable clean commit: 5 passed in 0.17s; an earlier implementation-time no-PYTHONPATH collection attempt executed no tests and was corrected for the repository src layout"
     },
     {
       "id": "trace-registry-semantics",
@@ -119,33 +121,52 @@
       "id": "traceability-checker",
       "command": "PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync python tools/verify_traceability.py --root . --format text",
       "result": "passed",
-      "evidence": "requirements=221; source_nodes=221; archive_files=16; production_modules=13; runtime_config_keys=235"
+      "evidence": "immutable clean commit: requirements=221; source_nodes=221; archive_files=16; production_modules=12; runtime_config_keys=235; duration=0.732s"
     },
     {
       "id": "trace-targeted-tests",
       "command": "PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -q -p no:cacheprovider tests/unit/docs/test_verify_traceability.py tests/contracts/assets/test_asset_boundary.py",
       "result": "passed",
-      "evidence": "41 passed in 10.27s; the first run exposed 3 fixture-only missing-path failures, then the authorized repo_copy path list was extended without changing checker or assertion semantics"
+      "evidence": "immutable clean commit: 41 passed in 11.32s; the first implementation-time run exposed 3 fixture-only missing-path failures, then the authorized repo_copy path list was extended without changing checker or assertion semantics"
     },
     {
       "id": "trace-full-tests",
       "command": "PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -q -p no:cacheprovider",
       "result": "passed",
-      "evidence": "195 passed in 15.82s"
+      "evidence": "immutable clean commit: 187 passed in 14.79s"
     },
     {
       "id": "trace-ruff",
       "command": "uv run --frozen --no-sync ruff check .",
       "result": "passed",
-      "evidence": "All checks passed"
+      "evidence": "immutable clean commit: All checks passed in 0.174s"
     },
     {
       "id": "trace-pyright",
       "command": "uv run --frozen --no-sync pyright",
       "result": "passed",
-      "evidence": "0 errors, 0 warnings, 0 informations"
+      "evidence": "immutable clean commit: 0 errors, 0 warnings, 0 informations in 3.58s"
     }
   ],
+  "independent_review_correction": {
+    "ai_verdict": "passed",
+    "infra_initial_verdict": "changes_required",
+    "infra_single_blocker": "The report attributed production_modules=13 and a 195-test full suite to the immutable commit, but those counts came from a shared dirty worktree.",
+    "invalidated_shared_dirty_tree_evidence": {
+      "production_modules": 13,
+      "full_suite": "195 passed in 15.82s",
+      "accepted_for_commit_verification": false
+    },
+    "accepted_immutable_commit_evidence": {
+      "production_modules": 12,
+      "full_suite": "187 passed in 14.79s",
+      "targeted_suite": "41 passed in 11.32s",
+      "asset_boundary_suite": "5 passed in 0.17s",
+      "ruff": "passed in 0.174s",
+      "pyright": "0 errors, 0 warnings in 3.58s"
+    },
+    "status": "corrected_pending_original_infra_rereview"
+  },
   "tracked_manifest": {
     "path": "docs/model-architecture/reviews/R001/tracked-files.txt",
     "count": 41,

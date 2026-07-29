@@ -14,7 +14,10 @@
   "independent_review": {
     "ai_review_seconds": null,
     "infra_review_seconds": null,
-    "status": "pending"
+    "reviewed_commit": "664fda71faed5e5d7d26d5fd06754af1a20b721f",
+    "ai_status": "passed",
+    "infra_status": "changes_required_evidence_counts",
+    "status": "infra_evidence_correction_pending_rereview"
   },
   "review_remediation": {
     "started_at_utc": "2026-07-29T17:23:26Z",
@@ -30,5 +33,13 @@
     "gpu_seconds": 0,
     "status": "completed_pending_independent_rereview"
   },
-  "notes": "Development-task timing only; no training runtime was executed. Review remediation removed ordinary-task performance placeholders and their references; trace remediation registered R001 ownership while preserving D001 checker responsibility. Independent reviewers must record their own measured timing."
+  "independent_review_evidence_remediation": {
+    "started_at_utc": "2026-07-29T19:27:57Z",
+    "ended_at_utc": "2026-07-29T19:30:07Z",
+    "wall_clock_seconds": 130,
+    "hardware_level": "CPU",
+    "gpu_seconds": 0,
+    "status": "completed_pending_original_infra_rereview"
+  },
+  "notes": "Development-task timing only; no training runtime was executed. Review remediation removed ordinary-task performance placeholders and their references; trace remediation registered R001 ownership while preserving D001 checker responsibility. Independent review evidence remediation corrected shared-dirty-tree counts to immutable-clean-commit results. Reviewer-reported durations remain separate from implementation timing."
 }

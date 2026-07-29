@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "R001",
-  "generated_at_utc": "2026-07-29T19:07:42Z",
+  "generated_at_utc": "2026-07-29T19:30:07Z",
   "self_hash_policy": "artifacts.json is not self-hashed; each listed digest is resolved against its explicit snapshot_binding",
   "snapshot_bindings": {
     "r001_initial_commit": {
@@ -13,8 +13,12 @@
       "digest_source": "Git blob at the committed R001 review-remediation snapshot"
     },
     "r001_trace_remediation": {
+      "commit": "664fda71faed5e5d7d26d5fd06754af1a20b721f",
+      "digest_source": "Git blob at the committed R001 trace-remediation snapshot"
+    },
+    "r001_review_evidence_remediation": {
       "commit": "task:R001",
-      "digest_source": "worktree content destined for the atomic R001 trace-remediation commit"
+      "digest_source": "worktree content destined for the atomic R001 review-evidence-remediation commit"
     }
   },
   "artifacts": [
@@ -51,26 +55,26 @@
     {
       "path": "docs/model-architecture/progress/time-log.jsonl",
       "kind": "development_time_log",
-      "snapshot_binding": "r001_trace_remediation",
-      "sha256": "3604dff653df74deb29cd19ab2abddaed5ac7edd5f3e362fd6e452b4d4e0810a"
+      "snapshot_binding": "r001_review_evidence_remediation",
+      "sha256": "7a72bb16677ef6286346824c3d873e4c79f36626290aa79542728262f9d446bc"
     },
     {
       "path": "docs/model-architecture/reviews/R001/implementation_report.md",
       "kind": "implementation_report",
-      "snapshot_binding": "r001_trace_remediation",
-      "sha256": "c6a481b8a53aaba1c92b22e676f225f2f85de5e40cf971e2af16f9888ea325ea"
+      "snapshot_binding": "r001_review_evidence_remediation",
+      "sha256": "ea9c847ad26c71877ebdc8d61fb765dec17b4a4f5be3b20bfb88967e89d286e0"
     },
     {
       "path": "docs/model-architecture/reviews/R001/test_report.json",
       "kind": "test_report",
-      "snapshot_binding": "r001_trace_remediation",
-      "sha256": "ce863ad469476abd708088eb6c5dbfd12996078e601f58d53e92b5919dfa71aa"
+      "snapshot_binding": "r001_review_evidence_remediation",
+      "sha256": "79eb03699f0296b84a73a3a398483a36de11c06c13ddbc2361f02bf27ed3d77b"
     },
     {
       "path": "docs/model-architecture/reviews/R001/timing.json",
       "kind": "task_timing",
-      "snapshot_binding": "r001_trace_remediation",
-      "sha256": "a568ceef2b206ce8a96a3c02e4dc4636e813cf5fccce8f04189c0ad9edee6423"
+      "snapshot_binding": "r001_review_evidence_remediation",
+      "sha256": "e68c9806fe24066d2d01c3ba5f63aa0c097338cd9fae6135f1f4a14efb8ad51b"
     },
     {
       "path": "docs/model-architecture/reviews/R001/reference_manifest.json",
