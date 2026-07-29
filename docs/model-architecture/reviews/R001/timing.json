@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "task_id": "R001",
+  "implementation_agent": {
+    "started_at_utc": "2026-07-29T08:15:01Z",
+    "ended_at_utc": "2026-07-29T08:38:13Z",
+    "wall_clock_seconds": 1392,
+    "implementation_and_self_check_seconds": 708,
+    "test_seconds": 684,
+    "fix_seconds": 0,
+    "gpu_seconds": 0,
+    "wait_seconds": 0
+  },
+  "independent_review": {
+    "ai_review_seconds": null,
+    "infra_review_seconds": null,
+    "status": "pending"
+  },
+  "notes": "Development-task timing only; no training runtime was executed. Independent reviewer must append its measured timing."
+}

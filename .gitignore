@@ -1,0 +1,55 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Python and uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local model, metadata, dataset and cache assets. These paths are anchored so
+# future source packages such as src/sakuramoon/model remain trackable.
+/model/
+/db/
+/data/
+/cache/
+/reference/
+
+# Model weights and local databases must be represented by manifests, not blobs.
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+*.onnx
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+
+# Training and evaluation artifacts
+/artifacts/
+/checkpoints/
+/outputs/
+/samples/
+/runs/
+/wandb/
+/profiles/
+/profile/
+/traces/
+/diagnostics/
+
+# Temporary files
+*.tmp
+*.partial
+._____temp/
+.ipynb_checkpoints/

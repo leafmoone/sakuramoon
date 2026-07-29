@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "task_id": "R001",
+  "applicability": "not_applicable",
+  "reason": "Repository initialization and asset-boundary documentation do not execute a training or runtime performance path.",
+  "gpu_required": false,
+  "measurements": []
+}

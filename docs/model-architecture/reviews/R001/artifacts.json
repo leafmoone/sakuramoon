@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "task_id": "R001",
+  "generated_at_utc": "2026-07-29T08:38:13Z",
+  "self_hash_policy": "artifacts.json is not self-hashed; every other R001 implementation artifact is hashed below",
+  "artifacts": [
+    {
+      "path": ".gitignore",
+      "kind": "repository_policy",
+      "sha256": "7199667a59825fc90cd6a841f0f883d5f774bbb647da37e129210b6bf2d75c67"
+    },
+    {
+      "path": "README.md",
+      "kind": "repository_entrypoint",
+      "sha256": "8267f1af022d4cc887a1e4b69232320d96a2f46b68f1323b8e7239e3a1d8cd56"
+    },
+    {
+      "path": "AGENTS.md",
+      "kind": "agent_policy",
+      "sha256": "f9d417d780c11ee557f07489592b948ddbe048d223682aa1d947a7d2323392ed"
+    },
+    {
+      "path": "docs/model-architecture/progress/asset-policy.md",
+      "kind": "asset_policy",
+      "sha256": "31b9f366a2f1f18416c025d69b0ffcfc8c6666e9a2b55a15463eb4f059a44f56"
+    },
+    {
+      "path": "docs/model-architecture/progress/tasks/R001.md",
+      "kind": "task_status_and_traceability",
+      "sha256": "98eabbbb39440e408f3098bfa1048a44fd5de4d65d64a35efaa0e24baae3541e"
+    },
+    {
+      "path": "docs/model-architecture/progress/time-log.jsonl",
+      "kind": "development_time_log",
+      "sha256": "476ab95a5fac571d349b33566d199fe2d09b7b61129571ebb90cb7d964556c49"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R001/implementation_report.md",
+      "kind": "implementation_report",
+      "sha256": "76f034c5b111e5dd6ba9e8d0040f4fffa1b4697c6ce17e906137b24eb3bc64b6"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R001/test_report.json",
+      "kind": "test_report",
+      "sha256": "8b39f26383ac9c4741343feb45e3817837b4575f1d1ec5aa5e59de4cfc1598d4"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R001/timing.json",
+      "kind": "task_timing",
+      "sha256": "7e4a2ae59885062f600453257de5499da163a6d5043c6867c5cec85fd616a668"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R001/perf_baseline.json",
+      "kind": "performance_not_applicable",
+      "sha256": "1d810ccdae38fc7686092f756068b7b2c1b030ead1b5e5da47f492e05011bef7"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R001/perf_after.json",
+      "kind": "performance_not_applicable",
+      "sha256": "c676ae5996274963bc97a10e7559931c4af553ba1c0b72ea361a491685d9d67a"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R001/reference_manifest.json",
+      "kind": "reference_source_and_license_manifest",
+      "sha256": "a28f3e14aab230c5c8ff86e64d3b9ba7e10d2a57af64402beea0d546d4ab94d5"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R001/tracked-files.txt",
+      "kind": "tracked_path_manifest",
+      "sha256": "cffa444c8e3a4959d8cae43aaaebf68f6274b57bfd82b494fd2c9b58bb5dc343"
+    }
+  ]
+}

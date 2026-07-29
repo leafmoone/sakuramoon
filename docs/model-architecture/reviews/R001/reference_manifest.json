@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "task_id": "R001",
+  "observed_at_utc": "2026-07-29T08:19:08Z",
+  "scope": "read-only local Git metadata and license blobs at HEAD",
+  "repositories": [
+    {
+      "name": "HDM",
+      "path": "reference/HDM",
+      "origin_url": "https://github.com/KohakuBlueleaf/HDM.git",
+      "head": "5fef7c4b71fe8386b497176021fe458810fdb7c0",
+      "worktree_status": "clean",
+      "license": {
+        "name": "CC-BY-NC-SA-4.0",
+        "file": "LICENSE",
+        "git_blob": "c0469af8f694e33b950ee20a8c133e2d53c62343",
+        "sha256": "c02a039a41caa77050b5d48880810777ec9e9c7c8bb740dca882611478f7319b"
+      }
+    },
+    {
+      "name": "JLT",
+      "path": "reference/JLT",
+      "origin_url": "https://github.com/akatsuki-neo/JLT",
+      "head": "aca236efa97aab3b7d865fd3d99a270431cf6ae5",
+      "worktree_status": "untracked .ipynb_checkpoints/ only",
+      "license": {
+        "name": "MIT",
+        "copyright": "Copyright (c) 2026 akatsuki-neo",
+        "file": "LICENSE",
+        "git_blob": "df6ff06c9eaf46916c4983fd74677b803ae82cea",
+        "sha256": "0e691a1683455d3cfa0808c60d9cb467accbb842355d2e43074c8efc0aef6532"
+      }
+    },
+    {
+      "name": "krea-2",
+      "path": "reference/krea-2",
+      "origin_url": "https://github.com/krea-ai/krea-2.git",
+      "head": "db3984fbc6e13b34c0064990fc2d95ac64d00058",
+      "worktree_status": "clean",
+      "license": {
+        "name": "Apache-2.0",
+        "scope": "repository root code",
+        "file": "LICENSE.md",
+        "git_blob": "b09cd7856d58590578ee1a4f3ad45d1310a97f87",
+        "sha256": "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a"
+      },
+      "additional_license": {
+        "name": "KREA COMMUNITY LICENSE AGREEMENT",
+        "scope": "assets/hf_samples",
+        "file": "assets/hf_samples/LICENSE.pdf",
+        "git_blob": "767c9b0bbb7609079f0ca16d5eb4fe447ca46b5b",
+        "sha256": "b82a2805162bde714a4eb27b9063c4fc3345d08a30be055134a6160e5430ba74"
+      }
+    }
+  ]
+}
