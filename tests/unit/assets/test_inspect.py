@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 from typing import Any, Protocol
@@ -9,6 +10,7 @@ import pytest
 
 from sakuramoon.assets import (
     AssetPreflightError,
+    VerifiedAssetSelection,
     inspect_databases,
     inspect_reference_repositories,
     inspect_runtime_models,
@@ -19,6 +21,7 @@ from sakuramoon.assets import (
 )
 from sakuramoon.assets import inspect as inspect_module
 from sakuramoon.assets.manifest import QwenAsset, VaeAsset
+from sakuramoon.cli import inspect as cli_inspect_module
 from sakuramoon.cli.inspect import main
 from sakuramoon.config.schema import AssetsConfig
 
@@ -172,6 +175,70 @@ def test_required_model_same_size_hash_drift_hard_fails(
         )
 
 
+def test_hash_io_error_is_a_redacted_relative_issue(
+    synthetic_assets: SyntheticAssetTree,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    weights = synthetic_assets.root / "model/qwen/model.safetensors"
+    secret = "SENSITIVE-ABSOLUTE-PATH"
+    real_sha256 = inspect_module._sha256  # pyright: ignore[reportPrivateUsage]
+
+    def deny_weight_read(path: Path) -> str:
+        if path == weights:
+            raise PermissionError(secret)
+        return real_sha256(path)
+
+    monkeypatch.setattr(inspect_module, "_sha256", deny_weight_read)
+
+    report = inspect_runtime_models(
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    matching = [issue for issue in report.issues if issue.code == "file_read_error"]
+    assert [(issue.asset_id, issue.detail) for issue in matching] == [
+        ("qwen_text_encoder", "model.safetensors")
+    ]
+    assert secret not in report.to_json()
+
+    common = (
+        "--manifest",
+        str(synthetic_assets.manifest_path),
+        "--root",
+        str(synthetic_assets.root),
+    )
+    assert main(common) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["ok"] is False
+    assert secret not in captured.out
+    assert captured.err == ""
+
+
+def test_config_read_io_is_not_misreported_as_invalid_json(
+    synthetic_assets: SyntheticAssetTree,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = synthetic_assets.root / "model/qwen/config.json"
+    real_read_text = Path.read_text
+
+    def deny_config_read(path: Path, *args: object, **kwargs: object) -> str:
+        if path == config_path:
+            raise PermissionError("SENSITIVE-CONFIG-PATH")
+        return real_read_text(path, *args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(Path, "read_text", deny_config_read)
+
+    report = inspect_runtime_models(
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    qwen_codes = {
+        issue.code for issue in report.issues if issue.asset_id == "qwen_text_encoder"
+    }
+    assert qwen_codes == {"file_read_error"}
+    assert "SENSITIVE-CONFIG-PATH" not in report.to_json()
+
+
 def test_selected_database_missing_fails_without_hash_or_open(
     synthetic_assets: SyntheticAssetTree,
     monkeypatch: pytest.MonkeyPatch,
@@ -301,6 +368,35 @@ def test_untrusted_wrapper_argument_requires_a_live_selection_capability(
     weights.write_bytes(b"x" * weights.stat().st_size)
     with pytest.raises(AssetPreflightError, match="identity drifted"):
         require_verified_selection(selection)
+
+
+def test_selection_capability_rejects_subclasses_directly_and_through_a_wrapper() -> None:
+    def forged_require_unchanged(self: object) -> None:
+        del self
+        raise AssertionError("a subclass override must never be invoked")
+
+    def forged_verified_root(self: object, asset_id: str) -> Path:
+        del self, asset_id
+        return Path("/tmp/unverified-model-cache")
+
+    forged_type = type(
+        "ForgedSelection",
+        (VerifiedAssetSelection,),
+        {
+            "require_unchanged": forged_require_unchanged,
+            "verified_root": forged_verified_root,
+        },
+    )
+    forged = object.__new__(forged_type)
+
+    with pytest.raises(AssetPreflightError, match="capability is not verified"):
+        require_verified_selection(forged)
+
+    def narrow(value: object) -> VerifiedAssetSelection:
+        return require_verified_selection(value)
+
+    with pytest.raises(AssetPreflightError, match="capability is not verified"):
+        narrow(forged)
 
 
 def test_database_audit_requires_explicit_known_unique_selection(
@@ -525,3 +621,46 @@ def test_cli_scopes_and_exit_codes(
     synthetic_assets.write_manifest()
     assert main(common) == 1
     assert '"ok":false' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("missing", ("manifest", "root"))
+def test_cli_preflight_errors_are_json_without_traceback(
+    synthetic_assets: SyntheticAssetTree,
+    capsys: pytest.CaptureFixture[str],
+    missing: str,
+) -> None:
+    manifest = synthetic_assets.manifest_path
+    root = synthetic_assets.root
+    if missing == "manifest":
+        manifest = synthetic_assets.root / "assets/missing.toml"
+    else:
+        root = synthetic_assets.root / "missing-root"
+
+    assert main(("--manifest", str(manifest), "--root", str(root))) == 2
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert "Traceback" not in captured.out
+    assert captured.err == ""
+
+
+def test_cli_last_resort_io_error_is_redacted(
+    synthetic_assets: SyntheticAssetTree,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "SENSITIVE-RAW-IO-PATH"
+
+    def raise_io(*args: object, **kwargs: object) -> None:
+        raise PermissionError(secret)
+
+    monkeypatch.setattr(cli_inspect_module, "inspect_runtime_models", raise_io)
+
+    assert cli_inspect_module.main(("--root", str(synthetic_assets.root))) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "error": "asset inspection I/O failed",
+        "ok": False,
+    }
+    assert secret not in captured.out
+    assert captured.err == ""

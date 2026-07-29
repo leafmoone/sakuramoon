@@ -1,6 +1,6 @@
 # A001 Review Remediation
 
-The independent AI and Infra reviews requested changes. This remediation is limited to A001-owned code, tests, and evidence while D001 owns the shared traceability registry.
+The independent AI and Infra reviews requested changes. This remediation is limited to A001-owned code, tests, and evidence; it updates only A001's registry mappings and does not include the concurrent D001 checker work.
 
 ## Closed Findings
 
@@ -10,14 +10,18 @@ The independent AI and Infra reviews requested changes. This remediation is limi
 - Database audit requires explicit, unique manifest asset IDs and validates missing files, bytes, and SHA-256 before any database library can open the payload.
 - Reference origin and worktree diagnostics redact observed values. Synthetic credential-bearing origins are absent from both JSON and exception/report representations.
 - A byte mismatch stops before hashing. Tests guard the mismatched file with a hash function that raises if called.
-- Test evidence now records 13 production modules.
+- CLI/preflight exceptions are normalized to a stable, redacted JSON contract with explicit 0/1/2 exit codes. Missing manifest/root and raw I/O negative tests assert empty stderr and no traceback.
+- File hash/config read failures report only a stable issue code and manifest-relative path; injected sensitive exception text is absent from reports and CLI output.
+- Selection revalidation hashes only the small manifest, catches revalidation I/O, and deterministically rejects both atomic replacement and same-inode/same-size content drift under simulated stale NFS stat metadata. Model payloads are not rehashed at the consumer gate.
+- The verified-selection gate requires the exact capability type and rejects a forged subclass both directly and through a wrapper. This closes the capability-forgery prerequisite found by the A002 reviewer, with task ownership retained by A001.
+- Test evidence records the 12 production modules present in the isolated `664fda71`-based commit candidate.
 
 ## Verification
 
-- A001 unit/contract: 38 passed.
-- Full live worktree: 121 passed.
-- Ruff: passed.
-- strict Pyright: 0 errors, 0 warnings.
-- Traceability checker: 219 requirements, 219 source nodes, 13 production modules, 235 runtime config keys, 16 archive files, no errors.
+- A001-only isolated asset unit/contract suite: 51 passed in 8.56 seconds.
+- A001-only isolated full suite: 196 passed in 16.41 seconds.
+- Full repository Ruff passed; strict Pyright reported 0 errors and 0 warnings.
+- Traceability passed with 221 requirements, 221 source nodes, 16 archive files, 12 production modules, and 235 runtime config keys.
+- Manifest binding suite: 13 passed in each of 5 consecutive runs.
 
-No model payload, database row, `.env`, GPU, or performance placeholder was read or created during this remediation. Main-agent integration verification passed after D001 revision 4 was committed. Registry revision 5 records `task:A001` implementation paths for `C02-001` and `C03-001`; both remain below `verified`, so T020/T021 retain the real model execution gates.
+The clean candidate was cloned at base `664fda71` and received only the explicit A001 path diff. No D001 checker/test diff, D010 data diff, or A002 scanner diff entered it. No model payload, database row, `.env`, GPU, or performance placeholder was read or created during this remediation. Registry revision 11 records the additional A001 CLI/readiness implementation entry for `C02-001` and `C03-001`; both remain below `verified`, so T020/T021 retain the real model loading, posterior/forward, round-trip, and 1GPU gates.

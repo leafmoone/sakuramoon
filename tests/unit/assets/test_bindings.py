@@ -136,7 +136,7 @@ def test_runtime_manifest_final_symlink_is_rejected(
         )
 
 
-def test_manifest_replacement_during_readiness_fails_closed(
+def test_atomic_manifest_replacement_during_readiness_fails_closed(
     synthetic_assets: SyntheticAssetTree,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -148,7 +148,9 @@ def test_manifest_replacement_during_readiness_fails_closed(
         nonlocal replaced
         if not replaced:
             replaced = True
-            synthetic_assets.write_manifest()
+            replacement = synthetic_assets.manifest_path.with_suffix(".replacement")
+            replacement.write_bytes(synthetic_assets.manifest_path.read_bytes())
+            replacement.replace(synthetic_assets.manifest_path)
         return real_sha256(path)
 
     monkeypatch.setattr(inspect_module, "_sha256", replace_manifest_once)
@@ -159,6 +161,87 @@ def test_manifest_replacement_during_readiness_fails_closed(
             synthetic_assets.manifest_path,
             root=synthetic_assets.root,
         )
+
+
+def test_same_inode_same_size_manifest_content_drift_fails_with_stale_stat(
+    synthetic_assets: SyntheticAssetTree,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readiness = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets.manifest_path),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    real_stat_identity = inspect_module._stat_identity  # pyright: ignore[reportPrivateUsage]
+    locked_identity = real_stat_identity(synthetic_assets.manifest_path)
+    original = synthetic_assets.manifest_path.read_bytes()
+    changed = original.replace(b"manifest_revision = 1", b"manifest_revision = 2", 1)
+    assert changed != original
+    assert len(changed) == len(original)
+    inode_before = synthetic_assets.manifest_path.stat().st_ino
+    with synthetic_assets.manifest_path.open("r+b") as handle:
+        handle.write(changed)
+        handle.truncate()
+    assert synthetic_assets.manifest_path.stat().st_ino == inode_before
+
+    def stale_manifest_identity(path: Path) -> object:
+        if path == synthetic_assets.manifest_path:
+            return locked_identity
+        return real_stat_identity(path)
+
+    monkeypatch.setattr(inspect_module, "_stat_identity", stale_manifest_identity)
+
+    with pytest.raises(AssetPreflightError, match="manifest identity drifted"):
+        readiness.require_unchanged()
+
+
+def test_selection_rehashes_only_the_small_manifest_before_model_use(
+    synthetic_assets: SyntheticAssetTree,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readiness = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets.manifest_path),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    real_sha256 = inspect_module._sha256  # pyright: ignore[reportPrivateUsage]
+    hashed_paths: list[Path] = []
+
+    def record_sha256(path: Path) -> str:
+        hashed_paths.append(path)
+        return real_sha256(path)
+
+    monkeypatch.setattr(inspect_module, "_sha256", record_sha256)
+
+    readiness.verified_path("qwen_text_encoder", "model.safetensors")
+
+    assert hashed_paths == [synthetic_assets.manifest_path]
+
+
+def test_manifest_revalidation_io_error_is_redacted(
+    synthetic_assets: SyntheticAssetTree,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readiness = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets.manifest_path),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    secret = "SENSITIVE-MANIFEST-PATH"
+
+    def deny_manifest_read(path: Path) -> str:
+        if path == synthetic_assets.manifest_path:
+            raise PermissionError(secret)
+        raise AssertionError(f"model payload was unexpectedly rehashed: {path.name}")
+
+    monkeypatch.setattr(inspect_module, "_sha256", deny_manifest_read)
+
+    with pytest.raises(
+        AssetPreflightError,
+        match="manifest could not be revalidated",
+    ) as raised:
+        readiness.require_unchanged()
+    assert secret not in str(raised.value)
 
 
 def test_verified_file_identity_must_be_rechecked_before_use(

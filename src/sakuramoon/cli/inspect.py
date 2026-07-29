@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from sakuramoon.assets import (
+    AssetPreflightError,
     ManifestError,
     inspect_databases,
     inspect_reference_repositories,
@@ -45,8 +46,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.asset_id:
                 raise ValueError("--asset-id is only valid for database audits")
             report = inspect_reference_repositories(args.manifest, root=args.root)
-    except (ManifestError, ValueError) as exc:
+    except (AssetPreflightError, ManifestError, ValueError) as exc:
         print(json.dumps({"error": str(exc), "ok": False}, sort_keys=True, separators=(",", ":")))
+        return 2
+    except OSError:
+        print(
+            json.dumps(
+                {"error": "asset inspection I/O failed", "ok": False},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
         return 2
     print(report.to_json())
     return 0 if report.ok else 1

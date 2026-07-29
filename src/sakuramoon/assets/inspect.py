@@ -110,8 +110,21 @@ class VerifiedAssetSelection:
     def require_unchanged(self) -> None:
         """Hard-fail if the manifest or any verified file changed after inspection."""
 
+        safe_manifest = _safe_path(self._root, self._manifest_relative_path)
         if (
-            _safe_path(self._root, self._manifest_relative_path) != self._manifest_path
+            safe_manifest != self._manifest_path
+            or self._manifest_path.is_symlink()
+            or _stat_identity(self._manifest_path) != self._manifest_identity
+        ):
+            raise AssetPreflightError("verified asset manifest identity drifted")
+        try:
+            observed_sha256 = _sha256(self._manifest_path)
+        except OSError as exc:
+            raise AssetPreflightError(
+                "verified asset manifest could not be revalidated"
+            ) from exc
+        if (
+            observed_sha256 != self.manifest_sha256
             or self._manifest_path.is_symlink()
             or _stat_identity(self._manifest_path) != self._manifest_identity
         ):
@@ -149,7 +162,7 @@ class VerifiedAssetSelection:
 def require_verified_selection(value: object) -> VerifiedAssetSelection:
     """Narrow an untrusted wrapper argument to a live verified asset capability."""
 
-    if not isinstance(value, VerifiedAssetSelection):
+    if type(value) is not VerifiedAssetSelection:
         raise AssetPreflightError("asset selection capability is not verified")
     value.require_unchanged()
     return value
@@ -188,7 +201,10 @@ def _sha256(path: Path) -> str:
 
 
 def _safe_path(root: Path, relative: str) -> Path | None:
-    root = root.resolve()
+    try:
+        root = root.resolve()
+    except (OSError, RuntimeError):
+        return None
     candidate = root / relative
     current = root
     for part in Path(relative).parts:
@@ -197,19 +213,26 @@ def _safe_path(root: Path, relative: str) -> Path | None:
             return None
     try:
         candidate.resolve(strict=False).relative_to(root)
-    except ValueError:
+    except (OSError, RuntimeError, ValueError):
         return None
     return candidate
 
 
 def _read_manifest_snapshot(manifest_path: Path, root: Path) -> _ManifestSnapshot:
-    resolved_root = root.resolve(strict=True)
+    try:
+        resolved_root = root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise AssetPreflightError("repository root is missing or inaccessible") from exc
+    if not resolved_root.is_dir():
+        raise AssetPreflightError("repository root is not a directory")
     candidate = manifest_path if manifest_path.is_absolute() else resolved_root / manifest_path
     try:
         lexical_relative = candidate.relative_to(resolved_root)
         candidate.resolve(strict=False).relative_to(resolved_root)
     except ValueError as exc:
         raise ValueError("asset manifest must remain inside the repository root") from exc
+    except (OSError, RuntimeError) as exc:
+        raise AssetPreflightError("asset manifest path could not be resolved") from exc
     if ".." in lexical_relative.parts:
         raise ValueError("asset manifest must use a normalized repository-relative path")
     safe_manifest = _safe_path(resolved_root, lexical_relative.as_posix())
@@ -262,7 +285,10 @@ def _inspect_file(
         return [], None
     if lock.sha256 is None:
         return [InspectionIssue(asset_id, "missing_sha256", lock.path)], None
-    observed_sha256 = _sha256(path)
+    try:
+        observed_sha256 = _sha256(path)
+    except OSError:
+        return [InspectionIssue(asset_id, "file_read_error", lock.path)], None
     after = _stat_identity(path)
     if after is None or before != after or path.is_symlink():
         return [InspectionIssue(asset_id, "file_changed_during_check", lock.path)], None
@@ -280,12 +306,16 @@ def _inspect_file(
     )
 
 
-def _read_json(path: Path) -> dict[str, Any] | None:
+def _read_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         payload = cast(object, json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    return cast(dict[str, Any], payload) if isinstance(payload, dict) else None
+    except OSError:
+        return None, "file_read_error"
+    except (UnicodeError, json.JSONDecodeError):
+        return None, "invalid_config_json"
+    if not isinstance(payload, dict):
+        return None, "invalid_config_json"
+    return cast(dict[str, Any], payload), None
 
 
 def _inspect_model_summary(root: Path, asset: ModelAsset) -> list[InspectionIssue]:
@@ -296,9 +326,17 @@ def _inspect_model_summary(root: Path, asset: ModelAsset) -> list[InspectionIssu
     if config_lock is None:
         return [InspectionIssue(asset.asset_id, "missing_config_lock", "config")]
     config_path = _safe_path(base, config_lock.path)
-    payload = _read_json(config_path) if config_path is not None else None
+    if config_path is None:
+        return [InspectionIssue(asset.asset_id, "unsafe_path", config_lock.path)]
+    payload, read_error = _read_json(config_path)
     if payload is None:
-        return [InspectionIssue(asset.asset_id, "invalid_config_json", config_lock.path)]
+        return [
+            InspectionIssue(
+                asset.asset_id,
+                read_error or "invalid_config_json",
+                config_lock.path,
+            )
+        ]
     issues: list[InspectionIssue] = []
     if isinstance(asset, QwenAsset):
         text_config = payload.get("text_config")
@@ -537,7 +575,7 @@ def inspect_runtime_models(manifest_path: Path, *, root: Path) -> InspectionRepo
     """Diagnostic-only model lock inspection; it does not bind runtime config."""
 
     snapshot = _read_manifest_snapshot(manifest_path, root)
-    report, _ = _inspect_runtime_snapshot(snapshot, root.resolve())
+    report, _ = _inspect_runtime_snapshot(snapshot, snapshot.root)
     return report
 
 
@@ -551,7 +589,7 @@ def require_runtime_assets_ready(
 
     snapshot = _read_manifest_snapshot(manifest_path, root)
     require_runtime_assets_match_snapshot(config, snapshot.manifest, snapshot.sha256)
-    report, files = _inspect_runtime_snapshot(snapshot, root.resolve())
+    report, files = _inspect_runtime_snapshot(snapshot, snapshot.root)
     if not report.ok:
         codes = ",".join(sorted({issue.code for issue in report.issues}))
         raise AssetPreflightError(f"runtime model preflight failed: {codes}")
@@ -567,7 +605,7 @@ def inspect_databases(
     """Hash selected DB payloads without opening a database or reading rows."""
 
     snapshot = _read_manifest_snapshot(manifest_path, root)
-    report, _ = _inspect_database_snapshot(snapshot, root.resolve(), asset_ids)
+    report, _ = _inspect_database_snapshot(snapshot, snapshot.root, asset_ids)
     return report
 
 
@@ -580,7 +618,7 @@ def require_databases_ready(
     """Verify selected DB identities before any database library opens them."""
 
     snapshot = _read_manifest_snapshot(manifest_path, root)
-    report, files = _inspect_database_snapshot(snapshot, root.resolve(), asset_ids)
+    report, files = _inspect_database_snapshot(snapshot, snapshot.root, asset_ids)
     if not report.ok:
         codes = ",".join(sorted({issue.code for issue in report.issues}))
         raise AssetPreflightError(f"database asset audit failed: {codes}")
@@ -593,7 +631,7 @@ def inspect_reference_repositories(manifest_path: Path, *, root: Path) -> Inspec
     snapshot = _read_manifest_snapshot(manifest_path, root)
     issues: list[InspectionIssue] = []
     for reference in snapshot.manifest.references:
-        issues.extend(_inspect_reference(root.resolve(), reference))
+        issues.extend(_inspect_reference(snapshot.root, reference))
     return _report(snapshot.manifest, issues)
 
 

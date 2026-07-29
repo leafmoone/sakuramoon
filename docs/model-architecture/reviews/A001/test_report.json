@@ -2,44 +2,68 @@
   "schema_version": 1,
   "task_id": "A001",
   "hardware": "CPU",
+  "candidate": {
+    "base_commit": "664fda71",
+    "scope": "isolated clone with only the explicit A001 path diff",
+    "excluded_concurrent_diffs": ["D001", "D010", "A002 scanner"]
+  },
+  "lock_check": {
+    "command": "uv lock --check",
+    "ok": true
+  },
   "targeted": {
-    "command": "PYTHONPATH=src uv run --frozen pytest -q tests/unit/assets tests/contracts/assets",
-    "passed": 38,
+    "command": "UV_PROJECT_ENVIRONMENT=<locked-env> uv run --frozen pytest -q tests/unit/assets tests/contracts/assets/test_asset_boundary.py",
+    "passed": 51,
     "failed": 0,
-    "duration_seconds": 5.82
+    "duration_seconds": 8.56
   },
   "ruff": {
-    "command": "uv run --frozen ruff check src/sakuramoon/assets src/sakuramoon/cli tests/unit/assets tests/contracts/assets",
+    "command": "UV_PROJECT_ENVIRONMENT=<locked-env> uv run --frozen ruff check src/sakuramoon tests tools",
     "ok": true
   },
   "pyright": {
-    "command": "uv run --frozen pyright -p /tmp/sakuramoon-c001-pyrightconfig.json src/sakuramoon/assets src/sakuramoon/cli tests/unit/assets tests/contracts/assets",
-    "locked_venv": ".venv",
+    "command": "UV_PROJECT_ENVIRONMENT=<locked-env> uv run --frozen pyright",
     "mode": "strict",
     "errors": 0,
     "warnings": 0
   },
   "traceability": {
-    "command": "PYTHONPATH=src /root/shared-nvme/sakuramoon/.venv/bin/python tools/verify_traceability.py --format json",
-    "snapshot_scope": "integrated A001 remediation after committed D001 revision 4; registry candidate revision 5",
+    "command": "UV_PROJECT_ENVIRONMENT=<locked-env> uv run --frozen python tools/verify_traceability.py --format json",
     "ok": true,
-    "requirements": 219,
-    "source_nodes": 219,
-    "production_modules": 13,
-    "runtime_config_keys": 235,
-    "archive_files": 16
+    "requirements": 221,
+    "source_nodes": 221,
+    "archive_files": 16,
+    "production_modules": 12,
+    "runtime_config_keys": 235
   },
   "full_suite": {
-    "command": "PYTHONPATH=src /root/shared-nvme/sakuramoon/.venv/bin/pytest -q",
-    "snapshot_scope": "integrated A001 remediation after committed D001 revision 4; registry candidate revision 5",
-    "passed": 121,
+    "command": "UV_PROJECT_ENVIRONMENT=<locked-env> uv run --frozen pytest -q",
+    "passed": 196,
     "failed": 0,
-    "duration_seconds": 13.76
+    "duration_seconds": 16.41
+  },
+  "manifest_binding_stability": {
+    "command": "five consecutive runs of uv run --frozen pytest -q tests/unit/assets/test_bindings.py",
+    "runs": 5,
+    "passed_per_run": 13,
+    "failed": 0
+  },
+  "capability_gate": {
+    "test": "test_selection_capability_rejects_subclasses_directly_and_through_a_wrapper",
+    "exact_type_required": true,
+    "task_owner": "A001"
+  },
+  "cli_failure_contract": {
+    "missing_manifest_exit": 2,
+    "missing_root_exit": 2,
+    "stdout": "single redacted JSON object",
+    "stderr": "empty",
+    "traceback": false
   },
   "production_manifest_static": {
     "command": "load_manifest assets/manifest.toml in unit/contract suite",
     "result": "runtime_models_ready_databases_optional",
-    "model_payloads_read_or_hashed": false,
+    "model_payloads_read_or_hashed_during_second_remediation": false,
     "database_payloads_hashed_once_for_manifest": true
   },
   "gpu_used": false
