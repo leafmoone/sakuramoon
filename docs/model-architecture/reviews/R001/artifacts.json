@@ -1,73 +1,90 @@
 {
   "schema_version": 1,
   "task_id": "R001",
-  "generated_at_utc": "2026-07-29T08:38:13Z",
-  "self_hash_policy": "artifacts.json is not self-hashed; every other R001 implementation artifact is hashed below",
+  "generated_at_utc": "2026-07-29T17:23:26Z",
+  "self_hash_policy": "artifacts.json is not self-hashed; each listed digest is resolved against its explicit snapshot_binding",
+  "snapshot_bindings": {
+    "r001_initial_commit": {
+      "commit": "473eea9206833b696d42235b0fcb6b1cec41faab",
+      "digest_source": "Git blob at the immutable R001 initial commit"
+    },
+    "r001_review_remediation": {
+      "commit": "task:R001",
+      "digest_source": "worktree content destined for the atomic R001 review-remediation commit"
+    }
+  },
   "artifacts": [
     {
       "path": ".gitignore",
       "kind": "repository_policy",
+      "snapshot_binding": "r001_initial_commit",
       "sha256": "7199667a59825fc90cd6a841f0f883d5f774bbb647da37e129210b6bf2d75c67"
     },
     {
       "path": "README.md",
       "kind": "repository_entrypoint",
+      "snapshot_binding": "r001_initial_commit",
       "sha256": "8267f1af022d4cc887a1e4b69232320d96a2f46b68f1323b8e7239e3a1d8cd56"
     },
     {
       "path": "AGENTS.md",
       "kind": "agent_policy",
+      "snapshot_binding": "r001_initial_commit",
       "sha256": "f9d417d780c11ee557f07489592b948ddbe048d223682aa1d947a7d2323392ed"
     },
     {
       "path": "docs/model-architecture/progress/asset-policy.md",
       "kind": "asset_policy",
+      "snapshot_binding": "r001_initial_commit",
       "sha256": "31b9f366a2f1f18416c025d69b0ffcfc8c6666e9a2b55a15463eb4f059a44f56"
     },
     {
       "path": "docs/model-architecture/progress/tasks/R001.md",
       "kind": "task_status_and_traceability",
-      "sha256": "98eabbbb39440e408f3098bfa1048a44fd5de4d65d64a35efaa0e24baae3541e"
+      "snapshot_binding": "r001_review_remediation",
+      "sha256": "52d3c56e44a638debb2fa823b7b73454bacc8f307c7c9112ce9782c7317a57d5"
     },
     {
       "path": "docs/model-architecture/progress/time-log.jsonl",
       "kind": "development_time_log",
+      "snapshot_binding": "r001_initial_commit",
       "sha256": "476ab95a5fac571d349b33566d199fe2d09b7b61129571ebb90cb7d964556c49"
     },
     {
       "path": "docs/model-architecture/reviews/R001/implementation_report.md",
       "kind": "implementation_report",
-      "sha256": "76f034c5b111e5dd6ba9e8d0040f4fffa1b4697c6ce17e906137b24eb3bc64b6"
+      "snapshot_binding": "r001_review_remediation",
+      "sha256": "ee87b89cd808c61c7de0f3688e8aacbe1abb3ef14ed69c13630ca5c5e76cddb2"
     },
     {
       "path": "docs/model-architecture/reviews/R001/test_report.json",
       "kind": "test_report",
-      "sha256": "8b39f26383ac9c4741343feb45e3817837b4575f1d1ec5aa5e59de4cfc1598d4"
+      "snapshot_binding": "r001_review_remediation",
+      "sha256": "f8ae24af4797463ae92640ee5164dcb31f0881175e739a9545edf66cb8a74b18"
     },
     {
       "path": "docs/model-architecture/reviews/R001/timing.json",
       "kind": "task_timing",
-      "sha256": "7e4a2ae59885062f600453257de5499da163a6d5043c6867c5cec85fd616a668"
-    },
-    {
-      "path": "docs/model-architecture/reviews/R001/perf_baseline.json",
-      "kind": "performance_not_applicable",
-      "sha256": "1d810ccdae38fc7686092f756068b7b2c1b030ead1b5e5da47f492e05011bef7"
-    },
-    {
-      "path": "docs/model-architecture/reviews/R001/perf_after.json",
-      "kind": "performance_not_applicable",
-      "sha256": "c676ae5996274963bc97a10e7559931c4af553ba1c0b72ea361a491685d9d67a"
+      "snapshot_binding": "r001_review_remediation",
+      "sha256": "ab54e0c700540e47c5da64409dbf9f644c368bb3bbc5d2851bd8b90f794af477"
     },
     {
       "path": "docs/model-architecture/reviews/R001/reference_manifest.json",
       "kind": "reference_source_and_license_manifest",
+      "snapshot_binding": "r001_initial_commit",
       "sha256": "a28f3e14aab230c5c8ff86e64d3b9ba7e10d2a57af64402beea0d546d4ab94d5"
     },
     {
       "path": "docs/model-architecture/reviews/R001/tracked-files.txt",
       "kind": "tracked_path_manifest",
-      "sha256": "cffa444c8e3a4959d8cae43aaaebf68f6274b57bfd82b494fd2c9b58bb5dc343"
+      "snapshot_binding": "r001_review_remediation",
+      "sha256": "b558f821e8da5b794159e273ba319d3f6abef16fb330a15ff2dde29fecabb292"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R001/review_remediation.md",
+      "kind": "review_remediation",
+      "snapshot_binding": "r001_review_remediation",
+      "sha256": "a0a65e5593fc5313a00e19a57ca606721018b0933f4b1c6180160580066ecc86"
     }
   ]
 }

@@ -30,9 +30,8 @@ docs/model-architecture/progress/tasks/R001.md
 docs/model-architecture/progress/time-log.jsonl
 docs/model-architecture/reviews/R001/artifacts.json
 docs/model-architecture/reviews/R001/implementation_report.md
-docs/model-architecture/reviews/R001/perf_after.json
-docs/model-architecture/reviews/R001/perf_baseline.json
 docs/model-architecture/reviews/R001/reference_manifest.json
+docs/model-architecture/reviews/R001/review_remediation.md
 docs/model-architecture/reviews/R001/task.md
 docs/model-architecture/reviews/R001/test_report.json
 docs/model-architecture/reviews/R001/timing.json

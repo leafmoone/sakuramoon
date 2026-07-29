@@ -16,5 +16,11 @@
     "infra_review_seconds": null,
     "status": "pending"
   },
-  "notes": "Development-task timing only; no training runtime was executed. Independent reviewer must append its measured timing."
+  "review_remediation": {
+    "started_at_utc": "2026-07-29T17:23:26Z",
+    "ended_at_utc": "2026-07-29T17:29:51Z",
+    "wall_clock_seconds": 385,
+    "status": "completed_pending_independent_rereview"
+  },
+  "notes": "Development-task timing only; no training runtime was executed. Review remediation removed ordinary-task performance placeholders and their references; independent reviewers must record their own measured timing."
 }

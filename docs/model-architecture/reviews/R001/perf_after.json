@@ -1,8 +1,0 @@
-{
-  "schema_version": 1,
-  "task_id": "R001",
-  "applicability": "not_applicable",
-  "reason": "No performance implementation was changed, so no before/after comparison is meaningful.",
-  "gpu_required": false,
-  "measurements": []
-}
