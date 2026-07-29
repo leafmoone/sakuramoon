@@ -106,7 +106,7 @@ class _StatIdentity:
     changed_ns: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class VerifiedAssetFile:
     """A manifest-locked file identity that must be rechecked before opening."""
 
@@ -142,7 +142,7 @@ class VerifiedAssetFile:
         return self._base
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class VerifiedAssetSelection:
     """Consumable identities from one manifest and filesystem verification pass."""
 
@@ -231,31 +231,6 @@ def require_verified_selection(value: object) -> VerifiedAssetSelection:
 _ISSUED_FILES = _IdentityWeakRegistry()
 _ISSUED_SELECTIONS = _IdentityWeakRegistry()
 _PATH_TYPE = type(Path())
-_FILE_FIELDS = frozenset(
-    {
-        "asset_id",
-        "relative_path",
-        "kind",
-        "bytes",
-        "sha256",
-        "_base",
-        "_path",
-        "_identity",
-    }
-)
-_SELECTION_FIELDS = frozenset(
-    {
-        "manifest_revision",
-        "manifest_sha256",
-        "files",
-        "_root",
-        "_manifest_relative_path",
-        "_manifest_path",
-        "_manifest_identity",
-    }
-)
-
-
 def _path_fingerprint(value: object) -> tuple[str, ...] | None:
     if type(value) is not _PATH_TYPE:
         return None
@@ -275,26 +250,33 @@ def _stat_fingerprint(value: object) -> tuple[int, int, int, int, int] | None:
 def _verified_file_fingerprint(value: object) -> tuple[object, ...] | None:
     if type(value) is not VerifiedAssetFile:
         return None
-    state = vars(value)
-    if frozenset(state) != _FILE_FIELDS:
+    try:
+        asset_id = object.__getattribute__(value, "asset_id")
+        relative_path = object.__getattribute__(value, "relative_path")
+        kind = object.__getattribute__(value, "kind")
+        byte_count = object.__getattribute__(value, "bytes")
+        sha256 = object.__getattribute__(value, "sha256")
+        raw_base = object.__getattribute__(value, "_base")
+        raw_path = object.__getattribute__(value, "_path")
+        raw_identity = object.__getattribute__(value, "_identity")
+    except AttributeError:
         return None
-    for name in ("asset_id", "relative_path", "kind", "sha256"):
-        if type(state[name]) is not str:
-            return None
-    if type(state["bytes"]) is not int:
+    if any(type(item) is not str for item in (asset_id, relative_path, kind, sha256)):
         return None
-    base = _path_fingerprint(state["_base"])
-    path = _path_fingerprint(state["_path"])
-    identity = _stat_fingerprint(state["_identity"])
+    if type(byte_count) is not int:
+        return None
+    base = _path_fingerprint(raw_base)
+    path = _path_fingerprint(raw_path)
+    identity = _stat_fingerprint(raw_identity)
     if base is None or path is None or identity is None:
         return None
     return (
         "file",
-        state["asset_id"],
-        state["relative_path"],
-        state["kind"],
-        state["bytes"],
-        state["sha256"],
+        asset_id,
+        relative_path,
+        kind,
+        byte_count,
+        sha256,
         base,
         path,
         identity,
@@ -304,31 +286,40 @@ def _verified_file_fingerprint(value: object) -> tuple[object, ...] | None:
 def _verified_selection_fingerprint(value: object) -> tuple[object, ...] | None:
     if type(value) is not VerifiedAssetSelection:
         return None
-    state = vars(value)
-    if frozenset(state) != _SELECTION_FIELDS:
+    try:
+        manifest_revision = object.__getattribute__(value, "manifest_revision")
+        manifest_sha256 = object.__getattribute__(value, "manifest_sha256")
+        raw_files = object.__getattribute__(value, "files")
+        raw_root = object.__getattribute__(value, "_root")
+        manifest_relative_path = object.__getattribute__(
+            value,
+            "_manifest_relative_path",
+        )
+        raw_manifest_path = object.__getattribute__(value, "_manifest_path")
+        raw_identity = object.__getattribute__(value, "_manifest_identity")
+    except AttributeError:
         return None
-    if type(state["manifest_revision"]) is not int:
+    if type(manifest_revision) is not int:
         return None
-    if type(state["manifest_sha256"]) is not str:
+    if type(manifest_sha256) is not str:
         return None
-    if type(state["_manifest_relative_path"]) is not str:
+    if type(manifest_relative_path) is not str:
         return None
-    raw_files = state["files"]
     if type(raw_files) is not tuple:
         return None
     files = cast(tuple[object, ...], raw_files)
-    root = _path_fingerprint(state["_root"])
-    manifest_path = _path_fingerprint(state["_manifest_path"])
-    identity = _stat_fingerprint(state["_manifest_identity"])
+    root = _path_fingerprint(raw_root)
+    manifest_path = _path_fingerprint(raw_manifest_path)
+    identity = _stat_fingerprint(raw_identity)
     if root is None or manifest_path is None or identity is None:
         return None
     return (
         "selection",
-        state["manifest_revision"],
-        state["manifest_sha256"],
+        manifest_revision,
+        manifest_sha256,
         tuple(id(item) for item in files),
         root,
-        state["_manifest_relative_path"],
+        manifest_relative_path,
         manifest_path,
         identity,
     )

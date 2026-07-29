@@ -4,8 +4,15 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import pytest
+from pydantic import ValidationError
 
-from sakuramoon.assets.manifest import ManifestError, QwenAsset, VaeAsset, load_manifest
+from sakuramoon.assets.manifest import (
+    AssetManifest,
+    ManifestError,
+    QwenAsset,
+    VaeAsset,
+    load_manifest,
+)
 
 
 class SyntheticAssetTree(Protocol):
@@ -49,14 +56,25 @@ def test_unknown_key_is_rejected(synthetic_assets: SyntheticAssetTree) -> None:
         load_manifest(synthetic_assets.manifest_path)
 
 
-def test_database_cannot_be_marked_required_for_runtime(
+@pytest.mark.parametrize("invalid", (True, 0, 1, "false"))
+def test_database_runtime_flag_rejects_true_and_wrong_toml_types(
     synthetic_assets: SyntheticAssetTree,
+    invalid: object,
 ) -> None:
-    synthetic_assets.payload["databases"][0]["required_for_runtime"] = True
+    synthetic_assets.payload["databases"][0]["required_for_runtime"] = invalid
     synthetic_assets.write_manifest()
 
     with pytest.raises(ManifestError, match="databases.0.required_for_runtime"):
         load_manifest(synthetic_assets.manifest_path)
+
+
+def test_database_runtime_flag_rejects_null_during_strict_model_validation(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    synthetic_assets.payload["databases"][0]["required_for_runtime"] = None
+
+    with pytest.raises(ValidationError, match="databases.0.required_for_runtime"):
+        AssetManifest.model_validate(synthetic_assets.payload, strict=True)
 
 
 def test_path_traversal_is_rejected(synthetic_assets: SyntheticAssetTree) -> None:

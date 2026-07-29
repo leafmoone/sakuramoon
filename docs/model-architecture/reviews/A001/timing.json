@@ -58,5 +58,15 @@
     "hardware_level": "CPU",
     "gpu_seconds": 0,
     "status": "third_review_remediation_complete_pending_independent_rereview"
+  },
+  "fourth_review_remediation": {
+    "measurement_scope": "first tracked slots/strict-schema edit through A001-only isolated validation and evidence refresh",
+    "agent": "a001_capability_remediation",
+    "started_at_utc": "2026-07-29T20:29:22Z",
+    "ended_at_utc": "2026-07-29T20:37:52Z",
+    "duration_seconds": 510,
+    "hardware_level": "CPU",
+    "gpu_seconds": 0,
+    "status": "fourth_review_remediation_complete_pending_independent_rereview"
   }
 }

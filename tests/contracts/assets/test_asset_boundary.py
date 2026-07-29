@@ -49,10 +49,14 @@ def test_production_manifest_records_ready_models_and_optional_databases_without
     assert all(not asset.required_for_runtime for asset in manifest.databases)
 
 
-def test_manifest_contract_rejects_a_runtime_required_database(tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid", ("true", "0", "1", '"false"'))
+def test_manifest_contract_strictly_rejects_runtime_database_values(
+    tmp_path: Path,
+    invalid: str,
+) -> None:
     payload = MANIFEST.read_text(encoding="utf-8").replace(
         "required_for_runtime = false",
-        "required_for_runtime = true",
+        f"required_for_runtime = {invalid}",
         1,
     )
     candidate = tmp_path / "manifest.toml"

@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     StringConstraints,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -187,13 +188,20 @@ class DatabaseAsset(StrictModel):
     local_path: NonEmpty
     lock_state: Literal["ready", "blocked"]
     blockers: Annotated[tuple[BlockerId, ...], BeforeValidator(_list_to_tuple)]
-    required_for_runtime: Literal[False]
+    required_for_runtime: Annotated[bool, Field(strict=True)]
     source: DatabaseSourceIdentity
     schema_version: NonEmpty | None = None
     files: Annotated[tuple[FileLock, ...], BeforeValidator(_list_to_tuple)]
     allowed_aggregate_statistics: Annotated[
         tuple[NonEmpty, ...], BeforeValidator(_list_to_tuple)
     ]
+
+    @field_validator("required_for_runtime")
+    @classmethod
+    def validate_runtime_boundary(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("database assets must remain audit-only")
+        return value
 
     @model_validator(mode="after")
     def validate_lock(self) -> DatabaseAsset:

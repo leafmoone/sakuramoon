@@ -8,7 +8,7 @@ import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import pytest
 
@@ -37,6 +37,48 @@ class SyntheticAssetTree(Protocol):
     payload: dict[str, Any]
 
     def write_manifest(self) -> None: ...
+
+
+FileConsumer = Literal["require_unchanged", "verified_root"]
+SelectionConsumer = Literal["require_unchanged", "verified_path", "verified_root"]
+
+
+def _consume_file(
+    verified_file: VerifiedAssetFile,
+    consumer: FileConsumer,
+    *,
+    through_class: bool,
+) -> Path:
+    if consumer == "require_unchanged":
+        if through_class:
+            return VerifiedAssetFile.require_unchanged(verified_file)
+        return verified_file.require_unchanged()
+    if through_class:
+        return VerifiedAssetFile.verified_root(verified_file)
+    return verified_file.verified_root()
+
+
+def _consume_selection(
+    selection: VerifiedAssetSelection,
+    consumer: SelectionConsumer,
+    *,
+    through_class: bool,
+) -> Path | None:
+    if consumer == "require_unchanged":
+        if through_class:
+            return VerifiedAssetSelection.require_unchanged(selection)
+        return selection.require_unchanged()
+    if consumer == "verified_path":
+        if through_class:
+            return VerifiedAssetSelection.verified_path(
+                selection,
+                "qwen_text_encoder",
+                "model.safetensors",
+            )
+        return selection.verified_path("qwen_text_encoder", "model.safetensors")
+    if through_class:
+        return VerifiedAssetSelection.verified_root(selection, "qwen_text_encoder")
+    return selection.verified_root("qwen_text_encoder")
 
 
 def _runtime_assets(tree: SyntheticAssetTree) -> AssetsConfig:
@@ -584,8 +626,47 @@ def test_runtime_selection_rejects_grafted_issued_database_files(
         require_verified_selection(runtime_selection)
 
 
-def test_instance_method_retarget_is_rejected_without_dispatch(
+@pytest.mark.parametrize("consumer", ("require_unchanged", "verified_root"))
+def test_file_consumer_methods_cannot_be_instance_shadowed_and_support_both_call_forms(
     synthetic_assets: SyntheticAssetTree,
+    consumer: FileConsumer,
+) -> None:
+    selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    verified_file = selection.files[0]
+    invoked: list[str] = []
+
+    def forged_method(*args: object, **kwargs: object) -> Path:
+        del args, kwargs
+        invoked.append("called")
+        return Path("/tmp/unverified-model-cache")
+
+    assert not hasattr(verified_file, "__dict__")
+    with pytest.raises(AttributeError):
+        object.__setattr__(verified_file, consumer, forged_method)
+
+    instance_result = _consume_file(verified_file, consumer, through_class=False)
+    class_result = _consume_file(verified_file, consumer, through_class=True)
+    expected = (
+        synthetic_assets.root / "model/qwen" / verified_file.relative_path
+        if consumer == "require_unchanged"
+        else synthetic_assets.root / "model/qwen"
+    )
+    assert instance_result == expected
+    assert class_result == expected
+    assert invoked == []
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    ("require_unchanged", "verified_path", "verified_root"),
+)
+def test_selection_consumer_methods_cannot_be_instance_shadowed_and_support_both_call_forms(
+    synthetic_assets: SyntheticAssetTree,
+    consumer: SelectionConsumer,
 ) -> None:
     selection = require_runtime_assets_ready(
         _runtime_assets(synthetic_assets),
@@ -594,24 +675,144 @@ def test_instance_method_retarget_is_rejected_without_dispatch(
     )
     invoked: list[str] = []
 
-    def forged_method(*args: object, **kwargs: object) -> None:
+    def forged_method(*args: object, **kwargs: object) -> Path:
         del args, kwargs
         invoked.append("called")
+        return Path("/tmp/unverified-model-cache")
 
-    object.__setattr__(selection.files[0], "require_unchanged", forged_method)
-    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
-        VerifiedAssetSelection.require_unchanged(selection)
+    assert not hasattr(selection, "__dict__")
+    with pytest.raises(AttributeError):
+        object.__setattr__(selection, consumer, forged_method)
+
+    instance_result = _consume_selection(selection, consumer, through_class=False)
+    class_result = _consume_selection(selection, consumer, through_class=True)
+    if consumer == "require_unchanged":
+        assert instance_result is None
+        assert class_result is None
+    elif consumer == "verified_path":
+        expected = synthetic_assets.root / "model/qwen/model.safetensors"
+        assert instance_result == expected
+        assert class_result == expected
+    else:
+        expected = synthetic_assets.root / "model/qwen"
+        assert instance_result == expected
+        assert class_result == expected
     assert invoked == []
 
-    fresh_selection = require_runtime_assets_ready(
+
+@pytest.mark.parametrize("consumer", ("require_unchanged", "verified_root"))
+@pytest.mark.parametrize("through_class", (False, True), ids=("instance", "class"))
+def test_every_file_consumer_rejects_issued_field_mutation(
+    synthetic_assets: SyntheticAssetTree,
+    consumer: FileConsumer,
+    through_class: bool,
+) -> None:
+    selection = require_runtime_assets_ready(
         _runtime_assets(synthetic_assets),
         synthetic_assets.manifest_path,
         root=synthetic_assets.root,
     )
-    object.__setattr__(fresh_selection, "require_unchanged", forged_method)
+    verified_file = selection.files[0]
+    object.__setattr__(
+        verified_file,
+        "_path",
+        verified_file._path.with_name("retarget"),  # pyright: ignore[reportPrivateUsage]
+    )
+
+    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+        _consume_file(verified_file, consumer, through_class=through_class)
+
+
+@pytest.mark.parametrize("consumer", ("require_unchanged", "verified_root"))
+@pytest.mark.parametrize("through_class", (False, True), ids=("instance", "class"))
+def test_every_file_consumer_rejects_cross_scope_field_graft(
+    synthetic_assets: SyntheticAssetTree,
+    consumer: FileConsumer,
+    through_class: bool,
+) -> None:
+    runtime_selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    database_selection = require_databases_ready(
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+        asset_ids=("metadata_db",),
+    )
+    runtime_file = runtime_selection.files[0]
+    database_file = database_selection.files[0]
+    for field in (
+        "asset_id",
+        "relative_path",
+        "kind",
+        "bytes",
+        "sha256",
+        "_base",
+        "_path",
+        "_identity",
+    ):
+        object.__setattr__(
+            runtime_file,
+            field,
+            object.__getattribute__(database_file, field),
+        )
+
+    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+        _consume_file(runtime_file, consumer, through_class=through_class)
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    ("require_unchanged", "verified_path", "verified_root"),
+)
+@pytest.mark.parametrize("through_class", (False, True), ids=("instance", "class"))
+def test_every_selection_consumer_rejects_issued_field_mutation(
+    synthetic_assets: SyntheticAssetTree,
+    consumer: SelectionConsumer,
+    through_class: bool,
+) -> None:
+    selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    object.__setattr__(
+        selection,
+        "_manifest_path",
+        selection._manifest_path.with_name(  # pyright: ignore[reportPrivateUsage]
+            "retarget.toml"
+        ),
+    )
+
     with pytest.raises(AssetPreflightError, match="selection capability is not verified"):
-        require_verified_selection(fresh_selection)
-    assert invoked == []
+        _consume_selection(selection, consumer, through_class=through_class)
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    ("require_unchanged", "verified_path", "verified_root"),
+)
+@pytest.mark.parametrize("through_class", (False, True), ids=("instance", "class"))
+def test_every_selection_consumer_rejects_cross_scope_file_graft(
+    synthetic_assets: SyntheticAssetTree,
+    consumer: SelectionConsumer,
+    through_class: bool,
+) -> None:
+    runtime_selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    database_selection = require_databases_ready(
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+        asset_ids=("metadata_db",),
+    )
+    object.__setattr__(runtime_selection, "files", database_selection.files)
+
+    with pytest.raises(AssetPreflightError, match="selection capability is not verified"):
+        _consume_selection(runtime_selection, consumer, through_class=through_class)
 
 
 def test_issued_capability_registries_are_thread_safe_and_release_on_gc(
