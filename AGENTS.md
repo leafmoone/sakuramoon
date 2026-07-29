@@ -9,6 +9,9 @@
 3. `docs/model-architecture/archive/` 只读。历史候选、推荐值或被取代决定不得回流到实现或配置。
 4. 不调用或恢复 Notion MCP；本地 `docs/model-architecture/` 是唯一文档入口。
 5. 任务包内可复用同一个实现代理，但必须按依赖顺序逐个关闭任务 ID；每个 ID 保持独立 task、diff、测试、状态和原子 commit，不得把多个 ID 合并提交。
+6. `traceability.toml` 只允许首次 bootstrap；后续新增、移动或修改条款必须保留既有 ID，只为新条款分配从未使用的新 ID。不得按行号、顺序或当前文本重新编号。
+7. 每个实现任务的允许路径必须包含 `docs/model-architecture/progress/traceability.toml`。同一原子 commit 内更新受影响 requirement 的逐条映射、状态与证据；提交自身使用 `task:<TASK_ID>`，后续提交可使用完整 40 位 commit SHA。
+8. 修改 `current/` 时必须递增 source 与 registry revision、追加连续 SHA-256 changelog 并更新受影响 fingerprint；不得缩小 canonical source 或 heading scope。archive 仍保持只读。
 
 ## 配置与环境
 

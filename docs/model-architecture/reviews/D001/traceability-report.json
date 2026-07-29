@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "task_id": "D001",
+  "ok": true,
+  "registry_revision": 1,
+  "registry_sha256": "578c424561b9ccc1d7310d4e21b60756cefd1bdc8607e28a0ccb3267e8e6a248",
+  "counts": {
+    "requirements": 219,
+    "source_nodes": 219,
+    "confirmed_nodes": 108,
+    "open_item_nodes": 99,
+    "observability_nodes": 12,
+    "archive_files": 16,
+    "production_modules": 0,
+    "runtime_config_keys": 0
+  },
+  "sources": {
+    "docs/model-architecture/current/confirmed-decisions.md": "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb",
+    "docs/model-architecture/current/open-items.md": "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6",
+    "docs/model-architecture/current/observability-and-evaluation.md": "9a8b4fd39c5e5bf76a343f1b02e3507abddc27e98e34946a0fd0f1e98be64201"
+  },
+  "archive_manifest": {
+    "path": "docs/model-architecture/SHA256SUMS",
+    "sha256": "8080e7d8e02345c5b6487b34de5d666630f524ddb9eca4c22e21ccedbffbee04",
+    "archive_entries_verified": 16
+  },
+  "link_scope": "all non-archive Markdown under docs/model-architecture"
+}

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "task_id": "D001",
+  "started_at_utc": "2026-07-29T13:33:13Z",
+  "ended_at_utc": "2026-07-29T14:25:28Z",
+  "duration_seconds": 3135,
+  "hardware_level": "CPU",
+  "gpu_seconds": 0
+}

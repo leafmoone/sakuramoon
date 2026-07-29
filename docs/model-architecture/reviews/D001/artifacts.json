@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "task_id": "D001",
+  "artifacts": [
+    "docs/model-architecture/progress/traceability.toml",
+    "tools/verify_traceability.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/reviews/D001/implementation_report.md",
+    "docs/model-architecture/reviews/D001/traceability-report.json",
+    "docs/model-architecture/reviews/D001/test_report.json",
+    "docs/model-architecture/reviews/D001/timing.json"
+  ],
+  "performance_artifacts_created": false
+}
