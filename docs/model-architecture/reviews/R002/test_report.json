@@ -2,6 +2,7 @@
   "schema_version": 1,
   "task_id": "R002",
   "result": "pass",
+  "result_scope": "cache-warm fresh-venv installation and static environment validation",
   "hardware_level": "CPU environment plus one-GPU visibility; no kernel",
   "checks": [
     {
@@ -11,10 +12,16 @@
       "detail": "Resolved 95 package entries."
     },
     {
-      "name": "fresh_frozen_sync",
+      "name": "cache_warm_fresh_venv_sync",
       "command": "uv venv --clear .venv --python /usr/bin/python3 && uv sync --frozen --python /usr/bin/python3",
       "status": "pass",
-      "detail": "Installed 94 distributions from an empty environment; final sync real time 24.81 seconds."
+      "detail": "Installed 94 distributions into an empty .venv with cache/uv retained; final sync real time 24.81 seconds and no compiler ran."
+    },
+    {
+      "name": "configured_uv_cache",
+      "command": "uv cache dir",
+      "status": "pass",
+      "detail": "Resolved the project cache directory to cache/uv, matching pyproject.toml."
     },
     {
       "name": "critical_imports",
@@ -38,6 +45,7 @@
     }
   ],
   "not_run": [
+    "cold causal-conv1d source rebuild with an empty cache/uv: pending; no compiler transcript or timing exists",
     "ruff and pyright source scans: no source tree exists in R002",
     "GPU kernel forward/backward/update: owned by K001/T021/T040",
     "multi-GPU NCCL/DDP: current hardware exposes one GPU"

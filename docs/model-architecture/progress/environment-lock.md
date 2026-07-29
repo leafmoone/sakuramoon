@@ -1,6 +1,6 @@
 # R002 Environment Lock
 
-状态：已锁定；硬件等级为 CPU 环境重建 + 单卡可见性，不包含 GPU kernel 放行。
+状态：依赖锁已锁定；已验证 CPU cache-warm 空 `.venv` 恢复与单卡可见性。空 uv cache 的源码冷重建保持 `pending`，不包含 GPU kernel 放行。
 
 ## 支持边界
 
@@ -46,9 +46,9 @@ uv 只锁 Python wheel 和 Python extension ABI，不管理 host driver、CUDA t
 
 uv 可下载该 wheel，但拒绝把 filename 的 local version 与内部 `METADATA` 的 `1.6.2.post1` 视为同一 distribution，导致每次 sync 重新准备。该 wheel 因可重建性不合格而未进入最终 lock；没有回退到临时 pip。
 
-源码例外固定 tag commit、PyTorch runtime match、CXX11 ABI=True、CUDA 12.8、GCC 13.3 和 `MAX_JOBS=4`。最终 extension 为 `270041048` bytes，SHA-256 `51655c843d2f8228884007b178b42c89eb0dd052495e68029602e39986a93b0e`。产物位于 ignored `.venv/cache`，不进入 Git。源码默认编译 `sm_75/80/87/90/100/120`；这只是构建兼容性，不是 kernel 正确性或性能证据。
+源码例外固定 tag commit、PyTorch runtime match、CXX11 ABI=True、CUDA 12.8、GCC 13.3 和 `MAX_JOBS=4`。最终安装的 extension 位于 ignored `.venv/lib/python3.12/site-packages/`，为 `270041048` bytes，SHA-256 `51655c843d2f8228884007b178b42c89eb0dd052495e68029602e39986a93b0e`；uv 的项目缓存由 `pyproject.toml` 固定为 ignored `cache/uv`，`uv cache dir` 也解析为该路径。两者都不进入 Git。源码默认编译 `sm_75/80/87/90/100/120`；这只是构建兼容性，不是 kernel 正确性或性能证据。
 
-## 重建证据
+## 空虚拟环境恢复证据（cache-warm）
 
 最终命令：
 
@@ -57,11 +57,11 @@ uv venv --clear .venv --python /usr/bin/python3
 time -p uv sync --frozen --python /usr/bin/python3
 ```
 
-结果：从空 `.venv` 安装 94 个 distributions；`uv sync` real time 24.81 秒、user 0.13 秒、sys 1.76 秒；无下载、无重新编译。NFS 上清理旧 `.venv` 使完整命令 wall time 为 77.3 秒。`uv lock --check` 解析 95 个 lock package entries 并通过。
+执行时删除并重建了 `.venv`，但保留了 `cache/uv`。结果：从空 `.venv` 安装 94 个 distributions；`uv sync` real time 24.81 秒、user 0.13 秒、sys 1.76 秒；无下载、无重新编译，`causal-conv1d` 复用了 uv 缓存中的构建结果。NFS 上清理旧 `.venv` 使完整命令 wall time 为 77.3 秒。`uv lock --check` 解析 95 个 lock package entries 并通过。
 
 关键 Python/extension 导入全部通过：torch、torchao、transformers、diffusers、safetensors、modelscope、wandb、webdataset、Pillow、einops、pydantic、triton、causal_conv1d、causal_conv1d_cuda、fla、flash_attn namespace、cutlass、quack、duckdb、pyarrow、tomli_w、markdown_it。Torch 报告 CUDA 12.8、1 个设备、RTX 5090、CC 12.0。导入期间仅出现 TorchAO docstring 的上游 `SyntaxWarning`；没有静默 fallback 证据。
 
-这些结果只证明环境可重建、extension 可加载和 GPU 可见。FA4、FLA、causal_conv1d、TorchAO 的真实 forward/backward/update 仍分别由 `K001/T021/T040` 关闭。
+这些结果证明 frozen lock 可以在保留项目 uv cache 时恢复到空 `.venv`，并证明 extension 可加载和 GPU 可见；它们不证明在空 `cache/uv` 上能够重新拉取固定源码并完成冷编译。源码冷重建的命令记录、编译日志、耗时与产物复核尚未生成，状态保持 `pending`，不得引用本节将其关闭。FA4、FLA、causal_conv1d、TorchAO 的真实 forward/backward/update 仍分别由 `K001/T021/T040` 关闭。
 
 ## 存储与正式训练阻塞
 

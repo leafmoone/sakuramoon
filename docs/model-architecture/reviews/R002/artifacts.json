@@ -2,6 +2,12 @@
   "schema_version": 1,
   "task_id": "R002",
   "commit_ref": "task:R002",
+  "uv_cache": {
+    "path": "cache/uv",
+    "tracked": false,
+    "fresh_venv_evidence": "pass_cache_warm",
+    "cold_source_rebuild_evidence": "pending"
+  },
   "tracked_artifacts": [
     {
       "path": "uv.lock",

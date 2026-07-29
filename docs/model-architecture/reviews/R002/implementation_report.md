@@ -2,7 +2,7 @@
 
 ## 范围
 
-R002 建立 Linux x86_64/Python 3.12 的 uv lock、CUDA 12.8/PyTorch ABI 组合、依赖许可证清单和空环境重建证据。没有读取 `.env`、下载数据集、加载 Qwen/VAE、执行 GPU kernel 或修改训练语义。
+R002 建立 Linux x86_64/Python 3.12 的 uv lock、CUDA 12.8/PyTorch ABI 组合、依赖许可证清单和 cache-warm 空 `.venv` 恢复证据。没有读取 `.env`、下载数据集、加载 Qwen/VAE、执行 GPU kernel 或修改训练语义。
 
 ## 实现摘要
 
@@ -22,15 +22,16 @@ R002 建立 Linux x86_64/Python 3.12 的 uv lock、CUDA 12.8/PyTorch ABI 组合�
 
 ## Infra/性能自检
 
-- 最终 lock 能从空 `.venv` frozen sync，且第二次缓存命中未重新构建源码。
+- 最终 lock 能在保留 `cache/uv` 时从空 `.venv` frozen sync；该结果只证明缓存命中的环境恢复，未重新构建源码。
 - CXX11 ABI 与 torch wheel 均为 True；源码 commit、toolchain、build variables、extension bytes/hash 已记录。
+- `pyproject.toml` 的 uv cache 路径和运行时 `uv cache dir` 均为 `cache/uv`；空 uv cache 的源码冷重建证据保持 `pending`。
 - 系统 NCCL 与 PyTorch wheel NCCL 分开记录，未把单卡 import 外推为四卡结论。
 - 工作区为 NFSv3 而非已验证 NVMe；容量只达到 cache 低限且没有 checkpoint 预留，后续 preflight 继续硬失败。
 
 ## 代理交接
 
-实现代理完成 lock 和 fresh sync 后因模型容量错误退出；主代理保留其工作，修正传递预发布 pins，重跑最终空环境 sync、导入与系统验收，并完成本报告。没有重复执行已完成的冷缓存构建。
+实现代理完成 lock 和 fresh sync 后因模型容量错误退出；主代理保留其工作，修正传递预发布 pins，重跑最终空 `.venv` sync、导入与系统验收，并完成本报告。审查修复没有删除 `cache/uv` 或执行源码冷重建，也没有补写不存在的编译证据。
 
 ## 结论
 
-R002 实现与针对性验收通过，状态进入“等待 Foundation 包级审查”。kernel、四卡、真实模型和正式训练门槛未关闭。
+R002 的依赖锁与 cache-warm fresh-venv 针对性验收通过，状态进入“等待 Foundation 包级审查”。源码冷重建证据保持 `pending`；kernel、四卡、真实模型和正式训练门槛未关闭。
