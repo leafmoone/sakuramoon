@@ -87,11 +87,14 @@ _NAMESPACE_REFLECTION_CALLS = frozenset(
         "inspect.getcoroutinelocals",
         "inspect.getargvalues",
         "inspect.getgeneratorlocals",
+        "inspect.getmembers",
+        "inspect.getmembers_static",
         "inspect.signature",
         "inspect.stack",
         "inspect.trace",
         "sys._current_frames",
         "sys._getframe",
+        "typing.get_type_hints",
     }
 )
 _FRAME_NAMESPACE_ATTRIBUTES = frozenset(
@@ -104,13 +107,16 @@ _FRAME_NAMESPACE_ATTRIBUTES = frozenset(
         "nonlocals",
         "unbound",
         "__builtins__",
+        "__annotations__",
         "__closure__",
         "__code__",
         "__defaults__",
         "__globals__",
         "__kwdefaults__",
         "default",
+        "annotation",
         "parameters",
+        "return_annotation",
         "f_back",
         "f_builtins",
         "f_code",
@@ -853,10 +859,27 @@ class _Analyzer:
                 return fact
             return _Fact(literal_known=True)
         if isinstance(node, ast.Name):
+            if (
+                self.path.startswith("src/sakuramoon/")
+                and node.id == "__builtins__"
+            ):
+                self.add(
+                    node,
+                    "namespace_reflection_forbidden",
+                    "production code may not inspect the dynamic builtins namespace",
+                )
+                return _Fact(
+                    network_capability_maybe=True,
+                    sensitive_callable_maybe=True,
+                    capability_class=True,
+                )
             return env.get(node.id)
         if isinstance(node, ast.Attribute):
             if (
-                self.path.startswith("src/sakuramoon/")
+                (
+                    self.path.startswith("src/sakuramoon/")
+                    or self.path == "tests/unit/assets/conftest.py"
+                )
                 and node.attr in _FRAME_NAMESPACE_ATTRIBUTES
             ):
                 self.add(
@@ -870,6 +893,20 @@ class _Analyzer:
                     capability_class=True,
                 )
             place = self._place(node, env)
+            if (
+                self.path.startswith("src/sakuramoon/")
+                and place == "sys.modules"
+            ):
+                self.add(
+                    node,
+                    "namespace_reflection_forbidden",
+                    "production code may not inspect the dynamic module namespace",
+                )
+                return _Fact(
+                    network_capability_maybe=True,
+                    sensitive_callable_maybe=True,
+                    capability_class=True,
+                )
             if place is not None and place in env.values:
                 return env.values[place]
             chain = self._attribute_chain(node)
@@ -2792,6 +2829,23 @@ except (OSError, ValueError):
                 else None
             )
             if (
+                (
+                    self.path.startswith("src/sakuramoon/")
+                    or self.path == "tests/unit/assets/conftest.py"
+                )
+                and attribute in _FRAME_NAMESPACE_ATTRIBUTES
+            ):
+                self.add(
+                    call,
+                    "namespace_reflection_forbidden",
+                    "callable execution namespaces may not be resolved through getattr",
+                )
+                return _Fact(
+                    network_capability_maybe=True,
+                    sensitive_callable_maybe=True,
+                    capability_class=True,
+                )
+            if (
                 self.path.startswith("src/sakuramoon/")
                 and attribute is None
                 and not self._dynamic_getattr_call_allowed(call)
@@ -2932,10 +2986,51 @@ except (OSError, ValueError):
                 return _Fact(callable=_Callable(f"{base.name}.*"))
             return _Fact()
 
-        if name in {"functools.partial", "partial"} and call.args:
+        if name in {
+            "functools.partial",
+            "functools.partialmethod",
+            "partial",
+            "partialmethod",
+        } and call.args:
             target = self._callable(call.args[0], env)
             if target is None:
                 return _Fact()
+            target_fact = self._eval(call.args[0], env)
+            if (
+                (
+                    self.path.startswith("src/sakuramoon/")
+                    or self.path == "tests/unit/assets/conftest.py"
+                )
+                and (
+                    target.name
+                    in {
+                        "builtins.getattr",
+                        "builtins.vars",
+                        "getattr",
+                        "vars",
+                    }
+                    or target.name.endswith(".__getattribute__")
+                )
+            ):
+                self.add(
+                    call,
+                    "callable_reflection_forbidden",
+                    "reflection callables may not be bound through partial adapters",
+                )
+                return _Fact(
+                    callable=_Callable("ambiguous-sensitive.*"),
+                    sensitive_callable_maybe=True,
+                )
+            if _fact_contains_synthetic_git_helper(target_fact):
+                self.add(
+                    call,
+                    "synthetic_git_helper_escape_forbidden",
+                    "the synthetic Git helper may not be bound through partial adapters",
+                )
+                return _Fact(
+                    callable=_Callable("ambiguous-sensitive.*"),
+                    sensitive_callable_maybe=True,
+                )
             bound_args = tuple(self._eval(item, env) for item in call.args[1:])
             keywords, unknown, expansions = self._keywords(call, env)
             bound_facts = (*bound_args, *keywords.values(), *expansions)
@@ -3443,7 +3538,20 @@ except (OSError, ValueError):
         for decorator in node.decorator_list:
             self._eval(decorator, env)
         for default in (*node.args.defaults, *node.args.kw_defaults):
-            self._eval(default, env)
+            fact = self._eval(default, env)
+            if (
+                default is not None
+                and _fact_contains_security_capability(fact)
+                and (
+                    self.path.startswith("src/sakuramoon/")
+                    or _fact_contains_synthetic_git_helper(fact)
+                )
+            ):
+                self.add(
+                    default,
+                    "security_capability_default_forbidden",
+                    "function defaults may not capture execution security capabilities",
+                )
         annotations = [
             *(item.annotation for item in node.args.posonlyargs),
             *(item.annotation for item in node.args.args),
@@ -3453,7 +3561,31 @@ except (OSError, ValueError):
             node.returns,
         ]
         for annotation in annotations:
-            self._eval(annotation, env)
+            fact = self._eval(annotation, env)
+            if (
+                annotation is not None
+                and self.path.startswith("src/sakuramoon/")
+                and _fact_contains_security_capability(fact)
+                and not self._audited_network_type_annotation(annotation)
+            ):
+                self.add(
+                    annotation,
+                    "security_capability_annotation_forbidden",
+                    "function annotations may not capture execution security capabilities",
+                )
+
+    def _audited_network_type_annotation(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant) and node.value is None:
+            return True
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            return self._audited_network_type_annotation(
+                node.left
+            ) and self._audited_network_type_annotation(node.right)
+        return self._place(node, _Environment()) in {
+            "_ValidatedHttpTarget",
+            "http.client.HTTPResponse",
+            "http.client.HTTPSConnection",
+        }
 
     def _declared_class_names(self, statements: list[ast.stmt]) -> set[str]:
         names: set[str] = set()

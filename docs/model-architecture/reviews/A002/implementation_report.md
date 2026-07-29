@@ -4,7 +4,7 @@
 
 A002 已将用户确认的两条资产执行边界写入现行决定、仓库规则、路线图与资产策略，并通过合同测试建立机器保护。实现没有读取或执行 `reference/` 内容、没有读取 `.env`、没有下载/哈希/加载模型、没有使用 GPU，也没有创建性能占位。
 
-首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17`、`70981e19510c5a6c7d7889d6042b5e8a55887931`、`9081104ba0a87ce72efbeac3125f975b7e3fb71d` 后的独立 AI/Infra 审查均提出 changes required。现已完成 `review_remediation.md` 所列第七轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
+首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17`、`70981e19510c5a6c7d7889d6042b5e8a55887931`、`9081104ba0a87ce72efbeac3125f975b7e3fb71d`、`cadd87391ef07ed7edb2932e8e2b339b268838ff` 后的独立 AI/Infra 审查均提出 changes required。现已完成 `review_remediation.md` 所列第八轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
 
 ## 实现摘要
 
@@ -82,3 +82,18 @@ A002 已将用户确认的两条资产执行边界写入现行决定、仓库规
 - 结果：271/271 boundary contracts（21.41 秒 pytest、22.012 秒 wall）、469/469 full tests（46.55/47.145 秒）、28 Python sources/0 violations（20.488 秒）、Ruff PASS（0.257 秒）、strict Pyright 0 errors/0 warnings（3.713 秒）、traceability 221 requirements/source nodes PASS（1.075 秒）。
 - Shared compatibility：冻结 D010 所在共享树扫描 36 Python sources、0 violations，用时 30.096 秒。Scanner 只在 preflight/验证阶段运行，不进入 forward/backward/update；该结果不是 D010 远端 WebDataset 流式证据。
 - 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有联网、模型/数据下载、GPU 工作或性能 artifact。状态保持第七轮修复完成、等待独立 AI/Infra 复审。
+
+## 第八轮修复摘要
+
+- Function definition expressions 对所有 security fact 统一 fail closed：positional/kw-only defaults 捕获 model root、model loader、asset capability 或 D010 network capability 时直接报告；annotation 捕获同类 live fact 同样失败。冻结 D010 使用的 `_ValidatedHttpTarget`、`HTTPResponse`、`HTTPSConnection` 静态 type annotation 是精确审计的类型表达式，不被误判为 live capability。
+- Callable namespace deny 扩展到 `__annotations__`、parameter `annotation`、`return_annotation` 与 `typing.get_type_hints`；literal `getattr` 不能读取 defaults/annotations/closure/code/globals 等 namespace。该规则同样覆盖 synthetic Git fixture path。
+- `partial`/`partialmethod` 绑定 `getattr`、`vars` 或 `__getattribute__` 会产生 ambiguous-sensitive callable 并失败；绑定 synthetic Git helper 直接报告 helper escape。`sys.modules`、`__builtins__`、`inspect.getmembers` 与 `getmembers_static` 作为动态 namespace/reflection 入口被拒绝。
+- 合同内加入 payload SHA 锁定的压缩 UTF-8 D010 source fixture，其中含完整 frozen transport class、最小 prelude 与 inert helper summaries。测试只解压、parse 与调用 scanner；完整 class normalized AST 必须等于 `226d16422aa57d5fcd8c7b1a05ef4cc07f52296f1d21c29e78c40ef23b1567f9`，完整 fixture 扫描必须零违规。
+- 共享工作树若存在 D010 source，合同额外比较其完整 class AST 与 tracked fixture；clean A002 tree 缺少 D010 source 时只 skip 这一共享一致性测试，仍完整执行 fixture digest 与 pin success-path 测试，因此不依赖 D010 先提交。
+
+## 第八轮验证结论
+
+- Clean candidate：base `cadd87391ef07ed7edb2932e8e2b339b268838ff`，只叠加 `tools/asset_execution_boundary.py` 与 `tests/contracts/assets/test_asset_execution_boundary.py`；并行 D001/D010 与全部 A002 evidence edits 均排除。
+- 结果：307 passed / 1 skipped boundary contracts（25.22 秒 pytest、25.838 秒 wall）、505 passed / 1 skipped full tests（47.18/47.784 秒）、28 Python sources/0 violations（20.249 秒）、Ruff PASS（0.273 秒）、strict Pyright 0 errors/0 warnings（3.991 秒）、traceability 221 requirements/source nodes PASS（1.054 秒）。唯一 skip 是 clean tree 不存在共享 D010 source；tracked fixture/pin success path 已通过。
+- Shared compatibility：共享树的 D010 AST/fixture 一致性实际通过，boundary contracts 308/308（32.61 秒），scanner 36 Python sources/0 violations（31.595 秒）。该结果不是 D010 远端 WebDataset 流式证据。
+- 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有联网、模型/数据下载、GPU 工作或性能 artifact。状态保持第八轮修复完成、等待独立 AI/Infra 复审。

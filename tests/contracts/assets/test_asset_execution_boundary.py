@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import ast
+import base64
+import hashlib
+import zlib
 from pathlib import Path
 
 import pytest
@@ -21,9 +25,140 @@ MODEL_LOCAL_PATHS = {
     "vae": "model/vae",
 }
 
+# Compressed UTF-8 source fixture: the frozen D010 module prelude, five inert
+# helper summaries, and the complete ModelScopeDatasetTransport class. Tests
+# only decompress and parse/scan this text; they never import or execute it.
+_FROZEN_D010_FIXTURE_B64 = (
+    b"eNrVXFtz2ziyftev4PJlqQxN20kmZ6MaZdeTODOundguSzNbc1IpFk1CFscUqSVI24qPz28/3bgQIAlSlO2c2smDwwvQaPTl"
+    b"60YDlG3bH4M42QuTjJLI+nk+P59ZRR6kdJ3lhbXIcitercoiuEyI9SmLSDILszWx/kUuPwRFQElh0WWQR9SzbXs0WuTZyvL9"
+    b"RVmUOfF96MvIBGmaFUERZykdjcSzZUCXSXxZ3RbF2guTmKSFfPQHzVJ5nVF5lRN5RWlSXQJ1eV3EK8IZiYDDMAkoJVRyUj3i"
+    b"LdZBgUzIt+dw61rnwPt5RuM7vOXtis06Tq9ks6N0A63yrMjCLHGtMKAFb1bmCVDz1kFOiWz87zIriIuvSBqCANnlH1mcsgu6"
+    b"TuJCyG29iYK0iEPZc0bCnBSzIhfvaXBd5sEqy1IvzNJFXPHznt3BO5TwcZ5nuQtiollyQ3zKiHQQ8Gi4JKtA0kGNzqXuOdFW"
+    b"RxSgtwrSeEFoITs6Iwv+fTr7cPzL7P3Z+bE/mx/9dHL6k3969Ol4dn70/thlLYTJfBLdaw9nWZmH5CQCA4iLDX81Q9O6IGGW"
+    b"R/zBbySPFzGJjIRi6tNgAVPGXj6qlj/Pyb/LGMzxRnT2I97bX1Xdx6ORxv2Ho/nR7HjuH59+OD87OZ1bU8tG+6ST/f0V+gBF"
+    b"H/DC1Db1+vlsxnp0t5yf/fP4FKj/dnJxdvrpmA+gvT86P+Ft7JHPPNI/P7vARq9fvxr5v5zM5ijbC5Ds2ensGB58Opn7P/4+"
+    b"P55BmzevrRfW4cFL+d8IGn44uTh+P0etzH+dsVag1q8kBSE4968ODl3r1cFL/PMK//wX/vnbw3jkzy+OTmc4tv8eRppf/Pp+"
+    b"fnbh//P4d6CQXf5BwsKBVlLZ74/Oj348+eVk/nuzyWjEfE6qurIxZqvORZmiz7Kb8YSpDMBkBqrcK7K9JLuyhMJ0YALQAje1"
+    b"buNimZUFAy60+TVADLHAuguwIwFK9cGPymKJNhYqb3GMfClW6l0swMQAnmR5/JU/QGYAPCUv5G4N6AFwAZ7HzDlI6pwwsz4B"
+    b"Fq9yMPVhLFhRdpsmWRDBQMDAurxMYrqEG2btVhQvFiSnFnPXuKAaaufMf2oM+BekyDf49mcwa87A8V1I1jgdNSiymKdBAiSi"
+    b"ICxgsFWQX5OchYUAngoiKO8UNC1lAYoRw/2jwluHW9x0npdkLNi4ICvARjHzjyBDPjJ67gQgPWd3NP5KJlYMYYHdLYOX379h"
+    b"b63/sU6zlEjXj+J8Yl1mWbJ12I+kANiLmBb0ERncc8BIQLEAnnVOLjcFoUZW2H0YAFV/GRcD2fAZAzhtCXqcmYjcxKE25TgF"
+    b"IFG3DS4AZTiopdrDcBmkV9qzrax8AHwMiyzfDGali6QLb+Ni+hFsXpGXsD0rgitwDE3yzLQpf2wtQBYguzKNrCKzQLdWFWi4"
+    b"EUMiEWFrtDnGCzezZ1NhLGdvUM5ISGQB+Q1O0fd51GN0SLJwqzvFinrW5ke9U0ypZxpn6mEfe6oVOCP0KlGd/jWBxhyGeYOx"
+    b"tfeOuc1EUV00u4A7WZCwWR3IrrqymQUxIK4Z2W2p2TBYB5cxpDpIm5YAIWKIYL3OsxsS2eOKKGfX8yF1gayuyEHQTL6WjbKz"
+    b"XSbfIc1rMrfdug6GEGCKgY7s/yEduNagB78Y0kXqFDrJy/F2f/0tSGJoQSLE73mQX5GCa2WZ0ULZM2pCWTvmQeBLfsHbK4Ql"
+    b"aeTXIlqFYBU8XEFHR6a840nlC+Ua2RCTWQcbjFATLjDX2lfWZnmepzxoSe4iThI7slbAjGg0Yj5GWTrIVOXw64k5U6x6M+oQ"
+    b"JAlkv2mwIpCA8I5eTtaZH0ceS7Ydex9kvQru2N30cCxkAysWiF72PcvXHUEH88npX/86ftgXz5Gw9tiW7EIwLsDQhWw5Mkjw"
+    b"mrTyXpDUFfHTcnVJcu74/ImKdWxW3WoGReYbmGC1qlBYdF/zTvsCIJyCSu1JxY9XiYW/cps9wjKn4CfQxUarsxsNzoHVU8Y7"
+    b"tNBmYmg2gwnJRjg51eSBw5EufNN01bzQsqcd6baGvWDxUy1p1hFYt/6pU2N2Ye8H63j/5nBfpJp0/75mgg3ZgUGgUe0XOSF/"
+    b"v2faAFuQ1MYajrd8i0dJMXtp7GzFMtB2WOOJvjba3VruB9mFZWOEwUAGrdiwHgrj4U+utWdQGCTELGOq6QzcJgdMmhhFwgkk"
+    b"WSgAtgrsQZJkt5CroaQgCyjKdUI+41tEwy/uNt1C9FZCwYgqh1CxJ6+eWX+ZVtcejBGvnbHeTu/vxTSgYRzXWwTpxsFWr15Z"
+    b"P8ACL48cyDVzXBzkY3xy+PINWx1UTwHNKpKc0ljlD725g1Zt4qZGMP8DejcoC0uqQGQOl0AC17XVQv1eqMNDwT5Mqlsc4aG6"
+    b"q9uXMAlY1ky0bC7Hyti0qtY4on7j4JCumty4Zs7QgfdkA7JXhK2wLFBlyRe7zy0IvvpTiyLdNAQzrOBD0A64oGxduaINCowF"
+    b"UMjRKmL1JiXFhSFvgubQ0WwN2cMt5u39zRZ5cLUiIkuRr1CG2Afsx8F+rqUBxLNYUpliHG8aEs5eKU/KwguB8CJLIuEOIFvW"
+    b"UHBYd+InciVz4oozNpQ9NiRxmpUB3qHcILuRDIo3DOwmHYjKXOa+4QV/v9e7CqcYDvf45xHYXr/tReR6GJC+3G7I1otcoVOr"
+    b"Iwo1g0CF8WWaxOm1j5kgkC18oOXTTRo6L4BByG5fvLi+xSthhUI+zMR5UOdrH1+tfYb2BJNIIcTQcoUrXR+XxcDA0N5YWOck"
+    b"1jlZxHdD+8nlx4D2Yl2gLLhp4qqKh2X/0LWCMor5up1vMfBKPwsVxZJYxW2GQHoNRi9rfT8dzy1a5osgJFQt82EFlWQF9X0w"
+    b"XMf211kSh7h2sv0iuyYpOMngZTrrMFFVdt1kkerEVA//JsvszjLr8JV2rSGTfbtmuirBES6JYgOkzSJGBTihvpFg12iOa1L0"
+    b"uLhBCez/xjsuP8QmdsFV8g9mMysC7hlVOsLhOSmfpDdxnqUYB9RswoQ2FKa38xGZGzWSrbpjqtlmuUJh5hExevZV83u0Zio+"
+    b"t1WnRQapRVVKBhkXBduMalRQOtRVS2YqMYJy6jtEjnmuio7IXtp7Tc85XW2aGifWTZDHvOhHrVVMWXEdkIOs1sWmMe9GDqTs"
+    b"5gbTLmmwHkQYMXH+QstyQe858RZlkqyCIlw6uf35aO+/g72vB3tvPf9/v9uf7n25P3RfH7x98wDIo1Efy4zpG4lEaJxlLYic"
+    b"HEqD+u7EkgQRyWmXOQgYB8fiGneFx7g9MKSDqozSYhhR+ZElJVN2wBwuisOCr2rgzxclH0EG9NKoWxyFaG5YggADT8Tk9nFL"
+    b"2LX0JxnAWLEHREmwahYqOI29Y1zzgskgMVVuqzf9FRLavaMreImtZmy/81OWpXsfDg4P9g/tZuFCAgSboSHzMLucBp19FqgJ"
+    b"5jPbfKrI2l9YwvYjCXJYWt0zSg+2ueP7LLuOieixgrEoLuohzE9b/YRRiK4CrwFW1iQvNpXuuZD9cFlCWsRKfKp8F6cackK0"
+    b"PsY9MMJi+400CUEAnZcX+VsbZnLLipukivoaj3qE8docaZbKUqBadtqI/z02q1q90PJV3FTBtE4UVcUGlBZW+OJdO8rgoYte"
+    b"iG1J12q+mb2vNs40n2ghtra9Nu2j0QYSlo8LI62n5bX0XLTA63YL3JsFLU1rkhcs+eIlWnKWRrTdm23F3kFvmnhg7CBmH7QT"
+    b"lEnhi1fO2O3AKhFynLOZONSgls7jp6RGGrrWstEwK5OIQewlYdtYALrx11ZoNYQYBWNcSk2U5AKuxxhlTfryeGJ25gtsLXyZ"
+    b"Gfr0XiPwsGcPsR5Z7TCIBLJt26B6bhddK7NqAyuLNlPlCoYJTMX/7Qa8IMldmER837DLHlQaLSdEYc1gDrrKKgyb3V3yQXIe"
+    b"y6+YVTs1kwfjjZr2XuetOn8w1YmCyOQLp9meQVpe4YPq1fKBOR9YOELlEU00aO7id1pFY+bs/FeDvZb7DR2M15soHQ1ShsGd"
+    b"eipl/0mT2V7Y4fAi/AcNVRTtarU6FbIWGdaRquoy/dOFLlGKwTSbMaNFbzEleHVQPb1d4o4/1tcnRkdy66GPu2MV18Vgrj67"
+    b"qXbdAg5J1sPjgiWVxbv2ASkDlAxwVb3Az9dXfDTglcOfY/8iXtt13vjEmNn6FVaYxjJMScr13bSeG62CO2VIXdg4pDQpapBJ"
+    b"vIoL5kawHonsFifVzLfA8Q5DZjAi5o14nonbU2NYZW6tHZnKOCRfrtVAc9GelWybuCyF+t3UOhTpMGWVrEb9wmdFjXix8blJ"
+    b"Ofw/5mP1jWkhJWF5WNR+jefuXh+8aqYy3NLs+rLONhCZTqH7a3NvsUru6vbyLa6fvz84wD0b8Ryuvn/71kyOHfUyEXuHPBwg"
+    b"MUnFenlwYCYijoa1lh02LWGhRqm9RdI17xg1sWJidYLXqB0jJn2A1lnDawWeysebIefR4aYWavpyuecdsU/yLPFpwVKPvK2E"
+    b"pFd4zEl6AT/h1CfGGrqyVMvhRMbPnQkNyUPU3G+DuPAvySLL0fagiyh4BABMq3Whptgq9ooWHbhc5DGhk0flFLIkKLMKQQzk"
+    b"swxKWtSwGdNVjyaErJu5LEzFvwzC62yxUMlsQ+fyUEuWhqSRivSmIM2sgqlfphzsaNGXyQ7+K3oCyteSxIHO3NG705WNOUcr"
+    b"MRNLoVrqgfQb8QnkcpWxsxcyxNfDRSMjaS91KgLTVkTYEmAHFRq7ys3BoBPPdote/wRkUNotNTAzLXaLjH7Bj69YUUZ4jkfu"
+    b"wJB3ZZaHvM5MkNsypq6dVHCTXYY2FGEz/YT3rVj5GCAQbiqVMm6gOzuTBxaIXhjkebBprIy6knA+2VUQp0gcUqzeDw++sw6t"
+    b"PQR+R4w4bq/QcI2vlUj0qGJUsnLJVZw6Wyp/rmJ2vEXVQlFoGozAxDj6JYxwbVgKstl55K4gKZ5+gf5G6roorHf90jMzsLNT"
+    b"dHmzNBCZvLOEGncRig1P620jOWOxgtd95cRcixVsmjHaEF2NAd/gRIs4DZKkgc3a2k2vlbHtfQ2tO8toO66xqjCIgvM50rBd"
+    b"+OaCHP/KENTxaVIzFra+eeDnvBS/1ZH36fYPl5xq/HH1TZYeWMsEIjROoj0slhI/f1FiZ6dxqqOcuEBhoc05bKybZE6AaQx2"
+    b"oOj5zWKTPFpiPBar/1uZTsR2jFgdIu2pDrIPU0TiVU2hK/0ycK55uMu/b6njVS0jahZ1a9ZqrFEpO2znlYLtsbETlsrjtBFr"
+    b"qmM+HOE7193PHlO4lK4wp/LZSSEpl27srwDxiiAa9iv4/wkO2RRqmCjPP+BeFZ5cHgCLytNkSGBz7Io3+LJjehwSGUo4nGKb"
+    b"Sj0mDZZInxTCbAUjAueQptR3QNi5Aq3yoAGj/BhNgqM4wJzJQ09dhcvteFn7BEZ8xtk44pFnWdH6vgae+RGhYR6viyzXvqYR"
+    b"52c7v0B6VszlH+NNtSPV+MBRUxnrBzJZNbT2tbGjTlmPPdaiag+TA32x9Budjpe9cNoeHkZlx51fsB6fJ3uHX8amftDBQGWf"
+    b"s/IZeqn1ayrNot7Hwy1bdjDEWdj3+gt89uDhOmxPdbZr08UzJUpFCB63QXLtR/LbM+1l3XwbynWFk2izdS2+tzit5RJ9h2BM"
+    b"8KwLB3N0/ISVsmzdDDDN+bvmVnHuL6JpSwDm1mKlSTcrPH1ITRtibRASaRfG9dOs+Iib64akq2OKtWWxRk1UVp5jsYaoUH2q"
+    b"2thlpWuCJ9EMyzPDxpBA0tYsejM/eebDtbJLSvIbjlcvv3+DJshOS/JPCv0uPQ9U3TBz2LaMGbZ2kXPyeG0FlpIcOfgteFdz"
+    b"qlUL8WWhkbfuM6+dAXagbIbLp6axPlpsPDwNbIdZnpdr9isQlZnZ7sDgTcC/eiOy6SCvNhXxQU7t8z0TpxzxOo72jraLVcNk"
+    b"T3yFhuOO+lZsj6ysPb261g2x7LM/V/+afWo4sjzq03mXjQ00xaYcv5WXqlVQ7fOuVf1DrnY/uX7RN0rrtRpNeD/ofj/praKY"
+    b"dGQ8YdTZqnNN09hixpxBsRgv9Lt31gFzue5Rdi/GdpJRaujcJO7sO+5887Sq7pMqvE+v9n6ryu8w0Q2vCD955ddTKRY/mbGl"
+    b"PPy4GXWVjZ9hu/8xjr2bgz+pRtHEL7Z3voUnc1FjWzH9W1qLwUw4dj3d8hsoiMXL5pbAtGNLoJakQSdYj7JwifmDowJev2J4"
+    b"7MUjpPynt0Qq6GzppUfqg86m5I7n8ZVB80CJ4U8eAParqoE8FjnIvPVkwdXD3SOgG+IFiW+2TIUH2arpD11z61fTzrsdxrlv"
+    b"bYk7I1sbPSqj2UXLe5W4ttMZu490oWHbNtu3cGrOdJvHYJlBkjh6rt2xrdP2Jk/8AMaADpVBATBiLXTIGMr3hnVipWdp4tNO"
+    b"dbGf0dnVLpU/dsP6eAg0m37+6hHAXIW/Wgm3KuV1F3C3W9ozBOihwXl4YNZ1+5fp40DpPyCwD90ifBa2t7Js3G587q3Hp2xD"
+    b"ducQ7ZqPgCT16zrjgWWfXTMKVhPaoX1GvQUrI7WW6OPRM+GErUlm60/iSZAYusEjjA6n4FrBoiA5u2Zr++GSkCU57FZ9bN0l"
+    b"r+6q8+Aaxu7F5x0K0GZBGWuVmvTQHjX5aXXK+pvJtzML8dt4gitAiGwVh/L3FIcYxPOXx+XaW/5aWrUjUq+Vo2CWeZa2P0nq"
+    b"K5d3IhwYGT9DqttsrZXPisFB4acZQMQ6CUIypFI52tlat1eGa/XenjpvXVVDcWeHuvdzTFfZ+Q4TFT9m1jtfiSr9CPPn2NMy"
+    b"nj7avRbf6waVCxjs4/8Aretm9w=="
+)
+_FROZEN_D010_FIXTURE_SHA256 = (
+    "30062f8ae69aa2cd55440b875e22005d95470ee5f5de93d028f4bd74085a6b32"
+)
+
 
 def _codes(source: str, path: str = "src/sakuramoon/encoders/qwen.py") -> set[str]:
     return {item.code for item in scan_source(source, path)}
+
+
+def _frozen_d010_fixture_source() -> str:
+    payload = zlib.decompress(base64.b64decode(_FROZEN_D010_FIXTURE_B64))
+    assert hashlib.sha256(payload).hexdigest() == _FROZEN_D010_FIXTURE_SHA256
+    return payload.decode("utf-8")
+
+
+def _d010_transport_class(source: str) -> ast.ClassDef:
+    candidates = [
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.ClassDef)
+        and node.name == boundary.DATASET_TRANSPORT_CLASS
+    ]
+    assert len(candidates) == 1
+    return candidates[0]
+
+
+def _normalized_class_digest(node: ast.ClassDef) -> str:
+    normalized = ast.dump(node, include_attributes=False).encode("utf-8")
+    return hashlib.sha256(normalized).hexdigest()
+
+
+def _pinned_d010_transport_digest() -> str:
+    value = vars(boundary)["_DATASET_TRANSPORT_CLASS_AST_SHA256"]
+    assert isinstance(value, str)
+    return value
+
+
+def test_frozen_d010_fixture_replays_the_structural_pin_success_path() -> None:
+    source = _frozen_d010_fixture_source()
+    transport = _d010_transport_class(source)
+
+    assert _normalized_class_digest(transport) == _pinned_d010_transport_digest()
+    assert scan_source(source, boundary.DATASET_TRANSPORT_PATH) == ()
+
+
+def test_shared_d010_transport_matches_the_tracked_fixture_when_present() -> None:
+    path = ROOT / boundary.DATASET_TRANSPORT_PATH
+    if not path.exists():
+        pytest.skip("clean A002 candidate intentionally has no D010 source")
+    fixture = _d010_transport_class(_frozen_d010_fixture_source())
+    shared = _d010_transport_class(path.read_text(encoding="utf-8"))
+
+    assert ast.dump(shared, include_attributes=False) == ast.dump(
+        fixture,
+        include_attributes=False,
+    )
+    assert _normalized_class_digest(shared) == _pinned_d010_transport_digest()
 
 
 def test_manifest_locks_the_two_prepared_model_directories() -> None:
@@ -928,6 +1063,16 @@ class ModelScopeDatasetTransport:
             '["value"].default'
         ),
         (
+            "def expose(value: {capability}):\n"
+            "            return value\n"
+            "        external(expose.__annotations__[\"value\"])"
+        ),
+        (
+            "def expose(value: {capability}):\n"
+            "            return value\n"
+            "        external(typing.get_type_hints(expose)[\"value\"])"
+        ),
+        (
             "def expose():\n"
             "            return {capability}\n"
             "        cell = expose.__closure__[0]\n"
@@ -944,6 +1089,7 @@ def test_d010_closure_and_generator_namespace_introspection_is_forbidden(
 import http.client
 import inspect
 import ssl
+import typing
 class ModelScopeDatasetTransport:
     def _open_get(self, target, *, range_start):
         connection = http.client.HTTPSConnection(
@@ -959,6 +1105,48 @@ class ModelScopeDatasetTransport:
 """
 
     assert "namespace_reflection_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
+@pytest.mark.parametrize("capability", ["headers", "target", "connection"])
+@pytest.mark.parametrize(
+    "definition",
+    [
+        (
+            "def expose(value={capability}):\n"
+            "            return value"
+        ),
+        (
+            "def expose(*, value={capability}):\n"
+            "            return value"
+        ),
+    ],
+)
+def test_d010_defaults_cannot_launder_network_capabilities(
+    capability: str,
+    definition: str,
+) -> None:
+    statement = definition.format(capability=capability)
+    source = f"""
+import http.client
+import ssl
+class ModelScopeDatasetTransport:
+    def _open_get(self, target, *, range_start):
+        connection = http.client.HTTPSConnection(
+            host=target.host,
+            port=target.port,
+            timeout=self._policy.connect_timeout_seconds,
+            context=ssl.create_default_context(),
+        )
+        headers = self._request_headers(target)
+        if range_start is not None:
+            headers["Range"] = f"bytes={{range_start}}-"
+        {statement}
+        external(expose())
+"""
+
+    assert "security_capability_default_forbidden" in _codes(
         source, "src/sakuramoon/data/modelscope.py"
     )
 
@@ -1571,6 +1759,21 @@ def test_reflective_model_loader_adapters_are_forbidden(source: str) -> None:
     assert "callable_reflection_forbidden" in _codes(source)
 
 
+@pytest.mark.parametrize("adapter", ["partial", "partialmethod"])
+def test_partial_reflection_adapters_cannot_resolve_model_loaders(
+    adapter: str,
+) -> None:
+    source = f'''
+from functools import {adapter}
+from transformers import AutoModel
+resolver = {adapter}(getattr, AutoModel)
+loader = resolver("from_pretrained")
+loader("remote/model")
+'''
+
+    assert "callable_reflection_forbidden" in _codes(source)
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -1583,6 +1786,19 @@ runner("payload")
 import builtins
 runner = getattr(builtins, input())
 runner("payload")
+""",
+        """
+import sys
+sys.modules["builtins"].eval("payload")
+""",
+        """
+__builtins__["eval"]("payload")
+""",
+        """
+import inspect
+from transformers import AutoModel
+members = dict(inspect.getmembers(AutoModel))
+members["from_pretrained"]("remote/model")
 """,
     ],
 )
@@ -1673,6 +1889,114 @@ from sakuramoon.assets import require_runtime_assets_ready
 from transformers import AutoModel
 {body}
 """
+
+    assert "namespace_reflection_forbidden" in _codes(source)
+
+
+@pytest.mark.parametrize(
+    ("capability_setup", "capability"),
+    [
+        ("from transformers import AutoModel", "AutoModel.from_pretrained"),
+        (
+            (
+                "from sakuramoon.assets import require_runtime_assets_ready\n"
+                "selection = require_runtime_assets_ready(config, manifest, root=repository)"
+            ),
+            "selection",
+        ),
+        (
+            (
+                "from sakuramoon.assets import require_runtime_assets_ready\n"
+                "selection = require_runtime_assets_ready(config, manifest, root=repository)\n"
+                'root = selection.verified_root("qwen_text_encoder")'
+            ),
+            "root",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "recovery",
+    [
+        'expose.__annotations__["value"]',
+        'typing.get_type_hints(expose)["value"]',
+    ],
+)
+def test_callable_annotations_cannot_launder_security_capabilities(
+    capability_setup: str,
+    capability: str,
+    recovery: str,
+) -> None:
+    source = f'''
+import typing
+{capability_setup}
+def expose(value: {capability}):
+    return value
+external({recovery})
+'''
+
+    codes = _codes(source)
+    assert "security_capability_annotation_forbidden" in codes
+    assert "namespace_reflection_forbidden" in codes
+
+
+@pytest.mark.parametrize(
+    ("capability_setup", "capability"),
+    [
+        ("from transformers import AutoModel", "AutoModel.from_pretrained"),
+        (
+            (
+                "from sakuramoon.assets import require_runtime_assets_ready\n"
+                "selection = require_runtime_assets_ready(config, manifest, root=repository)"
+            ),
+            "selection",
+        ),
+        (
+            (
+                "from sakuramoon.assets import require_runtime_assets_ready\n"
+                "selection = require_runtime_assets_ready(config, manifest, root=repository)\n"
+                'root = selection.verified_root("qwen_text_encoder")'
+            ),
+            "root",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "definition",
+    [
+        "def expose(value={capability}):\n    return value",
+        "def expose(*, value={capability}):\n    return value",
+    ],
+)
+def test_callable_defaults_cannot_launder_security_capabilities(
+    capability_setup: str,
+    capability: str,
+    definition: str,
+) -> None:
+    source = f'''
+{capability_setup}
+{definition.format(capability=capability)}
+external(expose())
+'''
+
+    assert "security_capability_default_forbidden" in _codes(source)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "__annotations__",
+        "annotation",
+        "return_annotation",
+    ],
+)
+def test_callable_annotation_namespace_members_are_forbidden(member: str) -> None:
+    source = f'''
+from transformers import AutoModel
+def expose(value: AutoModel.from_pretrained) -> AutoModel.from_pretrained:
+    return value
+metadata = expose.{member}
+external(metadata)
+'''
 
     assert "namespace_reflection_forbidden" in _codes(source)
 
@@ -2540,6 +2864,53 @@ globals()["make_reference"](
 """
 
     assert "namespace_reflection_forbidden" in _codes(
+        source, "tests/unit/assets/conftest.py"
+    )
+
+
+@pytest.mark.parametrize(
+    "recovery",
+    [
+        'expose.__defaults__[0]',
+        'getattr(expose, "__defaults__")[0]',
+    ],
+)
+def test_synthetic_git_helper_cannot_be_recovered_from_defaults(
+    recovery: str,
+) -> None:
+    source = f'''
+import subprocess
+def make_reference(root, relative, origin, licenses):
+    repo = root / relative
+    subprocess.run(("git", "-C", str(repo), "add", "."), check=True)
+def expose(helper=make_reference):
+    return helper
+{recovery}(tmp_path, "../../reference", origin, licenses)
+'''
+
+    codes = _codes(source, "tests/unit/assets/conftest.py")
+    assert "security_capability_default_forbidden" in codes
+    assert "namespace_reflection_forbidden" in codes
+
+
+def test_synthetic_git_helper_cannot_be_bound_through_partial() -> None:
+    source = """
+import subprocess
+from functools import partial
+def make_reference(root, relative, origin, licenses):
+    repo = root / relative
+    subprocess.run(("git", "-C", str(repo), "add", "."), check=True)
+invoke = partial(
+    make_reference,
+    tmp_path,
+    "../../reference",
+    origin,
+    licenses,
+)
+invoke()
+"""
+
+    assert "synthetic_git_helper_escape_forbidden" in _codes(
         source, "tests/unit/assets/conftest.py"
     )
 
