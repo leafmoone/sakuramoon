@@ -3,7 +3,7 @@
   "task_id": "A002",
   "hardware": "CPU",
   "candidate": {
-    "base_commit": "bcf792ef2968f8fb901bc65b1c289c7b8aa57f17",
+    "base_commit": "70981e19510c5a6c7d7889d6042b5e8a55887931",
     "overlaid_paths": [
       "tools/asset_execution_boundary.py",
       "tests/contracts/assets/test_asset_execution_boundary.py"
@@ -13,55 +13,55 @@
       "D010",
       "A002 documentation and evidence"
     ],
-    "worktree": "/root/shared-nvme/sakuramoon-a002-remediation-qViyoT/repo",
+    "worktree": "/root/shared-nvme/sakuramoon-a002-sixth-RjGb3v/repo",
     "diff_check": "passed"
   },
   "review_remediation": {
-    "reviewed_commit": "bcf792ef2968f8fb901bc65b1c289c7b8aa57f17",
+    "reviewed_commit": "70981e19510c5a6c7d7889d6042b5e8a55887931",
     "ai_verdict": "FAIL_changes_required",
     "infra_verdict": "FAIL_changes_required",
-    "status": "fifth_remediation_complete_pending_independent_rereview"
+    "status": "sixth_remediation_complete_pending_independent_rereview"
   },
   "boundary_contract": {
     "command": "uv run --frozen pytest -q tests/contracts/assets/test_asset_execution_boundary.py",
-    "passed": 191,
+    "passed": 232,
     "failed": 0,
-    "wall_duration_seconds": 8.0,
-    "pytest_reported_duration_seconds": 7.48
+    "wall_duration_seconds": 20.186,
+    "pytest_reported_duration_seconds": 19.56
   },
   "full_suite": {
     "command": "uv run --frozen pytest -q",
-    "passed": 389,
+    "passed": 430,
     "failed": 0,
-    "wall_duration_seconds": 32.3,
-    "pytest_reported_duration_seconds": 31.79
+    "wall_duration_seconds": 40.693,
+    "pytest_reported_duration_seconds": 40.05
   },
   "scanner_self_check": {
     "command": "uv run --frozen python -c '<scan_repository and python_sources>'",
     "python_sources": 28,
     "violations": 0,
-    "wall_duration_seconds": 7.1,
+    "wall_duration_seconds": 18.682,
     "includes_scanner_itself": true,
     "ignored_notebook_checkpoints_excluded": true,
-    "source_read_anchor": "per-component dirfd/openat with O_NOFOLLOW and same-parent leaf identity checks"
+    "execution_scope": "preflight and validation only; not called by the training hot path"
   },
   "shared_tree_d010_compatibility": {
     "command": "uv run python -c '<scan_repository and python_sources>'",
     "python_sources": 36,
     "violations": 0,
-    "wall_duration_seconds": 10.6,
-    "notes": "Includes concurrent frozen D010 stdlib HTTPS implementation; not part of the isolated A002 code candidate and not remote-streaming evidence."
+    "wall_duration_seconds": 28.165,
+    "notes": "Includes concurrent frozen D010; static compatibility only, not remote WebDataset streaming evidence."
   },
   "ruff": {
     "command": "uv run --frozen ruff check .",
     "ok": true,
-    "wall_duration_seconds": 0.1
+    "wall_duration_seconds": 0.279
   },
   "pyright": {
     "command": "uv run --frozen pyright",
     "errors": 0,
     "warnings": 0,
-    "wall_duration_seconds": 3.8
+    "wall_duration_seconds": 4.244
   },
   "traceability": {
     "command": "uv run --frozen python tools/verify_traceability.py",
@@ -72,28 +72,23 @@
     "production_modules": 12,
     "runtime_config_keys": 235,
     "errors": [],
-    "wall_duration_seconds": 1.0,
+    "wall_duration_seconds": 1.176,
     "registry_revision": 11,
-    "registry_unchanged_reason": "fifth remediation did not add or move a requirement and did not change mapping, path, or status"
+    "registry_unchanged_reason": "sixth remediation did not add or move a requirement and did not change mapping, path, or status"
   },
   "environment": {
-    "source_isolation": "detached git worktree at bcf792e with only the two A002 code/test paths overlaid",
+    "source_isolation": "detached git worktree at 70981e1 with only the two A002 code/test paths overlaid",
     "dependency_environment": "main checkout locked uv .venv reused by symlink",
-    "initial_isolated_environment_attempt": {
-      "completed": false,
-      "terminated": true,
-      "code_failure": false,
-      "notes": "An isolated uv materialization was stopped before validation; final evidence reused the existing locked environment."
-    }
+    "dependency_materialization_attempted": false
   },
   "validation_notes": [
-    "Network capabilities recursively escape-check and lose trust at opaque, cross-module, or higher-order calls; header mutation and indirect request/getresponse/close routes are negative contracts.",
-    "Dynamic import/container/reflection and loop-carried provenance bypasses are negative contracts.",
-    "The frozen D010 graph requires the exact wrapped HTTPS constructor, audited cleanup, bounded response reads, verified bindings, and direct target factories.",
-    "The clean candidate excludes concurrent D010 implementation; the separate shared-tree scan establishes static compatibility only."
+    "Starred positional and nonliteral keyword expansions retain recursive security facts across known and unknown calls.",
+    "Finite container widening preserves network/model-root/sensitive/asset/dataset summaries and converges across loop back-edges.",
+    "Break/continue, pop extraction, namespace/code/frame reflection, callable adapters, relative star imports, Git call-site paths, and D010 remaining overwrite are covered by negative contracts.",
+    "The shared D010 scan establishes static compatibility only; D010 remote streaming gates remain open in D010."
   ],
   "gpu_used": false,
-  "dependency_network_used": true,
+  "dependency_network_used": false,
   "model_or_dataset_network_used": false,
   "model_database_dataset_or_reference_payload_read": false
 }

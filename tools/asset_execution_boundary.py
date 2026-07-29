@@ -73,6 +73,32 @@ _DYNAMIC_CODE_CALLS = frozenset(
         "runpy.run_path",
     }
 )
+_NAMESPACE_REFLECTION_CALLS = frozenset(
+    {
+        "builtins.globals",
+        "builtins.locals",
+        "builtins.vars",
+        "inspect.currentframe",
+        "inspect.getargvalues",
+        "inspect.stack",
+        "inspect.trace",
+        "sys._current_frames",
+        "sys._getframe",
+    }
+)
+_FRAME_NAMESPACE_ATTRIBUTES = frozenset(
+    {
+        "ag_frame",
+        "cr_frame",
+        "f_back",
+        "f_builtins",
+        "f_code",
+        "f_globals",
+        "f_locals",
+        "gi_frame",
+        "tb_frame",
+    }
+)
 _PROCESS_PREFIXES = (
     "asyncio.create_subprocess_",
     "os.exec",
@@ -178,6 +204,61 @@ _AUDITED_PARAMETER_CALLS = frozenset(
         ),
     }
 )
+_AUDITED_OBJECT_GETATTRIBUTE_CALLS = frozenset(
+    {
+        (
+            "src/sakuramoon/assets/inspect.py",
+            "_verified_file_fingerprint",
+            "value",
+            attribute,
+        )
+        for attribute in (
+            "_base",
+            "_identity",
+            "_path",
+            "asset_id",
+            "bytes",
+            "kind",
+            "relative_path",
+            "sha256",
+        )
+    }
+    | {
+        (
+            "src/sakuramoon/assets/inspect.py",
+            "_verified_selection_fingerprint",
+            "value",
+            attribute,
+        )
+        for attribute in (
+            "_identity",
+            "_manifest_identity",
+            "_manifest_path",
+            "_manifest_relative_path",
+            "_root",
+            "files",
+            "manifest_revision",
+            "manifest_sha256",
+        )
+    }
+    | {
+        (
+            "src/sakuramoon/data/manifest.py",
+            "_revalidate_issued_manifest",
+            "selection",
+            "_identity",
+        )
+    }
+    | {
+        (
+            "src/sakuramoon/data/manifest.py",
+            "_verified_manifest_fingerprint",
+            "value",
+            attribute,
+        )
+        for attribute in ("_identity", "manifest", "path", "sha256")
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -208,20 +289,29 @@ class _Fact:
     taints: frozenset[str] = frozenset()
     callable: _Callable | None = None
     capability_class: bool = False
+    asset_capability_maybe: bool = False
     selection: bool = False
     model_root: str | None = None
+    model_root_maybe: bool = False
     config_path: tuple[str, ...] | None = None
+    dataset_capability_maybe: bool = False
     dataset_manifest: bool = False
     dataset_selection: bool = False
     dataset_shard: bool = False
     object_place: str | None = None
     instance_class: str | None = None
     network_instance_maybe: str | None = None
+    network_capability_maybe: bool = False
     network_headers: bool = False
     network_query: str | None = None
     network_target: bool = False
+    sensitive_callable_maybe: bool = False
+    bounded_nonnegative: bool = False
+    test_safe_relative: bool = False
     test_root_holder: bool = False
     test_root_path: bool = False
+    container_items_unknown: bool = False
+    container_mapping_unknown: bool = False
     items: tuple[_Fact, ...] = ()
     mapping: tuple[tuple[str | bool | int | None, _Fact], ...] = ()
     literal: str | bool | None = None
@@ -367,7 +457,7 @@ def _fact_children(fact: _Fact) -> tuple[_Fact, ...]:
 
 
 def _fact_contains_sensitive_callable(fact: _Fact) -> bool:
-    return _sensitive_callable(fact.callable) or any(
+    return fact.sensitive_callable_maybe or _sensitive_callable(fact.callable) or any(
         _fact_contains_sensitive_callable(child) for child in _fact_children(fact)
     )
 
@@ -375,7 +465,8 @@ def _fact_contains_sensitive_callable(fact: _Fact) -> bool:
 def _fact_contains_network_capability(fact: _Fact) -> bool:
     direct_callable = fact.callable
     direct = (
-        fact.network_headers
+        fact.network_capability_maybe
+        or fact.network_headers
         or fact.network_target
         or fact.instance_class in _NETWORK_INSTANCE_CLASSES
         or fact.network_instance_maybe in _NETWORK_INSTANCE_CLASSES
@@ -401,11 +492,39 @@ def _fact_contains_security_capability(fact: _Fact) -> bool:
         or fact.capability_class
         or fact.selection
         or fact.model_root is not None
+        or _fact_contains_dataset_capability(fact)
+        or any(
+            _fact_contains_security_capability(child)
+            for child in _fact_children(fact)
+        )
+    )
+
+
+def _fact_contains_model_root(fact: _Fact) -> bool:
+    return fact.model_root_maybe or fact.model_root is not None or any(
+        _fact_contains_model_root(child) for child in _fact_children(fact)
+    )
+
+
+def _fact_contains_asset_capability(fact: _Fact) -> bool:
+    return (
+        fact.asset_capability_maybe
+        or fact.capability_class
+        or fact.selection
+        or any(
+        _fact_contains_asset_capability(child) for child in _fact_children(fact)
+        )
+    )
+
+
+def _fact_contains_dataset_capability(fact: _Fact) -> bool:
+    return (
+        fact.dataset_capability_maybe
         or fact.dataset_manifest
         or fact.dataset_selection
         or fact.dataset_shard
         or any(
-            _fact_contains_security_capability(child)
+            _fact_contains_dataset_capability(child)
             for child in _fact_children(fact)
         )
     )
@@ -441,6 +560,7 @@ def _without_network_capabilities(fact: _Fact) -> _Fact:
             else fact.instance_class
         ),
         network_instance_maybe=None,
+        network_capability_maybe=False,
         network_headers=False,
         network_target=False,
         items=tuple(_without_network_capabilities(item) for item in fact.items),
@@ -453,9 +573,9 @@ def _without_network_capabilities(fact: _Fact) -> _Fact:
 
 def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
     same_callable = left.callable if left.callable == right.callable else None
-    if same_callable is None and (
-        _sensitive_callable(left.callable) or _sensitive_callable(right.callable)
-    ):
+    left_contains_sensitive = _fact_contains_sensitive_callable(left)
+    right_contains_sensitive = _fact_contains_sensitive_callable(right)
+    if same_callable is None and (left_contains_sensitive or right_contains_sensitive):
         if left.callable is None:
             same_callable = right.callable
         elif right.callable is None:
@@ -495,19 +615,63 @@ def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
         )
         if left_compatible and right_compatible:
             network_instance_maybe = candidate
+    container_items_unknown = (
+        left.container_items_unknown
+        or right.container_items_unknown
+        or len(left.items) != len(right.items)
+    )
+    items = ()
+    if not container_items_unknown and left.items:
+        items = tuple(
+            _merge_facts(left_item, right_item)
+            for left_item, right_item in zip(
+                left.items, right.items, strict=True
+            )
+        )
+    left_mapping_keys = tuple(key for key, _ in left.mapping)
+    right_mapping_keys = tuple(key for key, _ in right.mapping)
+    container_mapping_unknown = (
+        left.container_mapping_unknown
+        or right.container_mapping_unknown
+        or left_mapping_keys != right_mapping_keys
+    )
+    mapping: tuple[tuple[str | bool | int | None, _Fact], ...] = ()
+    if not container_mapping_unknown and left.mapping:
+        mapping = tuple(
+            (left_key, _merge_facts(left_value, right_value))
+            for (left_key, left_value), (_, right_value) in zip(
+                left.mapping, right.mapping, strict=True
+            )
+        )
     return _Fact(
         taints=left.taints | right.taints,
         callable=same_callable,
         capability_class=left.capability_class or right.capability_class,
+        asset_capability_maybe=(
+            _fact_contains_asset_capability(left)
+            or _fact_contains_asset_capability(right)
+        ),
         selection=left.selection and right.selection,
         model_root=same_root,
+        model_root_maybe=(
+            _fact_contains_model_root(left)
+            or _fact_contains_model_root(right)
+        ),
         config_path=same_config,
+        dataset_capability_maybe=(
+            _fact_contains_dataset_capability(left)
+            or _fact_contains_dataset_capability(right)
+        ),
         dataset_manifest=left.dataset_manifest and right.dataset_manifest,
         dataset_selection=left.dataset_selection and right.dataset_selection,
         dataset_shard=left.dataset_shard and right.dataset_shard,
         object_place=left.object_place if left.object_place == right.object_place else None,
         instance_class=instance_class,
         network_instance_maybe=network_instance_maybe,
+        network_capability_maybe=(
+            _fact_contains_network_capability(left)
+            or _fact_contains_network_capability(right)
+        ),
         network_headers=left.network_headers and right.network_headers,
         network_query=(
             left.network_query
@@ -515,10 +679,21 @@ def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
             else None
         ),
         network_target=left.network_target and right.network_target,
+        sensitive_callable_maybe=(
+            left_contains_sensitive or right_contains_sensitive
+        ),
+        bounded_nonnegative=(
+            left.bounded_nonnegative and right.bounded_nonnegative
+        ),
+        test_safe_relative=(
+            left.test_safe_relative and right.test_safe_relative
+        ),
         test_root_holder=left.test_root_holder and right.test_root_holder,
         test_root_path=left.test_root_path and right.test_root_path,
-        items=left.items if left.items == right.items else (),
-        mapping=left.mapping if left.mapping == right.mapping else (),
+        container_items_unknown=container_items_unknown,
+        container_mapping_unknown=container_mapping_unknown,
+        items=items,
+        mapping=mapping,
         literal=left.literal if literal_known else None,
         literal_known=literal_known,
     )
@@ -555,6 +730,8 @@ class _Analyzer:
         self.classes: dict[str, dict[str, _Fact]] = {}
         self.context = _FunctionContext("<module>", ())
         self.class_context: str | None = None
+        self.loop_break_environments: list[list[_Environment]] = []
+        self.loop_continue_environments: list[list[_Environment]] = []
 
     def _function_identifier(
         self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
@@ -611,11 +788,33 @@ class _Analyzer:
             return _Fact()
         if isinstance(node, ast.Constant):
             if isinstance(node.value, (str, bool)) or node.value is None:
-                return _fact_literal(node.value)
+                fact = _fact_literal(node.value)
+                if isinstance(node.value, str):
+                    fact = replace(
+                        fact,
+                        test_safe_relative=_safe_test_relative_literal(
+                            node.value
+                        ),
+                    )
+                return fact
             return _Fact(literal_known=True)
         if isinstance(node, ast.Name):
             return env.get(node.id)
         if isinstance(node, ast.Attribute):
+            if (
+                self.path.startswith("src/sakuramoon/")
+                and node.attr in _FRAME_NAMESPACE_ATTRIBUTES
+            ):
+                self.add(
+                    node,
+                    "namespace_reflection_forbidden",
+                    "production code may not inspect frame or execution namespaces",
+                )
+                return _Fact(
+                    network_capability_maybe=True,
+                    sensitive_callable_maybe=True,
+                    capability_class=True,
+                )
             place = self._place(node, env)
             if place is not None and place in env.values:
                 return env.values[place]
@@ -719,6 +918,8 @@ class _Analyzer:
                     else None
                 ),
             )
+        if isinstance(node, ast.Starred):
+            return self._eval(node.value, env)
         if isinstance(node, (ast.List, ast.Set, ast.Tuple)):
             items = tuple(self._eval(item, env) for item in node.elts)
             taints = _union_taints(item.taints for item in items)
@@ -815,16 +1016,16 @@ class _Analyzer:
 
     def _keywords(
         self, call: ast.Call, env: _Environment
-    ) -> tuple[dict[str, _Fact], bool, frozenset[str]]:
+    ) -> tuple[dict[str, _Fact], bool, tuple[_Fact, ...]]:
         values: dict[str, _Fact] = {}
         unknown = False
-        expansion_taints: set[str] = set()
+        expansions: list[_Fact] = []
         for keyword in call.keywords:
             if keyword.arg is not None:
                 values[keyword.arg] = self._eval(keyword.value, env)
                 continue
             expansion = self._eval(keyword.value, env)
-            expansion_taints.update(expansion.taints)
+            expansions.append(expansion)
             if not isinstance(keyword.value, ast.Dict):
                 unknown = True
                 continue
@@ -834,16 +1035,16 @@ class _Analyzer:
                     unknown = True
                     continue
                 values[key] = self._eval(value_node, env)
-        return values, unknown, frozenset(expansion_taints)
+        return values, unknown, tuple(expansions)
 
     def _effective_arguments(
         self, call: ast.Call, callable_value: _Callable, env: _Environment
-    ) -> tuple[tuple[_Fact, ...], dict[str, _Fact], bool, frozenset[str]]:
+    ) -> tuple[tuple[_Fact, ...], dict[str, _Fact], bool, tuple[_Fact, ...]]:
         positional = (*callable_value.bound_args, *(self._eval(item, env) for item in call.args))
         keywords = dict(callable_value.bound_keywords)
-        current, unknown, expansion_taints = self._keywords(call, env)
+        current, unknown, expansions = self._keywords(call, env)
         keywords.update(current)
-        return positional, keywords, callable_value.unknown_keywords or unknown, expansion_taints
+        return positional, keywords, callable_value.unknown_keywords or unknown, expansions
 
     def _record_sink(
         self,
@@ -972,6 +1173,53 @@ class _Analyzer:
         return fact.callable is not None and fact.callable.name.endswith(
             (":_ValidatedHttpTarget", "._ValidatedHttpTarget")
         )
+
+    def _object_getattribute_allowed(
+        self,
+        call: ast.Call,
+    ) -> bool:
+        if len(call.args) != 2 or call.keywords:
+            return False
+        receiver = self._place(call.args[0], _Environment())
+        attribute = _literal(call.args[1])
+        return (
+            isinstance(receiver, str)
+            and isinstance(attribute, str)
+            and (
+                self.path,
+                self.context.name,
+                receiver,
+                attribute,
+            )
+            in _AUDITED_OBJECT_GETATTRIBUTE_CALLS
+        )
+
+    def _reject_opaque_security_capability(
+        self,
+        call: ast.Call,
+        facts: tuple[_Fact, ...],
+    ) -> None:
+        if not self.path.startswith("src/sakuramoon/") or not any(
+            _fact_contains_security_capability(fact) for fact in facts
+        ):
+            return
+        self.add(
+            call,
+            "security_capability_escape_forbidden",
+            "security capabilities may not enter an opaque or higher-order call",
+        )
+        if any(_fact_contains_model_root(fact) for fact in facts):
+            self.add(
+                call,
+                "model_root_cross_module_call_forbidden",
+                "verified model roots may only enter an exact audited loader wrapper",
+            )
+        if any(_fact_contains_asset_capability(fact) for fact in facts):
+            self.add(
+                call,
+                "capability_reflection_forbidden",
+                "verified capabilities may not enter reflective or opaque calls",
+            )
 
     @staticmethod
     def _same_expression(node: ast.AST, expression: str) -> bool:
@@ -1364,7 +1612,7 @@ except (OSError, ValueError):
                 return self._same_expression(
                     length,
                     "min(self._policy.stream_chunk_bytes, remaining)",
-                )
+                ) and env.get("remaining").bounded_nonnegative
             if self.context.name == "download_locked_shard_to_staging":
                 return (
                     isinstance(length, ast.Constant)
@@ -1514,6 +1762,24 @@ except (OSError, ValueError):
             and isinstance(target.slice, ast.Constant)
             and target.slice.value == "Range"
             and self._same_expression(node.value, 'f"bytes={range_start}-"')
+        )
+
+    def _dataset_bounded_remaining_assignment(
+        self,
+        node: ast.Assign,
+        target: ast.AST,
+    ) -> bool:
+        return (
+            self.path == DATASET_TRANSPORT_PATH
+            and self.class_context == DATASET_TRANSPORT_CLASS
+            and self.context.name == "_read_listing_once"
+            and len(node.targets) == 1
+            and isinstance(target, ast.Name)
+            and target.id == "remaining"
+            and self._same_expression(
+                node.value,
+                "_LISTING_RESPONSE_LIMIT_BYTES + 1 - len(payload)",
+            )
         )
 
     def _reject_dataset_header_write(
@@ -1696,14 +1962,21 @@ except (OSError, ValueError):
         items = current.items
         mapping = current.mapping
         arguments = tuple(self._eval(item, env) for item in call.args)
-        if call.func.attr == "append" and arguments:
+        if current.container_items_unknown:
+            items = ()
+        elif call.func.attr == "append" and arguments:
             items = (*items, arguments[0])
         elif call.func.attr == "extend" and arguments:
             items = (*items, *(arguments[0].items or (arguments[0],)))
         elif call.func.attr == "insert" and len(arguments) >= 2:
             items = (*items, arguments[1])
-        elif call.func.attr == "update" and arguments:
+        elif (
+            call.func.attr == "update"
+            and arguments
+            and not current.container_mapping_unknown
+        ):
             mapping = (*mapping, *arguments[0].mapping)
+        added_facts = arguments if arguments else ()
         env.assign(
             receiver,
             replace(
@@ -1711,8 +1984,146 @@ except (OSError, ValueError):
                 taints=current.taints | taints,
                 items=items,
                 mapping=mapping,
+                network_capability_maybe=(
+                    current.network_capability_maybe
+                    or any(
+                        _fact_contains_network_capability(item)
+                        for item in added_facts
+                    )
+                ),
+                sensitive_callable_maybe=(
+                    current.sensitive_callable_maybe
+                    or any(
+                        _fact_contains_sensitive_callable(item)
+                        for item in added_facts
+                    )
+                ),
+                model_root_maybe=(
+                    current.model_root_maybe
+                    or any(
+                        _fact_contains_model_root(item)
+                        for item in added_facts
+                    )
+                ),
+                asset_capability_maybe=(
+                    current.asset_capability_maybe
+                    or any(
+                        _fact_contains_asset_capability(item)
+                        for item in added_facts
+                    )
+                ),
+                dataset_capability_maybe=(
+                    current.dataset_capability_maybe
+                    or any(
+                        _fact_contains_dataset_capability(item)
+                        for item in added_facts
+                    )
+                ),
             ),
         )
+
+    def _container_extraction(
+        self,
+        call: ast.Call,
+        env: _Environment,
+    ) -> _Fact | None:
+        if (
+            not isinstance(call.func, ast.Attribute)
+            or call.func.attr not in {"pop", "popitem"}
+        ):
+            return None
+        receiver = self._place(call.func.value, env)
+        container = self._eval(call.func.value, env)
+        if (
+            not container.items
+            and not container.mapping
+            and not _fact_contains_security_capability(container)
+        ):
+            return None
+        if call.func.attr == "popitem" and not call.args and not call.keywords:
+            if container.mapping:
+                key, value = container.mapping[-1]
+                if receiver is not None:
+                    env.assign(
+                        receiver,
+                        replace(container, mapping=container.mapping[:-1]),
+                    )
+                key_fact = (
+                    _fact_literal(key)
+                    if isinstance(key, (str, bool)) or key is None
+                    else _Fact(literal_known=True)
+                )
+                return _Fact(items=(key_fact, value))
+            return container
+        if call.func.attr != "pop" or call.keywords:
+            return container
+        if container.mapping and call.args:
+            key = _literal(call.args[0])
+            matches = tuple(
+                value for item_key, value in container.mapping if item_key == key
+            )
+            if matches:
+                if receiver is not None:
+                    env.assign(
+                        receiver,
+                        replace(
+                            container,
+                            mapping=tuple(
+                                (item_key, value)
+                                for item_key, value in container.mapping
+                                if item_key != key
+                            ),
+                        ),
+                    )
+                return matches[-1]
+            if len(call.args) >= 2:
+                return self._eval(call.args[1], env)
+            return container
+        if container.items:
+            if call.args and isinstance(call.args[0], ast.Constant):
+                index = call.args[0].value
+                if type(index) is int:
+                    normalized = (
+                        index if index >= 0 else len(container.items) + index
+                    )
+                    if 0 <= normalized < len(container.items):
+                        if receiver is not None:
+                            env.assign(
+                                receiver,
+                                replace(
+                                    container,
+                                    items=tuple(
+                                        item
+                                        for item_index, item in enumerate(
+                                            container.items
+                                        )
+                                        if item_index != normalized
+                                    ),
+                                ),
+                            )
+                        return container.items[normalized]
+            result = container.items[0]
+            for candidate in container.items[1:]:
+                result = _merge_facts(result, candidate)
+            if receiver is not None:
+                env.assign(
+                    receiver,
+                    replace(
+                        container,
+                        items=(),
+                        container_items_unknown=True,
+                        network_capability_maybe=(
+                            container.network_capability_maybe
+                            or _fact_contains_network_capability(container)
+                        ),
+                        sensitive_callable_maybe=(
+                            container.sensitive_callable_maybe
+                            or _fact_contains_sensitive_callable(container)
+                        ),
+                    ),
+                )
+            return result
+        return container
 
     def _capability_constructor_allowed(
         self,
@@ -1765,6 +2176,14 @@ except (OSError, ValueError):
                 "dataset_headers_mutation_forbidden",
                 "the audited headers binding may not receive method calls",
             )
+        extracted = self._container_extraction(call, env)
+        if extracted is not None:
+            self._reject_network_capability_escape(
+                call,
+                env,
+                (extracted,),
+            )
+            return extracted
         if isinstance(call.func, ast.Attribute) and call.func.attr in _DATASET_HTTP_HELPERS:
             allowed_helper = self._dataset_http_helper_allowed(call, env)
             if self.path.startswith("src/sakuramoon/") and not allowed_helper:
@@ -1856,11 +2275,19 @@ except (OSError, ValueError):
                     *(item.taints for item in keyword_facts),
                 )
             )
+            opaque_facts = (
+                function_fact,
+                receiver_fact,
+                *argument_facts,
+                *keyword_facts,
+            )
             self._reject_network_capability_escape(
                 call,
                 env,
-                (function_fact, receiver_fact, *argument_facts, *keyword_facts),
+                opaque_facts,
             )
+            if not self._dataset_network_capability_call_allowed(call, env):
+                self._reject_opaque_security_capability(call, opaque_facts)
             if any(
                 _fact_contains_sensitive_callable(item)
                 for item in (
@@ -1961,6 +2388,49 @@ except (OSError, ValueError):
         reflection_name = name
         while reflection_name.endswith(".__call__"):
             reflection_name = reflection_name.removesuffix(".__call__")
+        if (
+            self.path.startswith("src/sakuramoon/")
+            and reflection_name in _NAMESPACE_REFLECTION_CALLS
+            and (
+                reflection_name != "builtins.vars" or not call.args
+            )
+        ):
+            self.add(
+                call,
+                "namespace_reflection_forbidden",
+                "production code may not inspect dynamic execution namespaces",
+            )
+            return _Fact(
+                network_capability_maybe=True,
+                sensitive_callable_maybe=True,
+                capability_class=True,
+            )
+        if (
+            self.path.startswith("src/sakuramoon/")
+            and reflection_name
+            in {"operator.attrgetter", "operator.methodcaller"}
+        ):
+            self.add(
+                call,
+                "callable_reflection_forbidden",
+                "production callable adapters are not auditable",
+            )
+            return _Fact(callable=_Callable("ambiguous-sensitive.*"))
+        if (
+            self.path.startswith("src/sakuramoon/")
+            and reflection_name == "builtins.object.__getattribute__"
+            and not self._object_getattribute_allowed(call)
+        ):
+            self.add(
+                call,
+                "capability_reflection_forbidden",
+                "object.__getattribute__ is restricted to exact capability fingerprint readers",
+            )
+            return _Fact(
+                network_capability_maybe=True,
+                sensitive_callable_maybe=True,
+                capability_class=True,
+            )
         if (
             self.path.startswith("src/sakuramoon/")
             and reflection_name
@@ -2077,17 +2547,19 @@ except (OSError, ValueError):
                 )
 
         if name in self.classes:
-            positional, keywords, unknown_keywords, expansion_taints = self._effective_arguments(
+            positional, keywords, unknown_keywords, expansions = self._effective_arguments(
                 call, callable_value, env
             )
+            argument_facts = (*positional, *keywords.values(), *expansions)
             self._reject_network_capability_escape(
                 call,
                 env,
-                (*positional, *keywords.values()),
+                argument_facts,
             )
+            self._reject_opaque_security_capability(call, argument_facts)
             if any(
                 _fact_contains_sensitive_callable(item)
-                for item in (*positional, *keywords.values())
+                for item in argument_facts
             ):
                 self.add(
                     call,
@@ -2099,7 +2571,7 @@ except (OSError, ValueError):
                     (
                         *(item.taints for item in positional),
                         *(item.taints for item in keywords.values()),
-                        expansion_taints,
+                        *(item.taints for item in expansions),
                     )
                 ),
                 instance_class=name,
@@ -2117,6 +2589,46 @@ except (OSError, ValueError):
                 and isinstance(attribute_fact.literal, str)
                 else None
             )
+            class_identifier = base_fact.instance_class
+            if (
+                class_identifier is None
+                and base_fact.callable is not None
+                and base_fact.callable.name in self.classes
+            ):
+                class_identifier = base_fact.callable.name
+            class_member = (
+                self.classes.get(class_identifier, {}).get(attribute)
+                if class_identifier is not None
+                and isinstance(attribute, str)
+                else None
+            )
+            if (
+                self.path.startswith("src/sakuramoon/")
+                and (
+                    _fact_contains_security_capability(base_fact)
+                    or (
+                        class_member is not None
+                        and _fact_contains_security_capability(class_member)
+                    )
+                    or (
+                        self.path == DATASET_TRANSPORT_PATH
+                        and self.class_context == DATASET_TRANSPORT_CLASS
+                        and base_place == "self"
+                        and attribute
+                        in (
+                            _DATASET_HTTP_HELPERS
+                            | _DATASET_TARGET_FACTORIES
+                            | _NETWORK_MEMBER_NAMES
+                        )
+                    )
+                )
+            ):
+                self.add(
+                    call,
+                    "callable_reflection_forbidden",
+                    "sensitive class members may not be resolved through getattr",
+                )
+                return _Fact(callable=_Callable("ambiguous-sensitive.*"))
             if base is not None and isinstance(attribute, str):
                 return _Fact(callable=_Callable(f"{base.name}.{attribute}"))
             if (
@@ -2183,34 +2695,63 @@ except (OSError, ValueError):
             target = self._callable(call.args[0], env)
             if target is None:
                 return _Fact()
-            keywords, unknown, _ = self._keywords(call, env)
+            bound_args = tuple(self._eval(item, env) for item in call.args[1:])
+            keywords, unknown, expansions = self._keywords(call, env)
+            bound_facts = (*bound_args, *keywords.values(), *expansions)
+            self._reject_network_capability_escape(call, env, bound_facts)
+            self._reject_opaque_security_capability(call, bound_facts)
+            if any(
+                _fact_contains_sensitive_callable(item) for item in bound_facts
+            ):
+                self.add(
+                    call,
+                    "sensitive_callable_escape",
+                    "sensitive callable bound through a higher-order adapter",
+                )
             return _Fact(
                 callable=_Callable(
                     target.name,
-                    (*target.bound_args, *(self._eval(item, env) for item in call.args[1:])),
+                    (*target.bound_args, *bound_args),
                     (*target.bound_keywords, *keywords.items()),
                     target.unknown_keywords or unknown,
                 )
             )
 
-        positional, keywords, unknown_keywords, expansion_taints = self._effective_arguments(
+        positional, keywords, unknown_keywords, expansions = self._effective_arguments(
             call, callable_value, env
         )
+        argument_facts = (*positional, *keywords.values(), *expansions)
+        if (
+            self.path == "tests/unit/assets/conftest.py"
+            and name.startswith(
+                "local:tests/unit/assets/conftest.py:"
+            )
+            and name.endswith(":make_reference")
+            and (
+                len(positional) < 2
+                or not positional[1].test_safe_relative
+            )
+        ):
+            self.add(
+                call,
+                "synthetic_git_path_argument_forbidden",
+                "synthetic Git helper paths require a proven safe relative call argument",
+            )
         all_taints = _union_taints(
             (
                 *(item.taints for item in positional),
                 *(item.taints for item in keywords.values()),
-                expansion_taints,
+                *(item.taints for item in expansions),
             )
         )
         self._reject_network_capability_escape(
             call,
             env,
-            (*positional, *keywords.values()),
+            argument_facts,
         )
         if any(
             _fact_contains_sensitive_callable(item)
-            for item in (*positional, *keywords.values())
+            for item in argument_facts
         ):
             self.add(
                 call,
@@ -2235,7 +2776,9 @@ except (OSError, ValueError):
                     "reference_cross_module_call_forbidden",
                     "reference provenance may not cross an unaudited module call",
                 )
-            if any(item.model_root is not None for item in (*positional, *keywords.values())):
+            if any(
+                _fact_contains_model_root(item) for item in argument_facts
+            ):
                 self.add(
                     call,
                     "model_root_cross_module_call_forbidden",
@@ -2272,6 +2815,9 @@ except (OSError, ValueError):
         local = self._local_function_call(call, callable_value, positional, keywords)
         if local is not None:
             return local
+
+        if not self._model_loader(name):
+            self._reject_opaque_security_capability(call, argument_facts)
 
         canonical = name
         while canonical.endswith(".__call__"):
@@ -2319,6 +2865,16 @@ except (OSError, ValueError):
                 return _Fact(callable=_Callable("ambiguous-sensitive.*"))
         if canonical in _DYNAMIC_CODE_CALLS:
             self._record_sink(call, "reference_dynamic_exec", all_taints, "dynamically executes reference code")
+            if self.path.startswith("src/sakuramoon/"):
+                self.add(
+                    call,
+                    "dynamic_code_forbidden",
+                    "production dynamic code evaluation is forbidden",
+                )
+                return _Fact(
+                    network_capability_maybe=True,
+                    sensitive_callable_maybe=True,
+                )
         is_process = canonical in _PROCESS_EXACT or canonical.startswith(_PROCESS_PREFIXES)
         if canonical.endswith(".*") and canonical.startswith(
             ("asyncio.", "os.", "subprocess.")
@@ -2712,6 +3268,7 @@ except (OSError, ValueError):
         state = env.clone()
         max_passes = 3 + len(node.body) + len(env.values)
         converged = False
+        break_exits: list[_Environment] = []
         for _ in range(max_passes):
             body = state.clone()
             if isinstance(node, (ast.For, ast.AsyncFor)):
@@ -2725,8 +3282,16 @@ except (OSError, ValueError):
                 self._assign(node.target, item_fact, body)
             else:
                 self._eval(node.test, body)
+            self.loop_break_environments.append([])
+            self.loop_continue_environments.append([])
             self._block(node.body, body)
-            next_state = _merge_environments(env, body)
+            current_breaks = self.loop_break_environments.pop()
+            current_continues = self.loop_continue_environments.pop()
+            break_exits.extend(current_breaks)
+            iteration_states = [*current_continues]
+            if not self._statements_definitely_terminate(node.body):
+                iteration_states.append(body)
+            next_state = _merge_environments(env, *iteration_states)
             if next_state.values == state.values:
                 state = next_state
                 converged = True
@@ -2740,7 +3305,7 @@ except (OSError, ValueError):
             )
         normal_exit = state.clone()
         self._block(node.orelse, normal_exit)
-        return _merge_environments(state, normal_exit)
+        return _merge_environments(normal_exit, *break_exits)
 
     @classmethod
     def _statements_definitely_terminate(
@@ -2804,6 +3369,9 @@ except (OSError, ValueError):
                             "transformers",
                             "urllib.request",
                         )
+                    ) or (
+                        node.level > 0
+                        and node.module.split(".")[-1] == "assets"
                     ):
                         self.add(
                             node,
@@ -2827,6 +3395,8 @@ except (OSError, ValueError):
                 )
             fact = self._eval(node.value, env)
             for target in node.targets:
+                if self._dataset_bounded_remaining_assignment(node, target):
+                    fact = replace(fact, bounded_nonnegative=True)
                 self._reject_dataset_network_binding_assignment(
                     node, target, fact
                 )
@@ -2890,6 +3460,12 @@ except (OSError, ValueError):
                 if self.context.return_fact is None
                 else _merge_facts(self.context.return_fact, fact)
             )
+        elif isinstance(node, ast.Break):
+            if self.loop_break_environments:
+                self.loop_break_environments[-1].append(env.clone())
+        elif isinstance(node, ast.Continue):
+            if self.loop_continue_environments:
+                self.loop_continue_environments[-1].append(env.clone())
         elif isinstance(node, ast.Assert):
             self._eval(node.test, env)
             self._eval(node.msg, env)
@@ -2965,6 +3541,8 @@ except (OSError, ValueError):
                     if _is_reference_text(item.name):
                         self.add(statement, "reference_import", "engineering code imports reference code")
             current = self._statement(statement, current)
+            if self._statements_definitely_terminate([statement]):
+                break
         if current is not env:
             env.values = current.values
         return env
@@ -2988,6 +3566,8 @@ except (OSError, ValueError):
                     "eval": _Fact(callable=_Callable("builtins.eval")),
                     "exec": _Fact(callable=_Callable("builtins.exec")),
                     "getattr": _Fact(callable=_Callable("builtins.getattr")),
+                    "globals": _Fact(callable=_Callable("builtins.globals")),
+                    "locals": _Fact(callable=_Callable("builtins.locals")),
                     "object": _Fact(callable=_Callable("builtins.object")),
                     "print": _Fact(callable=_Callable("builtins.print")),
                     "setattr": _Fact(callable=_Callable("builtins.setattr")),

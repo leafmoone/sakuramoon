@@ -4,7 +4,7 @@
 
 A002 已将用户确认的两条资产执行边界写入现行决定、仓库规则、路线图与资产策略，并通过合同测试建立机器保护。实现没有读取或执行 `reference/` 内容、没有读取 `.env`、没有下载/哈希/加载模型、没有使用 GPU，也没有创建性能占位。
 
-首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17` 后的独立 AI/Infra 审查均提出 changes required。现已完成 `review_remediation.md` 所列第五轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
+首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17`、`70981e19510c5a6c7d7889d6042b5e8a55887931` 后的独立 AI/Infra 审查均提出 changes required。现已完成 `review_remediation.md` 所列第六轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
 
 ## 实现摘要
 
@@ -52,3 +52,18 @@ A002 已将用户确认的两条资产执行边界写入现行决定、仓库规
 - 结果：191/191 boundary contracts、389/389 full tests、28 Python sources/0 violations、全仓 Ruff PASS、strict Pyright 0 errors/0 warnings、traceability 221 requirements/source nodes PASS。
 - Shared compatibility：并行 D010 冻结实现所在共享树扫描 36 Python sources、0 violations；这不是 D010 远端流式或任务放行证据。
 - 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有模型/数据下载、GPU 工作或性能 artifact。状态保持第五轮修复完成、等待独立 AI/Infra 复审。
+
+## 第六轮修复摘要
+
+- Call expansion 不再把 `ast.Starred` 或 nonliteral `**` 降为 taint-only。完整 container children 进入 network、model-root、capability 与 sensitive-callable 递归检查；known/unknown calls、class construction 和 `partial` binding 使用同一 security fact 集合。
+- Branch/loop join 对不同 container shape 做不可逆 widening，并在容器顶层保存 network、model-root、sensitive callable、asset capability 与 dataset capability summary，保证 join 幂等且不会静默丢失历史安全事实。`pop`/`popitem` 返回候选 value fact，并同步有限 mutation state。
+- Loop analysis 分开收集 break exit 与 continue back-edge；block 在确定终止语句后停止，normal exhaustion 才执行 loop `else`。敏感 loader 的 break/continue 负合同同时验证 fact 传播和 fixed-point convergence。
+- Production restricted language 新增 dynamic namespace/code/frame 与 callable reflection deny。无参 locals/vars/globals、eval/exec/compile、frame/f_locals、operator adapters、D010 reflected private helpers、非审计 object member extraction 全部失败；runtime capability fingerprint 的既有 object access 由精确 path/function/receiver/attribute tuple 审计。
+- Relative assets star import 纳入敏感 import；synthetic Git helper call-site 要求第二参数为 proven safe relative literal。D010 listing `remaining` 获得独立 bounded-nonnegative fact，精确表达式只负责签发，重赋值与 merge 会移除信任。
+
+## 第六轮验证结论
+
+- Clean candidate：base `70981e19510c5a6c7d7889d6042b5e8a55887931`，只叠加 `tools/asset_execution_boundary.py` 与 `tests/contracts/assets/test_asset_execution_boundary.py`。
+- 结果：232/232 boundary contracts（19.56 秒 pytest、20.186 秒 wall）、430/430 full tests（40.05/40.693 秒）、28 Python sources/0 violations（18.682 秒）、Ruff PASS（0.279 秒）、strict Pyright 0 errors/0 warnings（4.244 秒）、traceability 221 requirements/source nodes PASS（1.176 秒）。
+- Shared compatibility：冻结 D010 所在共享树扫描 36 Python sources、0 violations，用时 28.165 秒。Scanner 只在 preflight/验证阶段运行，不进入训练 step 热路径；该结果不是 D010 远端 WebDataset 流式证据。
+- 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有模型/数据下载、GPU 工作或性能 artifact。状态保持第六轮修复完成、等待独立 AI/Infra 复审。

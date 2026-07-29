@@ -699,6 +699,96 @@ class ModelScopeDatasetTransport:
 
 
 @pytest.mark.parametrize(
+    "statement",
+    [
+        "external(*[headers])",
+        "external(*(target,))",
+        "values = [connection]\n        external(*values)",
+        "values = (headers,)\n        external(*values)",
+        "external(*((target,),))",
+        "external(*(item for item in (connection,)))",
+        (
+            "values = [headers] if range_start is None else unknown_values"
+            "\n        external(*values)"
+        ),
+        "external(*unknown_values, headers)",
+    ],
+)
+def test_d010_starred_positional_expansion_preserves_network_facts(
+    statement: str,
+) -> None:
+    source = f'''
+import http.client
+import ssl
+from sakuramoon.adapters import external
+class ModelScopeDatasetTransport:
+    def _open_get(self, target, *, range_start):
+        connection = http.client.HTTPSConnection(
+            host=target.host,
+            port=target.port,
+            timeout=self._policy.connect_timeout_seconds,
+            context=ssl.create_default_context(),
+        )
+        headers = self._request_headers(target)
+        if range_start is not None:
+            headers["Range"] = f"bytes={{range_start}}-"
+        {statement}
+        connection.request(
+            "GET",
+            target.request_target,
+            body=None,
+            headers=headers,
+            encode_chunked=False,
+        )
+'''
+
+    codes = _codes(source, "src/sakuramoon/data/modelscope.py")
+    assert "network_capability_escape_forbidden" in codes
+    assert "network_call_forbidden" in codes
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        'options = {"headers": headers}\n        external(**options)',
+        (
+            'options = {"nested": {"target": target}}'
+            "\n        external(**options)"
+        ),
+        (
+            'options = {"connection": connection} if range_start is None '
+            "else unknown_options\n        external(**options)"
+        ),
+        "external(**unknown_options, headers=headers)",
+    ],
+)
+def test_d010_keyword_expansion_preserves_nested_network_facts(
+    statement: str,
+) -> None:
+    source = f'''
+import http.client
+import ssl
+from sakuramoon.adapters import external
+class ModelScopeDatasetTransport:
+    def _open_get(self, target, *, range_start):
+        connection = http.client.HTTPSConnection(
+            host=target.host,
+            port=target.port,
+            timeout=self._policy.connect_timeout_seconds,
+            context=ssl.create_default_context(),
+        )
+        headers = self._request_headers(target)
+        if range_start is not None:
+            headers["Range"] = f"bytes={{range_start}}-"
+        {statement}
+'''
+
+    assert "network_capability_escape_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
+@pytest.mark.parametrize(
     "adapter",
     [
         '''operator.methodcaller(
@@ -744,6 +834,60 @@ class ModelScopeDatasetTransport:
     )
 
 
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    [
+        (
+            'locals()["headers"].__setitem__("Host", "attacker.invalid")',
+            "namespace_reflection_forbidden",
+        ),
+        (
+            'vars()["headers"].__setitem__("Host", "attacker.invalid")',
+            "namespace_reflection_forbidden",
+        ),
+        ('eval("headers.clear()")', "dynamic_code_forbidden"),
+        ('exec("headers.clear()")', "dynamic_code_forbidden"),
+        (
+            'inspect.currentframe().f_locals["headers"].clear()',
+            "namespace_reflection_forbidden",
+        ),
+        (
+            'getattr(self, "_open_get")(target, range_start=range_start)',
+            "callable_reflection_forbidden",
+        ),
+        (
+            'operator.attrgetter("_open_get")(self)('
+            + "target, range_start=range_start)",
+            "callable_reflection_forbidden",
+        ),
+    ],
+)
+def test_d010_dynamic_namespace_and_callable_reflection_is_forbidden(
+    statement: str,
+    expected: str,
+) -> None:
+    source = f'''
+import http.client
+import inspect
+import operator
+import ssl
+class ModelScopeDatasetTransport:
+    def _open_get(self, target, *, range_start):
+        connection = http.client.HTTPSConnection(
+            host=target.host,
+            port=target.port,
+            timeout=self._policy.connect_timeout_seconds,
+            context=ssl.create_default_context(),
+        )
+        headers = self._request_headers(target)
+        if range_start is not None:
+            headers["Range"] = f"bytes={{range_start}}-"
+        {statement}
+'''
+
+    assert expected in _codes(source, "src/sakuramoon/data/modelscope.py")
+
+
 def test_d010_target_constructor_alias_is_rejected() -> None:
     source = """
 class _ValidatedHttpTarget: pass
@@ -780,6 +924,25 @@ class ModelScopeDatasetTransport:
         response, connection = self._follow_redirects(target, range_start=None)
         return self._read_response(response, {length})
 '''
+
+    assert "network_helper_call_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
+def test_d010_listing_remaining_requires_live_nonnegative_provenance() -> None:
+    source = """
+class ModelScopeDatasetTransport:
+    def _read_listing_once(self, target):
+        response, connection = self._follow_redirects(target, range_start=None)
+        payload = bytearray()
+        remaining = _LISTING_RESPONSE_LIMIT_BYTES + 1 - len(payload)
+        remaining = -1
+        return self._read_response(
+            response,
+            min(self._policy.stream_chunk_bytes, remaining),
+        )
+"""
 
     assert "network_helper_call_forbidden" in _codes(
         source, "src/sakuramoon/data/modelscope.py"
@@ -935,6 +1098,102 @@ def test_scope_sensitive_model_provenance_rejects_bypasses(
     source: str, expected: str
 ) -> None:
     assert expected in _codes(source)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "external(*[AutoModel.from_pretrained])",
+        (
+            "callbacks = (AutoModel.from_pretrained,)"
+            "\nexternal(*callbacks)"
+        ),
+        "external(*((AutoModel.from_pretrained,),))",
+        (
+            "external(*(callback for callback in "
+            "(AutoModel.from_pretrained,)))"
+        ),
+        (
+            "callbacks = [AutoModel.from_pretrained] if enabled else unknown"
+            "\nexternal(*callbacks)"
+        ),
+        (
+            'options = {"callback": AutoModel.from_pretrained}'
+            "\nexternal(**options)"
+        ),
+        (
+            'options = {"nested": {"callback": AutoModel.from_pretrained}}'
+            "\nexternal(**options)"
+        ),
+    ],
+)
+def test_argument_expansion_preserves_nested_sensitive_callables(
+    body: str,
+) -> None:
+    source = f'''
+from sakuramoon.adapters import external
+from transformers import AutoModel
+{body}
+'''
+
+    assert "sensitive_callable_escape" in _codes(source)
+
+
+@pytest.mark.parametrize(
+    "container",
+    [
+        "{AutoModel.from_pretrained}",
+        '{"model": AutoModel.from_pretrained}',
+    ],
+)
+def test_pop_extraction_preserves_sensitive_loader_fact(
+    container: str,
+) -> None:
+    argument = '"model"' if container.startswith("{") and ":" in container else ""
+    source = f'''
+from transformers import AutoModel
+loaders = {container}
+loader = loaders.pop({argument})
+loader("remote/model")
+'''
+
+    codes = _codes(source)
+    assert "unverified_model_source" in codes
+    assert "model_network_enabled" in codes
+
+
+@pytest.mark.parametrize("terminator", ["break", "continue"])
+def test_loop_exit_facts_preserve_sensitive_loader_provenance(
+    terminator: str,
+) -> None:
+    source = f'''
+from transformers import AutoModel
+loader = safe_loader
+for item in values:
+    loader = AutoModel.from_pretrained
+    {terminator}
+loader("remote/model")
+'''
+
+    codes = _codes(source)
+    assert "unverified_model_source" in codes
+    assert "loop_analysis_did_not_converge" not in codes
+
+
+@pytest.mark.parametrize("expansion", ["*[root]", '**{"root": root}', "**options"])
+def test_model_root_cannot_escape_through_argument_expansion(
+    expansion: str,
+) -> None:
+    setup = 'options = {"root": root}\n' if expansion == "**options" else ""
+    source = f'''
+from sakuramoon.assets import require_runtime_assets_ready
+from sakuramoon.encoders.external import construct
+selection = require_runtime_assets_ready(config, manifest, root=repository)
+root = selection.verified_root("qwen_text_encoder")
+{setup}construct({expansion})
+'''
+
+    assert "model_root_cross_module_call_forbidden" in _codes(source)
 
 
 def test_model_provenance_does_not_leak_across_functions() -> None:
@@ -1128,6 +1387,41 @@ def test_reflective_capability_construction_and_mutation_are_rejected(
     [
         """
 from transformers import AutoModel
+class Holder:
+    loader = AutoModel.from_pretrained
+loader = getattr(Holder, "loader")
+loader("remote/model")
+""",
+        """
+import operator
+from transformers import AutoModel
+class Holder:
+    loader = AutoModel.from_pretrained
+loader = operator.attrgetter("loader")(Holder)
+loader("remote/model")
+""",
+    ],
+)
+def test_reflective_class_member_resolution_is_forbidden(source: str) -> None:
+    assert "callable_reflection_forbidden" in _codes(source)
+
+
+def test_object_getattribute_cannot_extract_verified_capability_members() -> None:
+    source = """
+from sakuramoon.assets import require_runtime_assets_ready
+selection = require_runtime_assets_ready(config, manifest, root=repository)
+method = object.__getattribute__(selection, "verified_root")
+method("qwen_text_encoder")
+"""
+
+    assert "capability_reflection_forbidden" in _codes(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+from transformers import AutoModel
 loaders = [AutoModel.from_pretrained]
 loaders[0]("other/model", local_files_only=True)
 """,
@@ -1211,6 +1505,10 @@ HTTPSConnection("modelscope.cn")
 """,
         """
 from sakuramoon.assets import *
+candidate = VerifiedAssetSelection(payload)
+""",
+        """
+from ..assets import *
 candidate = VerifiedAssetSelection(payload)
 """,
     ],
@@ -1935,6 +2233,33 @@ def make_reference(root, relative, origin, licenses):
     assert "reference_process_exec" in _codes(
         source, "tests/unit/assets/conftest.py"
     )
+
+
+@pytest.mark.parametrize(
+    ("relative", "expected"),
+    [
+        ('"reference/HDM"', None),
+        ('"../../reference"', "synthetic_git_path_argument_forbidden"),
+        ('"/absolute/reference"', "synthetic_git_path_argument_forbidden"),
+    ],
+)
+def test_synthetic_git_helper_requires_safe_relative_call_argument(
+    relative: str,
+    expected: str | None,
+) -> None:
+    source = f'''
+import subprocess
+def make_reference(root, relative, origin, licenses):
+    repo = root / relative
+    subprocess.run(("git", "-C", str(repo), "add", "."), check=True)
+make_reference(tmp_path, {relative}, origin, licenses)
+'''
+
+    codes = _codes(source, "tests/unit/assets/conftest.py")
+    if expected is None:
+        assert not codes
+    else:
+        assert expected in codes
 
 
 def test_unrelated_method_names_and_read_only_metadata_are_not_false_positives() -> None:
