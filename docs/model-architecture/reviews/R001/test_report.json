@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "task_id": "R001",
-  "generated_at_utc": "2026-07-29T17:29:51Z",
+  "generated_at_utc": "2026-07-29T19:07:42Z",
   "status": "passed",
   "hardware_level": "CPU",
   "gpu_used": false,
   "summary": {
-    "checks": 16,
-    "passed": 16,
+    "checks": 22,
+    "passed": 22,
     "failed": 0,
     "skipped": 0
   },
@@ -108,6 +108,42 @@
       "command": "PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -q -p no:cacheprovider tests/contracts/assets/test_asset_boundary.py",
       "result": "passed",
       "evidence": "5 passed in 0.18s; an earlier no-PYTHONPATH collection attempt executed no tests and was corrected for the repository src layout"
+    },
+    {
+      "id": "trace-registry-semantics",
+      "command": "parse HEAD and worktree traceability TOML; assert revision/source/changelog/profile/owner/DOC-001..004 invariants",
+      "result": "passed",
+      "evidence": "registry 9->10; sources and changelog unchanged; repository_boundary owners are R001+D001; DOC-001/002 implemented by task:R001; DOC-003/004 byte-equivalent as parsed objects"
+    },
+    {
+      "id": "traceability-checker",
+      "command": "PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync python tools/verify_traceability.py --root . --format text",
+      "result": "passed",
+      "evidence": "requirements=221; source_nodes=221; archive_files=16; production_modules=13; runtime_config_keys=235"
+    },
+    {
+      "id": "trace-targeted-tests",
+      "command": "PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -q -p no:cacheprovider tests/unit/docs/test_verify_traceability.py tests/contracts/assets/test_asset_boundary.py",
+      "result": "passed",
+      "evidence": "41 passed in 10.27s; the first run exposed 3 fixture-only missing-path failures, then the authorized repo_copy path list was extended without changing checker or assertion semantics"
+    },
+    {
+      "id": "trace-full-tests",
+      "command": "PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -q -p no:cacheprovider",
+      "result": "passed",
+      "evidence": "195 passed in 15.82s"
+    },
+    {
+      "id": "trace-ruff",
+      "command": "uv run --frozen --no-sync ruff check .",
+      "result": "passed",
+      "evidence": "All checks passed"
+    },
+    {
+      "id": "trace-pyright",
+      "command": "uv run --frozen --no-sync pyright",
+      "result": "passed",
+      "evidence": "0 errors, 0 warnings, 0 informations"
     }
   ],
   "tracked_manifest": {

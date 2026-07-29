@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 9
+registry_revision = 10
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -96,6 +96,34 @@ not_applicable_fields = [
     "benchmarks",
 ]
 not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+
+[[profiles]]
+name = "repository_boundary"
+owner_tasks = [
+    "R001",
+    "D001",
+]
+config_keys = []
+modules = [
+    "tools/verify_traceability.py",
+]
+reference_modules = []
+tests = [
+    "tests/unit/docs/**",
+    "tests/contracts/assets/test_asset_boundary.py",
+]
+benchmarks = []
+artifacts = [
+    "docs/model-architecture/reviews/R001/**",
+    "docs/model-architecture/reviews/D001/**",
+]
+hardware = "CPU"
+not_applicable_fields = [
+    "config_keys",
+    "reference_modules",
+    "benchmarks",
+]
+not_applicable_reason = "Repository authority and asset-exclusion policy have no runtime configuration, reference module, or performance benchmark; R001 owns the boundary implementation and D001 owns its machine-checkable enforcement."
 
 [[profiles]]
 name = "constraints"
@@ -735,7 +763,7 @@ no_configs_reason = ""
 id = "DOC-001"
 kind = "requirement"
 status = "implemented"
-profile = "governance"
+profile = "repository_boundary"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
     "0. 判定规则与当前边界",
@@ -746,10 +774,24 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = "task:D001"
+implementation_commit_ref = "task:R001"
 implementation_paths = [
+    ".gitignore",
+    "README.md",
+    "AGENTS.md",
+    "docs/model-architecture/progress/asset-policy.md",
+    "docs/model-architecture/progress/tasks/R001.md",
+    "docs/model-architecture/reviews/R001/implementation_report.md",
+    "docs/model-architecture/reviews/R001/reference_manifest.json",
+    "docs/model-architecture/reviews/R001/review_remediation.md",
+    "docs/model-architecture/reviews/R001/test_report.json",
+    "docs/model-architecture/reviews/R001/timing.json",
+    "docs/model-architecture/reviews/R001/artifacts.json",
+    "docs/model-architecture/reviews/R001/tracked-files.txt",
+    "tests/unit/docs/test_verify_traceability.py",
     "tools/verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/time-log.jsonl",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -762,9 +804,11 @@ modules = [
 reference_modules = []
 tests = [
     "tests/unit/docs/**",
+    "tests/contracts/assets/test_asset_boundary.py",
 ]
 benchmarks = []
 artifacts = [
+    "docs/model-architecture/reviews/R001/**",
     "docs/model-architecture/reviews/D001/**",
 ]
 not_applicable_fields = [
@@ -772,13 +816,13 @@ not_applicable_fields = [
     "reference_modules",
     "benchmarks",
 ]
-not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+not_applicable_reason = "Repository authority and asset-exclusion policy have no runtime configuration, reference module, or performance benchmark; R001 owns the boundary implementation and D001 owns its machine-checkable enforcement."
 
 [[requirements]]
 id = "DOC-002"
 kind = "requirement"
 status = "implemented"
-profile = "governance"
+profile = "repository_boundary"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
     "0. 判定规则与当前边界",
@@ -789,10 +833,24 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = "task:D001"
+implementation_commit_ref = "task:R001"
 implementation_paths = [
+    ".gitignore",
+    "README.md",
+    "AGENTS.md",
+    "docs/model-architecture/progress/asset-policy.md",
+    "docs/model-architecture/progress/tasks/R001.md",
+    "docs/model-architecture/reviews/R001/implementation_report.md",
+    "docs/model-architecture/reviews/R001/reference_manifest.json",
+    "docs/model-architecture/reviews/R001/review_remediation.md",
+    "docs/model-architecture/reviews/R001/test_report.json",
+    "docs/model-architecture/reviews/R001/timing.json",
+    "docs/model-architecture/reviews/R001/artifacts.json",
+    "docs/model-architecture/reviews/R001/tracked-files.txt",
+    "tests/unit/docs/test_verify_traceability.py",
     "tools/verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/time-log.jsonl",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -805,9 +863,11 @@ modules = [
 reference_modules = []
 tests = [
     "tests/unit/docs/**",
+    "tests/contracts/assets/test_asset_boundary.py",
 ]
 benchmarks = []
 artifacts = [
+    "docs/model-architecture/reviews/R001/**",
     "docs/model-architecture/reviews/D001/**",
 ]
 not_applicable_fields = [
@@ -815,7 +875,7 @@ not_applicable_fields = [
     "reference_modules",
     "benchmarks",
 ]
-not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+not_applicable_reason = "Repository authority and asset-exclusion policy have no runtime configuration, reference module, or performance benchmark; R001 owns the boundary implementation and D001 owns its machine-checkable enforcement."
 
 [[requirements]]
 id = "DOC-003"

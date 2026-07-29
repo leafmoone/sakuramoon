@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "R001",
-  "generated_at_utc": "2026-07-29T17:23:26Z",
+  "generated_at_utc": "2026-07-29T19:07:42Z",
   "self_hash_policy": "artifacts.json is not self-hashed; each listed digest is resolved against its explicit snapshot_binding",
   "snapshot_bindings": {
     "r001_initial_commit": {
@@ -9,8 +9,12 @@
       "digest_source": "Git blob at the immutable R001 initial commit"
     },
     "r001_review_remediation": {
+      "commit": "98f33ab36ed1f606a7f6f6c57cb3b0bd18b39820",
+      "digest_source": "Git blob at the committed R001 review-remediation snapshot"
+    },
+    "r001_trace_remediation": {
       "commit": "task:R001",
-      "digest_source": "worktree content destined for the atomic R001 review-remediation commit"
+      "digest_source": "worktree content destined for the atomic R001 trace-remediation commit"
     }
   },
   "artifacts": [
@@ -41,32 +45,32 @@
     {
       "path": "docs/model-architecture/progress/tasks/R001.md",
       "kind": "task_status_and_traceability",
-      "snapshot_binding": "r001_review_remediation",
-      "sha256": "52d3c56e44a638debb2fa823b7b73454bacc8f307c7c9112ce9782c7317a57d5"
+      "snapshot_binding": "r001_trace_remediation",
+      "sha256": "83bc3b95ef0066d655b1656f44d71c4ab9ecea59e262589e18c4fc880a1c3635"
     },
     {
       "path": "docs/model-architecture/progress/time-log.jsonl",
       "kind": "development_time_log",
-      "snapshot_binding": "r001_initial_commit",
-      "sha256": "476ab95a5fac571d349b33566d199fe2d09b7b61129571ebb90cb7d964556c49"
+      "snapshot_binding": "r001_trace_remediation",
+      "sha256": "3604dff653df74deb29cd19ab2abddaed5ac7edd5f3e362fd6e452b4d4e0810a"
     },
     {
       "path": "docs/model-architecture/reviews/R001/implementation_report.md",
       "kind": "implementation_report",
-      "snapshot_binding": "r001_review_remediation",
-      "sha256": "ee87b89cd808c61c7de0f3688e8aacbe1abb3ef14ed69c13630ca5c5e76cddb2"
+      "snapshot_binding": "r001_trace_remediation",
+      "sha256": "c6a481b8a53aaba1c92b22e676f225f2f85de5e40cf971e2af16f9888ea325ea"
     },
     {
       "path": "docs/model-architecture/reviews/R001/test_report.json",
       "kind": "test_report",
-      "snapshot_binding": "r001_review_remediation",
-      "sha256": "f8ae24af4797463ae92640ee5164dcb31f0881175e739a9545edf66cb8a74b18"
+      "snapshot_binding": "r001_trace_remediation",
+      "sha256": "ce863ad469476abd708088eb6c5dbfd12996078e601f58d53e92b5919dfa71aa"
     },
     {
       "path": "docs/model-architecture/reviews/R001/timing.json",
       "kind": "task_timing",
-      "snapshot_binding": "r001_review_remediation",
-      "sha256": "ab54e0c700540e47c5da64409dbf9f644c368bb3bbc5d2851bd8b90f794af477"
+      "snapshot_binding": "r001_trace_remediation",
+      "sha256": "a568ceef2b206ce8a96a3c02e4dc4636e813cf5fccce8f04189c0ad9edee6423"
     },
     {
       "path": "docs/model-architecture/reviews/R001/reference_manifest.json",
@@ -85,6 +89,18 @@
       "kind": "review_remediation",
       "snapshot_binding": "r001_review_remediation",
       "sha256": "a0a65e5593fc5313a00e19a57ca606721018b0933f4b1c6180160580066ecc86"
+    },
+    {
+      "path": "docs/model-architecture/progress/traceability.toml",
+      "kind": "requirement_traceability",
+      "snapshot_binding": "r001_trace_remediation",
+      "sha256": "dd8acb19e941b7d1b5176c6747e093446c602c0e360208c18ca158c6fd001bbf"
+    },
+    {
+      "path": "tests/unit/docs/test_verify_traceability.py",
+      "kind": "traceability_fixture",
+      "snapshot_binding": "r001_trace_remediation",
+      "sha256": "25ba3cdc7069569dd5f0e23279fe2558ea315c1041ba7f2e7073c9d93132e7d3"
     }
   ]
 }
