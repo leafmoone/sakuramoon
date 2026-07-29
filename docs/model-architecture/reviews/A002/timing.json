@@ -18,5 +18,44 @@
     "hardware_level": "CPU",
     "gpu_seconds": 0,
     "status": "second_remediation_complete_pending_independent_rereview"
+  },
+  "third_review_remediation_validation": {
+    "measurement_scope": "third-review remediation and A002-only isolated validation",
+    "agent": "a002_boundary_impl",
+    "started_at_utc": null,
+    "ended_at_utc": "2026-07-29T20:25:02Z",
+    "duration_seconds": null,
+    "timing_status": "unavailable_after_context_compaction",
+    "hardware_level": "CPU",
+    "gpu_seconds": 0,
+    "measured_commands_seconds": {
+      "boundary_contract": 11.78,
+      "full_suite": 25.22,
+      "scanner": 3.0,
+      "ruff": 0.1,
+      "pyright": 4.0,
+      "traceability": 1.1
+    },
+    "isolated_uv_sync_timeout_seconds": 120,
+    "status": "third_remediation_complete_pending_independent_rereview"
+  },
+  "fourth_review_remediation_validation": {
+    "measurement_scope": "frozen D010 stdlib HTTPS boundary remediation and final A002-only isolated validation",
+    "agent": "a002_boundary_impl",
+    "started_at_utc": null,
+    "ended_at_utc": "2026-07-29T21:17:51Z",
+    "duration_seconds": null,
+    "timing_status": "start unavailable after context compaction",
+    "hardware_level": "CPU",
+    "gpu_seconds": 0,
+    "measured_commands_seconds": {
+      "boundary_contract_wall": 5.17,
+      "full_suite_wall": 25.10,
+      "scanner_wall": 4.21,
+      "ruff_wall": 0.27,
+      "pyright_wall": 3.79,
+      "traceability_wall": 1.15
+    },
+    "status": "fourth_remediation_complete_pending_independent_rereview"
   }
 }

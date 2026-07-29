@@ -1,29 +1,31 @@
 {
   "schema_version": 1,
   "task_id": "A002",
+  "candidate_base_commit": "fa435ee72d2d905911ea296c07d1ed3743667a05",
   "files": {
-    "AGENTS.md": "d4ba2545430c33d94bf04cb3cff96436552b32a2b0df0b5ecdbf661f35d11a0e",
-    "docs/model-architecture/current/confirmed-decisions.md": "5ddb1ff9649a62c799650bc912a0275839a374cc859169ecd036b2d0194b6d1d",
-    "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md": "f7ab36618fbc2c3837fe4728fc4b458990971d37f8d702a5f4574570ebdf5a00",
-    "docs/model-architecture/progress/asset-policy.md": "70adf36cb012652fb29119eaecb4b8539cb7399e53b3dc0b92e882baa608114c",
-    "docs/model-architecture/progress/traceability.toml": "ea3589a926d221970f522bf4cfe98e577f8d47f8cc90ebaf7258ada9bd5d45f1",
-    "src/sakuramoon/assets/__init__.py": "9c17ee900ec1dfdd2d706fd1c034509c6152cb90a99d1adfa750fa6b67cd68fd",
-    "src/sakuramoon/assets/inspect.py": "c51a2eceb35c8ea88dcde166c542d6cf997b67224db7832afd48153d808aee49",
-    "tests/contracts/assets/conftest.py": "a541ece254afc811b0c6b71d9b70fea65e623b0b57b7351b12394e1d28af3ea5",
-    "tests/contracts/assets/test_asset_execution_boundary.py": "851afc06f5e2f261313160374c4a96e77842fc07241f67bf3e9642f55bb145a6",
-    "tests/unit/assets/conftest.py": "ebad46c8c6982b02d93060b23c2ae81c8116f248a0bf0c074cbd135fdfb71649",
-    "tests/unit/assets/test_inspect.py": "1cae66e32ad94bebf6a60332016b0254bb738b162d64a16f4840aa9a675655f1",
-    "tests/unit/docs/test_verify_traceability.py": "bcc9d595dff9defb734daaf0732d2c2e400e056f449bcfbbf5065e976778428d",
-    "tools/__init__.py": "ff36e0ad05540b28a6954d61429194fa76a5f6c3027580d63ee8e90e1ce9c980",
-    "tools/asset_execution_boundary.py": "d48b3c47438496a79a869667d84d2ef2a98847d1c8a750c39f5124087e3efeb2",
-    "docs/model-architecture/progress/tasks/A002.md": "b0b84c75e3e296e2c9d4158c31432f9ce9becb72d1f41fe62ca40c25ee3e4140",
-    "docs/model-architecture/progress/time-log.jsonl": "682ac2e1f2c48465c58c6150752945f41bc588346b39fb247c91897751cfcd64",
-    "docs/model-architecture/reviews/A002/implementation_report.md": "96c70140d8506fbd879c2a67305987586a64eefb01ce59bc478bd919011b038a",
-    "docs/model-architecture/reviews/A002/test_report.json": "0b02f018c38cd2230f02dba54c84ac61b99a64c66ac2a81e7170ecbfc6bb2cc0",
-    "docs/model-architecture/reviews/A002/review_remediation.md": "48578cf824db44e75a97e33f00048e4d791da3eaeda677da7ec88383fcfbd165",
-    "docs/model-architecture/reviews/A002/timing.json": "c4811610b6d7c7232026cf08f84c8009b734821c916c42346da48c047948978d"
+    "tools/asset_execution_boundary.py": "518ddc37539ec081314b22e40955159081174bd7fdb42e8f35754465dcf6c7ca",
+    "tests/contracts/assets/test_asset_execution_boundary.py": "ffe1f8c2e728282c0a5de77ec6ea3f11dad186782d5d48b2143f2f5419b92d41",
+    "docs/model-architecture/progress/tasks/A002.md": "b8a6f6da7e69706360fe00aa5b119c937f9552af97c31066f44a487ab25335ef",
+    "docs/model-architecture/progress/time-log.jsonl": "7eabae849aceeb1745c309dba5e83e69701cfbbcbbaabdef5f53528b1da2f833",
+    "docs/model-architecture/reviews/A002/implementation_report.md": "768c5a74d1db6bf883b23a591f94b1d997288edd62eb2aa6493dd4ebe5b579e4",
+    "docs/model-architecture/reviews/A002/review_remediation.md": "61ce29fbc0bcdafd6bc256ef02eab7a5136fab862d8e7e1c2ca44f642f2bdc55",
+    "docs/model-architecture/reviews/A002/test_report.json": "09cef89392934e07947f9c69f53e66e259ec4d60ce820bcef890d875a361eab6",
+    "docs/model-architecture/reviews/A002/timing.json": "a96b79831aca8cc6aecb6c01a531a93465d9c123f42629735f885e704359e406"
   },
+  "prerequisite_commits": {
+    "A001_runtime_capability_and_cli_hardening": "fa435ee72d2d905911ea296c07d1ed3743667a05"
+  },
+  "traceability": {
+    "registry_revision": 11,
+    "modified": false,
+    "reason": "fourth remediation did not add or move requirements and did not change mapping, path, or status"
+  },
+  "excluded_concurrent_worktree_paths": [
+    "D001 checker and contract changes",
+    "D010 data implementation and evidence"
+  ],
   "performance_artifacts_created": false,
   "large_payloads_included": false,
-  "second_review_remediation": true
+  "third_review_remediation": true,
+  "fourth_review_remediation": true
 }

@@ -2,62 +2,95 @@
   "schema_version": 1,
   "task_id": "A002",
   "hardware": "CPU",
-  "targeted_boundary_and_git": {
-    "command": "uv run --frozen pytest -q tests/contracts/assets/test_asset_execution_boundary.py tests/unit/assets/test_inspect.py",
-    "passed": 82,
-    "failed": 0,
-    "duration_seconds": 4.90
+  "candidate": {
+    "base_commit": "fa435ee72d2d905911ea296c07d1ed3743667a05",
+    "overlaid_paths": [
+      "tools/asset_execution_boundary.py",
+      "tests/contracts/assets/test_asset_execution_boundary.py"
+    ],
+    "excluded_concurrent_diffs": [
+      "D001",
+      "D010",
+      "A002 documentation and evidence"
+    ],
+    "diff_check": "passed"
   },
-  "governance_and_contract": {
-    "command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py tests/contracts/assets/test_asset_execution_boundary.py tests/unit/assets/test_inspect.py",
-    "passed": 118,
+  "review_remediation": {
+    "third_ai_verdict": "FAIL_changes_required",
+    "third_infra_verdict": "FAIL_changes_required",
+    "status": "fourth_remediation_complete_pending_independent_rereview"
+  },
+  "boundary_contract": {
+    "command": "uv run pytest -q tests/contracts/assets/test_asset_execution_boundary.py",
+    "passed": 151,
     "failed": 0,
-    "duration_seconds": 11.53
+    "wall_duration_seconds": 5.17,
+    "pytest_reported_duration_seconds": 4.46
+  },
+  "full_suite": {
+    "command": "uv run pytest -q",
+    "passed": 349,
+    "failed": 0,
+    "wall_duration_seconds": 25.10,
+    "pytest_reported_duration_seconds": 24.39
   },
   "scanner_self_check": {
-    "command": "uv run --frozen python -c 'from pathlib import Path; from tools.asset_execution_boundary import python_sources, scan_repository; p=python_sources(Path.cwd()); print(f\"sources={len(p)}\"); print(f\"violations={len(scan_repository(Path.cwd()))}\")'",
-    "tracked_python_sources": 28,
+    "command": "uv run python -c '<scan_repository and python_sources>'",
     "python_sources": 28,
     "violations": 0,
+    "wall_duration_seconds": 4.21,
     "includes_scanner_itself": true,
     "ignored_notebook_checkpoints_excluded": true
   },
+  "shared_tree_d010_compatibility": {
+    "command": "uv run python -c '<scan_repository and python_sources>'",
+    "python_sources": 33,
+    "violations": 0,
+    "notes": "Includes the concurrent frozen D010 stdlib HTTPS implementation; not part of the isolated A002 code candidate."
+  },
+  "ruff": {
+    "command": "uv run ruff check .",
+    "ok": true,
+    "wall_duration_seconds": 0.27
+  },
+  "pyright": {
+    "command": "uv run pyright",
+    "errors": 0,
+    "warnings": 0,
+    "wall_duration_seconds": 3.79
+  },
   "traceability": {
-    "command": "uv run --frozen python tools/verify_traceability.py --format json",
+    "command": "uv run python tools/verify_traceability.py",
     "ok": true,
     "requirements": 221,
     "source_nodes": 221,
     "archive_files": 16,
-    "working_tree_production_modules": 13,
-    "clean_tracked_production_modules": 12,
-    "working_tree_extra_is_ignored_notebook_checkpoint": true,
+    "production_modules": 12,
     "runtime_config_keys": 235,
-    "registry_revision": 9
+    "errors": [],
+    "wall_duration_seconds": 1.15,
+    "registry_revision": 11,
+    "registry_unchanged_reason": "fourth remediation did not add or move a requirement and did not change mapping, path, or status"
   },
-  "full_suite": {
-    "command": "uv run --frozen pytest -q",
-    "passed": 187,
-    "failed": 0,
-    "duration_seconds": 15.23
-  },
-  "ruff": {
-    "command": "uv run --frozen ruff check src/sakuramoon tests tools",
-    "ok": true
-  },
-  "pyright": {
-    "command": "uv run --frozen pyright",
-    "errors": 0,
-    "warnings": 0
-  },
-  "second_review_remediation": {
-    "second_ai_verdict": "FAIL_changes_required",
-    "second_infra_verdict": "FAIL_changes_required",
-    "status": "second_remediation_complete_pending_original_reviewer_rereview"
+  "environment": {
+    "source_isolation": "detached git worktree at the base commit with only the two A002 code/test paths overlaid",
+    "dependency_environment": "main checkout locked .venv reused by symlink",
+    "prior_isolated_uv_sync_attempt": {
+      "command": "uv sync --frozen",
+      "completed": false,
+      "timeout_seconds": 120,
+      "reason": "materializing the already locked multi-gigabyte CUDA dependency set exceeded the command window",
+      "code_failure": false
+    }
   },
   "validation_notes": [
-    "One intermediate full-suite attempt run alongside other read-only validators observed the existing timing-sensitive manifest-replacement test fail to detect identity drift; its isolated retry passed (1 passed in 0.93s), and the final serial full suite passed 187 tests. No production or test change was made to conceal the transient result."
+    "A001 runtime capability sealing, field fingerprints and CLI hardening are prerequisites from PASS commit fa435ee72d2d905911ea296c07d1ed3743667a05, not an A002-owned code diff.",
+    "The former ModelScope SDK/HubApi allowance was removed. The only D010 network allowance is the exact standard-library HTTPS target/header/helper graph in src/sakuramoon/data/modelscope.py::ModelScopeDatasetTransport.",
+    "Target and header provenance are killed on overwrite; changed receiver, method alias, args, kwargs, location, alternate network imports, patching and TLS verification mutation are negative contracts.",
+    "The clean candidate excludes the concurrent D010 implementation. A separate shared-tree scan verifies its frozen HTTP AST at zero violations; D010 completion retains its own file-safety, pagination and real streaming evidence gates."
   ],
   "gpu_used": false,
-  "network_used": false,
+  "dependency_network_used": true,
+  "model_or_dataset_network_used": false,
   "model_database_dataset_or_reference_payload_read": false
 }
