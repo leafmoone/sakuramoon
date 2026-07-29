@@ -1,24 +1,36 @@
 {
   "schema_version": 1,
   "task_id": "A002",
-  "candidate_base_commit": "fa435ee72d2d905911ea296c07d1ed3743667a05",
+  "candidate_base_commit": "bcf792ef2968f8fb901bc65b1c289c7b8aa57f17",
   "files": {
-    "tools/asset_execution_boundary.py": "518ddc37539ec081314b22e40955159081174bd7fdb42e8f35754465dcf6c7ca",
-    "tests/contracts/assets/test_asset_execution_boundary.py": "ffe1f8c2e728282c0a5de77ec6ea3f11dad186782d5d48b2143f2f5419b92d41",
-    "docs/model-architecture/progress/tasks/A002.md": "b8a6f6da7e69706360fe00aa5b119c937f9552af97c31066f44a487ab25335ef",
-    "docs/model-architecture/progress/time-log.jsonl": "7eabae849aceeb1745c309dba5e83e69701cfbbcbbaabdef5f53528b1da2f833",
-    "docs/model-architecture/reviews/A002/implementation_report.md": "768c5a74d1db6bf883b23a591f94b1d997288edd62eb2aa6493dd4ebe5b579e4",
-    "docs/model-architecture/reviews/A002/review_remediation.md": "61ce29fbc0bcdafd6bc256ef02eab7a5136fab862d8e7e1c2ca44f642f2bdc55",
-    "docs/model-architecture/reviews/A002/test_report.json": "09cef89392934e07947f9c69f53e66e259ec4d60ce820bcef890d875a361eab6",
-    "docs/model-architecture/reviews/A002/timing.json": "a96b79831aca8cc6aecb6c01a531a93465d9c123f42629735f885e704359e406"
+    "tools/asset_execution_boundary.py": "b4138e85bf9328c25792cf59aba039fdbc3630453cdbe4447105a6f1cd2be2ba",
+    "tests/contracts/assets/test_asset_execution_boundary.py": "5888e2d59d84241da24a722b9fa793a5aca03a83b49cb8e037516305157e320d",
+    "docs/model-architecture/progress/tasks/A002.md": "568cae60a3e573c23218cb4fb662bbdd0fb32f55f5ab0657b112da0b633f6e9b",
+    "docs/model-architecture/progress/time-log.jsonl": "0c45c88ba94ee8d1cfd979a6be41377d888f285d3cfbf3766095eb73e946e2b7",
+    "docs/model-architecture/reviews/A002/implementation_report.md": "f3fa1a31bb704fb5b9c790776f932f24fed70189733c93720705463e627c01fe",
+    "docs/model-architecture/reviews/A002/review_remediation.md": "793449b04620f2d5a6931fdc8367041d5f13b6c536517ed4f3d1f2f6c4899f77",
+    "docs/model-architecture/reviews/A002/test_report.json": "ab89ac6eb7dfb12db405658505e9c273933e618394acf9705cae93aa46b860e7",
+    "docs/model-architecture/reviews/A002/timing.json": "2197cdbed84906888acfe2c6af0898a306aa5f75171c06ac98cd8633e327e21c"
   },
+  "commit_paths": [
+    "tools/asset_execution_boundary.py",
+    "tests/contracts/assets/test_asset_execution_boundary.py",
+    "docs/model-architecture/progress/tasks/A002.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/A002/artifacts.json",
+    "docs/model-architecture/reviews/A002/implementation_report.md",
+    "docs/model-architecture/reviews/A002/review_remediation.md",
+    "docs/model-architecture/reviews/A002/test_report.json",
+    "docs/model-architecture/reviews/A002/timing.json"
+  ],
   "prerequisite_commits": {
-    "A001_runtime_capability_and_cli_hardening": "fa435ee72d2d905911ea296c07d1ed3743667a05"
+    "A001_runtime_capability_and_cli_hardening": "fa435ee72d2d905911ea296c07d1ed3743667a05",
+    "A002_reviewed_implementation": "bcf792ef2968f8fb901bc65b1c289c7b8aa57f17"
   },
   "traceability": {
     "registry_revision": 11,
     "modified": false,
-    "reason": "fourth remediation did not add or move requirements and did not change mapping, path, or status"
+    "reason": "fifth remediation did not add or move requirements and did not change mapping, path, or status"
   },
   "excluded_concurrent_worktree_paths": [
     "D001 checker and contract changes",
@@ -26,6 +38,6 @@
   ],
   "performance_artifacts_created": false,
   "large_payloads_included": false,
-  "third_review_remediation": true,
-  "fourth_review_remediation": true
+  "fifth_review_remediation": true,
+  "status": "pending_independent_ai_and_infra_rereview"
 }

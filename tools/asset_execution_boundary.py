@@ -170,6 +170,12 @@ _AUDITED_PARAMETER_CALLS = frozenset(
             "contains",
             "reference",
         ),
+        (
+            "src/sakuramoon/data/manifest.py",
+            "_IdentityWeakRegistry",
+            "contains",
+            "reference",
+        ),
     }
 )
 
@@ -210,9 +216,12 @@ class _Fact:
     dataset_shard: bool = False
     object_place: str | None = None
     instance_class: str | None = None
+    network_instance_maybe: str | None = None
     network_headers: bool = False
     network_query: str | None = None
     network_target: bool = False
+    test_root_holder: bool = False
+    test_root_path: bool = False
     items: tuple[_Fact, ...] = ()
     mapping: tuple[tuple[str | bool | int | None, _Fact], ...] = ()
     literal: str | bool | None = None
@@ -298,6 +307,16 @@ def _fact_literal(value: str | bool | None, *, known: bool = True) -> _Fact:
     return _Fact(taints=taints, literal=value, literal_known=known)
 
 
+def _safe_test_relative_literal(value: str) -> bool:
+    path = Path(value)
+    return (
+        bool(value)
+        and not path.is_absolute()
+        and "\\" not in value
+        and all(part not in {"", ".", ".."} for part in path.parts)
+    )
+
+
 def _union_taints(values: Iterable[frozenset[str]]) -> frozenset[str]:
     result: set[str] = set()
     for value in values:
@@ -333,6 +352,105 @@ def _sensitive_callable(value: _Callable | None) -> bool:
     )
 
 
+def _fact_children(fact: _Fact) -> tuple[_Fact, ...]:
+    callable_children: tuple[_Fact, ...] = ()
+    if fact.callable is not None:
+        callable_children = (
+            *fact.callable.bound_args,
+            *(value for _, value in fact.callable.bound_keywords),
+        )
+    return (
+        *callable_children,
+        *fact.items,
+        *(value for _, value in fact.mapping),
+    )
+
+
+def _fact_contains_sensitive_callable(fact: _Fact) -> bool:
+    return _sensitive_callable(fact.callable) or any(
+        _fact_contains_sensitive_callable(child) for child in _fact_children(fact)
+    )
+
+
+def _fact_contains_network_capability(fact: _Fact) -> bool:
+    direct_callable = fact.callable
+    direct = (
+        fact.network_headers
+        or fact.network_target
+        or fact.instance_class in _NETWORK_INSTANCE_CLASSES
+        or fact.network_instance_maybe in _NETWORK_INSTANCE_CLASSES
+        or (
+            direct_callable is not None
+            and (
+                direct_callable.name.startswith(_NETWORK_CALL_PREFIXES)
+                or direct_callable.name.endswith(
+                    (":_ValidatedHttpTarget", "._ValidatedHttpTarget")
+                )
+            )
+        )
+    )
+    return direct or any(
+        _fact_contains_network_capability(child) for child in _fact_children(fact)
+    )
+
+
+def _fact_contains_security_capability(fact: _Fact) -> bool:
+    return (
+        _fact_contains_sensitive_callable(fact)
+        or _fact_contains_network_capability(fact)
+        or fact.capability_class
+        or fact.selection
+        or fact.model_root is not None
+        or fact.dataset_manifest
+        or fact.dataset_selection
+        or fact.dataset_shard
+        or any(
+            _fact_contains_security_capability(child)
+            for child in _fact_children(fact)
+        )
+    )
+
+
+def _without_network_capabilities(fact: _Fact) -> _Fact:
+    callable_value = fact.callable
+    if callable_value is not None:
+        callable_value = replace(
+            callable_value,
+            bound_args=tuple(
+                _without_network_capabilities(item)
+                for item in callable_value.bound_args
+            ),
+            bound_keywords=tuple(
+                (key, _without_network_capabilities(value))
+                for key, value in callable_value.bound_keywords
+            ),
+        )
+        if (
+            callable_value.name.startswith(_NETWORK_CALL_PREFIXES)
+            or callable_value.name.endswith(
+                (":_ValidatedHttpTarget", "._ValidatedHttpTarget")
+            )
+        ):
+            callable_value = None
+    return replace(
+        fact,
+        callable=callable_value,
+        instance_class=(
+            None
+            if fact.instance_class in _NETWORK_INSTANCE_CLASSES
+            else fact.instance_class
+        ),
+        network_instance_maybe=None,
+        network_headers=False,
+        network_target=False,
+        items=tuple(_without_network_capabilities(item) for item in fact.items),
+        mapping=tuple(
+            (key, _without_network_capabilities(value))
+            for key, value in fact.mapping
+        ),
+    )
+
+
 def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
     same_callable = left.callable if left.callable == right.callable else None
     if same_callable is None and (
@@ -347,6 +465,36 @@ def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
     same_root = left.model_root if left.model_root == right.model_root else None
     same_config = left.config_path if left.config_path == right.config_path else None
     literal_known = left.literal_known and right.literal_known and left.literal == right.literal
+    instance_class = (
+        left.instance_class
+        if left.instance_class == right.instance_class
+        else None
+    )
+    network_instance_maybe: str | None = None
+    network_classes = {
+        value
+        for value in (
+            left.instance_class,
+            left.network_instance_maybe,
+            right.instance_class,
+            right.network_instance_maybe,
+        )
+        if value in _NETWORK_INSTANCE_CLASSES
+    }
+    if instance_class is None and len(network_classes) == 1:
+        candidate = next(iter(network_classes))
+        left_compatible = (
+            left.instance_class == candidate
+            or left.network_instance_maybe == candidate
+            or (left.literal_known and left.literal is None)
+        )
+        right_compatible = (
+            right.instance_class == candidate
+            or right.network_instance_maybe == candidate
+            or (right.literal_known and right.literal is None)
+        )
+        if left_compatible and right_compatible:
+            network_instance_maybe = candidate
     return _Fact(
         taints=left.taints | right.taints,
         callable=same_callable,
@@ -358,11 +506,8 @@ def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
         dataset_selection=left.dataset_selection and right.dataset_selection,
         dataset_shard=left.dataset_shard and right.dataset_shard,
         object_place=left.object_place if left.object_place == right.object_place else None,
-        instance_class=(
-            left.instance_class
-            if left.instance_class == right.instance_class
-            else None
-        ),
+        instance_class=instance_class,
+        network_instance_maybe=network_instance_maybe,
         network_headers=left.network_headers and right.network_headers,
         network_query=(
             left.network_query
@@ -370,6 +515,8 @@ def _merge_facts(left: _Fact, right: _Fact) -> _Fact:
             else None
         ),
         network_target=left.network_target and right.network_target,
+        test_root_holder=left.test_root_holder and right.test_root_holder,
+        test_root_path=left.test_root_path and right.test_root_path,
         items=left.items if left.items == right.items else (),
         mapping=left.mapping if left.mapping == right.mapping else (),
         literal=left.literal if literal_known else None,
@@ -482,6 +629,11 @@ class _Analyzer:
                         config_path=(*root_fact.config_path, *attributes),
                     )
             base = self._eval(node.value, env)
+            if base.test_root_holder and node.attr == "root":
+                return _Fact(
+                    taints=base.taints,
+                    test_root_path=True,
+                )
             if base.dataset_selection and node.attr == "manifest":
                 return _Fact(
                     taints=base.taints,
@@ -507,7 +659,10 @@ class _Analyzer:
                             ),
                         )
                     return member
-                if base.instance_class in _NETWORK_INSTANCE_CLASSES:
+                if (
+                    base.instance_class in _NETWORK_INSTANCE_CLASSES
+                    and node.attr in _NETWORK_MEMBER_NAMES
+                ):
                     return _Fact(
                         taints=base.taints,
                         callable=_Callable(
@@ -547,7 +702,23 @@ class _Analyzer:
                 for item_key, item_fact in base.mapping:
                     if item_key == raw_key:
                         return item_fact
-            return _Fact(taints=base.taints | key.taints)
+            if (
+                self.path.startswith("src/sakuramoon/")
+                and _fact_contains_security_capability(base)
+            ):
+                self.add(
+                    node,
+                    "ambiguous_sensitive_container_access",
+                    "dynamic container access may select an execution capability",
+                )
+            return _Fact(
+                taints=base.taints | key.taints,
+                callable=(
+                    _Callable("ambiguous-sensitive.*")
+                    if _fact_contains_sensitive_callable(base)
+                    else None
+                ),
+            )
         if isinstance(node, (ast.List, ast.Set, ast.Tuple)):
             items = tuple(self._eval(item, env) for item in node.elts)
             taints = _union_taints(item.taints for item in items)
@@ -608,7 +779,19 @@ class _Analyzer:
             literal = _literal(node)
             if isinstance(literal, str):
                 return _fact_literal(literal)
-            return _Fact(taints=self._eval(node.left, env).taints | self._eval(node.right, env).taints)
+            left = self._eval(node.left, env)
+            right = self._eval(node.right, env)
+            test_root_path = False
+            if isinstance(node.op, ast.Div) and left.test_root_path:
+                test_root_path = (
+                    right.literal_known
+                    and isinstance(right.literal, str)
+                    and _safe_test_relative_literal(right.literal)
+                ) or right.taints == frozenset({"parameter:1"})
+            return _Fact(
+                taints=left.taints | right.taints,
+                test_root_path=test_root_path,
+            )
         if isinstance(node, ast.UnaryOp):
             return self._eval(node.operand, env)
         if isinstance(node, ast.IfExp):
@@ -873,6 +1056,28 @@ if range_start is not None:
             )
         )
 
+    def _dataset_open_get_constructor_shape_allowed(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> bool:
+        expected = ast.parse(
+            '''
+try:
+    connection = http.client.HTTPSConnection(
+        host=target.host,
+        port=target.port,
+        timeout=self._policy.connect_timeout_seconds,
+        context=ssl.create_default_context(),
+    )
+except (OSError, ValueError):
+    raise DatasetTransportError(
+        "ModelScope HTTPS client could not be initialized"
+    ) from None
+'''
+        ).body[0]
+        return bool(node.body) and ast.dump(
+            node.body[0], include_attributes=False
+        ) == ast.dump(expected, include_attributes=False)
+
     def _dataset_urlencode_kind(self, call: ast.Call) -> str | None:
         if (
             self.path != DATASET_TRANSPORT_PATH
@@ -1001,11 +1206,19 @@ if range_start is not None:
         keywords = self._keyword_nodes(call)
         if keywords is None:
             return False
+        connection_verified = (
+            env.get("connection").instance_class
+            == "http.client.HTTPSConnection"
+        )
+        response_verified = (
+            env.get("response").instance_class == "http.client.HTTPResponse"
+        )
         if self.class_context == DATASET_TRANSPORT_CLASS:
             if self.context.name == "_open_get":
                 if method == "request" and receiver == "connection":
                     return (
-                        len(call.args) == 2
+                        connection_verified
+                        and len(call.args) == 2
                         and env.get("target").network_target
                         and _literal(call.args[0]) == "GET"
                         and self._place(call.args[1], _Environment())
@@ -1020,38 +1233,47 @@ if range_start is not None:
                         and _literal(keywords["encode_chunked"]) is False
                     )
                 if method == "getresponse" and receiver == "connection":
-                    return not call.args and not keywords
+                    return connection_verified and not call.args and not keywords
                 if method == "settimeout" and receiver == "connection.sock":
                     return (
-                        len(call.args) == 1
+                        connection_verified
+                        and len(call.args) == 1
                         and not keywords
                         and self._place(call.args[0], _Environment())
                         == "self._policy.read_timeout_seconds"
                     )
                 if method == "close" and receiver == "connection":
-                    return not call.args and not keywords
-            if self.context.name == "_follow_redirects":
-                if method == "getheader" and receiver == "response":
-                    return (
-                        len(call.args) == 1
-                        and not keywords
-                        and _literal(call.args[0]) == "Location"
-                    )
-                if method == "close" and receiver in {"connection", "response"}:
-                    return not call.args and not keywords
+                    return connection_verified and not call.args and not keywords
+            if (
+                self.context.name == "_follow_redirects"
+                and method == "getheader"
+                and receiver == "response"
+            ):
+                return (
+                    response_verified
+                    and len(call.args) == 1
+                    and not keywords
+                    and _literal(call.args[0]) == "Location"
+                )
             if (
                 self.context.name == "_close_response"
                 and method == "close"
                 and receiver in {"connection", "response"}
             ):
-                return not call.args and not keywords
+                receiver_verified = (
+                    connection_verified
+                    if receiver == "connection"
+                    else response_verified
+                )
+                return receiver_verified and not call.args and not keywords
             if (
                 self.context.name == "_read_response"
                 and method == "read"
                 and receiver == "response"
             ):
                 return (
-                    len(call.args) == 1
+                    response_verified
+                    and len(call.args) == 1
                     and not keywords
                     and self._place(call.args[0], _Environment()) == "length"
                 )
@@ -1064,7 +1286,8 @@ if range_start is not None:
                 },
             }
             return (
-                len(call.args) == 1
+                response_verified
+                and len(call.args) == 1
                 and not keywords
                 and _literal(call.args[0])
                 in allowed_headers.get(self.context.name, set())
@@ -1128,17 +1351,35 @@ if range_start is not None:
                 and not keywords
             )
         if method == "_read_response":
-            return (
-                self.context.name
-                in {"_read_listing_once", "download_locked_shard_to_staging"}
-                and len(call.args) == 2
-                and places[0] == "response"
-                and not keywords
-            )
+            if (
+                len(call.args) != 2
+                or places[0] != "response"
+                or env.get("response").instance_class
+                != "http.client.HTTPResponse"
+                or keywords
+            ):
+                return False
+            length = call.args[1]
+            if self.context.name == "_read_listing_once":
+                return self._same_expression(
+                    length,
+                    "min(self._policy.stream_chunk_bytes, remaining)",
+                )
+            if self.context.name == "download_locked_shard_to_staging":
+                return (
+                    isinstance(length, ast.Constant)
+                    and type(length.value) is int
+                    and length.value == 1
+                ) or self._same_expression(
+                    length,
+                    "min(self._policy.stream_chunk_bytes, expected_response_bytes - received)",
+                )
+            return False
         if method == "_close_response":
             return (
                 self.context.name
                 in {
+                    "_follow_redirects",
                     "_read_listing_once",
                     "download_locked_shard_to_staging",
                 }
@@ -1186,6 +1427,160 @@ if range_start is not None:
             )
         return False
 
+    def _dataset_response_helper_allowed(
+        self, call: ast.Call, env: _Environment
+    ) -> bool:
+        if (
+            self.path != DATASET_TRANSPORT_PATH
+            or not isinstance(call.func, ast.Name)
+            or call.keywords
+        ):
+            return False
+        places = tuple(self._place(item, _Environment()) for item in call.args)
+        if call.func.id == "_parse_content_length":
+            return (
+                self.class_context is None
+                and self.context.name == "_validate_download_headers"
+                and places == ("response",)
+                and env.get("response").instance_class
+                == "http.client.HTTPResponse"
+            )
+        if call.func.id == "_validate_download_headers":
+            return (
+                self.class_context == DATASET_TRANSPORT_CLASS
+                and self.context.name == "download_locked_shard_to_staging"
+                and places == ("response", "downloaded", "shard.bytes")
+                and env.get("response").instance_class
+                == "http.client.HTTPResponse"
+            )
+        return False
+
+    def _dataset_network_capability_call_allowed(
+        self, call: ast.Call, env: _Environment
+    ) -> bool:
+        return (
+            self._dataset_http_member_allowed(call, env)
+            or self._dataset_http_helper_allowed(call, env)
+            or self._dataset_target_factory_allowed(call, env)
+            or self._dataset_response_helper_allowed(call, env)
+        )
+
+    @staticmethod
+    def _invalidate_network_capabilities(env: _Environment) -> None:
+        env.values = {
+            key: _without_network_capabilities(value)
+            for key, value in env.values.items()
+        }
+
+    def _reject_network_capability_escape(
+        self,
+        call: ast.Call,
+        env: _Environment,
+        facts: tuple[_Fact, ...],
+    ) -> bool:
+        if (
+            not self.path.startswith("src/sakuramoon/")
+            or not any(_fact_contains_network_capability(fact) for fact in facts)
+            or self._dataset_network_capability_call_allowed(call, env)
+        ):
+            return False
+        if any(fact.network_headers for fact in facts):
+            self.add(
+                call,
+                "dataset_headers_mutation_forbidden",
+                "audited request headers may not enter a non-exact call",
+            )
+        self.add(
+            call,
+            "network_capability_escape_forbidden",
+            "network capabilities may only enter the exact audited transport graph",
+        )
+        self._invalidate_network_capabilities(env)
+        return True
+
+    def _dataset_header_write_allowed(
+        self,
+        node: ast.Assign,
+        target: ast.AST,
+        env: _Environment,
+    ) -> bool:
+        return (
+            self.path == DATASET_TRANSPORT_PATH
+            and self.class_context == DATASET_TRANSPORT_CLASS
+            and self.context.name == "_open_get"
+            and len(node.targets) == 1
+            and isinstance(target, ast.Subscript)
+            and self._eval(target.value, env).network_headers
+            and isinstance(target.slice, ast.Constant)
+            and target.slice.value == "Range"
+            and self._same_expression(node.value, 'f"bytes={range_start}-"')
+        )
+
+    def _reject_dataset_header_write(
+        self,
+        node: ast.Assign | ast.AnnAssign | ast.AugAssign,
+        target: ast.AST,
+        env: _Environment,
+    ) -> bool:
+        if self.path != DATASET_TRANSPORT_PATH:
+            return False
+        if isinstance(target, (ast.Subscript, ast.Attribute)):
+            target_fact = self._eval(target.value, env)
+        else:
+            target_fact = self._eval(target, env)
+        if not target_fact.network_headers:
+            return False
+        if isinstance(node, ast.Assign) and self._dataset_header_write_allowed(
+            node, target, env
+        ):
+            return False
+        self.add(
+            node,
+            "dataset_headers_mutation_forbidden",
+            "audited request headers only allow the exact Range assignment",
+        )
+        self._invalidate_network_capabilities(env)
+        return True
+
+    def _reject_dataset_network_binding_assignment(
+        self,
+        node: ast.Assign | ast.AnnAssign,
+        target: ast.AST,
+        fact: _Fact,
+    ) -> None:
+        if (
+            self.path != DATASET_TRANSPORT_PATH
+            or self.class_context != DATASET_TRANSPORT_CLASS
+        ):
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for index, item in enumerate(target.elts):
+                item_fact = fact.items[index] if index < len(fact.items) else fact
+                self._reject_dataset_network_binding_assignment(
+                    node, item, item_fact
+                )
+            return
+        if not isinstance(target, ast.Name) or target.id not in {
+            "connection",
+            "response",
+        }:
+            return
+        expected = (
+            "http.client.HTTPSConnection"
+            if target.id == "connection"
+            else "http.client.HTTPResponse"
+        )
+        if (
+            fact.instance_class == expected
+            or (fact.literal_known and fact.literal is None)
+        ):
+            return
+        self.add(
+            node,
+            "network_binding_assignment_forbidden",
+            "network response and connection bindings require exact audited provenance",
+        )
+
     def _git_shape(self, call: ast.Call) -> tuple[str | None, ...] | None:
         if not call.args or not isinstance(call.args[0], (ast.List, ast.Tuple)):
             return None
@@ -1208,8 +1603,16 @@ if range_start is not None:
                 return False
             if index >= len(call.args[0].elts):
                 return False
-            fact = self._eval(call.args[0].elts[index], env)
-            return "parameter:0" in fact.taints
+            argument = call.args[0].elts[index]
+            if (
+                isinstance(argument, ast.Call)
+                and isinstance(argument.func, ast.Name)
+                and argument.func.id == "str"
+                and len(argument.args) == 1
+                and not argument.keywords
+            ):
+                argument = argument.args[0]
+            return self._eval(argument, env).test_root_path
 
         if location == (
             "tests/contracts/assets/test_asset_boundary.py",
@@ -1355,19 +1758,12 @@ if range_start is not None:
             self.path == DATASET_TRANSPORT_PATH
             and isinstance(call.func, ast.Attribute)
             and self._place(call.func.value, _Environment()) == "headers"
-            and call.func.attr
-            in {
-                "clear",
-                "pop",
-                "popitem",
-                "setdefault",
-                "update",
-            }
+            and not self._dataset_network_capability_call_allowed(call, env)
         ):
             self.add(
                 call,
                 "dataset_headers_mutation_forbidden",
-                "dataset request headers may only be built by the exact audited assignments",
+                "the audited headers binding may not receive method calls",
             )
         if isinstance(call.func, ast.Attribute) and call.func.attr in _DATASET_HTTP_HELPERS:
             allowed_helper = self._dataset_http_helper_allowed(call, env)
@@ -1379,6 +1775,18 @@ if range_start is not None:
                 )
             if allowed_helper and call.func.attr == "_request_headers":
                 return _Fact(network_headers=True)
+            if allowed_helper and call.func.attr in {
+                "_follow_redirects",
+                "_open_get",
+            }:
+                return _Fact(
+                    items=(
+                        _Fact(instance_class="http.client.HTTPResponse"),
+                        _Fact(instance_class="http.client.HTTPSConnection"),
+                    )
+                )
+            if allowed_helper:
+                return _Fact()
         if (
             isinstance(call.func, ast.Attribute)
             and call.func.attr in _NETWORK_MEMBER_NAMES
@@ -1433,6 +1841,11 @@ if range_start is not None:
             if self._dataset_http_member_allowed(call, env):
                 return _Fact()
             function_fact = self._eval(call.func, env)
+            receiver_fact = (
+                self._eval(call.func.value, env)
+                if isinstance(call.func, ast.Attribute)
+                else _Fact()
+            )
             argument_facts = tuple(self._eval(item, env) for item in call.args)
             keyword_facts = tuple(
                 self._eval(item.value, env) for item in call.keywords
@@ -1443,9 +1856,18 @@ if range_start is not None:
                     *(item.taints for item in keyword_facts),
                 )
             )
+            self._reject_network_capability_escape(
+                call,
+                env,
+                (function_fact, receiver_fact, *argument_facts, *keyword_facts),
+            )
             if any(
-                _sensitive_callable(item.callable)
-                for item in (*argument_facts, *keyword_facts)
+                _fact_contains_sensitive_callable(item)
+                for item in (
+                    function_fact,
+                    *argument_facts,
+                    *keyword_facts,
+                )
             ):
                 self.add(
                     call,
@@ -1476,6 +1898,20 @@ if range_start is not None:
             self._mutate_container(call, env, taints)
             return _Fact(taints=taints)
         name = callable_value.name
+        for factory_name in _DATASET_TARGET_FACTORIES:
+            if (
+                self.path.startswith("src/sakuramoon/")
+                and name.endswith(f":{factory_name}")
+                and not (
+                    isinstance(call.func, ast.Name)
+                    and call.func.id == factory_name
+                )
+            ):
+                self.add(
+                    call,
+                    "network_target_factory_call_forbidden",
+                    "validated HTTP target factories may not be aliased",
+                )
         if self.path == DATASET_TRANSPORT_PATH and (
             name in {"builtins.delattr", "builtins.print", "builtins.setattr"}
             or name.startswith(
@@ -1525,6 +1961,28 @@ if range_start is not None:
         reflection_name = name
         while reflection_name.endswith(".__call__"):
             reflection_name = reflection_name.removesuffix(".__call__")
+        if (
+            self.path.startswith("src/sakuramoon/")
+            and reflection_name
+            in {"builtins.vars", "inspect.getattr_static"}
+            and call.args
+        ):
+            reflected = self._eval(call.args[0], env)
+            reflected_name = (
+                reflected.callable.name
+                if reflected.callable is not None
+                else ""
+            )
+            if (
+                _fact_contains_security_capability(reflected)
+                or reflected_name.startswith("sakuramoon.assets")
+            ):
+                self.add(
+                    call,
+                    "capability_reflection_forbidden",
+                    "capability exports may not be accessed through reflection mappings",
+                )
+                return _Fact(capability_class=True)
         if self.path.startswith("src/sakuramoon/") and reflection_name == "builtins.type":
             type_arguments = tuple(self._eval(item, env) for item in call.args)
             if len(type_arguments) >= 2 and any(
@@ -1570,9 +2028,13 @@ if range_start is not None:
             )
 
         constructor_syntax = call.func.id if isinstance(call.func, ast.Name) else ""
-        target_constructor = constructor_syntax == "_ValidatedHttpTarget"
-        target_constructor_allowed = target_constructor and self._dataset_target_constructor_allowed(
-            call, env
+        target_constructor = (
+            constructor_syntax == "_ValidatedHttpTarget"
+            or name.endswith((":_ValidatedHttpTarget", "._ValidatedHttpTarget"))
+        )
+        target_constructor_allowed = (
+            constructor_syntax == "_ValidatedHttpTarget"
+            and self._dataset_target_constructor_allowed(call, env)
         )
         if (
             self.path.startswith("src/sakuramoon/")
@@ -1618,8 +2080,13 @@ if range_start is not None:
             positional, keywords, unknown_keywords, expansion_taints = self._effective_arguments(
                 call, callable_value, env
             )
+            self._reject_network_capability_escape(
+                call,
+                env,
+                (*positional, *keywords.values()),
+            )
             if any(
-                _sensitive_callable(item.callable)
+                _fact_contains_sensitive_callable(item)
                 for item in (*positional, *keywords.values())
             ):
                 self.add(
@@ -1736,8 +2203,13 @@ if range_start is not None:
                 expansion_taints,
             )
         )
+        self._reject_network_capability_escape(
+            call,
+            env,
+            (*positional, *keywords.values()),
+        )
         if any(
-            _sensitive_callable(item.callable)
+            _fact_contains_sensitive_callable(item)
             for item in (*positional, *keywords.values())
         ):
             self.add(
@@ -1838,6 +2310,13 @@ if range_start is not None:
 
         if canonical in _DYNAMIC_IMPORT_CALLS:
             self._record_sink(call, "reference_dynamic_import", all_taints, "dynamically imports reference code")
+            if self.path.startswith("src/sakuramoon/"):
+                self.add(
+                    call,
+                    "dynamic_import_forbidden",
+                    "production dynamic imports cannot prove execution provenance",
+                )
+                return _Fact(callable=_Callable("ambiguous-sensitive.*"))
         if canonical in _DYNAMIC_CODE_CALLS:
             self._record_sink(call, "reference_dynamic_exec", all_taints, "dynamically executes reference code")
         is_process = canonical in _PROCESS_EXACT or canonical.startswith(_PROCESS_PREFIXES)
@@ -1926,7 +2405,26 @@ if range_start is not None:
         parameter_names = tuple(item.arg for item in parameters)
         env = outer.clone()
         for index, parameter in enumerate(parameter_names):
-            env.assign(parameter, _Fact(taints=frozenset({f"parameter:{index}"})))
+            fact = _Fact(taints=frozenset({f"parameter:{index}"}))
+            if (
+                index == 0
+                and self.path == "tests/unit/assets/conftest.py"
+                and self.class_context is None
+                and function_name == "make_reference"
+            ):
+                fact = replace(fact, test_root_path=True)
+            if (
+                index == 0
+                and self.path == "tests/unit/assets/test_inspect.py"
+                and self.class_context is None
+                and function_name
+                in {
+                    "test_reference_git_audit_disables_hostile_local_configuration",
+                    "test_reference_origin_diagnostic_redacts_credentials",
+                }
+            ):
+                fact = replace(fact, test_root_holder=True)
+            env.assign(parameter, fact)
         if (
             self.path == DATASET_TRANSPORT_PATH
             and self.class_context == DATASET_TRANSPORT_CLASS
@@ -1941,6 +2439,47 @@ if range_start is not None:
         ):
             target = env.get("target")
             env.assign("target", replace(target, network_target=True))
+        if self.path == DATASET_TRANSPORT_PATH:
+            if (
+                self.class_context == DATASET_TRANSPORT_CLASS
+                and function_name in {"_close_response", "_read_response"}
+                and "response" in parameter_names
+            ):
+                response = env.get("response")
+                env.assign(
+                    "response",
+                    replace(
+                        response,
+                        instance_class="http.client.HTTPResponse",
+                    ),
+                )
+            if (
+                self.class_context == DATASET_TRANSPORT_CLASS
+                and function_name == "_close_response"
+                and "connection" in parameter_names
+            ):
+                connection = env.get("connection")
+                env.assign(
+                    "connection",
+                    replace(
+                        connection,
+                        instance_class="http.client.HTTPSConnection",
+                    ),
+                )
+            if (
+                self.class_context is None
+                and function_name
+                in {"_parse_content_length", "_validate_download_headers"}
+                and "response" in parameter_names
+            ):
+                response = env.get("response")
+                env.assign(
+                    "response",
+                    replace(
+                        response,
+                        instance_class="http.client.HTTPResponse",
+                    ),
+                )
         if arguments.vararg is not None:
             index = len(parameter_names)
             parameter_names = (*parameter_names, arguments.vararg.arg)
@@ -1974,6 +2513,15 @@ if range_start is not None:
                     node,
                     "dataset_range_header_forbidden",
                     "range headers must use the exact audited manifest-offset shape",
+                )
+            if (
+                node.name == "_open_get"
+                and not self._dataset_open_get_constructor_shape_allowed(node)
+            ):
+                self.add(
+                    node,
+                    "dataset_connection_factory_forbidden",
+                    "HTTPS construction must use the exact redacted initialization guard",
                 )
         env, parameter_names = self._parameter_environment(
             node.args, outer, node.name
@@ -2156,6 +2704,61 @@ if range_start is not None:
             if isinstance(item, ast.expr):
                 self._eval(item, env)
 
+    def _loop_fixed_point(
+        self,
+        node: ast.For | ast.AsyncFor | ast.While,
+        env: _Environment,
+    ) -> _Environment:
+        state = env.clone()
+        max_passes = 3 + len(node.body) + len(env.values)
+        converged = False
+        for _ in range(max_passes):
+            body = state.clone()
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                iterable = self._eval(node.iter, body)
+                if iterable.items:
+                    item_fact = iterable.items[0]
+                    for candidate in iterable.items[1:]:
+                        item_fact = _merge_facts(item_fact, candidate)
+                else:
+                    item_fact = iterable
+                self._assign(node.target, item_fact, body)
+            else:
+                self._eval(node.test, body)
+            self._block(node.body, body)
+            next_state = _merge_environments(env, body)
+            if next_state.values == state.values:
+                state = next_state
+                converged = True
+                break
+            state = next_state
+        if not converged:
+            self.add(
+                node,
+                "loop_analysis_did_not_converge",
+                "loop-carried execution provenance did not reach a fixed point",
+            )
+        normal_exit = state.clone()
+        self._block(node.orelse, normal_exit)
+        return _merge_environments(state, normal_exit)
+
+    @classmethod
+    def _statements_definitely_terminate(
+        cls, statements: list[ast.stmt]
+    ) -> bool:
+        if not statements:
+            return False
+        final = statements[-1]
+        if isinstance(final, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+            return True
+        if isinstance(final, ast.If):
+            return (
+                bool(final.orelse)
+                and cls._statements_definitely_terminate(final.body)
+                and cls._statements_definitely_terminate(final.orelse)
+            )
+        return False
+
     def _statement(self, node: ast.stmt, env: _Environment) -> _Environment:
         if isinstance(node, ast.Import):
             for item in node.names:
@@ -2194,6 +2797,7 @@ if range_start is not None:
                             "os",
                             "requests",
                             "runpy",
+                            "sakuramoon.assets",
                             "site",
                             "socket",
                             "subprocess",
@@ -2223,6 +2827,11 @@ if range_start is not None:
                 )
             fact = self._eval(node.value, env)
             for target in node.targets:
+                self._reject_dataset_network_binding_assignment(
+                    node, target, fact
+                )
+                if self._reject_dataset_header_write(node, target, env):
+                    fact = _without_network_capabilities(fact)
                 if self.path.startswith("src/sakuramoon/") and self._tls_policy_target(
                     target
                 ):
@@ -2234,6 +2843,12 @@ if range_start is not None:
                 self._assign(target, fact, env)
         elif isinstance(node, ast.AnnAssign):
             if node.value is not None:
+                fact = self._eval(node.value, env)
+                self._reject_dataset_network_binding_assignment(
+                    node, node.target, fact
+                )
+                if self._reject_dataset_header_write(node, node.target, env):
+                    fact = _without_network_capabilities(fact)
                 if self.path.startswith("src/sakuramoon/") and self._tls_policy_target(
                     node.target
                 ):
@@ -2242,8 +2857,13 @@ if range_start is not None:
                         "tls_policy_mutation_forbidden",
                         "TLS hostname and certificate verification may not be changed",
                     )
-                self._assign(node.target, self._eval(node.value, env), env)
+                self._assign(node.target, fact, env)
         elif isinstance(node, ast.AugAssign):
+            target_fact = self._eval(node.target, env)
+            value_fact = self._eval(node.value, env)
+            rejected_header_write = self._reject_dataset_header_write(
+                node, node.target, env
+            )
             if self.path.startswith("src/sakuramoon/") and self._tls_policy_target(
                 node.target
             ):
@@ -2252,7 +2872,9 @@ if range_start is not None:
                     "tls_policy_mutation_forbidden",
                     "TLS hostname and certificate verification may not be changed",
                 )
-            fact = _merge_facts(self._eval(node.target, env), self._eval(node.value, env))
+            fact = _merge_facts(target_fact, value_fact)
+            if rejected_header_write:
+                fact = _without_network_capabilities(fact)
             self._assign(node.target, fact, env)
         elif isinstance(node, ast.Expr):
             self._eval(node.value, env)
@@ -2285,40 +2907,34 @@ if range_start is not None:
             other = env.clone()
             self._block(node.body, body)
             self._block(node.orelse, other)
-            env = _merge_environments(body, other)
-        elif isinstance(node, (ast.For, ast.AsyncFor)):
-            iterable = self._eval(node.iter, env)
-            body = env.clone()
-            if iterable.items:
-                item_fact = iterable.items[0]
-                for candidate in iterable.items[1:]:
-                    item_fact = _merge_facts(item_fact, candidate)
-            else:
-                item_fact = iterable
-            self._assign(node.target, item_fact, body)
-            self._block(node.body, body)
-            self._block(node.orelse, body)
-            env = _merge_environments(env, body)
-        elif isinstance(node, ast.While):
-            self._eval(node.test, env)
-            body = env.clone()
-            self._block(node.body, body)
-            self._block(node.orelse, body)
-            env = _merge_environments(env, body)
+            continuing: list[_Environment] = []
+            if not self._statements_definitely_terminate(node.body):
+                continuing.append(body)
+            if not self._statements_definitely_terminate(node.orelse):
+                continuing.append(other)
+            if continuing:
+                env = _merge_environments(*continuing)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            env = self._loop_fixed_point(node, env)
         elif isinstance(node, (ast.Try, ast.TryStar)):
             branches: list[_Environment] = []
             body = env.clone()
             self._block(node.body, body)
             self._block(node.orelse, body)
-            branches.append(body)
+            if not self._statements_definitely_terminate(
+                [*node.body, *node.orelse]
+            ):
+                branches.append(body)
             for handler in node.handlers:
                 branch = env.clone()
                 self._eval(handler.type, branch)
                 if handler.name:
                     branch.assign(handler.name, _Fact())
                 self._block(handler.body, branch)
-                branches.append(branch)
-            env = _merge_environments(*branches)
+                if not self._statements_definitely_terminate(handler.body):
+                    branches.append(branch)
+            if branches:
+                env = _merge_environments(*branches)
             self._block(node.finalbody, env)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
@@ -2376,6 +2992,7 @@ if range_start is not None:
                     "print": _Fact(callable=_Callable("builtins.print")),
                     "setattr": _Fact(callable=_Callable("builtins.setattr")),
                     "type": _Fact(callable=_Callable("builtins.type")),
+                    "vars": _Fact(callable=_Callable("builtins.vars")),
                 }
             )
             self._block(tree.body, builtins)
@@ -2420,18 +3037,59 @@ def _assert_safe_source_path(root: Path, path: Path) -> None:
 
 
 def _read_source(root: Path, path: Path) -> str:
-    _assert_safe_source_path(root, path)
     try:
-        before = path.lstat()
-    except OSError as exc:
-        raise SourceBoundaryError("source path cannot be inspected") from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise SourceBoundaryError("source path is a symlink or is not a regular file")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise SourceBoundaryError("source path escapes repository root") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise SourceBoundaryError("source path contains an unsafe component")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directory_descriptor = -1
+    descriptor = -1
     try:
-        descriptor = os.open(path, flags)
+        directory_descriptor = os.open(root, directory_flags)
+        for part in relative.parts[:-1]:
+            child_descriptor = os.open(
+                part,
+                directory_flags,
+                dir_fd=directory_descriptor,
+            )
+            os.close(directory_descriptor)
+            directory_descriptor = child_descriptor
+        leaf = relative.parts[-1]
+        before = os.stat(
+            leaf,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            os.close(directory_descriptor)
+            directory_descriptor = -1
+            raise SourceBoundaryError(
+                "source path is a symlink or is not a regular file"
+            )
+        descriptor = os.open(
+            leaf,
+            file_flags,
+            dir_fd=directory_descriptor,
+        )
     except OSError as exc:
-        raise SourceBoundaryError("source path cannot be opened without following links") from exc
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
+            directory_descriptor = -1
+        raise SourceBoundaryError(
+            "source path cannot be opened through anchored no-follow descriptors"
+        ) from exc
     try:
         opened = os.fstat(descriptor)
         if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
@@ -2439,12 +3097,18 @@ def _read_source(root: Path, path: Path) -> str:
         with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
             descriptor = -1
             source = handle.read()
-        after = path.lstat()
+        after = os.stat(
+            leaf,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
     except (OSError, UnicodeError) as exc:
         raise SourceBoundaryError("source path changed or could not be decoded") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
     if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
         before.st_dev,
         before.st_ino,

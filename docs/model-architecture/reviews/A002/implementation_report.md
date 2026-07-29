@@ -4,7 +4,7 @@
 
 A002 已将用户确认的两条资产执行边界写入现行决定、仓库规则、路线图与资产策略，并通过合同测试建立机器保护。实现没有读取或执行 `reference/` 内容、没有读取 `.env`、没有下载/哈希/加载模型、没有使用 GPU，也没有创建性能占位。
 
-首轮、第二轮与第三轮独立 AI/Infra 审查均提出 changes required。现已完成 `review_remediation.md` 所列第三轮修复、D010 标准库 HTTPS 最终接口收敛和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
+首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17` 后的独立 AI/Infra 审查均提出 changes required。现已完成 `review_remediation.md` 所列第五轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
 
 ## 实现摘要
 
@@ -36,3 +36,19 @@ A002 已将用户确认的两条资产执行边界写入现行决定、仓库规
 
 - AI reviewer：复验 capability 工厂/identity 边界、容器/subscript/helper/class/dynamic-attribute callable provenance、`git -C` synthetic temp-root provenance，以及 D010 target/manifest/header 的端到端 provenance。
 - Infra reviewer：复验 forward helper、class/lambda、definition expressions、`match`/`assert`/`except*`、star import、循环/推导、tuple destructuring、跨模块/高阶 wrapper、精确 weakref 例外和 D010 changed receiver/args/kwargs/location 拒绝矩阵；确认 scanner 保持 fail closed 且不进入训练热路径。
+
+## 第五轮修复摘要
+
+- `_Fact` 递归保存并检查敏感 callable 与 D010 target/header/response/connection capability。任何网络 capability 进入 opaque、跨模块或高阶调用都报告 escape，并从环境和嵌套容器中失效；因此失败调用后的 request/read/close 不会沿用旧信任。
+- 对 assignment、augmented assignment、bound/unbound mutation、operator helper、mapping alias 与自定义 helper 统一执行 header mutation 拒绝；对 `operator.methodcaller`、`operator.attrgetter`、未知 receiver/method 与网络 binding 覆盖统一 fail closed。
+- D010 exact graph 与冻结实现一致：HTTPS constructor 必须位于 redacted-error `try` 中，redirect cleanup 只走 `_close_response`，response reads 使用冻结 bounded length，target construction 只允许三个直接 factory。changed wrapper/helper/alias/location 均有负合同。
+- 动态 import、动态/嵌套容器下标、`vars`、`inspect.getattr_static`、assets star import 与 callable escape 已封闭；`for`/`while` 采用循环携带事实 fixed point，控制流 merge 排除确定终止的分支。
+- Git 测试例外验证 synthetic root path 的安全相对组合并拒绝绝对路径和 `..`；data manifest 的 weakref 解引用只增加与 assets inspect 同等精确的 tuple 审计项。
+- Scanner 文件读取使用逐组件 no-follow directory descriptors 锚定仓库根，leaf 的 stat/open/read/post-stat 均绑定同一父目录 descriptor；合同模拟预检后父目录替换和 leaf open 前替换，均硬失败或继续读取已锚定的安全 inode。
+
+## 第五轮验证结论
+
+- Clean candidate：base `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17`，只叠加 `tools/asset_execution_boundary.py` 与 `tests/contracts/assets/test_asset_execution_boundary.py`。
+- 结果：191/191 boundary contracts、389/389 full tests、28 Python sources/0 violations、全仓 Ruff PASS、strict Pyright 0 errors/0 warnings、traceability 221 requirements/source nodes PASS。
+- Shared compatibility：并行 D010 冻结实现所在共享树扫描 36 Python sources、0 violations；这不是 D010 远端流式或任务放行证据。
+- 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有模型/数据下载、GPU 工作或性能 artifact。状态保持第五轮修复完成、等待独立 AI/Infra 复审。

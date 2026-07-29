@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import tools.asset_execution_boundary as boundary
 from sakuramoon.assets import load_manifest
 from tools.asset_execution_boundary import (
     SourceBoundaryError,
@@ -231,12 +232,17 @@ class ModelScopeDatasetTransport:
             headers["Cookie"] = f"m_session_id={token}"
         return headers
     def _open_get(self, target, *, range_start):
-        connection = http.client.HTTPSConnection(
-            host=target.host,
-            port=target.port,
-            timeout=self._policy.connect_timeout_seconds,
-            context=ssl.create_default_context(),
-        )
+        try:
+            connection = http.client.HTTPSConnection(
+                host=target.host,
+                port=target.port,
+                timeout=self._policy.connect_timeout_seconds,
+                context=ssl.create_default_context(),
+            )
+        except (OSError, ValueError):
+            raise DatasetTransportError(
+                "ModelScope HTTPS client could not be initialized"
+            ) from None
         headers = self._request_headers(target)
         if range_start is not None:
             headers["Range"] = f"bytes={range_start}-"
@@ -330,8 +336,7 @@ class ModelScopeDatasetTransport:
         current = target
         response, connection = self._open_get(current, range_start=range_start)
         location = response.getheader("Location")
-        response.close()
-        connection.close()
+        self._close_response(response, connection)
         current = _redirect_target(
             current,
             location,
@@ -611,6 +616,226 @@ class OtherTransport:
     )
 
 
+def _d010_header_attack(statement: str) -> str:
+    return f'''
+class ModelScopeDatasetTransport:
+    def _open_get(self, target, *, range_start):
+        headers = self._request_headers(target)
+        if range_start is not None:
+            headers["Range"] = f"bytes={{range_start}}-"
+        {statement}
+        connection.request(
+            "GET",
+            target.request_target,
+            body=None,
+            headers=headers,
+            encode_chunked=False,
+        )
+'''
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        'headers.__setitem__("Host", "attacker.invalid")',
+        'dict.__setitem__(headers, "Host", "attacker.invalid")',
+        'headers.__ior__({"Host": "attacker.invalid"})',
+        'operator.setitem(headers, "Host", "attacker.invalid")',
+        'mapping = headers\n        mapping.__setitem__("Host", "attacker.invalid")',
+        'mutate_headers(headers)',
+    ],
+)
+def test_d010_audited_headers_reject_every_non_exact_mutation_or_escape(
+    statement: str,
+) -> None:
+    source = _d010_header_attack(statement)
+    if "operator." in statement:
+        source = f"import operator\n{source}"
+
+    codes = _codes(source, "src/sakuramoon/data/modelscope.py")
+    assert "network_capability_escape_forbidden" in codes
+    assert "network_call_forbidden" in codes
+
+
+def test_d010_audited_headers_reject_in_place_mapping_merge() -> None:
+    source = _d010_header_attack('headers |= {"Host": "attacker.invalid"}')
+
+    codes = _codes(source, "src/sakuramoon/data/modelscope.py")
+    assert "dataset_headers_mutation_forbidden" in codes
+    assert "network_call_forbidden" in codes
+
+
+@pytest.mark.parametrize("capability", ["target", "headers", "connection"])
+def test_d010_network_capability_cannot_enter_opaque_calls(
+    capability: str,
+) -> None:
+    source = f'''
+import http.client
+import ssl
+class ModelScopeDatasetTransport:
+    def _open_get(self, target, *, range_start):
+        connection = http.client.HTTPSConnection(
+            host=target.host,
+            port=target.port,
+            timeout=self._policy.connect_timeout_seconds,
+            context=ssl.create_default_context(),
+        )
+        headers = self._request_headers(target)
+        if range_start is not None:
+            headers["Range"] = f"bytes={{range_start}}-"
+        external({capability})
+        connection.request(
+            "GET",
+            target.request_target,
+            body=None,
+            headers=headers,
+            encode_chunked=False,
+        )
+'''
+
+    codes = _codes(source, "src/sakuramoon/data/modelscope.py")
+    assert "network_capability_escape_forbidden" in codes
+    assert "network_call_forbidden" in codes
+
+
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        '''operator.methodcaller(
+            "request",
+            "GET",
+            target.request_target,
+            body=None,
+            headers=headers,
+            encode_chunked=False,
+        )(connection)''',
+        '''operator.attrgetter("request")(connection)(
+            "GET",
+            target.request_target,
+            body=None,
+            headers=headers,
+            encode_chunked=False,
+        )''',
+        'operator.methodcaller("getresponse")(connection)',
+        'operator.methodcaller("close")(connection)',
+    ],
+)
+def test_d010_higher_order_network_adapters_are_rejected(adapter: str) -> None:
+    source = f'''
+import http.client
+import operator
+import ssl
+class ModelScopeDatasetTransport:
+    def _open_get(self, target, *, range_start):
+        connection = http.client.HTTPSConnection(
+            host=target.host,
+            port=target.port,
+            timeout=self._policy.connect_timeout_seconds,
+            context=ssl.create_default_context(),
+        )
+        headers = self._request_headers(target)
+        if range_start is not None:
+            headers["Range"] = f"bytes={{range_start}}-"
+        {adapter}
+'''
+
+    assert "network_capability_escape_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
+def test_d010_target_constructor_alias_is_rejected() -> None:
+    source = """
+class _ValidatedHttpTarget: pass
+Target = _ValidatedHttpTarget
+def helper(host, request_target):
+    return Target(
+        host=host,
+        port=_HTTPS_PORT,
+        request_target=request_target,
+        send_authorization=True,
+    )
+"""
+
+    assert "network_target_construction_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "length"),
+    [
+        ("_read_listing_once", "requested_length"),
+        ("download_locked_shard_to_staging", "requested_length"),
+        ("download_locked_shard_to_staging", "self._policy.stream_chunk_bytes"),
+    ],
+)
+def test_d010_read_response_length_is_locked_to_exact_bounded_shapes(
+    method: str,
+    length: str,
+) -> None:
+    source = f'''
+class ModelScopeDatasetTransport:
+    def {method}(self, target):
+        response, connection = self._follow_redirects(target, range_start=None)
+        return self._read_response(response, {length})
+'''
+
+    assert "network_helper_call_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
+def test_d010_unwrapped_connection_constructor_is_rejected() -> None:
+    source = """
+import http.client
+import ssl
+class ModelScopeDatasetTransport:
+    def _open_get(self, target, *, range_start):
+        connection = http.client.HTTPSConnection(
+            host=target.host,
+            port=target.port,
+            timeout=self._policy.connect_timeout_seconds,
+            context=ssl.create_default_context(),
+        )
+        if range_start is not None:
+            headers["Range"] = f"bytes={range_start}-"
+"""
+
+    assert "dataset_connection_factory_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
+def test_d010_redirect_cleanup_must_use_the_audited_close_helper() -> None:
+    source = """
+class ModelScopeDatasetTransport:
+    def _follow_redirects(self, target, *, range_start):
+        response, connection = self._open_get(target, range_start=range_start)
+        response.close()
+        connection.close()
+"""
+
+    assert "network_call_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
+@pytest.mark.parametrize("binding", ["response", "connection"])
+def test_d010_network_bindings_reject_unverified_overwrite(binding: str) -> None:
+    source = f'''
+class ModelScopeDatasetTransport:
+    def _read_listing_once(self, target):
+        response, connection = self._follow_redirects(target, range_start=None)
+        {binding} = attacker_controlled
+        self._close_response(response, connection)
+'''
+
+    assert "network_binding_assignment_forbidden" in _codes(
+        source, "src/sakuramoon/data/modelscope.py"
+    )
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
@@ -872,6 +1097,23 @@ candidate = constructor(payload)
 """,
             "capability_reflection_forbidden",
         ),
+        (
+            """
+from sakuramoon.assets import VerifiedAssetSelection
+constructor = vars(VerifiedAssetSelection)[capability_name]
+candidate = constructor(payload)
+""",
+            "capability_reflection_forbidden",
+        ),
+        (
+            """
+import inspect
+from sakuramoon.assets import VerifiedAssetSelection
+constructor = inspect.getattr_static(VerifiedAssetSelection, capability_name)
+candidate = constructor(payload)
+""",
+            "capability_reflection_forbidden",
+        ),
     ],
 )
 def test_reflective_capability_construction_and_mutation_are_rejected(
@@ -967,6 +1209,10 @@ run(["python", "reference/JLT/train.py"])
 from http.client import *
 HTTPSConnection("modelscope.cn")
 """,
+        """
+from sakuramoon.assets import *
+candidate = VerifiedAssetSelection(payload)
+""",
     ],
 )
 def test_sensitive_star_import_is_rejected_without_guessing_exported_names(
@@ -1020,6 +1266,48 @@ register(HTTPSConnection)
     assert "sensitive_callable_escape" in _codes(
         source, "src/sakuramoon/runtime/network.py"
     )
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        '"transformers"',
+        '"requests"',
+        '"modelscope_hub"',
+        "input()",
+    ],
+)
+def test_dynamic_import_cannot_manufacture_unknown_sensitive_callables(
+    module_name: str,
+) -> None:
+    source = f'''
+module = __import__({module_name})
+loader = getattr(module, input())
+loader("other/model")
+'''
+
+    assert "dynamic_import_forbidden" in _codes(
+        source, "src/sakuramoon/runtime/imports.py"
+    )
+
+
+def test_dynamic_container_subscript_cannot_drop_sensitive_callable() -> None:
+    source = """
+from transformers import AutoModel
+loaders = [AutoModel.from_pretrained]
+loaders[index]("other/model", local_files_only=True)
+"""
+
+    assert "ambiguous_sensitive_container_access" in _codes(source)
+
+
+def test_nested_sensitive_container_cannot_enter_higher_order_call() -> None:
+    source = """
+from transformers import AutoModel
+register({"nested": [[AutoModel.from_pretrained]]})
+"""
+
+    assert "sensitive_callable_escape" in _codes(source)
 
 
 def test_branch_dependent_sensitive_callable_is_denied_fail_closed() -> None:
@@ -1341,6 +1629,35 @@ def test_reference_execution_covers_forward_class_lambda_and_all_statement_forms
         """
 import subprocess
 from pathlib import Path
+path = "ordinary.py"
+for _ in range(2):
+    subprocess.run(["python", path])
+    path = Path("reference") / "JLT" / "train.py"
+""",
+        """
+import subprocess
+from pathlib import Path
+path = "ordinary.py"
+while condition:
+    subprocess.run(["python", path])
+    path = Path("reference") / "JLT" / "train.py"
+""",
+    ],
+)
+def test_loop_carried_reference_provenance_reaches_execution_sink(
+    source: str,
+) -> None:
+    assert "reference_process_exec" in _codes(
+        source, "src/sakuramoon/train/step.py"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+import subprocess
+from pathlib import Path
 def configured(value=subprocess.run([Path("reference") / "JLT" / "train.py"])):
     return value
 """,
@@ -1443,7 +1760,16 @@ def invoke(callback, value):
     )
 
 
-def test_identity_registry_weak_reference_dereference_is_exactly_audited() -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/sakuramoon/assets/inspect.py",
+        "src/sakuramoon/data/manifest.py",
+    ],
+)
+def test_identity_registry_weak_reference_dereference_is_exactly_audited(
+    path: str,
+) -> None:
     source = """
 class _IdentityWeakRegistry:
     def contains(self, value):
@@ -1451,10 +1777,19 @@ class _IdentityWeakRegistry:
         return reference is not None and reference() is value
 """
 
-    assert scan_source(source, "src/sakuramoon/assets/inspect.py") == ()
+    assert scan_source(source, path) == ()
 
 
-def test_identity_registry_exception_does_not_allow_other_callable_parameters() -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/sakuramoon/assets/inspect.py",
+        "src/sakuramoon/data/manifest.py",
+    ],
+)
+def test_identity_registry_exception_does_not_allow_other_callable_parameters(
+    path: str,
+) -> None:
     source = """
 class OtherRegistry:
     def contains(self, value):
@@ -1463,7 +1798,7 @@ class OtherRegistry:
 """
 
     assert "callable_parameter_forbidden" in _codes(
-        source, "src/sakuramoon/assets/inspect.py"
+        source, path
     )
 
 
@@ -1583,6 +1918,25 @@ def make_reference(root, relative, origin, licenses):
     assert scan_source(source, "tests/unit/assets/conftest.py") == ()
 
 
+@pytest.mark.parametrize(
+    "relative",
+    ['"../../reference"', '"/tmp/reference"', '"safe/../reference"'],
+)
+def test_synthetic_git_exception_rejects_temp_root_escape(
+    relative: str,
+) -> None:
+    source = f'''
+import subprocess
+def make_reference(root, relative, origin, licenses):
+    repo = root / {relative}
+    subprocess.run(("git", "-C", str(repo), "add", "."), check=True)
+'''
+
+    assert "reference_process_exec" in _codes(
+        source, "tests/unit/assets/conftest.py"
+    )
+
+
 def test_unrelated_method_names_and_read_only_metadata_are_not_false_positives() -> None:
     source = """
 class Reporter:
@@ -1654,3 +2008,72 @@ def test_explicit_source_scan_rejects_out_of_root_paths(tmp_path: Path) -> None:
 
     with pytest.raises(SourceBoundaryError, match="escapes"):
         scan_file(tmp_path, outside)
+
+
+def test_source_read_rejects_parent_symlink_replacement_after_precheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "src/package"
+    package.mkdir(parents=True)
+    source = package / "module.py"
+    source.write_text("SAFE = True\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "module.py").write_text(
+        "import requests\nrequests.get('https://attacker.invalid')\n",
+        encoding="utf-8",
+    )
+    detached = tmp_path / "detached"
+    original = vars(boundary)["_assert_safe_source_path"]
+    replaced = False
+
+    def replace_parent(root: Path, path: Path) -> None:
+        nonlocal replaced
+        original(root, path)
+        if not replaced and path == source:
+            package.rename(detached)
+            package.symlink_to(outside, target_is_directory=True)
+            replaced = True
+
+    monkeypatch.setattr(boundary, "_assert_safe_source_path", replace_parent)
+
+    with pytest.raises(SourceBoundaryError, match="anchored no-follow"):
+        scan_file(tmp_path, source)
+
+
+def test_source_read_keeps_open_parent_anchor_during_leaf_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "src/package"
+    package.mkdir(parents=True)
+    source = package / "module.py"
+    source.write_text("SAFE = True\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "module.py").write_text(
+        "import requests\nrequests.get('https://attacker.invalid')\n",
+        encoding="utf-8",
+    )
+    detached = tmp_path / "detached"
+    original_open = boundary.os.open
+    replaced = False
+
+    def replace_after_parent_open(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal replaced
+        if not replaced and path == "module.py" and dir_fd is not None:
+            package.rename(detached)
+            package.symlink_to(outside, target_is_directory=True)
+            replaced = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(boundary.os, "open", replace_after_parent_open)
+
+    assert scan_file(tmp_path, source) == ()
