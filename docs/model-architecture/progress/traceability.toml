@@ -1,13 +1,19 @@
 schema_version = 1
-registry_revision = 5
+registry_revision = 6
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
-changes = []
+[[changes]]
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+revision = 2
+previous_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
+new_sha256 = "5ddb1ff9649a62c799650bc912a0275839a374cc859169ecd036b2d0194b6d1d"
+changed_at = "2026-07-30"
+summary = "Lock prepared Qwen/Mage-VAE to local-only validation/loading and prohibit engineering use of reference code."
 
 [[sources]]
 path = "docs/model-architecture/current/confirmed-decisions.md"
 kind = "confirmed"
-revision = 1
+revision = 2
 include_top_headings = [
     "0.",
     "1.",
@@ -28,7 +34,7 @@ include_top_headings = [
 excluded_top_headings = [
     "15.",
 ]
-sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
+sha256 = "5ddb1ff9649a62c799650bc912a0275839a374cc859169ecd036b2d0194b6d1d"
 initial_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
 
 [[sources]]
@@ -629,6 +635,59 @@ not_applicable_fields = [
     "reference_modules",
 ]
 not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+
+[[profiles]]
+name = "local_model_execution_boundary"
+owner_tasks = [
+    "A002",
+]
+config_keys = [
+    "assets.qwen.local_path",
+    "assets.vae.local_path",
+]
+modules = [
+    "src/sakuramoon/assets/**",
+    "src/sakuramoon/encoders/**",
+]
+reference_modules = []
+tests = [
+    "tests/contracts/assets/**",
+]
+benchmarks = []
+artifacts = [
+    "docs/model-architecture/reviews/A002/**",
+]
+hardware = "CPU"
+not_applicable_fields = [
+    "reference_modules",
+    "benchmarks",
+]
+not_applicable_reason = "The local-model execution boundary has no reference module or benchmark."
+
+[[profiles]]
+name = "reference_execution_boundary"
+owner_tasks = [
+    "A002",
+]
+config_keys = []
+modules = [
+    "src/sakuramoon/**",
+]
+reference_modules = []
+tests = [
+    "tests/contracts/assets/**",
+]
+benchmarks = []
+artifacts = [
+    "docs/model-architecture/reviews/A002/**",
+]
+hardware = "CPU"
+not_applicable_fields = [
+    "config_keys",
+    "reference_modules",
+    "benchmarks",
+]
+not_applicable_reason = "Reference code is forbidden; no runtime config or benchmark can authorize it."
 
 [[blockers]]
 id = "DECISION-DROPOUT-VALUES"
@@ -10888,3 +10947,110 @@ not_applicable_fields = [
     "reference_modules",
 ]
 not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+
+[[requirements]]
+id = "DOC-006"
+kind = "requirement"
+status = "implemented"
+profile = "local_model_execution_boundary"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = [
+    "0. 判定规则与当前边界",
+]
+node_kind = "list_item"
+source_fingerprint = "62a7c50225fb4ae5e39f4f5497efdcae47904d4d25fc18035a374fcf3d97baa0"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:A002"
+implementation_paths = [
+    "AGENTS.md",
+    "docs/model-architecture/current/confirmed-decisions.md",
+    "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
+    "docs/model-architecture/progress/asset-policy.md",
+    "docs/model-architecture/progress/traceability.toml",
+    "tests/contracts/assets/test_asset_execution_boundary.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/progress/tasks/A002.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/A002/implementation_report.md",
+    "docs/model-architecture/reviews/A002/test_report.json",
+]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = [
+    "assets.qwen.local_path",
+    "assets.vae.local_path",
+]
+modules = [
+    "src/sakuramoon/assets/**",
+    "src/sakuramoon/encoders/**",
+]
+reference_modules = []
+tests = [
+    "tests/contracts/assets/**",
+]
+benchmarks = []
+artifacts = [
+    "docs/model-architecture/reviews/A002/**",
+]
+not_applicable_fields = [
+    "reference_modules",
+    "benchmarks",
+]
+not_applicable_reason = "The local-model execution boundary has no reference module or benchmark."
+
+[[requirements]]
+id = "DOC-007"
+kind = "requirement"
+status = "implemented"
+profile = "reference_execution_boundary"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = [
+    "0. 判定规则与当前边界",
+]
+node_kind = "list_item"
+source_fingerprint = "94f48f448f294e1ef349c095861f97e3e753174518bb1a07f9b7aa66c62ead1b"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:A002"
+implementation_paths = [
+    "AGENTS.md",
+    "docs/model-architecture/current/confirmed-decisions.md",
+    "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
+    "docs/model-architecture/progress/asset-policy.md",
+    "docs/model-architecture/progress/traceability.toml",
+    "tests/contracts/assets/test_asset_execution_boundary.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/progress/tasks/A002.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/A002/implementation_report.md",
+    "docs/model-architecture/reviews/A002/test_report.json",
+]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = []
+modules = [
+    "src/sakuramoon/**",
+]
+reference_modules = []
+tests = [
+    "tests/contracts/assets/**",
+]
+benchmarks = []
+artifacts = [
+    "docs/model-architecture/reviews/A002/**",
+]
+not_applicable_fields = [
+    "config_keys",
+    "reference_modules",
+    "benchmarks",
+]
+not_applicable_reason = "Reference code is forbidden; no runtime config or benchmark can authorize it."

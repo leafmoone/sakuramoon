@@ -21,11 +21,11 @@
 | Python | 3.12.3 | 仅支持 Linux/Python 3.12，不做额外兼容 |
 | PyTorch | 2.10.0+cu128；TorchAO 0.16.0；Triton 3.6.0 | import/CUDA 可见性已通过；kernel 仍由 `K001/T021/T040` 验证 |
 | GPU | 当前只可见 1×RTX 5090，32607 MiB | 可完成 S0 和单卡 kernel 测试；S1 以后必须等 4 卡可见 |
-| Qwen | `model/qwen_3.5_2B`，约 4.6 GiB 模型目录；config 为 24L/2048 hidden | `A001/T021` 锁 repo、revision、文件 hash 与 tokenizer hash |
-| VAE | `model/vae`，MageVAE，128 latent channels、downsample 16、posterior mean | `A001/T020` 验证官方来源、hash、round-trip 和质量门槛 |
+| Qwen | `model/qwen_3.5_2B` 已下载；config 为 24L/2048 hidden | `A001/T021` 只做本地锁定、校验与加载；禁止下载、联网替换或 fallback |
+| VAE | `model/vae` 已下载；MageVAE，128 latent channels、downsample 16、posterior mean | `A001/T020` 只做本地校验/加载、round-trip 和质量验收；禁止下载或 fallback |
 | 元数据 | `db/` 已知文件约 25.16 GB；只做过 stat，未读取数据行 | 不进 Git；`A001/D011` 只提交 schema、来源、hash 与非敏感 aggregate |
 | 存储 | 工作区为 400 GiB NFSv3，当前约 363 GiB 可用；无 checkpoint 预留 | 达到 300 GiB cache 低限，但不是已验证 NVMe；正式 preflight 继续硬阻塞 |
-| 参考工程 | `reference/HDM`、`JLT`、`krea-2` 均为嵌套 Git 仓库 | 根仓忽略 `reference/`，另存 URL、commit、license 和引用清单 |
+| 参考工程 | `reference/` 仅供人工理解/对照，可完全不使用 | 根仓忽略；任何代码、测试、preflight、训练或运行时不得导入、执行或调用其中代码 |
 | 凭据 | `.env` 已写 `MODELSCOPE_API_TOKEN`，权限 600 | `.env` 永不进 Git；resolved config、日志和 W&B 必须脱敏 |
 
 目标配置仍要求 4×RTX 5090、14 vCPU、约 120 GiB host RAM 和足够 NVMe。正式四卡任务不得用当前单卡结果替代。
@@ -235,6 +235,16 @@ sakuramoon/
 - **验证：** 任一文件缺失或 hash 不符时在模型加载前失败；模型目录不进入 Git。
 - **完成证据：** asset manifest、hash report、license/source report。
 - **GPU：** 无，模型加载留到 `T020/T021`。
+
+### A002：本地模型与参考工程执行硬边界
+
+- **对应文档：** `current/confirmed-decisions.md` 第 0 节、`progress/asset-policy.md`。
+- **实现路径：** `AGENTS.md`、现行/进度文档、`tests/contracts/assets/`、`traceability.toml`。
+- **动作：** 锁定 `model/qwen_3.5_2B` 与 `model/vae` 为唯一本地 Qwen/Mage-VAE 资产，禁止下载、补下载、联网替换和 fallback；锁定 `reference/` 仅人工理解/对照，禁止所有工程路径导入、执行或调用其中代码。
+- **验证：** 合同测试校验 manifest 的精确本地路径、生产模型加载的 explicit local-only 语义、禁止模型下载 API，并以 AST 阻止 `reference/` 代码的 import、动态 loader、`sys.path` 注入和子进程执行。
+- **边界：** 不读取或执行 `reference/` 内容，不读取 `.env`，不下载或加载模型，不使用 GPU。
+- **完成证据：** A002 task、targeted/full CPU 测试、Ruff/Pyright、traceability checker 与独立 AI/Infra 审查。
+- **GPU：** 无。
 
 ### D010：ModelScope 不可变 dataset manifest
 
@@ -567,7 +577,7 @@ sakuramoon/
   ↓
 R001 → R002 → D001 → C001
   ↓                 ↓
-A001 → D010 → D011 → D012 → D013 → D014 → D015
+A001 → A002 → D010 → D011 → D012 → D013 → D014 → D015
   ↓                                  ↓
 T020 + T021 → T022 + T023 → T024
   ↓

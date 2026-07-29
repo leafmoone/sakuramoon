@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "task_id": "A002",
+  "hardware": "CPU",
+  "targeted": {
+    "command": "PYTHONPATH=src uv run --frozen pytest -q tests/contracts/assets",
+    "passed": 9,
+    "failed": 0
+  },
+  "governance_and_contract": {
+    "command": "PYTHONPATH=src uv run --frozen pytest -q tests/contracts/assets tests/unit/docs/test_verify_traceability.py",
+    "passed": 45,
+    "failed": 0
+  },
+  "traceability": {
+    "command": "PYTHONPATH=src uv run --frozen python tools/verify_traceability.py --format json",
+    "ok": true,
+    "requirements": 221,
+    "source_nodes": 221,
+    "archive_files": 16,
+    "production_modules": 13,
+    "runtime_config_keys": 235
+  },
+  "full_suite": {
+    "command": "PYTHONPATH=src uv run --frozen pytest -q",
+    "passed": 125,
+    "failed": 0,
+    "duration_seconds": 14.98
+  },
+  "flaky_recheck": {
+    "initial_failure": "tests/unit/assets/test_bindings.py::test_manifest_replacement_during_readiness_fails_closed",
+    "scope": "pre-existing A001 test; no A002 source change",
+    "isolated_rerun_passed": 1,
+    "subsequent_full_suite_passed": 125,
+    "final_full_suite_failed": 0
+  },
+  "ruff": {
+    "command": "uv run --frozen ruff check .",
+    "ok": true
+  },
+  "pyright": {
+    "command": "uv run --frozen pyright tests/contracts/assets/test_asset_execution_boundary.py tests/unit/docs/test_verify_traceability.py",
+    "errors": 0,
+    "warnings": 0
+  },
+  "gpu_used": false,
+  "model_or_reference_payload_read": false
+}

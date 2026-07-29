@@ -1,6 +1,6 @@
 # SakuraMoon 资产与 Git 边界
 
-状态：R001 建立的仓库基线。资产内容的完整锁定由后续 `A001` 与数据任务执行；本文件只定义允许进入 Git 的元数据边界，并记录 R001 要求的参考仓库来源证据。
+状态：R001 建立仓库基线，A001 锁定本地资产身份，A002 锁定模型只本地加载与参考工程禁止代码调用的执行边界。
 
 ## 基本原则
 
@@ -14,16 +14,18 @@
 | 本地路径或类型 | Git 状态 | 允许提交的替代物 |
 |---|---|---|
 | `.env`、`.env.*`（`.env.example` 除外）、私钥 | 忽略 | 环境变量名、空值示例、脱敏规则 |
-| `model/`、模型权重扩展名 | 忽略 | `assets/manifest.toml` 中的 repo、revision、路径、bytes、SHA-256、配置/tokenizer 摘要和许可证 |
+| `model/`、模型权重扩展名 | 忽略；只本地校验/加载 | `assets/manifest.toml` 中的 repo、revision、路径、bytes、SHA-256、配置/tokenizer 摘要和许可证；不得下载、替换或 fallback |
 | `db/`、本地数据库扩展名 | 忽略 | schema、来源/revision、非敏感统计、文件级 bytes 与 SHA-256；不得包含数据行或可还原内容 |
 | `data/`、`cache/` | 忽略 | 不可变 dataset/shard manifest、校验和、样本计数和缓存策略 |
-| `reference/` | 忽略 | 本文件与审查 artifact 中的 remote、HEAD、license 和引用说明 |
+| `reference/` | 忽略；仅人工理解/对照 | 本文件与审查 artifact 中的历史 remote、HEAD 和 license 记录；禁止工程代码导入、执行或调用其中代码 |
 | `checkpoints/`、`artifacts/`、`outputs/`、`samples/`、`runs/` | 忽略 | 运行 manifest、checksum、artifact kind 和外部/本地受控路径索引 |
 | `wandb/`、`profiles?/`、`traces/`、`diagnostics/` | 忽略 | 脱敏后的摘要、指标 schema、报告和 trace 索引 |
 
 ## 模型与数据库 manifest 边界
 
-后续 `A001` 可以提交 manifest 与校验工具，但不得提交实际资产。每个模型条目至少包含：稳定 asset ID、用途、本地逻辑路径、上游 repo、不可变 revision、逐文件相对路径/bytes/SHA-256、许可证或访问条款、tokenizer/config 哈希及冻结策略。Qwen 必须锁定 ModelScope `spawner/Qwen3_5_2b_claude_heretic_spawner`，Mage-VAE 必须锁定 Microsoft 官方来源；R001 不宣称已经验证本地权重身份或文件哈希。
+A001 已提交 manifest 与校验工具，但实际资产仍不得提交。每个模型条目至少包含：稳定 asset ID、用途、本地逻辑路径、上游 repo、不可变 revision、逐文件相对路径/bytes/SHA-256、许可证或访问条款、tokenizer/config 哈希及冻结策略。Qwen 必须锁定 ModelScope `spawner/Qwen3_5_2b_claude_heretic_spawner`，Mage-VAE 必须锁定 Microsoft 官方来源。
+
+Qwen TE 与 Mage-VAE 已分别位于 `model/qwen_3.5_2B/` 和 `model/vae/`。所有模型消费者必须先按 manifest 在仓库根边界内验证本地文件身份，再以显式 local-only 语义加载。禁止下载 API、缺失时补下载、远端 repo 替换、默认 cache 命中或其他 fallback；本地资产不合约必须在模型构造或 forward 前硬失败。
 
 DB 条目至少包含：稳定 asset ID、来源与不可变 revision、schema 版本、文件级 bytes/SHA-256、访问限制和允许输出的聚合统计。manifest 不得包含原始记录、caption、用户数据、访问 URL 中的签名参数或任何凭据。
 
@@ -45,6 +47,7 @@ krea-2 的 `assets/hf_samples/LICENSE.pdf` 是单独的 **KREA COMMUNITY LICENSE
 
 ## 引用与例外流程
 
-- 参考实现只用于理解或对照。使用任何代码前，任务必须记录精确文件/行来源、适用许可证、修改说明和兼容性结论；HDM 的非商业许可证尤其不得被误当作宽松代码许可证。
+- 参考实现只供人工理解或对照，可以完全不使用。生产模块、测试、preflight、训练、评估与运行时均不得把 `reference/` 加入模块路径，不得 import、动态加载、执行、调用或以子进程启动其中任何代码。
+- 任何需要的能力均必须依据现行决定独立实现并审查；不得通过 vendor、submodule、`sys.path`、动态 loader 或 shell 包装绕过该边界。
 - 远端 branch、tag 或默认分支不是不可变标识。manifest 和证据只接受 commit/revision 与逐文件哈希。
 - 任何边界例外必须先更新现行决策或任务文件，列出允许路径、最大体积、许可证和回滚点，再由独立审查与主代理提交；不得通过 `git add -f` 临时绕过。

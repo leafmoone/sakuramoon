@@ -55,6 +55,19 @@ def repo_copy(tmp_path: Path) -> Path:
         destination = model_docs / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / "docs/model-architecture" / relative, destination)
+    for relative in (
+        "AGENTS.md",
+        "docs/model-architecture/progress/asset-policy.md",
+        "docs/model-architecture/progress/tasks/A002.md",
+        "docs/model-architecture/progress/time-log.jsonl",
+        "docs/model-architecture/reviews/A002/implementation_report.md",
+        "docs/model-architecture/reviews/A002/test_report.json",
+        "tests/contracts/assets/test_asset_execution_boundary.py",
+        "tests/unit/docs/test_verify_traceability.py",
+    ):
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, destination)
     tool = root / "tools/verify_traceability.py"
     tool.parent.mkdir(parents=True)
     shutil.copy2(ROOT / "tools/verify_traceability.py", tool)
@@ -84,12 +97,12 @@ def source_by_kind(data: dict[str, Any], kind: str) -> dict[str, Any]:
 def test_live_registry_and_source_coverage() -> None:
     report = vt.verify(ROOT)
     assert report.ok, report.errors
-    assert report.requirement_count == report.source_node_count == 219
+    assert report.requirement_count == report.source_node_count == 221
     assert report.archive_file_count == 16
 
     data = load_registry(ROOT)
     expected = {
-        "confirmed": (108, {f"{index}." for index in range(15)}),
+        "confirmed": (110, {f"{index}." for index in range(15)}),
         "open_items": (99, {f"{index}." for index in range(11)}),
         "observability": (12, {"可观测性与评估补充决定"}),
     }
@@ -130,11 +143,11 @@ def test_new_clause_preserves_existing_ids(repo_copy: Path) -> None:
         source_entry = source_by_kind(data, "confirmed")
         previous = source_entry["sha256"]
         source_entry["sha256"] = digest
-        source_entry["revision"] = 2
+        source_entry["revision"] = 3
         data["changes"].append(
             {
                 "source_path": source_entry["path"],
-                "revision": 2,
+                "revision": 3,
                 "previous_sha256": previous,
                 "new_sha256": digest,
                 "changed_at": "2026-07-29",
@@ -148,7 +161,7 @@ def test_new_clause_preserves_existing_ids(repo_copy: Path) -> None:
         )
         template.update(
             {
-                "id": "DOC-006",
+                "id": "DOC-008",
                 "heading_path": list(node.heading_path),
                 "node_kind": node.kind,
                 "source_fingerprint": node.fingerprint,
@@ -345,6 +358,9 @@ def test_reverse_module_and_config_inventory_is_required(repo_copy: Path) -> Non
     def mutate(data: dict[str, Any]) -> None:
         data["inventory"]["no_modules_reason"] = ""
         data["inventory"]["no_configs_reason"] = ""
+        for item in (*data["profiles"], *data["requirements"]):
+            if item.get("profile", item.get("name")) == "reference_execution_boundary":
+                item["modules"] = ["src/sakuramoon/__init__.py"]
 
     rewrite_registry(repo_copy, mutate)
     errors = error_text(repo_copy)
@@ -490,7 +506,7 @@ def test_current_change_requires_revision_and_changelog(repo_copy: Path) -> None
         source_entry["sha256"] = digest
 
     rewrite_registry(repo_copy, mutate)
-    assert "revision 1 SHA must equal initial_sha256" in error_text(repo_copy)
+    assert "latest changelog hash does not match source" in error_text(repo_copy)
 
 
 def test_current_change_cannot_rewrite_canonical_initial_sha(repo_copy: Path) -> None:
@@ -514,13 +530,13 @@ def test_valid_current_changelog_chain_passes(repo_copy: Path) -> None:
 
     def mutate(data: dict[str, Any]) -> None:
         source_entry = source_by_kind(data, "confirmed")
-        previous = source_entry["initial_sha256"]
+        previous = source_entry["sha256"]
         source_entry["sha256"] = digest
-        source_entry["revision"] = 2
+        source_entry["revision"] = 3
         data["changes"].append(
             {
                 "source_path": source_entry["path"],
-                "revision": 2,
+                "revision": 3,
                 "previous_sha256": previous,
                 "new_sha256": digest,
                 "changed_at": "2026-07-29",

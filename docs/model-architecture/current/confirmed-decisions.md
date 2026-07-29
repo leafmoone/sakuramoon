@@ -17,6 +17,8 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 3. **待验证：**结构已经决定，但仍需单元测试、canary、目标机 benchmark 或质量验收。
 4. **尚未决定：**只剩除整体条件外的 dropout 数值，见第 13 节与配套清单。Artist 路径与文本长度桶已由后续会话锁定。
 5. 实现配置不得从原组件的候选、推荐、早期记录或历史决定中自动取值。
+6. **本地模型资产硬边界：**Qwen TE 与 Mage-VAE 已分别位于 `model/qwen_3.5_2B/` 和 `model/vae/`。仓库只允许按锁定 manifest 做本地校验与本地加载；禁止自动下载、缺失补下载、联网替换或 fallback，任一本地文件缺失或漂移必须在加载前硬失败。
+7. **参考工程硬边界：**`reference/` 仅供人工理解和对照，可以完全不使用。生产代码、测试、preflight、训练和运行时绝对不得 import、执行或调用其中任何代码；实现必须以本地现行决定与独立实现为准。
 # 1. 项目目标与硬约束
 - 从零训练二次元垂类文生图基础模型，不继承现有 DiT 权重。
 - 目标机器为单机 4×RTX 5090，每卡 32 GB；训练窗口 90–180 天；数据约 11M WebDataset 样本。
@@ -185,6 +187,7 @@ Artist 只走 style 分支、在线 segment metadata、无第二次 Qwen/离线 
 - 2026-07-29：按完整会话导出重新判定“已批准 / 后续覆盖 / 尚未决定”，移除对已批准架构的重复确认请求。
 - 2026-07-29：补入架构图评审结论：clean latent `x`、modality/packing/RoPE 分层、独立 final modulation head、velocity-space CFG、双重 zero-init 与固定 growth alpha。
 - 2026-07-29：用户锁定 Artist 仅进入 style 分支；serializer 在线记录 segment/token indices，同一 Qwen 只前向一次，不做 style cache。文本预算固定为 condition 512 和 8 桶，不因 Artist 路径变化重新扫描。
+- 2026-07-30：用户确认 Qwen TE 与 Mage-VAE 为 `model/` 下已准备本地资产，锁定只校验/只本地加载且禁止下载或 fallback；`reference/` 收窄为纯人工理解/对照，禁止任何工程路径导入、执行或调用其中代码。
 - 会话证据：Codex 会话导出附件 `pasted-text.txt`；原组件页保留讨论过程和外部参考。
 ## Notion 原始组件
 - <mention-page url="https://app.notion.com/p/3aaae967ecf281ba8f73fac2f9e4c4f3"/>
