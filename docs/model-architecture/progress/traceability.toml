@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 6
+registry_revision = 7
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -648,10 +648,12 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/encoders/**",
+    "tools/asset_execution_boundary.py",
 ]
 reference_modules = []
 tests = [
     "tests/contracts/assets/**",
+    "tests/unit/assets/test_inspect.py",
 ]
 benchmarks = []
 artifacts = [
@@ -672,10 +674,12 @@ owner_tasks = [
 config_keys = []
 modules = [
     "src/sakuramoon/**",
+    "tools/asset_execution_boundary.py",
 ]
 reference_modules = []
 tests = [
     "tests/contracts/assets/**",
+    "tests/unit/assets/test_inspect.py",
 ]
 benchmarks = []
 artifacts = [
@@ -10971,11 +10975,19 @@ implementation_paths = [
     "docs/model-architecture/progress/asset-policy.md",
     "docs/model-architecture/progress/traceability.toml",
     "tests/contracts/assets/test_asset_execution_boundary.py",
+    "tests/contracts/assets/conftest.py",
+    "src/sakuramoon/assets/inspect.py",
+    "tests/unit/assets/test_inspect.py",
+    "tools/__init__.py",
+    "tools/asset_execution_boundary.py",
     "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/tasks/A002.md",
     "docs/model-architecture/progress/time-log.jsonl",
     "docs/model-architecture/reviews/A002/implementation_report.md",
     "docs/model-architecture/reviews/A002/test_report.json",
+    "docs/model-architecture/reviews/A002/review_remediation.md",
+    "docs/model-architecture/reviews/A002/timing.json",
+    "docs/model-architecture/reviews/A002/artifacts.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -10988,10 +11000,12 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/encoders/**",
+    "tools/asset_execution_boundary.py",
 ]
 reference_modules = []
 tests = [
     "tests/contracts/assets/**",
+    "tests/unit/assets/test_inspect.py",
 ]
 benchmarks = []
 artifacts = [
@@ -11026,11 +11040,19 @@ implementation_paths = [
     "docs/model-architecture/progress/asset-policy.md",
     "docs/model-architecture/progress/traceability.toml",
     "tests/contracts/assets/test_asset_execution_boundary.py",
+    "tests/contracts/assets/conftest.py",
+    "src/sakuramoon/assets/inspect.py",
+    "tests/unit/assets/test_inspect.py",
+    "tools/__init__.py",
+    "tools/asset_execution_boundary.py",
     "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/tasks/A002.md",
     "docs/model-architecture/progress/time-log.jsonl",
     "docs/model-architecture/reviews/A002/implementation_report.md",
     "docs/model-architecture/reviews/A002/test_report.json",
+    "docs/model-architecture/reviews/A002/review_remediation.md",
+    "docs/model-architecture/reviews/A002/timing.json",
+    "docs/model-architecture/reviews/A002/artifacts.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -11039,10 +11061,12 @@ infra_review = ""
 config_keys = []
 modules = [
     "src/sakuramoon/**",
+    "tools/asset_execution_boundary.py",
 ]
 reference_modules = []
 tests = [
     "tests/contracts/assets/**",
+    "tests/unit/assets/test_inspect.py",
 ]
 benchmarks = []
 artifacts = [

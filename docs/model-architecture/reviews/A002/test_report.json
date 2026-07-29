@@ -2,18 +2,26 @@
   "schema_version": 1,
   "task_id": "A002",
   "hardware": "CPU",
-  "targeted": {
-    "command": "PYTHONPATH=src uv run --frozen pytest -q tests/contracts/assets",
-    "passed": 9,
-    "failed": 0
+  "targeted_boundary_and_git": {
+    "command": "uv run --frozen pytest -q tests/contracts/assets/test_asset_execution_boundary.py tests/unit/assets/test_inspect.py",
+    "passed": 54,
+    "failed": 0,
+    "duration_seconds": 2.92
   },
   "governance_and_contract": {
-    "command": "PYTHONPATH=src uv run --frozen pytest -q tests/contracts/assets tests/unit/docs/test_verify_traceability.py",
-    "passed": 45,
-    "failed": 0
+    "command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py tests/contracts/assets/test_asset_execution_boundary.py tests/unit/assets/test_inspect.py",
+    "passed": 90,
+    "failed": 0,
+    "duration_seconds": 11.64
+  },
+  "scanner_self_check": {
+    "command": "uv run --frozen python -c 'from pathlib import Path; from tools.asset_execution_boundary import python_sources, scan_repository; p=python_sources(Path.cwd()); print(len(p)); print(len(scan_repository(Path.cwd())))'",
+    "python_sources": 29,
+    "violations": 0,
+    "includes_scanner_itself": true
   },
   "traceability": {
-    "command": "PYTHONPATH=src uv run --frozen python tools/verify_traceability.py --format json",
+    "command": "uv run --frozen python tools/verify_traceability.py --format json",
     "ok": true,
     "requirements": 221,
     "source_nodes": 221,
@@ -22,27 +30,26 @@
     "runtime_config_keys": 235
   },
   "full_suite": {
-    "command": "PYTHONPATH=src uv run --frozen pytest -q",
-    "passed": 125,
+    "command": "uv run --frozen pytest -q",
+    "passed": 159,
     "failed": 0,
-    "duration_seconds": 14.98
-  },
-  "flaky_recheck": {
-    "initial_failure": "tests/unit/assets/test_bindings.py::test_manifest_replacement_during_readiness_fails_closed",
-    "scope": "pre-existing A001 test; no A002 source change",
-    "isolated_rerun_passed": 1,
-    "subsequent_full_suite_passed": 125,
-    "final_full_suite_failed": 0
+    "duration_seconds": 14.93
   },
   "ruff": {
-    "command": "uv run --frozen ruff check .",
+    "command": "uv run --frozen ruff check src/sakuramoon tests tools",
     "ok": true
   },
   "pyright": {
-    "command": "uv run --frozen pyright tests/contracts/assets/test_asset_execution_boundary.py tests/unit/docs/test_verify_traceability.py",
+    "command": "uv run --frozen pyright",
     "errors": 0,
     "warnings": 0
   },
+  "review_remediation": {
+    "initial_ai_verdict": "FAIL_changes_required",
+    "initial_infra_verdict": "FAIL_changes_required",
+    "status": "remediation_complete_pending_original_reviewer_rereview"
+  },
   "gpu_used": false,
-  "model_or_reference_payload_read": false
+  "network_used": false,
+  "model_database_dataset_or_reference_payload_read": false
 }

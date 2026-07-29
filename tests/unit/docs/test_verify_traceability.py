@@ -62,14 +62,21 @@ def repo_copy(tmp_path: Path) -> Path:
         "docs/model-architecture/progress/time-log.jsonl",
         "docs/model-architecture/reviews/A002/implementation_report.md",
         "docs/model-architecture/reviews/A002/test_report.json",
+        "docs/model-architecture/reviews/A002/review_remediation.md",
+        "docs/model-architecture/reviews/A002/timing.json",
+        "docs/model-architecture/reviews/A002/artifacts.json",
+        "tests/contracts/assets/conftest.py",
         "tests/contracts/assets/test_asset_execution_boundary.py",
+        "tests/unit/assets/test_inspect.py",
         "tests/unit/docs/test_verify_traceability.py",
+        "tools/__init__.py",
+        "tools/asset_execution_boundary.py",
     ):
         destination = root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, destination)
     tool = root / "tools/verify_traceability.py"
-    tool.parent.mkdir(parents=True)
+    tool.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "tools/verify_traceability.py", tool)
     return root
 

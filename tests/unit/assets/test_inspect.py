@@ -261,6 +261,28 @@ def test_selected_database_returns_revalidated_identity(
         readiness.verified_path("metadata_db", "metadata.db")
 
 
+def test_verified_model_root_is_bound_to_the_complete_selection(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+
+    assert selection.verified_root("qwen_text_encoder") == (
+        synthetic_assets.root / "model/qwen"
+    )
+    assert selection.verified_root("mage_vae") == synthetic_assets.root / "model/vae"
+    with pytest.raises(AssetPreflightError, match="asset root was not verified"):
+        selection.verified_root("unknown_model")
+
+    weights = synthetic_assets.root / "model/qwen/model.safetensors"
+    weights.write_bytes(b"x" * weights.stat().st_size)
+    with pytest.raises(AssetPreflightError, match="identity drifted"):
+        selection.verified_root("qwen_text_encoder")
+
+
 def test_database_audit_requires_explicit_known_unique_selection(
     synthetic_assets: SyntheticAssetTree,
 ) -> None:
@@ -383,6 +405,69 @@ def test_reference_origin_diagnostic_redacts_credentials(
     assert "origin_mismatch" in serialized
     assert secret not in serialized
     assert secret not in str(report.issues)
+
+
+def test_reference_git_audit_disables_hostile_local_configuration(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    reference = synthetic_assets.root / "reference/HDM"
+    marker = synthetic_assets.root / "hostile-git-config-executed"
+    hostile = synthetic_assets.root / "hostile-git-command.sh"
+    hostile.write_text(
+        f"#!/bin/sh\nprintf executed >> {marker}\nexit 0\n",
+        encoding="utf-8",
+    )
+    hostile.chmod(0o700)
+    hooks = synthetic_assets.root / "hostile-hooks"
+    hooks.mkdir()
+    hook = hooks / "post-index-change"
+    hook.write_text(
+        f"#!/bin/sh\nprintf hook >> {marker}\nexit 0\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o700)
+    for key, value in (
+        ("core.fsmonitor", str(hostile)),
+        ("core.hooksPath", str(hooks)),
+        ("core.pager", str(hostile)),
+        ("pager.status", str(hostile)),
+        ("diff.external", str(hostile)),
+        ("interactive.diffFilter", str(hostile)),
+    ):
+        subprocess.run(
+            ("git", "-C", str(reference), "config", key, value),
+            check=True,
+        )
+
+    report = inspect_reference_repositories(
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+
+    assert report.ok
+    assert not marker.exists()
+
+
+def test_reference_git_helper_rejects_unlisted_commands_without_execution(
+    synthetic_assets: SyntheticAssetTree,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = load_manifest(synthetic_assets.manifest_path).references[0]
+
+    def forbidden_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError(f"unexpected subprocess: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr(inspect_module.subprocess, "run", forbidden_run)
+
+    assert (
+        inspect_module._git(  # pyright: ignore[reportPrivateUsage]
+            reference,
+            synthetic_assets.root,
+            "show",
+            "HEAD:train.py",
+        )
+        is None
+    )
 
 
 def test_cli_scopes_and_exit_codes(

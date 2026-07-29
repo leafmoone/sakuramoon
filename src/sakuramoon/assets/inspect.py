@@ -88,6 +88,12 @@ class VerifiedAssetFile:
             )
         return self._path
 
+    def verified_root(self) -> Path:
+        """Return this file's asset root only while its identity is unchanged."""
+
+        self.require_unchanged()
+        return self._base
+
 
 @dataclass(frozen=True)
 class VerifiedAssetSelection:
@@ -125,6 +131,19 @@ class VerifiedAssetSelection:
         if len(matches) != 1:
             raise AssetPreflightError(f"file was not verified: {asset_id}:{relative_path}")
         return matches[0].require_unchanged()
+
+    def verified_root(self, asset_id: str) -> Path:
+        """Return one manifest-bound asset root after revalidating every locked file."""
+
+        self.require_unchanged()
+        matches = [item for item in self.files if item.asset_id == asset_id]
+        roots = {item.verified_root() for item in matches}
+        if not matches or len(roots) != 1:
+            raise AssetPreflightError(f"asset root was not verified: {asset_id}")
+        root = roots.pop()
+        if _safe_path(self._root, root.relative_to(self._root).as_posix()) != root:
+            raise AssetPreflightError(f"verified asset root drifted: {asset_id}")
+        return root
 
 
 @dataclass(frozen=True)
@@ -312,15 +331,56 @@ def _inspect_model_summary(root: Path, asset: ModelAsset) -> list[InspectionIssu
     return issues
 
 
+_REFERENCE_GIT_COMMANDS = frozenset(
+    {
+        ("rev-parse", "--verify", "HEAD^{commit}"),
+        ("remote", "get-url", "origin"),
+        ("status", "--porcelain=v1", "--untracked-files=no"),
+    }
+)
+
+
 def _git(reference: ReferenceAsset, root: Path, *args: str) -> str | None:
+    if args not in _REFERENCE_GIT_COMMANDS:
+        return None
     path = _safe_path(root, reference.local_path)
     if path is None:
         return None
     try:
         result = subprocess.run(
-            ("git", "-C", str(path), *args),
+            (
+                "git",
+                "--no-pager",
+                "--no-optional-locks",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.pager=cat",
+                "-c",
+                "pager.status=false",
+                "-c",
+                "diff.external=",
+                "-c",
+                "interactive.diffFilter=",
+                "-C",
+                str(path),
+                *args,
+            ),
             check=True,
             capture_output=True,
+            env={
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "GIT_EXTERNAL_DIFF": "",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_PAGER": "cat",
+                "GIT_TERMINAL_PROMPT": "0",
+                "PAGER": "cat",
+            },
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=10,
         )
@@ -334,13 +394,13 @@ def _inspect_reference(root: Path, reference: ReferenceAsset) -> list[Inspection
     base = _safe_path(root, reference.local_path)
     if base is None or not base.is_dir():
         return [InspectionIssue(reference.asset_id, "missing_reference", reference.local_path)]
-    head = _git(reference, root, "rev-parse", "HEAD")
+    head = _git(reference, root, "rev-parse", "--verify", "HEAD^{commit}")
     if head != reference.commit:
         issues.append(InspectionIssue(reference.asset_id, "commit_mismatch", head or "unavailable"))
     origin = _git(reference, root, "remote", "get-url", "origin")
     if origin != reference.origin_url:
         issues.append(InspectionIssue(reference.asset_id, "origin_mismatch", "redacted"))
-    tracked_status = _git(reference, root, "status", "--porcelain", "--untracked-files=no")
+    tracked_status = _git(reference, root, "status", "--porcelain=v1", "--untracked-files=no")
     if tracked_status is None or tracked_status:
         issues.append(
             InspectionIssue(

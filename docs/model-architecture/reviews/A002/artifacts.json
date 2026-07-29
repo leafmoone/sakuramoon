@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "task_id": "A002",
+  "files": {
+    "AGENTS.md": "d4ba2545430c33d94bf04cb3cff96436552b32a2b0df0b5ecdbf661f35d11a0e",
+    "docs/model-architecture/current/confirmed-decisions.md": "5ddb1ff9649a62c799650bc912a0275839a374cc859169ecd036b2d0194b6d1d",
+    "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md": "f7ab36618fbc2c3837fe4728fc4b458990971d37f8d702a5f4574570ebdf5a00",
+    "docs/model-architecture/progress/asset-policy.md": "70adf36cb012652fb29119eaecb4b8539cb7399e53b3dc0b92e882baa608114c",
+    "docs/model-architecture/progress/traceability.toml": "607514b19e6db492fe3440721fe222eff12c397997501241a85bdb3cc1380311",
+    "src/sakuramoon/assets/inspect.py": "de2ffd7354e33886cd60bcd1752aac2cf79f59c9e7e156eb26bcfd83de5c19cd",
+    "tests/contracts/assets/conftest.py": "a541ece254afc811b0c6b71d9b70fea65e623b0b57b7351b12394e1d28af3ea5",
+    "tests/contracts/assets/test_asset_execution_boundary.py": "e84344f76f12f21bd08f4dab6d71d8aaeada0f94e65edde64470232ae0b90269",
+    "tests/unit/assets/test_inspect.py": "ffb002063f4811d1a626db144eab53249e2c670de67d42cb34e8b1863b0f40dc",
+    "tests/unit/docs/test_verify_traceability.py": "29d2bafa6c2fca41885a62611a182424bd81013d229e2d5504dfa8f3de110890",
+    "tools/__init__.py": "ff36e0ad05540b28a6954d61429194fa76a5f6c3027580d63ee8e90e1ce9c980",
+    "tools/asset_execution_boundary.py": "9edadacfef2467ca397d26a73b08514004a908be46eba2dd915711c7836199e4",
+    "docs/model-architecture/progress/tasks/A002.md": "017741d4063619118815e25ed79bd3323724efef1a9274e629214697cf9cbc57",
+    "docs/model-architecture/reviews/A002/implementation_report.md": "b95ff45231b4eb4616aa9899bc7733eedcc64c292a1b19e5f274f0f3a9ba3bde",
+    "docs/model-architecture/reviews/A002/test_report.json": "adfd52146fb05470bdf15e29f92bfb1d1809006d3a1f9b94436aa1fd8d7ed5d2",
+    "docs/model-architecture/reviews/A002/review_remediation.md": "7a45f904d0be26694a15e5c07deb71860d90ec8a1c06354e15581d3c39da7a8a",
+    "docs/model-architecture/reviews/A002/timing.json": "d9391acb00b521f3e0f37841e1f132c0f7abf2ede27efccb9d7c0a32cdcd51c8"
+  },
+  "performance_artifacts_created": false,
+  "large_payloads_included": false
+}
