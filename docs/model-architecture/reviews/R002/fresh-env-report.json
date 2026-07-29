@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "task_id": "R002",
+  "result": "pass",
+  "python": "3.12.3",
+  "uv": "0.12.0",
+  "lock_sha256": "ee6a52d796e029a9a19db1e59011f8a801f3ea3b451f3a70b0190679dc2244ef",
+  "command": "uv venv --clear .venv --python /usr/bin/python3 && time -p uv sync --frozen --python /usr/bin/python3",
+  "installed_distributions": 94,
+  "sync_seconds": {
+    "real": 24.81,
+    "user": 0.13,
+    "sys": 1.76
+  },
+  "command_wall_seconds": 77.3,
+  "downloaded_packages": 0,
+  "source_rebuilds": 0,
+  "notes": [
+    "The command wall time includes clearing the prior 8+ GiB virtual environment on NFSv3.",
+    "The cached causal-conv1d source artifact was reused; no compiler ran in the final sync."
+  ]
+}

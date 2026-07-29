@@ -1,6 +1,6 @@
 # SakuraMoon 详细实现工程路线图
 
-状态：规划基线，尚未开始代码实现。本文之后的任务必须按顺序执行，除文档迁移外不得把“已规划”标记成“已完成”。
+状态：执行中。`R001` 已由 commit `473eea9` 完成；`R002` 已完成实现与主代理验收，等待 Foundation 包级审查。后续任务仍须按依赖顺序逐 ID 关闭。
 
 独立审查记录：[AI/模型正确性审查](../reviews/ROADMAP/ai_review.md)；[Infra/性能审查](../reviews/ROADMAP/infra_review.md)。
 
@@ -10,20 +10,21 @@
 
 本路线图覆盖：本地文档治理、Git、uv、配置系统、数据和缓存、Caption/Qwen/VAE、文本与 Style 条件、Single-stream DiT、目标函数与采样、optimizer/DDP/checkpoint、增长和 stage、W&B、FID/IS、profiling、故障注入及正式 canary。
 
-不在本轮执行：Git 初始化、uv 安装、依赖安装、数据集下载、代码实现、模型加载测试、GPU kernel 测试和训练。Notion 迁移与 MCP 移除已经完成。
+当前已完成 Git 初始化、资产忽略边界、uv 安装和 Python 依赖锁。尚未执行数据集下载、模型加载、GPU kernel、训练代码或 canary；Notion 迁移与 MCP 移除已经完成。
 
 ## 2. 当前已核对的环境事实
 
 | 项目 | 当前事实 | 路线图影响 |
 |---|---|---|
-| Git | 工作区当前不是 Git 仓库 | `R001` 首先初始化并建立安全忽略规则 |
-| uv | 当前 shell 中不存在 `uv` | `R002` 安装并锁定，不能假定已准备好 |
+| Git | 根仓已初始化；`R001` commit=`473eea9` | 后续任务保持逐 ID 原子 commit |
+| uv | 0.12.0；Linux x86_64/Python 3.12 lock 已生成 | `R002` 的空环境重建证据见 `progress/environment-lock.md` |
 | Python | 3.12.3 | 仅支持 Linux/Python 3.12，不做额外兼容 |
-| PyTorch | 2.7.0 alpha，CUDA 12.8 | 仅作为现状；生产版本须由 FA4/TorchAO/Qwen kernel 兼容矩阵决定 |
+| PyTorch | 2.10.0+cu128；TorchAO 0.16.0；Triton 3.6.0 | import/CUDA 可见性已通过；kernel 仍由 `K001/T021/T040` 验证 |
 | GPU | 当前只可见 1×RTX 5090，32607 MiB | 可完成 S0 和单卡 kernel 测试；S1 以后必须等 4 卡可见 |
 | Qwen | `model/qwen_3.5_2B`，约 4.6 GiB 模型目录；config 为 24L/2048 hidden | `A001/T021` 锁 repo、revision、文件 hash 与 tokenizer hash |
 | VAE | `model/vae`，MageVAE，128 latent channels、downsample 16、posterior mean | `A001/T020` 验证官方来源、hash、round-trip 和质量门槛 |
-| 元数据 | `db/` 含约 3.5 GiB 本地资料 | 不进 Git；只提交 schema、来源和 hash manifest |
+| 元数据 | `db/` 已知文件约 25.16 GB；只做过 stat，未读取数据行 | 不进 Git；`A001/D011` 只提交 schema、来源、hash 与非敏感 aggregate |
+| 存储 | 工作区为 400 GiB NFSv3，当前约 363 GiB 可用；无 checkpoint 预留 | 达到 300 GiB cache 低限，但不是已验证 NVMe；正式 preflight 继续硬阻塞 |
 | 参考工程 | `reference/HDM`、`JLT`、`krea-2` 均为嵌套 Git 仓库 | 根仓忽略 `reference/`，另存 URL、commit、license 和引用清单 |
 | 凭据 | `.env` 已写 `MODELSCOPE_API_TOKEN`，权限 600 | `.env` 永不进 Git；resolved config、日志和 W&B 必须脱敏 |
 
@@ -65,33 +66,21 @@
 
 `tools/verify_traceability.py` 必须双向检查：所有现行 requirement 都有实现/验证映射，所有关键模块和配置键也能反向找到文档依据。映射缺失时 preflight 失败。
 
-## 4. 强制的逐任务代理、审查和 Git 协议
+## 4. 风险分级、里程碑审查和 Git 协议
 
-每个下文任务 ID 都是独立实现单元，不得把两个任务交给同一个“顺手完成”的代理。
+2026-07-29 用户批准以下执行协议。它只减少代理调用、重复文档与重复测试，不改变架构、凭据安全、生产训练或真实硬件门槛。
 
-1. 主代理创建 `docs/model-architecture/progress/tasks/<TASK_ID>.md`，写明 requirement、依赖、允许修改路径、非目标、CPU/GPU 等级、测试和回滚点。
-2. 启动新的实现子代理。实现代理必须分别以 AI/模型正确性和 Infra/性能角度自检，并更新代码、测试、配置、当前文档和耗时记录。
-3. 实现结束后才启动新的独立审查子代理。审查代理第一轮只读 diff 和证据，以两个独立章节输出 `ai_review.md` 与 `infra_review.md`，不得用一句“已自检”替代。
-4. 有问题时由原实现代理修复，再由原审查代理复审。共享工作树中禁止两个代理同时写同一模块。
-5. 主代理重新运行验收命令、核对文档和耗时，只有全部通过后才做一个原子 Git commit。
-6. kernel、optimizer、checkpoint、growth、DDP 和故障注入任务必须使用两个独立审查代理：一个模型正确性审查，一个 Infra 审查。
+1. 每个任务 ID 仍是独立实现与回滚单元。主代理创建 `progress/tasks/<TASK_ID>.md`，每个 ID 保持独立状态、diff、针对性测试和原子 commit。
+2. 低中风险任务按包复用同一个实现代理：Foundation=`R002,D001,C001,A001`；Data=`D010-D015`；Encoders/Conditioning=`T020-T024`；Dense Model=`M030-M033`；Training Utilities=`T050-T053`。
+3. 低中风险任务从逐任务审查改为包级里程碑审查。审查报告仍逐 ID 分别给出 AI/模型正确性与 Infra/性能结论；问题只修复受影响任务，不重跑无关任务。
+4. `K001`、`T040`、`T041`、`T042`、`T043`、`T054` 和所有正式 stage canary 保持单独实现、独立 AI reviewer、独立 Infra reviewer。
+5. 每任务只跑针对性 unit、contract 和小型真实 GPU 测试；17x8 shape、100k 扫描、1,000-step canary 与完整恢复矩阵在对应里程碑集中运行一次。
+6. metadata 扫描、下载校验、VAE 统计和 GPU canary 可在后台运行；仅当依赖已满足、接口已冻结、不写同一文件且不争用同一 GPU/NVMe 时并行，结果返回前不得关闭依赖项。
+7. 普通任务只保留 task、实现摘要、测试结果、耗时和 commit。共同环境、资产和 benchmark 由任务包共享引用；`perf_baseline/after` 只为实际性能任务生成，不写 N/A 占位。
+8. 生产 FA4 和完整 canary 前允许显式 dense SDPA reference 的 1-10 step 真实垂直 engineering smoke；不得把该结果作为 S0 放行证据。
+9. 当前优先单卡相关任务。所有多卡实现、DDP/NCCL 验证和正式多卡 stage 暂不执行并保持 blocked/pending；单卡结果不得替代四卡证据。
 
-每个任务目录固定包含：
-
-```text
-docs/model-architecture/reviews/<TASK_ID>/
-  task.md
-  implementation_report.md
-  ai_review.md
-  infra_review.md
-  test_report.json
-  timing.json
-  perf_baseline.json        # 性能任务必需
-  perf_after.json           # 性能任务必需
-  artifacts.json
-```
-
-`timing.json` 分开记录代理实现、测试、修复、AI review、Infra review、GPU 运行和等待时间。训练运行期 phase timing 另写 artifact/W&B，不与开发耗时混用。
+每个任务的开发耗时写入 `progress/time-log.jsonl`；训练运行期 phase timing 另写 artifact/W&B，不与开发耗时混用。实现和审查代理不得创建 commit，最终验证与每 ID 原子 commit 由主代理完成。
 
 ## 5. 目标仓库和模块边界
 

@@ -1,0 +1,82 @@
+[project]
+name = "sakuramoon"
+version = "0.0.0"
+description = "Training infrastructure for the SakuraMoon text-to-image model"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "causal-conv1d==1.6.2.post1",
+    "diffusers==0.39.0",
+    "duckdb==1.5.5",
+    "einops==0.8.2",
+    "flash-attn-4==4.0.0b24",
+    "flash-linear-attention[cuda]==0.5.2",
+    "hf-xet==1.5.2",
+    "modelscope==1.39.0",
+    "modelscope-hub==0.1.8",
+    "nvidia-cutlass-dsl==4.6.0.dev0",
+    "nvidia-cutlass-dsl-libs-base==4.6.0.dev0",
+    "pillow==12.3.0",
+    "pyarrow==25.0.0",
+    "pydantic==2.13.4",
+    "quack-kernels==0.5.3",
+    "safetensors==0.8.0",
+    "sentry-sdk==2.66.1",
+    "tokenizers==0.22.2",
+    "torch==2.10.0",
+    "torchao==0.16.0",
+    "tomli-w==1.2.0",
+    "transformers==5.14.1",
+    "triton==3.6.0",
+    "wandb==0.28.1",
+    "webdataset==1.0.2",
+]
+
+[dependency-groups]
+dev = [
+    "markdown-it-py==4.2.0",
+    "pyright[nodejs]==1.1.411",
+    "pytest==9.1.1",
+    "ruff==0.16.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+causal-conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d", rev = "4f6ae4e26ae5fe8af9372f8d312ab25cc4595223" }
+torch = { index = "pytorch-cu128" }
+
+[tool.uv.extra-build-variables]
+causal-conv1d = { CAUSAL_CONV1D_FORCE_BUILD = "TRUE", CAUSAL_CONV1D_FORCE_CXX11_ABI = "TRUE", MAX_JOBS = "4" }
+
+[tool.uv.extra-build-dependencies]
+causal-conv1d = [{ requirement = "torch", match-runtime = true }]
+
+[[tool.uv.dependency-metadata]]
+name = "causal-conv1d"
+version = "1.6.2.post1"
+requires-dist = ["ninja", "packaging", "torch"]
+
+[tool.uv]
+package = false
+cache-dir = "cache/uv"
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"

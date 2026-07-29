@@ -1,0 +1,978 @@
+{
+  "packages": [
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "annotated-doc",
+      "version": "0.0.5"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "annotated-types",
+      "version": "0.8.0"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "anyio",
+      "version": "4.14.2"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "license_files": [
+        "LICENSE",
+        "NOTICE"
+      ],
+      "name": "apache-tvm-ffi",
+      "version": "0.1.13rc2"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "braceexpand",
+      "version": "0.1.7"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: BSD License"
+      ],
+      "license_files": [
+        "AUTHORS",
+        "LICENSE"
+      ],
+      "name": "causal_conv1d",
+      "version": "1.6.2.post1"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "certifi",
+      "version": "2026.7.22"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "charset-normalizer",
+      "version": "3.4.9"
+    },
+    {
+      "declared_license": [
+        "BSD-3-Clause"
+      ],
+      "license_files": [
+        "LICENSE.txt"
+      ],
+      "name": "click",
+      "version": "8.4.2"
+    },
+    {
+      "declared_license": [
+        "LicenseRef-NVIDIA-SOFTWARE-LICENSE"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "cuda-bindings",
+      "version": "12.9.4"
+    },
+    {
+      "declared_license": [
+        "Apache-2.0"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "cuda-pathfinder",
+      "version": "1.6.0"
+    },
+    {
+      "declared_license": [
+        "LicenseRef-NVIDIA-SOFTWARE-LICENSE"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "cuda-python",
+      "version": "12.9.4"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "diffusers",
+      "version": "0.39.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "duckdb",
+      "version": "1.5.5"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "einops",
+      "version": "0.8.2"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "filelock",
+      "version": "3.32.0"
+    },
+    {
+      "declared_license": [
+        "MIT License\n\nCopyright (c) 2023-2026 Songlin Yang, Yu Zhang, Zhiyuan Li\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "fla-core",
+      "version": "0.5.2"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: BSD License"
+      ],
+      "license_files": [
+        "AUTHORS",
+        "LICENSE"
+      ],
+      "name": "flash-attn-4",
+      "version": "4.0.0b24"
+    },
+    {
+      "declared_license": [
+        "MIT License\n\nCopyright (c) 2023-2026 Songlin Yang, Yu Zhang, Zhiyuan Li\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "flash-linear-attention",
+      "version": "0.5.2"
+    },
+    {
+      "declared_license": [
+        "BSD-3-Clause"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "fsspec",
+      "version": "2026.7.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE.txt"
+      ],
+      "name": "h11",
+      "version": "0.16.0"
+    },
+    {
+      "declared_license": [
+        "Apache-2.0"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "hf-xet",
+      "version": "1.5.2"
+    },
+    {
+      "declared_license": [
+        "BSD-3-Clause"
+      ],
+      "license_files": [
+        "LICENSE.md"
+      ],
+      "name": "httpcore",
+      "version": "1.0.9"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: BSD License"
+      ],
+      "license_files": [
+        "LICENSE.md"
+      ],
+      "name": "httpx",
+      "version": "0.28.1"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "huggingface_hub",
+      "version": "1.25.1"
+    },
+    {
+      "declared_license": [
+        "BSD-3-Clause"
+      ],
+      "license_files": [
+        "LICENSE.md"
+      ],
+      "name": "idna",
+      "version": "3.18"
+    },
+    {
+      "declared_license": [
+        "Apache-2.0"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "importlib_metadata",
+      "version": "9.0.0"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "iniconfig",
+      "version": "2.3.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: BSD License"
+      ],
+      "license_files": [
+        "LICENSE.txt"
+      ],
+      "name": "Jinja2",
+      "version": "3.1.6"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE",
+        "LICENSE.markdown-it"
+      ],
+      "name": "markdown-it-py",
+      "version": "4.2.0"
+    },
+    {
+      "declared_license": [
+        "BSD-3-Clause"
+      ],
+      "license_files": [
+        "LICENSE.txt"
+      ],
+      "name": "MarkupSafe",
+      "version": "3.0.3"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "mdurl",
+      "version": "0.1.2"
+    },
+    {
+      "declared_license": [
+        "Apache-2.0"
+      ],
+      "license_files": [
+        "LICENSE",
+        "license_plate_detection_pipeline.py"
+      ],
+      "name": "modelscope",
+      "version": "1.39.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "modelscope-hub",
+      "version": "0.1.8"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: BSD License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "mpmath",
+      "version": "1.3.0"
+    },
+    {
+      "declared_license": [
+        "BSD-3-Clause"
+      ],
+      "license_files": [
+        "LICENSE.txt"
+      ],
+      "name": "networkx",
+      "version": "3.6.1"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: Apache Software License",
+        "OSI Approved :: BSD License"
+      ],
+      "license_files": [
+        "AUTHORS.rst",
+        "LICENSE_Apache_20"
+      ],
+      "name": "ninja",
+      "version": "1.13.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: BSD License"
+      ],
+      "license_files": [
+        "AUTHORS",
+        "LICENSE"
+      ],
+      "name": "nodeenv",
+      "version": "1.10.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "AUTHORS",
+        "LICENSE",
+        "LICENSE-MIT",
+        "LICENSE-MIT.txt",
+        "LICENSE.APACHE",
+        "LICENSE.BSD",
+        "LICENSE.md",
+        "LICENSE.txt",
+        "license",
+        "license.js",
+        "license.md"
+      ],
+      "name": "nodejs-wheel-binaries",
+      "version": "24.16.0"
+    },
+    {
+      "declared_license": [
+        "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0"
+      ],
+      "license_files": [
+        "COPYING",
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE.txt"
+      ],
+      "name": "numpy",
+      "version": "2.5.1"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-cublas-cu12",
+      "version": "12.8.4.1"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-cuda-cupti-cu12",
+      "version": "12.8.90"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-cuda-nvrtc-cu12",
+      "version": "12.8.93"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-cuda-runtime-cu12",
+      "version": "12.8.90"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-cudnn-cu12",
+      "version": "9.10.2.21"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-cufft-cu12",
+      "version": "11.3.3.83"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-cufile-cu12",
+      "version": "1.13.1.3"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-curand-cu12",
+      "version": "10.3.9.90"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-cusolver-cu12",
+      "version": "11.7.3.90"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-cusparse-cu12",
+      "version": "12.5.8.93"
+    },
+    {
+      "declared_license": [
+        "NVIDIA Proprietary Software"
+      ],
+      "license_files": [
+        "LICENSE.txt"
+      ],
+      "name": "nvidia-cusparselt-cu12",
+      "version": "0.7.1"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "nvidia-cutlass-dsl",
+      "version": "4.6.0.dev0"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "nvidia-cutlass-dsl-libs-base",
+      "version": "4.6.0.dev0"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-nccl-cu12",
+      "version": "2.27.5"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-nvjitlink-cu12",
+      "version": "12.8.93"
+    },
+    {
+      "declared_license": [
+        "LicenseRef-NVIDIA-Proprietary"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-nvshmem-cu12",
+      "version": "3.4.5"
+    },
+    {
+      "declared_license": [
+        "Other/Proprietary License"
+      ],
+      "license_files": [
+        "License.txt"
+      ],
+      "name": "nvidia-nvtx-cu12",
+      "version": "12.8.90"
+    },
+    {
+      "declared_license": [
+        "Apache-2.0 OR BSD-2-Clause"
+      ],
+      "license_files": [
+        "LICENSE",
+        "LICENSE.APACHE",
+        "LICENSE.BSD"
+      ],
+      "name": "packaging",
+      "version": "26.2"
+    },
+    {
+      "declared_license": [
+        "MIT-CMU"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "pillow",
+      "version": "12.3.0"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "platformdirs",
+      "version": "4.11.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "pluggy",
+      "version": "1.6.0"
+    },
+    {
+      "declared_license": [
+        "3-Clause BSD License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "protobuf",
+      "version": "6.33.6"
+    },
+    {
+      "declared_license": [
+        "Apache-2.0"
+      ],
+      "license_files": [
+        "LICENSE.txt",
+        "NOTICE.txt"
+      ],
+      "name": "pyarrow",
+      "version": "25.0.0"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "pydantic",
+      "version": "2.13.4"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "pydantic_core",
+      "version": "2.46.4"
+    },
+    {
+      "declared_license": [
+        "BSD-2-Clause"
+      ],
+      "license_files": [
+        "AUTHORS",
+        "LICENSE"
+      ],
+      "name": "Pygments",
+      "version": "2.20.0"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE",
+        "LICENSE.txt"
+      ],
+      "name": "pyright",
+      "version": "1.1.411"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "pytest",
+      "version": "9.1.1"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "PyYAML",
+      "version": "6.0.3"
+    },
+    {
+      "declared_license": [
+        "Apache-2.0"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "quack-kernels",
+      "version": "0.5.3"
+    },
+    {
+      "declared_license": [
+        "Apache-2.0 AND CNRI-Python"
+      ],
+      "license_files": [
+        "LICENSE.txt"
+      ],
+      "name": "regex",
+      "version": "2026.7.19"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "license_files": [
+        "LICENSE",
+        "NOTICE"
+      ],
+      "name": "requests",
+      "version": "2.34.2"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "rich",
+      "version": "15.0.0"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "ruff",
+      "version": "0.16.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "safetensors",
+      "version": "0.8.0"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "sentry-sdk",
+      "version": "2.66.1"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE",
+        "LICENSE.APACHE",
+        "LICENSE.BSD",
+        "LICENSE.txt",
+        "NOTICE"
+      ],
+      "name": "setuptools",
+      "version": "83.0.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: ISC License (ISCL)"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "shellingham",
+      "version": "1.5.4"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: BSD License"
+      ],
+      "license_files": [
+        "AUTHORS",
+        "LICENSE",
+        "LICENSE.txt"
+      ],
+      "name": "sympy",
+      "version": "1.14.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "license_files": [],
+      "name": "tokenizers",
+      "version": "0.22.2"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "tomli_w",
+      "version": "1.2.0"
+    },
+    {
+      "declared_license": [
+        "BSD-3-Clause"
+      ],
+      "license_files": [
+        "LICENSE",
+        "NOTICE"
+      ],
+      "name": "torch",
+      "version": "2.10.0+cu128"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "license_files": [
+        "LICENSE",
+        "NOTICE"
+      ],
+      "name": "torch_c_dlpack_ext",
+      "version": "0.1.5"
+    },
+    {
+      "declared_license": [
+        "BSD-3-Clause"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "torchao",
+      "version": "0.16.0"
+    },
+    {
+      "declared_license": [
+        "MPL-2.0 AND MIT"
+      ],
+      "license_files": [],
+      "name": "tqdm",
+      "version": "4.70.0"
+    },
+    {
+      "declared_license": [
+        "Apache 2.0 License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "transformers",
+      "version": "5.14.1"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "triton",
+      "version": "3.6.0"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE",
+        "LICENSE.txt"
+      ],
+      "name": "typer",
+      "version": "0.27.0"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "typing-inspection",
+      "version": "0.4.2"
+    },
+    {
+      "declared_license": [
+        "PSF-2.0"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "typing_extensions",
+      "version": "4.16.0"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE.txt"
+      ],
+      "name": "urllib3",
+      "version": "2.7.0"
+    },
+    {
+      "declared_license": [
+        "OSI Approved :: MIT License"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "wandb",
+      "version": "0.28.1"
+    },
+    {
+      "declared_license": [
+        "BSD-3-Clause"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "webdataset",
+      "version": "1.0.2"
+    },
+    {
+      "declared_license": [
+        "MIT"
+      ],
+      "license_files": [
+        "LICENSE"
+      ],
+      "name": "zipp",
+      "version": "4.1.0"
+    }
+  ],
+  "schema_version": 1,
+  "source": "installed distribution metadata; torchao and quack-kernels supplemented from their bundled LICENSE files"
+}

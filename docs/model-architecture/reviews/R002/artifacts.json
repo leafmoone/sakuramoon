@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "task_id": "R002",
+  "commit_ref": "task:R002",
+  "tracked_artifacts": [
+    {
+      "path": "uv.lock",
+      "bytes": 75101,
+      "sha256": "ee6a52d796e029a9a19db1e59011f8a801f3ea3b451f3a70b0190679dc2244ef"
+    },
+    {
+      "path": "pyproject.toml",
+      "bytes": 2084,
+      "sha256": "77ef980615f6a501330a6943bf2995632fdb7583a4eaf5747a7f08574566bd9a"
+    },
+    {
+      "path": ".python-version",
+      "bytes": 5,
+      "sha256": "7b55f8e67b5623c4bef3fa691288da9437d79d3aba156de48d481db32ac7d16d"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R002/dependency-licenses.json",
+      "bytes": 20989,
+      "sha256": "62e5f9c6e802b0106055922334c7fdbcb09915f4fb6172932a0a1d662873f7fd"
+    }
+  ],
+  "ignored_build_artifacts": [
+    {
+      "path": ".venv/lib/python3.12/site-packages/causal_conv1d_cuda.cpython-312-x86_64-linux-gnu.so",
+      "bytes": 270041048,
+      "sha256": "51655c843d2f8228884007b178b42c89eb0dd052495e68029602e39986a93b0e"
+    }
+  ]
+}

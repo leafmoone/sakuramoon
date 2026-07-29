@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "task_id": "R002",
+  "result": "pass",
+  "hardware_level": "CPU environment plus one-GPU visibility; no kernel",
+  "checks": [
+    {
+      "name": "lock_check",
+      "command": "uv lock --check",
+      "status": "pass",
+      "detail": "Resolved 95 package entries."
+    },
+    {
+      "name": "fresh_frozen_sync",
+      "command": "uv venv --clear .venv --python /usr/bin/python3 && uv sync --frozen --python /usr/bin/python3",
+      "status": "pass",
+      "detail": "Installed 94 distributions from an empty environment; final sync real time 24.81 seconds."
+    },
+    {
+      "name": "critical_imports",
+      "status": "pass",
+      "detail": "22 Python and extension modules imported, including causal_conv1d_cuda, FLA, FA4 namespace, CuTeDSL and Quack."
+    },
+    {
+      "name": "cuda_visibility",
+      "status": "pass",
+      "detail": "torch 2.10.0+cu128 reported CUDA 12.8, one RTX 5090 and compute capability 12.0."
+    },
+    {
+      "name": "tool_versions",
+      "status": "pass",
+      "detail": "pyright 1.1.411, ruff 0.16.0, pytest 9.1.1 and bundled Node 24.16.0 are executable."
+    },
+    {
+      "name": "license_inventory",
+      "status": "pass",
+      "detail": "94 installed distributions recorded; all have declared or bundled-license classification."
+    }
+  ],
+  "not_run": [
+    "ruff and pyright source scans: no source tree exists in R002",
+    "GPU kernel forward/backward/update: owned by K001/T021/T040",
+    "multi-GPU NCCL/DDP: current hardware exposes one GPU"
+  ]
+}
