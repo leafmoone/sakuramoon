@@ -1,11 +1,8 @@
-"""Exact binding between runtime asset configuration and the locked manifest."""
+"""Internal binding between runtime configuration and one manifest snapshot."""
 
 from __future__ import annotations
 
-import hashlib
-from pathlib import Path
-
-from sakuramoon.assets.manifest import QwenAsset, VaeAsset, load_manifest
+from sakuramoon.assets.manifest import AssetManifest, QwenAsset, VaeAsset
 from sakuramoon.config.schema import AssetsConfig
 
 
@@ -13,14 +10,13 @@ class AssetBindingError(ValueError):
     """Raised when runtime configuration does not select the locked assets."""
 
 
-def _manifest_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def require_runtime_assets_match_snapshot(
+    config: AssetsConfig,
+    manifest: AssetManifest,
+    manifest_sha256: str,
+) -> None:
+    """Reject fields that differ from the already-read readiness snapshot."""
 
-
-def require_runtime_assets_match(config: AssetsConfig, manifest_path: Path) -> None:
-    """Reject runtime asset fields that differ from the immutable manifest."""
-
-    manifest = load_manifest(manifest_path)
     models = {asset.kind: asset for asset in manifest.models}
     qwen = models["qwen"]
     vae = models["vae"]
@@ -29,7 +25,6 @@ def require_runtime_assets_match(config: AssetsConfig, manifest_path: Path) -> N
     if qwen.lock_state != "ready" or vae.lock_state != "ready":
         raise AssetBindingError("runtime models are not fully locked")
 
-    manifest_sha256 = _manifest_sha256(manifest_path)
     expected_qwen = {
         "repo_id": qwen.source.repo_id,
         "revision": qwen.source.revision,

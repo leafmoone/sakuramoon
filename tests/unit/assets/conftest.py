@@ -166,7 +166,7 @@ def synthetic_assets(tmp_path: Path) -> SyntheticAssetTree:
                 "lock_state": "ready",
                 "blockers": [],
                 "source": {
-                    "repo_id": "microsoft/synthetic-mage-vae",
+                    "repo_id": "microsoft/Mage-Flow",
                     "revision": "2" * 40,
                     "license_id": "MIT",
                     "access_terms": "synthetic fixture",

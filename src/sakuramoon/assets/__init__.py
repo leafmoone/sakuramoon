@@ -1,12 +1,17 @@
 """Immutable asset manifest and preflight interfaces."""
 
-from sakuramoon.assets.bindings import AssetBindingError, require_runtime_assets_match
+from sakuramoon.assets.bindings import AssetBindingError
 from sakuramoon.assets.inspect import (
     AssetPreflightError,
     InspectionIssue,
     InspectionReport,
-    inspect_assets,
-    require_assets_ready,
+    VerifiedAssetFile,
+    VerifiedAssetSelection,
+    inspect_databases,
+    inspect_reference_repositories,
+    inspect_runtime_models,
+    require_databases_ready,
+    require_runtime_assets_ready,
 )
 from sakuramoon.assets.manifest import AssetManifest, ManifestError, load_manifest
 
@@ -17,8 +22,12 @@ __all__ = [
     "InspectionIssue",
     "InspectionReport",
     "ManifestError",
-    "inspect_assets",
+    "VerifiedAssetFile",
+    "VerifiedAssetSelection",
+    "inspect_databases",
+    "inspect_reference_repositories",
+    "inspect_runtime_models",
     "load_manifest",
-    "require_assets_ready",
-    "require_runtime_assets_match",
+    "require_databases_ready",
+    "require_runtime_assets_ready",
 ]

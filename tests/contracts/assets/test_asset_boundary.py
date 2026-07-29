@@ -5,9 +5,12 @@ import subprocess
 from pathlib import Path
 
 from sakuramoon.assets import (
-    inspect_assets,
+    inspect_databases,
+    inspect_reference_repositories,
+    inspect_runtime_models,
     load_manifest,
-    require_assets_ready,
+    require_databases_ready,
+    require_runtime_assets_ready,
 )
 from sakuramoon.assets.inspect import iter_declared_paths
 
@@ -16,11 +19,23 @@ MANIFEST = ROOT / "assets/manifest.toml"
 
 
 def test_preflight_has_no_force_or_skip_switch() -> None:
-    inspect_parameters = inspect.signature(inspect_assets).parameters
-    require_parameters = inspect.signature(require_assets_ready).parameters
+    runtime_inspect_parameters = inspect.signature(inspect_runtime_models).parameters
+    runtime_require_parameters = inspect.signature(require_runtime_assets_ready).parameters
+    database_inspect_parameters = inspect.signature(inspect_databases).parameters
+    database_require_parameters = inspect.signature(require_databases_ready).parameters
+    reference_parameters = inspect.signature(inspect_reference_repositories).parameters
 
-    assert set(inspect_parameters) == {"manifest_path", "root"}
-    assert set(require_parameters) == {"manifest_path", "root"}
+    assert set(runtime_inspect_parameters) == {"manifest_path", "root"}
+    assert set(runtime_require_parameters) == {"config", "manifest_path", "root"}
+    assert set(database_inspect_parameters) == {"manifest_path", "root", "asset_ids"}
+    assert set(database_require_parameters) == {"manifest_path", "root", "asset_ids"}
+    assert set(reference_parameters) == {"manifest_path", "root"}
+
+
+def test_binding_only_bypass_is_not_public() -> None:
+    import sakuramoon.assets as assets_module
+
+    assert not hasattr(assets_module, "require_runtime_assets_match")
 
 
 def test_production_manifest_records_ready_models_and_optional_databases_without_io() -> None:

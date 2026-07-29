@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 4
+registry_revision = 5
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 changes = []
@@ -1177,7 +1177,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C02-001"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "vae"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1189,8 +1189,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:A001"
+implementation_paths = [
+    "assets/manifest.toml",
+    "src/sakuramoon/assets/manifest.py",
+    "src/sakuramoon/assets/inspect.py",
+    "src/sakuramoon/assets/bindings.py",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1510,7 +1515,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-001"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1523,8 +1528,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:A001"
+implementation_paths = [
+    "assets/manifest.toml",
+    "src/sakuramoon/assets/manifest.py",
+    "src/sakuramoon/assets/inspect.py",
+    "src/sakuramoon/assets/bindings.py",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

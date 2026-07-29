@@ -8,5 +8,15 @@
   "duration_seconds": 3078,
   "hardware_level": "CPU",
   "gpu_seconds": 0,
-  "status": "implementation_complete_pending_foundation_review"
+  "status": "implementation_complete_pending_foundation_review",
+  "review_remediation": {
+    "measurement_scope": "first tracked remediation edit through final integration validation",
+    "agent": "a001_review_fix+main",
+    "started_at_utc": "2026-07-29T16:16:38Z",
+    "ended_at_utc": "2026-07-29T16:38:09Z",
+    "duration_seconds": 1291,
+    "hardware_level": "CPU",
+    "gpu_seconds": 0,
+    "status": "remediation_complete_pending_foundation_rereview"
+  }
 }

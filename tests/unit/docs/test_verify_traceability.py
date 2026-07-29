@@ -44,6 +44,9 @@ def repo_copy(tmp_path: Path) -> Path:
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     shutil.copytree(ROOT / "config", root / "config")
+    assets = root / "assets"
+    assets.mkdir()
+    shutil.copy2(ROOT / "assets/manifest.toml", assets / "manifest.toml")
     for relative in (
         "SHA256SUMS",
         "progress/IMPLEMENTATION_ROADMAP.md",

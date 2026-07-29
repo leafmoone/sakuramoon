@@ -2,16 +2,27 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Any, Protocol
 
 import pytest
 
 from sakuramoon.assets import (
     AssetBindingError,
+    AssetPreflightError,
     load_manifest,
-    require_runtime_assets_match,
+    require_runtime_assets_ready,
 )
+from sakuramoon.assets import inspect as inspect_module
 from sakuramoon.assets.manifest import QwenAsset, VaeAsset
 from sakuramoon.config.schema import AssetsConfig
+
+
+class SyntheticAssetTree(Protocol):
+    root: Path
+    manifest_path: Path
+    payload: dict[str, Any]
+
+    def write_manifest(self) -> None: ...
 
 
 def _runtime_assets(manifest_path: Path) -> AssetsConfig:
@@ -51,10 +62,19 @@ def _runtime_assets(manifest_path: Path) -> AssetsConfig:
     )
 
 
-def test_runtime_assets_match_locked_production_models() -> None:
-    manifest_path = Path("assets/manifest.toml")
+def test_runtime_readiness_binds_and_verifies_one_manifest_snapshot(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    readiness = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets.manifest_path),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
 
-    require_runtime_assets_match(_runtime_assets(manifest_path), manifest_path)
+    assert readiness.manifest_sha256 == hashlib.sha256(
+        synthetic_assets.manifest_path.read_bytes()
+    ).hexdigest()
+    assert readiness.verified_path("qwen_text_encoder", "model.safetensors").is_file()
 
 
 @pytest.mark.parametrize(
@@ -67,12 +87,90 @@ def test_runtime_assets_match_locked_production_models() -> None:
         ("vae", "manifest_sha256", "2" * 64),
     ],
 )
-def test_runtime_asset_mismatch_is_rejected(table: str, field: str, value: str) -> None:
-    manifest_path = Path("assets/manifest.toml")
-    config = _runtime_assets(manifest_path)
+def test_runtime_asset_mismatch_is_rejected(
+    synthetic_assets: SyntheticAssetTree,
+    table: str,
+    field: str,
+    value: str,
+) -> None:
+    config = _runtime_assets(synthetic_assets.manifest_path)
     payload = config.model_dump(mode="python")
     payload[table][field] = value
     mismatched = AssetsConfig.model_validate(payload, strict=True)
 
     with pytest.raises(AssetBindingError, match=f"{table}.{field}"):
-        require_runtime_assets_match(mismatched, manifest_path)
+        require_runtime_assets_ready(
+            mismatched,
+            synthetic_assets.manifest_path,
+            root=synthetic_assets.root,
+        )
+
+
+def test_runtime_manifest_must_be_root_confined(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    outside = (
+        synthetic_assets.root.parent / f"{synthetic_assets.root.name}-external-manifest.toml"
+    )
+    outside.write_bytes(synthetic_assets.manifest_path.read_bytes())
+
+    with pytest.raises(ValueError, match="inside the repository root"):
+        require_runtime_assets_ready(
+            _runtime_assets(synthetic_assets.manifest_path),
+            outside,
+            root=synthetic_assets.root,
+        )
+
+
+def test_runtime_manifest_final_symlink_is_rejected(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    link = synthetic_assets.root / "manifest-link.toml"
+    link.symlink_to(synthetic_assets.manifest_path)
+
+    with pytest.raises(ValueError, match="symlink path components"):
+        require_runtime_assets_ready(
+            _runtime_assets(synthetic_assets.manifest_path),
+            link,
+            root=synthetic_assets.root,
+        )
+
+
+def test_manifest_replacement_during_readiness_fails_closed(
+    synthetic_assets: SyntheticAssetTree,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _runtime_assets(synthetic_assets.manifest_path)
+    real_sha256 = inspect_module._sha256  # pyright: ignore[reportPrivateUsage]
+    replaced = False
+
+    def replace_manifest_once(path: Path) -> str:
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            synthetic_assets.write_manifest()
+        return real_sha256(path)
+
+    monkeypatch.setattr(inspect_module, "_sha256", replace_manifest_once)
+
+    with pytest.raises(AssetPreflightError, match="manifest identity drifted"):
+        require_runtime_assets_ready(
+            config,
+            synthetic_assets.manifest_path,
+            root=synthetic_assets.root,
+        )
+
+
+def test_verified_file_identity_must_be_rechecked_before_use(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    readiness = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets.manifest_path),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    weights = synthetic_assets.root / "model/qwen/model.safetensors"
+    weights.write_bytes(b"x" * weights.stat().st_size)
+
+    with pytest.raises(AssetPreflightError, match="identity drifted"):
+        readiness.verified_path("qwen_text_encoder", "model.safetensors")

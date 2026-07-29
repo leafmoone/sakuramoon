@@ -275,20 +275,31 @@ class AssetManifest(StrictModel):
         return self
 
 
-def load_manifest(path: Path) -> AssetManifest:
-    """Read and strictly validate a TOML manifest without touching its assets."""
+def parse_manifest_bytes(payload: bytes) -> AssetManifest:
+    """Strictly validate exact manifest bytes without touching declared assets."""
 
     try:
-        payload = tomllib.loads(path.read_text(encoding="utf-8"))
-        return AssetManifest.model_validate(payload, strict=True)
-    except OSError as exc:
-        raise ManifestError(f"cannot read asset manifest: {path}") from exc
+        decoded = payload.decode("utf-8")
+        parsed = tomllib.loads(decoded)
+        return AssetManifest.model_validate(parsed, strict=True)
+    except UnicodeError as exc:
+        raise ManifestError("asset manifest must be UTF-8") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ManifestError("invalid asset manifest TOML") from exc
     except ValidationError as exc:
         locations = sorted(".".join(str(part) for part in error["loc"]) for error in exc.errors())
         summary = ", ".join(locations[:8])
         raise ManifestError(f"invalid asset manifest fields: {summary}") from exc
+
+
+def load_manifest(path: Path) -> AssetManifest:
+    """Read and strictly validate a TOML manifest without touching its assets."""
+
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ManifestError(f"cannot read asset manifest: {path}") from exc
+    return parse_manifest_bytes(payload)
 
 
 def is_sha256(value: str) -> bool:

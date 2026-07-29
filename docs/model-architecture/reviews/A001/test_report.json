@@ -4,9 +4,9 @@
   "hardware": "CPU",
   "targeted": {
     "command": "PYTHONPATH=src uv run --frozen pytest -q tests/unit/assets tests/contracts/assets",
-    "passed": 25,
+    "passed": 38,
     "failed": 0,
-    "duration_seconds": 2.90
+    "duration_seconds": 5.82
   },
   "ruff": {
     "command": "uv run --frozen ruff check src/sakuramoon/assets src/sakuramoon/cli tests/unit/assets tests/contracts/assets",
@@ -21,20 +21,20 @@
   },
   "traceability": {
     "command": "PYTHONPATH=src /root/shared-nvme/sakuramoon/.venv/bin/python tools/verify_traceability.py --format json",
-    "snapshot_scope": "clean HEAD plus staged A001 diff",
+    "snapshot_scope": "integrated A001 remediation after committed D001 revision 4; registry candidate revision 5",
     "ok": true,
     "requirements": 219,
     "source_nodes": 219,
-    "production_modules": 12,
+    "production_modules": 13,
     "runtime_config_keys": 235,
     "archive_files": 16
   },
   "full_suite": {
     "command": "PYTHONPATH=src /root/shared-nvme/sakuramoon/.venv/bin/pytest -q",
-    "snapshot_scope": "clean HEAD plus staged A001 diff",
-    "passed": 105,
+    "snapshot_scope": "integrated A001 remediation after committed D001 revision 4; registry candidate revision 5",
+    "passed": 121,
     "failed": 0,
-    "duration_seconds": 11.99
+    "duration_seconds": 13.76
   },
   "production_manifest_static": {
     "command": "load_manifest assets/manifest.toml in unit/contract suite",
