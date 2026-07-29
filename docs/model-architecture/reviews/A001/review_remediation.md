@@ -13,15 +13,16 @@ The independent AI and Infra reviews requested changes. This remediation is limi
 - CLI/preflight exceptions are normalized to a stable, redacted JSON contract with explicit 0/1/2 exit codes. Missing manifest/root and raw I/O negative tests assert empty stderr and no traceback.
 - File hash/config read failures report only a stable issue code and manifest-relative path; injected sensitive exception text is absent from reports and CLI output.
 - Selection revalidation hashes only the small manifest, catches revalidation I/O, and deterministically rejects both atomic replacement and same-inode/same-size content drift under simulated stale NFS stat metadata. Model payloads are not rehashed at the consumer gate.
-- The verified-selection gate requires the exact capability type and rejects a forged subclass both directly and through a wrapper. This closes the capability-forgery prerequisite found by the A002 reviewer, with task ownership retained by A001.
-- Test evidence records the 12 production modules present in the isolated `664fda71`-based commit candidate.
+- The selection and every nested file require both an exact capability type and identity issuance by the successful preflight factories. Identity-keyed weak registries reject direct construction, `object.__new__`, structurally equal copies, and nested subclass dispatch while remaining thread-safe and reclaimable by GC. This closes the capability-forgery prerequisite found by the A002 reviewer, with task ownership retained by A001.
+- Test evidence records the 12 production modules present in the isolated `80692a7`-based commit candidate.
 
 ## Verification
 
-- A001-only isolated asset unit/contract suite: 51 passed in 8.56 seconds.
-- A001-only isolated full suite: 196 passed in 16.41 seconds.
+- A001-only isolated asset unit/contract suite: 55 passed in 7.04 seconds.
+- A001-only isolated full suite: 200 passed in 17.55 seconds.
 - Full repository Ruff passed; strict Pyright reported 0 errors and 0 warnings.
 - Traceability passed with 221 requirements, 221 source nodes, 16 archive files, 12 production modules, and 235 runtime config keys.
 - Manifest binding suite: 13 passed in each of 5 consecutive runs.
+- The 32-thread issuance validation plus weak-registry GC cleanup test passed in each of 10 consecutive runs.
 
-The clean candidate was cloned at base `664fda71` and received only the explicit A001 path diff. No D001 checker/test diff, D010 data diff, or A002 scanner diff entered it. No model payload, database row, `.env`, GPU, or performance placeholder was read or created during this remediation. Registry revision 11 records the additional A001 CLI/readiness implementation entry for `C02-001` and `C03-001`; both remain below `verified`, so T020/T021 retain the real model loading, posterior/forward, round-trip, and 1GPU gates.
+The latest clean candidate was cloned at base `80692a7` and received only the explicit A001 sealed-capability diff. No D001 checker/test diff, D010 data diff, or A002 scanner diff entered it. No model payload, database row, `.env`, GPU, or performance placeholder was read or created during this remediation. The affected implementation remains on the existing `C02-001`/`C03-001` paths, so registry revision 11 is unchanged; both requirements remain below `verified`, and T020/T021 retain the real model loading, posterior/forward, round-trip, and 1GPU gates.

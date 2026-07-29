@@ -38,5 +38,15 @@
     "hardware_level": "CPU",
     "gpu_seconds": 0,
     "status": "isolated_validation_complete_pending_independent_rereview"
+  },
+  "sealed_capability_remediation": {
+    "measurement_scope": "first tracked seal edit through clean isolated validation and evidence refresh",
+    "agent": "a001_cli_preflight",
+    "started_at_utc": "2026-07-29T19:41:06Z",
+    "ended_at_utc": "2026-07-29T19:44:59Z",
+    "duration_seconds": 233,
+    "hardware_level": "CPU",
+    "gpu_seconds": 0,
+    "status": "sealed_capability_remediation_complete_pending_independent_rereview"
   }
 }

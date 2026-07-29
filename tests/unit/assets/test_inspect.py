@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import subprocess
+import weakref
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -10,6 +14,7 @@ import pytest
 
 from sakuramoon.assets import (
     AssetPreflightError,
+    VerifiedAssetFile,
     VerifiedAssetSelection,
     inspect_databases,
     inspect_reference_repositories,
@@ -397,6 +402,116 @@ def test_selection_capability_rejects_subclasses_directly_and_through_a_wrapper(
 
     with pytest.raises(AssetPreflightError, match="capability is not verified"):
         narrow(forged)
+
+
+def test_selection_capability_rejects_equal_direct_construction_and_object_new(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    issued = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    equal_direct_construction = replace(issued)
+    uninitialized = object.__new__(VerifiedAssetSelection)
+
+    assert type(equal_direct_construction) is VerifiedAssetSelection
+    assert equal_direct_construction == issued
+    assert equal_direct_construction is not issued
+    with pytest.raises(AssetPreflightError, match="capability is not verified"):
+        require_verified_selection(equal_direct_construction)
+    with pytest.raises(AssetPreflightError, match="capability is not verified"):
+        require_verified_selection(uninitialized)
+
+
+def test_issued_selection_rejects_nested_file_subclass_without_dispatch(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+
+    def forged_require_unchanged(self: object) -> Path:
+        del self
+        raise AssertionError("a nested subclass override must never be invoked")
+
+    forged_type = type(
+        "ForgedAssetFile",
+        (VerifiedAssetFile,),
+        {"require_unchanged": forged_require_unchanged},
+    )
+    forged = object.__new__(forged_type)
+    object.__setattr__(selection, "files", (forged, *selection.files[1:]))
+
+    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+        selection.require_unchanged()
+    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+        require_verified_selection(selection)
+
+
+def test_issued_selection_rejects_equal_but_unissued_file(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    issued_file = selection.files[0]
+    equal_direct_construction = replace(issued_file)
+
+    assert type(equal_direct_construction) is VerifiedAssetFile
+    assert equal_direct_construction == issued_file
+    assert equal_direct_construction is not issued_file
+    object.__setattr__(
+        selection,
+        "files",
+        (equal_direct_construction, *selection.files[1:]),
+    )
+
+    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+        require_verified_selection(selection)
+    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+        equal_direct_construction.require_unchanged()
+
+
+def test_issued_capability_registries_are_thread_safe_and_release_on_gc(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    gc.collect()
+    selection_count_before = len(
+        inspect_module._ISSUED_SELECTIONS  # pyright: ignore[reportPrivateUsage]
+    )
+    file_count_before = len(
+        inspect_module._ISSUED_FILES  # pyright: ignore[reportPrivateUsage]
+    )
+    selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    selection_reference = weakref.ref(selection)
+    file_references = tuple(weakref.ref(item) for item in selection.files)
+    issued_file_count = len(selection.files)
+    selections = (selection,) * 32
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = tuple(executor.map(require_verified_selection, selections))
+    assert all(item is selection for item in results)
+    assert len(inspect_module._ISSUED_SELECTIONS) == selection_count_before + 1  # pyright: ignore[reportPrivateUsage]
+    assert len(inspect_module._ISSUED_FILES) == file_count_before + issued_file_count  # pyright: ignore[reportPrivateUsage]
+
+    del results
+    del selections
+    del selection
+    gc.collect()
+
+    assert selection_reference() is None
+    assert all(reference() is None for reference in file_references)
+    assert len(inspect_module._ISSUED_SELECTIONS) == selection_count_before  # pyright: ignore[reportPrivateUsage]
+    assert len(inspect_module._ISSUED_FILES) == file_count_before  # pyright: ignore[reportPrivateUsage]
 
 
 def test_database_audit_requires_explicit_known_unique_selection(

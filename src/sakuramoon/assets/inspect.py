@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
+import weakref
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -26,6 +28,43 @@ from sakuramoon.config.schema import AssetsConfig
 
 class AssetPreflightError(RuntimeError):
     """Raised before asset use when a lock is incomplete or has drifted."""
+
+
+class _IdentityWeakRegistry:
+    """Track issued capabilities by identity without extending their lifetime."""
+
+    def __init__(self) -> None:
+        self._references: dict[int, weakref.ReferenceType[object]] = {}
+        self._lock = threading.Lock()
+
+    def issue(self, value: object) -> None:
+        identity = id(value)
+
+        def discard(reference: weakref.ReferenceType[object]) -> None:
+            with self._lock:
+                if self._references.get(identity) is reference:
+                    del self._references[identity]
+
+        reference = weakref.ref(value, discard)
+        with self._lock:
+            self._references[identity] = reference
+
+    def contains(self, value: object) -> bool:
+        with self._lock:
+            reference = self._references.get(id(value))
+            if reference is None:
+                return False
+            referent = cast(
+                object | None,
+                weakref.ReferenceType.__call__(  # pyright: ignore[reportUnknownMemberType]
+                    reference
+                ),
+            )
+            return referent is value
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._references)
 
 
 @dataclass(frozen=True)
@@ -78,6 +117,8 @@ class VerifiedAssetFile:
     def require_unchanged(self) -> Path:
         """Return the verified path only while its filesystem identity is unchanged."""
 
+        if type(self) is not VerifiedAssetFile or not _ISSUED_FILES.contains(self):
+            raise AssetPreflightError("asset file capability is not verified")
         if (
             _safe_path(self._base, self.relative_path) != self._path
             or self._path.is_symlink()
@@ -110,6 +151,10 @@ class VerifiedAssetSelection:
     def require_unchanged(self) -> None:
         """Hard-fail if the manifest or any verified file changed after inspection."""
 
+        if type(self) is not VerifiedAssetSelection or not _ISSUED_SELECTIONS.contains(self):
+            raise AssetPreflightError("asset selection capability is not verified")
+        if type(self.files) is not tuple:
+            raise AssetPreflightError("asset file capability is not verified")
         safe_manifest = _safe_path(self._root, self._manifest_relative_path)
         if (
             safe_manifest != self._manifest_path
@@ -130,6 +175,11 @@ class VerifiedAssetSelection:
         ):
             raise AssetPreflightError("verified asset manifest identity drifted")
         for verified_file in self.files:
+            if (
+                type(verified_file) is not VerifiedAssetFile
+                or not _ISSUED_FILES.contains(verified_file)
+            ):
+                raise AssetPreflightError("asset file capability is not verified")
             verified_file.require_unchanged()
 
     def verified_path(self, asset_id: str, relative_path: str) -> Path:
@@ -162,10 +212,14 @@ class VerifiedAssetSelection:
 def require_verified_selection(value: object) -> VerifiedAssetSelection:
     """Narrow an untrusted wrapper argument to a live verified asset capability."""
 
-    if type(value) is not VerifiedAssetSelection:
+    if type(value) is not VerifiedAssetSelection or not _ISSUED_SELECTIONS.contains(value):
         raise AssetPreflightError("asset selection capability is not verified")
     value.require_unchanged()
     return value
+
+
+_ISSUED_FILES = _IdentityWeakRegistry()
+_ISSUED_SELECTIONS = _IdentityWeakRegistry()
 
 
 @dataclass(frozen=True)
@@ -294,7 +348,7 @@ def _inspect_file(
         return [InspectionIssue(asset_id, "file_changed_during_check", lock.path)], None
     if observed_sha256 != lock.sha256:
         return [InspectionIssue(asset_id, "sha256_mismatch", lock.path)], None
-    return [], VerifiedAssetFile(
+    verified_file = VerifiedAssetFile(
         asset_id=asset_id,
         relative_path=lock.path,
         kind=lock.kind,
@@ -304,6 +358,8 @@ def _inspect_file(
         _path=path,
         _identity=after,
     )
+    _ISSUED_FILES.issue(verified_file)
+    return [], verified_file
 
 
 def _read_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -567,6 +623,7 @@ def _selection(
         _manifest_path=snapshot.path,
         _manifest_identity=snapshot.identity,
     )
+    _ISSUED_SELECTIONS.issue(selection)
     selection.require_unchanged()
     return selection
 
