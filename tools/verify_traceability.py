@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import tomllib
 from collections import Counter, defaultdict
@@ -125,6 +126,39 @@ CANONICAL_SOURCES: dict[str, dict[str, object]] = {
         "excluded_top_headings": (),
     },
 }
+TRUSTED_ARCHIVE_MANIFEST_SHA256 = (
+    "8080e7d8e02345c5b6487b34de5d666630f524ddb9eca4c22e21ccedbffbee04"
+)
+BASELINE_REQUIREMENT_BINDINGS_SHA256 = (
+    "999eff1fece89b69eba0497d60bdf8adc358d0f7f2a5243c1e17a591a233bb6b"
+)
+BASELINE_REQUIREMENT_MAXIMA = {
+    "ARCH": 2,
+    "C01": 5,
+    "C02": 7,
+    "C03": 13,
+    "C04": 9,
+    "C05": 11,
+    "C06": 6,
+    "C07": 6,
+    "C08": 6,
+    "C10": 9,
+    "C11": 7,
+    "C12": 11,
+    "DEC": 1,
+    "DOC": 5,
+    "OBS": 12,
+    "OPEN": 99,
+    "SUP": 10,
+}
+REQUIREMENT_IDENTITY_FIELDS = (
+    "id",
+    "source_path",
+    "heading_path",
+    "node_kind",
+    "source_fingerprint",
+    "source_occurrence",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -438,6 +472,160 @@ def _detect_graph_cycles(edges: Mapping[str, str], label: str, errors: list[str]
             current = edges[current]
 
 
+def _requirement_identity(requirement: Mapping[str, Any]) -> dict[str, Any]:
+    return {field: requirement[field] for field in REQUIREMENT_IDENTITY_FIELDS}
+
+
+def _requirement_locator(requirement: Mapping[str, Any]) -> tuple[object, ...]:
+    return (
+        requirement["source_path"],
+        tuple(requirement["heading_path"]),
+        requirement["node_kind"],
+        requirement["source_fingerprint"],
+        requirement["source_occurrence"],
+    )
+
+
+def _baseline_requirement_ids() -> set[str]:
+    return {
+        f"{prefix}-{serial:03d}"
+        for prefix, maximum in BASELINE_REQUIREMENT_MAXIMA.items()
+        for serial in range(1, maximum + 1)
+    }
+
+
+def _binding_digest(requirements: Sequence[Mapping[str, Any]]) -> str:
+    payload = [_requirement_identity(requirement) for requirement in requirements]
+    serialized = json.dumps(
+        sorted(payload, key=lambda item: cast(str, item["id"])),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return sha256_bytes(serialized.encode("utf-8"))
+
+
+def _validate_bootstrap_bindings(
+    requirements: Sequence[Mapping[str, Any]], errors: list[str]
+) -> None:
+    baseline_ids = _baseline_requirement_ids()
+    requirement_by_id = {
+        cast(str, requirement["id"]): requirement for requirement in requirements
+    }
+    missing = sorted(baseline_ids - set(requirement_by_id))
+    if missing:
+        errors.append(f"bootstrap requirement IDs were removed: {missing}")
+        return
+    baseline = [requirement_by_id[req_id] for req_id in baseline_ids]
+    if _binding_digest(baseline) != BASELINE_REQUIREMENT_BINDINGS_SHA256:
+        errors.append("bootstrap requirement ID bindings do not match the trusted anchor")
+
+
+def _validate_registry_history(
+    snapshots: Sequence[Mapping[str, Any]], errors: list[str]
+) -> None:
+    if not snapshots:
+        return
+    _validate_bootstrap_bindings(
+        cast(Sequence[Mapping[str, Any]], snapshots[0]["requirements"]), errors
+    )
+    issued_ids: set[str] = set()
+    maximum_by_prefix: dict[str, int] = {}
+    locator_owner: dict[tuple[object, ...], str] = {}
+    previous: Mapping[str, Any] | None = None
+    for snapshot_index, snapshot in enumerate(snapshots):
+        requirements = cast(Sequence[Mapping[str, Any]], snapshot["requirements"])
+        current_by_id = {
+            cast(str, requirement["id"]): requirement for requirement in requirements
+        }
+        if previous is not None:
+            previous_requirements = cast(
+                Sequence[Mapping[str, Any]], previous["requirements"]
+            )
+            previous_by_id = {
+                cast(str, requirement["id"]): requirement
+                for requirement in previous_requirements
+            }
+            missing = sorted(set(previous_by_id) - set(current_by_id))
+            if missing:
+                errors.append(
+                    f"registry history snapshot {snapshot_index}: stable requirement IDs were removed: {missing}"
+                )
+            if snapshot["registry_revision"] != previous["registry_revision"] + 1:
+                errors.append(
+                    f"registry history snapshot {snapshot_index}: registry_revision must increment by exactly one"
+                )
+        for req_id, requirement in current_by_id.items():
+            locator = _requirement_locator(requirement)
+            owner = locator_owner.get(locator)
+            if owner is not None and owner != req_id:
+                errors.append(
+                    f"{req_id}: source locator was historically bound to stable ID {owner}"
+                )
+            locator_owner[locator] = req_id
+            prefix, separator, serial_text = req_id.rpartition("-")
+            if not separator or not serial_text.isdigit():
+                continue
+            serial = int(serial_text)
+            if req_id not in issued_ids:
+                previous_maximum = maximum_by_prefix.get(prefix, 0)
+                if previous is not None and prefix in maximum_by_prefix and serial <= previous_maximum:
+                    errors.append(
+                        f"{req_id}: new requirement ID must use an unused serial above {prefix}-{previous_maximum:03d}"
+                    )
+                maximum_by_prefix[prefix] = max(previous_maximum, serial)
+                issued_ids.add(req_id)
+        previous = snapshot
+
+
+def _load_registry_history(
+    root: Path,
+    registry_path: Path,
+    current: Mapping[str, Any],
+    errors: list[str],
+) -> list[Mapping[str, Any]]:
+    git_marker = root / ".git"
+    if not git_marker.exists():
+        _validate_bootstrap_bindings(
+            cast(Sequence[Mapping[str, Any]], current["requirements"]), errors
+        )
+        return []
+
+    def run_git(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    top_level = run_git("rev-parse", "--show-toplevel")
+    if top_level.returncode != 0 or Path(top_level.stdout.strip()).resolve() != root.resolve():
+        errors.append("cannot establish repository root for requirement ID history")
+        return []
+    history = run_git(
+        "log", "--format=%H", "--reverse", "--follow", "--", registry_path.as_posix()
+    )
+    if history.returncode != 0:
+        errors.append("cannot read requirement registry Git history")
+        return []
+    snapshots: list[Mapping[str, Any]] = []
+    for commit in history.stdout.splitlines():
+        result = run_git("show", f"{commit}:{registry_path.as_posix()}")
+        if result.returncode != 0:
+            errors.append(f"cannot read requirement registry at commit {commit}")
+            return []
+        try:
+            snapshot = tomllib.loads(result.stdout)
+        except tomllib.TOMLDecodeError as exc:
+            errors.append(f"invalid historical requirement registry at {commit}: {exc}")
+            return []
+        snapshots.append(snapshot)
+    if not snapshots or current != snapshots[-1]:
+        snapshots.append(current)
+    return snapshots
+
+
 def _validate_archive(root: Path, manifest_value: str, errors: list[str]) -> int:
     error_count = len(errors)
     _validate_repo_path(root, manifest_value, "archive_manifest", errors)
@@ -446,6 +634,9 @@ def _validate_archive(root: Path, manifest_value: str, errors: list[str]) -> int
     manifest = root / manifest_value
     if not manifest.is_file():
         errors.append(f"archive manifest does not exist: {manifest_value}")
+        return 0
+    if sha256_file(manifest) != TRUSTED_ARCHIVE_MANIFEST_SHA256:
+        errors.append("archive manifest does not match the trusted bootstrap anchor")
         return 0
     expected: dict[str, str] = {}
     for line_number, line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):
@@ -925,6 +1116,10 @@ def verify(root: Path, registry_path: Path = REGISTRY_PATH) -> VerificationRepor
     for locator, req_id in registry_locators.items():
         if locator not in actual_nodes:
             errors.append(f"{req_id}: source node missing or fingerprint drifted")
+
+    history = _load_registry_history(root, registry_path, data, errors)
+    if history:
+        _validate_registry_history(history, errors)
 
     changes_by_source: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for index, change in enumerate(data["changes"]):

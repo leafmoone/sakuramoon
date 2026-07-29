@@ -52,6 +52,9 @@ def repo_copy(tmp_path: Path) -> Path:
         destination = model_docs / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / "docs/model-architecture" / relative, destination)
+    tool = root / "tools/verify_traceability.py"
+    tool.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "tools/verify_traceability.py", tool)
     return root
 
 
@@ -249,6 +252,70 @@ def test_archive_checksum_change_is_rejected(repo_copy: Path) -> None:
     )
     assert "archive checksum mismatch" in error_text(repo_copy)
 
+
+def test_archive_and_checksum_manifest_cannot_be_changed_together(
+    repo_copy: Path,
+) -> None:
+    model_docs = repo_copy / "docs/model-architecture"
+    archive_file = next((model_docs / "archive").rglob("*.md"))
+    relative = archive_file.relative_to(model_docs).as_posix()
+    old_digest = hashlib.sha256(archive_file.read_bytes()).hexdigest()
+    archive_file.write_text(
+        archive_file.read_text(encoding="utf-8") + "\nchanged together\n",
+        encoding="utf-8",
+    )
+    new_digest = hashlib.sha256(archive_file.read_bytes()).hexdigest()
+    manifest = model_docs / "SHA256SUMS"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            f"{old_digest}  {relative}", f"{new_digest}  {relative}"
+        ),
+        encoding="utf-8",
+    )
+    assert "archive manifest does not match the trusted bootstrap anchor" in error_text(
+        repo_copy
+    )
+
+
+def test_bootstrap_requirement_id_exchange_is_rejected(repo_copy: Path) -> None:
+    def mutate(data: dict[str, Any]) -> None:
+        first, second = data["requirements"][:2]
+        first["id"], second["id"] = second["id"], first["id"]
+
+    rewrite_registry(repo_copy, mutate)
+    assert "bootstrap requirement ID bindings do not match the trusted anchor" in error_text(
+        repo_copy
+    )
+
+
+def test_requirement_id_history_rejects_exchange_and_reuse() -> None:
+    baseline = load_registry(ROOT)
+    exchanged = copy.deepcopy(baseline)
+    exchanged["registry_revision"] += 1
+    first, second = exchanged["requirements"][:2]
+    first["id"], second["id"] = second["id"], first["id"]
+
+    errors: list[str] = []
+    vt._validate_registry_history([baseline, exchanged], errors)
+    assert any("source locator was historically bound" in error for error in errors)
+
+    removed = copy.deepcopy(baseline)
+    removed["registry_revision"] += 1
+    retired = removed["requirements"].pop()
+    reused = copy.deepcopy(removed)
+    reused["registry_revision"] += 1
+    retired["source_fingerprint"] = "f" * 64
+    reused["requirements"].append(retired)
+
+    errors = []
+    vt._validate_registry_history([baseline, removed, reused], errors)
+    assert any("stable requirement IDs were removed" in error for error in errors)
+
+    unchanged_revision = copy.deepcopy(baseline)
+    unchanged_revision["requirements"][0]["status"] = "planned"
+    errors = []
+    vt._validate_registry_history([baseline, unchanged_revision], errors)
+    assert any("registry_revision must increment by exactly one" in error for error in errors)
 
 @pytest.mark.parametrize("target_is_directory", [False, True])
 def test_archive_symlink_is_rejected(

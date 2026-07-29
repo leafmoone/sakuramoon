@@ -2,8 +2,8 @@
   "schema_version": 1,
   "task_id": "D001",
   "ok": true,
-  "registry_revision": 1,
-  "registry_sha256": "578c424561b9ccc1d7310d4e21b60756cefd1bdc8607e28a0ccb3267e8e6a248",
+  "registry_revision": 4,
+  "registry_sha256": "8e4ae5aab7db5113ba443d39621b08e71c4736d675a052b342900686f44413d8",
   "counts": {
     "requirements": 219,
     "source_nodes": 219,
@@ -11,8 +11,8 @@
     "open_item_nodes": 99,
     "observability_nodes": 12,
     "archive_files": 16,
-    "production_modules": 0,
-    "runtime_config_keys": 0
+    "production_modules": 13,
+    "runtime_config_keys": 235
   },
   "sources": {
     "docs/model-architecture/current/confirmed-decisions.md": "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb",
@@ -22,7 +22,18 @@
   "archive_manifest": {
     "path": "docs/model-architecture/SHA256SUMS",
     "sha256": "8080e7d8e02345c5b6487b34de5d666630f524ddb9eca4c22e21ccedbffbee04",
+    "trusted_bootstrap_sha256": "8080e7d8e02345c5b6487b34de5d666630f524ddb9eca4c22e21ccedbffbee04",
     "archive_entries_verified": 16
+  },
+  "requirement_identity_history": {
+    "bootstrap_bindings": 219,
+    "bootstrap_sha256": "999eff1fece89b69eba0497d60bdf8adc358d0f7f2a5243c1e17a591a233bb6b",
+    "committed_registry_revisions_verified": [
+      1,
+      2,
+      3
+    ],
+    "worktree_candidate_revision_verified": 4
   },
   "link_scope": "all non-archive Markdown under docs/model-architecture"
 }

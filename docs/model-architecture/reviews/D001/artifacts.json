@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "task_id": "D001",
-  "artifacts": [
-    "docs/model-architecture/progress/traceability.toml",
-    "tools/verify_traceability.py",
-    "tests/unit/docs/test_verify_traceability.py",
-    "docs/model-architecture/reviews/D001/implementation_report.md",
-    "docs/model-architecture/reviews/D001/traceability-report.json",
-    "docs/model-architecture/reviews/D001/test_report.json",
-    "docs/model-architecture/reviews/D001/timing.json"
-  ],
+  "files": {
+    "docs/model-architecture/progress/traceability.toml": "8e4ae5aab7db5113ba443d39621b08e71c4736d675a052b342900686f44413d8",
+    "tools/verify_traceability.py": "0ad358847ecc4892716d4ae32f92e15d52a1bd7baea80e31f716e94aa7a9db57",
+    "tests/unit/docs/test_verify_traceability.py": "a5aa7c4d703d186f4efd4237ae988d375e3fd1ff1dd94a1b0892b926984a92fb"
+  },
+  "trusted_bootstrap_anchors": {
+    "archive_manifest_sha256": "8080e7d8e02345c5b6487b34de5d666630f524ddb9eca4c22e21ccedbffbee04",
+    "requirement_bindings_sha256": "999eff1fece89b69eba0497d60bdf8adc358d0f7f2a5243c1e17a591a233bb6b"
+  },
   "performance_artifacts_created": false
 }
