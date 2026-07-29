@@ -1,21 +1,38 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "R002",
   "result": "pass",
-  "result_scope": "cache-warm fresh-venv installation and static environment validation",
-  "hardware_level": "CPU environment plus one-GPU visibility; no kernel",
+  "integration_status": "main-agent full-suite recheck passed after A002 worktree stabilized",
+  "result_scope": "cache-warm fresh-venv installation, empty-cache cold source rebuild, static environment validation, and tracked default Python tooling entrypoints",
+  "hardware_level": "CPU",
+  "observed_environment": {
+    "cuda_visible_devices": 1,
+    "device": "NVIDIA GeForce RTX 5090",
+    "gpu_kernel_executed": false
+  },
   "checks": [
     {
       "name": "lock_check",
       "command": "uv lock --check",
       "status": "pass",
-      "detail": "Resolved 95 package entries."
+      "detail": "Resolved 95 package entries in 0.068 seconds; uv.lock was unchanged by the tooling-only pyproject update."
     },
     {
       "name": "cache_warm_fresh_venv_sync",
       "command": "uv venv --clear .venv --python /usr/bin/python3 && uv sync --frozen --python /usr/bin/python3",
       "status": "pass",
       "detail": "Installed 94 distributions into an empty .venv with cache/uv retained; final sync real time 24.81 seconds and no compiler ran."
+    },
+    {
+      "name": "empty_cache_cold_source_rebuild",
+      "command": "env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=<isolated>/venv UV_CACHE_DIR=<isolated>/uv-cache uv sync --frozen --python /usr/bin/python3 --no-python-downloads -vv",
+      "status": "pass",
+      "detail": "An empty isolated cache and venv installed 94 distributions in 2002.709 seconds; causal-conv1d rebuilt from fixed commit 4f6ae4e26ae5fe8af9372f8d312ab25cc4595223 and 22 critical imports passed. No GPU kernel, model, dataset, database, reference or dotenv access occurred."
+    },
+    {
+      "name": "cold_rebuild_lock_input_binding",
+      "status": "pass",
+      "detail": "Start/current pyproject files differ only in tooling configuration. Canonical JSON over project, dependency-groups and tool.uv is 1678 bytes with identical SHA-256 7f10b80856f5e6d20b6637c416f753980a7347a3c3e64c601c289b0afb3035cf."
     },
     {
       "name": "configured_uv_cache",
@@ -39,14 +56,81 @@
       "detail": "pyright 1.1.411, ruff 0.16.0, pytest 9.1.1 and bundled Node 24.16.0 are executable."
     },
     {
+      "name": "default_pytest_src_layout",
+      "command": "uv run --frozen pytest -q",
+      "status": "pass",
+      "detail": "125 tests passed in 13.13 seconds (13.578 seconds command wall time) without setting PYTHONPATH. The shared worktree included concurrent A002/D001 test changes; no failure was attributed to another task."
+    },
+    {
+      "name": "default_strict_pyright",
+      "command": "uv run --frozen pyright",
+      "status": "pass",
+      "detail": "0 errors, 0 warnings and 0 informations in 3.195 seconds. Tracked pyproject configuration includes only src/sakuramoon, tests and tools, uses extraPaths=src and the project .venv, and excludes local assets, caches, reference, notebook checkpoints and run artifacts."
+    },
+    {
+      "name": "pyright_scope_audit",
+      "command": "uv run --frozen pyright --verbose",
+      "status": "pass",
+      "detail": "Found 25 source files and completed analysis in 2.342 seconds. The count included the concurrent A002 contract test and excluded an ignored notebook-checkpoint Python file under the source tree."
+    },
+    {
+      "name": "pytest_src_layout_targeted_recheck",
+      "command": "uv run --frozen pytest -q tests/unit/config tests/contracts/config",
+      "status": "pass",
+      "detail": "47 tests passed in 1.75 seconds without setting PYTHONPATH."
+    },
+    {
+      "name": "default_collection_recheck",
+      "command": "uv run --frozen pytest -q --collect-only",
+      "status": "pass",
+      "detail": "All 125 tests collected in 0.22 seconds without setting PYTHONPATH."
+    },
+    {
+      "name": "main_agent_stable_full_suite_recheck",
+      "command": "uv run --frozen pytest -q",
+      "status": "pass",
+      "detail": "After A002 was committed and its concurrent fixture edits stopped, all 125 tests passed in 14.26 seconds without setting PYTHONPATH."
+    },
+    {
+      "name": "r002_evidence_integration_recheck",
+      "command": "uv run --frozen pytest -q",
+      "status": "pass",
+      "detail": "159 tests passed in 13.01 seconds without setting PYTHONPATH after the R002 traceability mapping and isolated-repo fixture adaptation."
+    },
+    {
+      "name": "traceability_live_checker",
+      "command": "uv run --frozen python tools/verify_traceability.py --format json",
+      "status": "pass",
+      "detail": "Registry revision 8 validated 221 requirements against 221 source nodes with 13 production modules, 235 runtime config keys, 16 archive files and 0 errors."
+    },
+    {
+      "name": "traceability_targeted_tests",
+      "command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py",
+      "status": "pass",
+      "detail": "36 tests passed in 12.53 seconds. The isolated repo copies the OPEN-049 R002 implementation paths; checker semantics and unrelated assertions are unchanged."
+    },
+    {
+      "name": "ruff_repository_code",
+      "command": "uv run --frozen ruff check src/sakuramoon tests tools",
+      "status": "pass",
+      "detail": "All checks passed."
+    },
+    {
       "name": "license_inventory",
       "status": "pass",
-      "detail": "94 installed distributions recorded; all have declared or bundled-license classification."
+      "detail": "The R002 license inventory is explicitly bound to the canonical uv.lock SHA-256 and records all 94 installed distributions; all have declared or bundled-license classification."
+    }
+  ],
+  "historical_attempts": [
+    {
+      "name": "shared_worktree_full_suite_during_concurrent_D001_A002_edits",
+      "command": "uv run --frozen pytest -q",
+      "status": "historical_external_failure",
+      "detail": "124 tests passed and one D001 reverse-inventory assertion failed while another task was mutating its fixture. R002 did not modify that file; the stable post-A002 main-agent recheck subsequently passed 125/125."
     }
   ],
   "not_run": [
-    "cold causal-conv1d source rebuild with an empty cache/uv: pending; no compiler transcript or timing exists",
-    "ruff and pyright source scans: no source tree exists in R002",
+    "bit-for-bit source build reproducibility: cold and cache-warm extensions differ because absolute debug paths change BuildID",
     "GPU kernel forward/backward/update: owned by K001/T021/T040",
     "multi-GPU NCCL/DDP: current hardware exposes one GPU"
   ]

@@ -56,10 +56,22 @@ def repo_copy(tmp_path: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / "docs/model-architecture" / relative, destination)
     for relative in (
+        "pyproject.toml",
+        "uv.lock",
+        ".python-version",
         "AGENTS.md",
+        "docs/model-architecture/progress/environment-lock.md",
         "docs/model-architecture/progress/asset-policy.md",
+        "docs/model-architecture/progress/tasks/R002.md",
         "docs/model-architecture/progress/tasks/A002.md",
         "docs/model-architecture/progress/time-log.jsonl",
+        "docs/model-architecture/reviews/R002/implementation_report.md",
+        "docs/model-architecture/reviews/R002/test_report.json",
+        "docs/model-architecture/reviews/R002/artifacts.json",
+        "docs/model-architecture/reviews/R002/dependency-licenses.json",
+        "docs/model-architecture/reviews/R002/fresh-env-report.json",
+        "docs/model-architecture/reviews/R002/cold-rebuild-report.json",
+        "docs/model-architecture/reviews/R002/timing.json",
         "docs/model-architecture/reviews/A002/implementation_report.md",
         "docs/model-architecture/reviews/A002/test_report.json",
         "docs/model-architecture/reviews/A002/review_remediation.md",

@@ -1,4 +1,8 @@
 {
+  "schema_version": 2,
+  "task_id": "R002",
+  "uv_lock_sha256": "ee6a52d796e029a9a19db1e59011f8a801f3ea3b451f3a70b0190679dc2244ef",
+  "package_count": 94,
   "packages": [
     {
       "declared_license": [
@@ -973,6 +977,5 @@
       "version": "4.1.0"
     }
   ],
-  "schema_version": 1,
   "source": "installed distribution metadata; torchao and quack-kernels supplemented from their bundled LICENSE files"
 }

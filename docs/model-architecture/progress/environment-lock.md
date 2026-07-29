@@ -1,6 +1,6 @@
 # R002 Environment Lock
 
-状态：依赖锁已锁定；已验证 CPU cache-warm 空 `.venv` 恢复与单卡可见性。空 uv cache 的源码冷重建保持 `pending`，不包含 GPU kernel 放行。
+状态：依赖锁已锁定；已验证 CPU cache-warm 空 `.venv` 恢复、空 uv cache 源码冷重建与单卡可见性。不包含 GPU kernel 放行，也不宣称源码构建 bit-for-bit 一致。
 
 ## 支持边界
 
@@ -46,7 +46,7 @@ uv 只锁 Python wheel 和 Python extension ABI，不管理 host driver、CUDA t
 
 uv 可下载该 wheel，但拒绝把 filename 的 local version 与内部 `METADATA` 的 `1.6.2.post1` 视为同一 distribution，导致每次 sync 重新准备。该 wheel 因可重建性不合格而未进入最终 lock；没有回退到临时 pip。
 
-源码例外固定 tag commit、PyTorch runtime match、CXX11 ABI=True、CUDA 12.8、GCC 13.3 和 `MAX_JOBS=4`。最终安装的 extension 位于 ignored `.venv/lib/python3.12/site-packages/`，为 `270041048` bytes，SHA-256 `51655c843d2f8228884007b178b42c89eb0dd052495e68029602e39986a93b0e`；uv 的项目缓存由 `pyproject.toml` 固定为 ignored `cache/uv`，`uv cache dir` 也解析为该路径。两者都不进入 Git。源码默认编译 `sm_75/80/87/90/100/120`；这只是构建兼容性，不是 kernel 正确性或性能证据。
+源码例外固定 tag commit、PyTorch runtime match、CXX11 ABI=True、CUDA 12.8、GCC 13.3 和 `MAX_JOBS=4`。cache-warm 项目 extension 位于 ignored `.venv/lib/python3.12/site-packages/`，为 `270041048` bytes，SHA-256 `51655c843d2f8228884007b178b42c89eb0dd052495e68029602e39986a93b0e`；uv 的项目缓存由 `pyproject.toml` 固定为 ignored `cache/uv`，`uv cache dir` 也解析为该路径。两者都不进入 Git。源码默认编译 `sm_75/80/87/90/100/120`；这只是构建兼容性，不是 kernel 正确性或性能证据。
 
 ## 空虚拟环境恢复证据（cache-warm）
 
@@ -61,7 +61,23 @@ time -p uv sync --frozen --python /usr/bin/python3
 
 关键 Python/extension 导入全部通过：torch、torchao、transformers、diffusers、safetensors、modelscope、wandb、webdataset、Pillow、einops、pydantic、triton、causal_conv1d、causal_conv1d_cuda、fla、flash_attn namespace、cutlass、quack、duckdb、pyarrow、tomli_w、markdown_it。Torch 报告 CUDA 12.8、1 个设备、RTX 5090、CC 12.0。导入期间仅出现 TorchAO docstring 的上游 `SyntaxWarning`；没有静默 fallback 证据。
 
-这些结果证明 frozen lock 可以在保留项目 uv cache 时恢复到空 `.venv`，并证明 extension 可加载和 GPU 可见；它们不证明在空 `cache/uv` 上能够重新拉取固定源码并完成冷编译。源码冷重建的命令记录、编译日志、耗时与产物复核尚未生成，状态保持 `pending`，不得引用本节将其关闭。FA4、FLA、causal_conv1d、TorchAO 的真实 forward/backward/update 仍分别由 `K001/T021/T040` 关闭。
+这些结果证明 frozen lock 可以在保留项目 uv cache 时恢复到空 `.venv`，并证明 extension 可加载和 GPU 可见。后续独立空 cache 冷重建见下一节。FA4、FLA、causal_conv1d、TorchAO 的真实 forward/backward/update 仍分别由 `K001/T021/T040` 关闭。
+
+## 空 cache 与空 venv 冷重建证据
+
+使用 ignored 隔离根目录中的空 `uv-cache/` 与空 `venv/`，执行：
+
+```bash
+env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=<isolated>/venv UV_CACHE_DIR=<isolated>/uv-cache uv sync --frozen --python /usr/bin/python3 --no-python-downloads -vv
+```
+
+命令 exit 0，安装 94 个 distributions；Bash `time -p` 记录 real/user/sys 为 `2002.709/1706.820/66.070` 秒。`causal-conv1d` 从 commit `4f6ae4e26ae5fe8af9372f8d312ab25cc4595223` 重新编译，使用 CPython 3.12.3、GCC/G++ 13.3.0、CUDA 12.8.93、CMake 3.31.6、Ninja 1.11.1、glibc 2.39、Torch 2.10.0+cu128、CXX11 ABI=True，以及 `CAUSAL_CONV1D_FORCE_BUILD=TRUE`、`CAUSAL_CONV1D_FORCE_CXX11_ABI=TRUE`、`MAX_JOBS=4`。
+
+冷构建 extension 为 `270042496` bytes、SHA-256 `0a216693f3733015216ac936d183cf7ce8e9298c8e880d3ad81ddccc68232903`、ELF BuildID `0ca5b226d68788d717040e68c0953837b277f838`。cache-warm extension 的 BuildID 为 `bf94bdd2e03281c4d3ffd3f9628531893b3635b1`。两份 `.so` 因绝对构建路径进入未剥离 debug 信息而非 bit-identical；这证明固定依赖可从空 cache 重建，但不证明逐字节可复现或 kernel 正确性。
+
+22 个关键 imports 全部通过；验证显式设置 `CUDA_VISIBLE_DEVICES=''`、Hugging Face/Transformers offline 与 W&B offline，未运行 GPU kernel。隔离重建没有改变项目 `.venv` 或 `cache/uv`，没有访问模型、数据、DB、reference 或 `.env`。完整约 5 MB 日志和本地校验清单仅保留在 ignored 隔离目录，不进入 Git；tracked 证据为 `reviews/R002/cold-rebuild-report.json`。
+
+冷重建启动与当前 `pyproject.toml` SHA-256 分别为 `77ef980615f6a501330a6943bf2995632fdb7583a4eaf5747a7f08574566bd9a` 与 `b718f6c8c235af6df19d7fa10cd1f49348907844ad3ed5ffff65716d5dc87fc2`。对 `[project]`、`[dependency-groups]`、完整 `[tool.uv]` 生成排序紧凑 JSON 后，两份 canonical lock input 均为 1678 bytes，SHA-256 `7f10b80856f5e6d20b6637c416f753980a7347a3c3e64c601c289b0afb3035cf`；中途加入的 pytest/Pyright 配置不改变依赖重建结论。
 
 ## 存储与正式训练阻塞
 

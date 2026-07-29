@@ -71,11 +71,36 @@ required-environments = [
 ]
 
 [tool.pyright]
+include = ["src/sakuramoon", "tests", "tools"]
+exclude = [
+    "**/.ipynb_checkpoints",
+    "**/__pycache__",
+    ".venv",
+    "artifacts",
+    "cache",
+    "checkpoints",
+    "data",
+    "db",
+    "diagnostics",
+    "model",
+    "outputs",
+    "profile",
+    "profiles",
+    "reference",
+    "runs",
+    "samples",
+    "traces",
+    "wandb",
+]
+extraPaths = ["src"]
+venvPath = "."
+venv = ".venv"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
+pythonpath = ["src"]
 testpaths = ["tests"]
 
 [tool.ruff]

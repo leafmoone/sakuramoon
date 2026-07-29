@@ -6,7 +6,8 @@
     "path": "cache/uv",
     "tracked": false,
     "fresh_venv_evidence": "pass_cache_warm",
-    "cold_source_rebuild_evidence": "pending"
+    "cold_source_rebuild_evidence": "pass",
+    "bit_for_bit_reproducibility": "not_proven"
   },
   "tracked_artifacts": [
     {
@@ -16,8 +17,8 @@
     },
     {
       "path": "pyproject.toml",
-      "bytes": 2084,
-      "sha256": "77ef980615f6a501330a6943bf2995632fdb7583a4eaf5747a7f08574566bd9a"
+      "bytes": 2501,
+      "sha256": "b718f6c8c235af6df19d7fa10cd1f49348907844ad3ed5ffff65716d5dc87fc2"
     },
     {
       "path": ".python-version",
@@ -25,16 +26,69 @@
       "sha256": "7b55f8e67b5623c4bef3fa691288da9437d79d3aba156de48d481db32ac7d16d"
     },
     {
+      "path": "docs/model-architecture/reviews/R002/fresh-env-report.json",
+      "bytes": 1447,
+      "sha256": "807dfb794f26236723d295262bf41a60b9b1dc7ae800bf7463c396cf93df8df8"
+    },
+    {
       "path": "docs/model-architecture/reviews/R002/dependency-licenses.json",
-      "bytes": 20989,
-      "sha256": "62e5f9c6e802b0106055922334c7fdbcb09915f4fb6172932a0a1d662873f7fd"
+      "bytes": 21121,
+      "sha256": "37de242ce677b1019c1ec3bd1b190861f15dcec179bb6694e3a3e6f568371e26"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R002/cold-rebuild-report.json",
+      "bytes": 4554,
+      "sha256": "dc1d7b62f66b7c17ee0a27426c9857303e895a710fffdaa7d8bab0c6ce78892d"
+    },
+    {
+      "path": "docs/model-architecture/progress/environment-lock.md",
+      "bytes": 7043,
+      "sha256": "78b5cfe7ded5f79ebb83801cfad198d75dddf60b9690b86a1a64d4510b1f65fb"
+    },
+    {
+      "path": "docs/model-architecture/progress/traceability.toml",
+      "bytes": 252441,
+      "sha256": "b3e692b1a2946212cc771a806dd89112ad748fb70792c374f2688e924c109945"
+    },
+    {
+      "path": "tests/unit/docs/test_verify_traceability.py",
+      "bytes": 22429,
+      "sha256": "7f488bacee08da52c0cde3385f8e6cc3610e367b5357714e16899f603861a5e7"
     }
   ],
+  "tooling_entrypoints": {
+    "pytest": "uv run --frozen pytest -q",
+    "pytest_import_path": "src",
+    "pyright": "uv run --frozen pyright",
+    "pyright_mode": "strict",
+    "pyright_include": [
+      "src/sakuramoon",
+      "tests",
+      "tools"
+    ],
+    "pyright_venv": ".venv"
+  },
+  "traceability": {
+    "registry_revision": 8,
+    "profile": "environment_lock",
+    "requirement_id": "OPEN-049",
+    "status": "implemented",
+    "implementation_commit_ref": "task:R002",
+    "open_050_kernel_status": "planned",
+    "open_051_four_gpu_status": "planned"
+  },
   "ignored_build_artifacts": [
     {
       "path": ".venv/lib/python3.12/site-packages/causal_conv1d_cuda.cpython-312-x86_64-linux-gnu.so",
       "bytes": 270041048,
-      "sha256": "51655c843d2f8228884007b178b42c89eb0dd052495e68029602e39986a93b0e"
+      "sha256": "51655c843d2f8228884007b178b42c89eb0dd052495e68029602e39986a93b0e",
+      "evidence_scope": "cache_warm_project_extension"
+    },
+    {
+      "path": "cache/r002-cold-rebuild.FIUoJwXb/venv/lib/python3.12/site-packages/causal_conv1d_cuda.cpython-312-x86_64-linux-gnu.so",
+      "bytes": 270042496,
+      "sha256": "0a216693f3733015216ac936d183cf7ce8e9298c8e880d3ad81ddccc68232903",
+      "evidence_scope": "empty_cache_cold_rebuild_extension"
     }
   ]
 }

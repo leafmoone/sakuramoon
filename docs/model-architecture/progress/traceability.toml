@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 7
+registry_revision = 8
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -635,6 +635,31 @@ not_applicable_fields = [
     "reference_modules",
 ]
 not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+
+[[profiles]]
+name = "environment_lock"
+owner_tasks = [
+    "R002",
+]
+config_keys = []
+modules = []
+reference_modules = []
+tests = [
+    "tests/**",
+]
+benchmarks = []
+artifacts = [
+    "docs/model-architecture/progress/environment-lock.md",
+    "docs/model-architecture/reviews/R002/**",
+]
+hardware = "CPU"
+not_applicable_fields = [
+    "config_keys",
+    "modules",
+    "reference_modules",
+    "benchmarks",
+]
+not_applicable_reason = "The environment lock has no runtime configuration, production module, reference module, or runtime benchmark; reconstruction and tooling validation are recorded as R002 artifacts."
 
 [[profiles]]
 name = "local_model_execution_boundary"
@@ -7804,8 +7829,8 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-049"
 kind = "open_item"
-status = "planned"
-profile = "training_system"
+status = "implemented"
+profile = "environment_lock"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
     "5. P0：环境、Optimizer 与 Checkpoint Canary",
@@ -7817,44 +7842,46 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:R002"
+implementation_paths = [
+    "pyproject.toml",
+    "uv.lock",
+    ".python-version",
+    "docs/model-architecture/progress/environment-lock.md",
+    "docs/model-architecture/progress/tasks/R002.md",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/reviews/R002/test_report.json",
+    "docs/model-architecture/reviews/R002/artifacts.json",
+    "docs/model-architecture/reviews/R002/dependency-licenses.json",
+    "docs/model-architecture/reviews/R002/fresh-env-report.json",
+    "docs/model-architecture/reviews/R002/cold-rebuild-report.json",
+    "docs/model-architecture/reviews/R002/timing.json",
+    "docs/model-architecture/reviews/R002/implementation_report.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "tests/unit/docs/test_verify_traceability.py",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
-config_keys = [
-    "optimizer.*",
-    "scheduler.*",
-    "gradient.*",
-    "distributed.*",
-    "checkpoint.*",
-    "failure.*",
-]
-modules = [
-    "src/sakuramoon/optim/**",
-    "src/sakuramoon/distributed/**",
-    "src/sakuramoon/checkpoint/**",
-    "src/sakuramoon/train/**",
-]
+config_keys = []
+modules = []
 reference_modules = []
 tests = [
-    "tests/**/optim*",
-    "tests/**/distributed*",
-    "tests/**/checkpoint*",
-    "tests/fault_injection/**",
+    "tests/**",
 ]
-benchmarks = [
-    "benchmarks/training/**",
-]
+benchmarks = []
 artifacts = [
-    "artifacts/training/**",
-    "checkpoints/**",
+    "docs/model-architecture/progress/environment-lock.md",
+    "docs/model-architecture/reviews/R002/**",
 ]
 not_applicable_fields = [
+    "config_keys",
+    "modules",
     "reference_modules",
+    "benchmarks",
 ]
-not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+not_applicable_reason = "The environment lock has no runtime configuration, production module, reference module, or runtime benchmark; reconstruction and tooling validation are recorded as R002 artifacts."
 
 [[requirements]]
 id = "OPEN-050"
