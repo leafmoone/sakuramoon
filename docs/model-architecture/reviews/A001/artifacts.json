@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "task_id": "A001",
+  "files": {
+    "assets/manifest.toml": "2f90407a09d2dc7abebbad26ab7f400b167be2af0248603922361bffbdb3e8e2",
+    "src/sakuramoon/assets/__init__.py": "0b2fa905213987979b9fc18f6ca630f9f785522f58f803688e16fa260900be5e",
+    "src/sakuramoon/assets/bindings.py": "93e715810a7f2df36beb526879e10367d99881e8915ba2d769310d5056979371",
+    "src/sakuramoon/assets/manifest.py": "e403651fff3d669d0b0cc6e9b0e2be5d586c9fca221f6d445ea8e23785d88cf3",
+    "src/sakuramoon/assets/inspect.py": "d722161eeffe596d5caf06b0a407254be651bad7b9393622f45a461b7c07464b",
+    "src/sakuramoon/cli/__init__.py": "a8570cdd55d507f1f23803b5d03a319ba443628c70bd42eb61265100edd4998d",
+    "src/sakuramoon/cli/inspect.py": "453e719a713cca4a872675a0865ab02880feb2d257500ec1114ed50c560cc0ad",
+    "tests/unit/assets/conftest.py": "2198e39040b0fbe4ab917fdee08d0f763a4fac99e08a9faea13fecbee2f8761e",
+    "tests/unit/assets/test_bindings.py": "60194c1b35258710e819e76016b9122bf81ac5ad4898d0450361600dca698c34",
+    "tests/unit/assets/test_manifest.py": "034e7ef4161b71e80a594ee91a06136675f7475c46f7f3eb2fce803beeece864",
+    "tests/unit/assets/test_inspect.py": "35545a251521ac1850fa1e5fbfffedc92e580751752a5ed8ac866f26ab9f1734",
+    "tests/contracts/assets/test_asset_boundary.py": "6b90acbc0026f14595c45880885e1b23fde20c2fa308569de518c37a02e3042b",
+    "docs/model-architecture/progress/traceability.toml": "07dfda58f3edf9ae97e1d7134d363bcf6a6b7d50646f8e94d25725176cb9c942"
+  },
+  "performance_artifacts_created": false,
+  "large_payloads_included": false
+}

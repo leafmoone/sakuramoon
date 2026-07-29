@@ -1,0 +1,197 @@
+schema_version = 1
+manifest_revision = 1
+
+[[models]]
+asset_id = "qwen_text_encoder"
+kind = "qwen"
+local_path = "model/qwen_3.5_2B"
+lock_state = "ready"
+blockers = []
+
+[models.source]
+repo_id = "spawner/Qwen3_5_2b_claude_heretic_spawner"
+revision = "7a387e3c9c23e913bbbe0b20fcbd1c5b38c0b96f"
+license_id = "Apache-2.0"
+access_terms = "ModelScope upstream terms; credential values are never stored in this manifest"
+
+[models.summary]
+config_sha256 = "ed1c1723241f23f7f4e23430759cbd7dcfb4103cbdfe052bfe7626b57c2615b4"
+tokenizer_sha256 = "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+layers = 24
+hidden_size = 2048
+dtype = "bfloat16"
+frozen = true
+use_cache = false
+visual_path_enabled = false
+
+[[models.files]]
+path = "config.json"
+kind = "config"
+bytes = 2908
+sha256 = "ed1c1723241f23f7f4e23430759cbd7dcfb4103cbdfe052bfe7626b57c2615b4"
+
+[[models.files]]
+path = "tokenizer.json"
+kind = "tokenizer"
+bytes = 12807982
+sha256 = "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+
+[[models.files]]
+path = "model.safetensors"
+kind = "weights"
+bytes = 4426558864
+sha256 = "a71a234d04b9a026f56232372c0f5c143caaf9ca3e2cea814ca1cc08ce56301f"
+
+[[models.files]]
+path = "LICENSE"
+kind = "license"
+bytes = 11343
+sha256 = "50cbab8a892c5f2993b8c7351a99182507472def3b1374558308605d99b86b32"
+
+[[models]]
+asset_id = "mage_vae"
+kind = "vae"
+local_path = "model/vae"
+lock_state = "ready"
+blockers = []
+
+[models.source]
+repo_id = "microsoft/Mage-Flow"
+revision = "faca09c18c1c19458e7fbc3f7bce6f7a7d4d01a9"
+license_id = "MIT"
+access_terms = "Official Microsoft Hugging Face repository; upstream model-card terms apply"
+
+[models.summary]
+config_sha256 = "abd124d603d6c6a03e9d0f2aa6d113b8c4afda0738400bdf2f99240aeaeaff76"
+latent_channels = 128
+downsample_factor = 16
+sample_posterior = false
+posterior_mean_required = true
+dtype = "bfloat16"
+frozen = true
+
+[[models.files]]
+path = "config.json"
+kind = "config"
+bytes = 112
+sha256 = "abd124d603d6c6a03e9d0f2aa6d113b8c4afda0738400bdf2f99240aeaeaff76"
+
+[[models.files]]
+path = "diffusion_pytorch_model.safetensors"
+kind = "weights"
+bytes = 345053056
+sha256 = "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+
+[[databases]]
+asset_id = "danbooru_metadata_db"
+local_path = "db"
+lock_state = "ready"
+blockers = []
+required_for_runtime = false
+allowed_aggregate_statistics = ["file_bytes", "schema_names", "column_names", "row_count"]
+schema_version = "duckdb-schema-sha256:b6d31640445a6e8b1862cf0b032649f5cfa93b66c6bd9d542ea4ca9d8e2456b1"
+
+[databases.source]
+origin_kind = "user_derived"
+derived_from = "Danbooru metadata; user-owned local database snapshot"
+license_id = "USER-PROVIDED"
+access_terms = "Optional reference only; WebDataset JSON captions are the runtime source"
+
+[[databases.files]]
+path = "dan_5_9.db"
+kind = "database"
+bytes = 14121971712
+sha256 = "3517dec35bcc16c490c7f77ee12aabda697c3046912621425e62607359a192fc"
+
+[[databases]]
+asset_id = "anime_art_multicaptions_v5"
+local_path = "db/Anime-Art-Multicaptions-v5.0"
+lock_state = "ready"
+blockers = []
+required_for_runtime = false
+allowed_aggregate_statistics = ["file_bytes", "schema_names", "column_names", "row_count"]
+schema_version = "arrow-schema-sha256:b5062f604b7deab39d08988831a83c5b07e47da258b6e546855edd9b2f9257a0"
+
+[databases.source]
+origin_kind = "upstream_repo"
+repo_id = "Minthy/Anime-Art-Multicaptions-v5.0"
+revision = "af09ff411496601582e2780ba4b3c7fe801d978b"
+license_id = "MIT"
+access_terms = "Hugging Face dataset card; image assets are not included in this local metadata file"
+
+[[databases.files]]
+path = "data.parquet"
+kind = "database"
+bytes = 11018188621
+sha256 = "767a2cf8dbd8193cdee04ce4fda463e45a998d5fc6077c5aa3cad5b21b39af5d"
+
+[[databases]]
+asset_id = "booru_characters_v05"
+local_path = "db/BooruCharacters_v0.5"
+lock_state = "ready"
+blockers = []
+required_for_runtime = false
+allowed_aggregate_statistics = ["file_bytes", "schema_names", "column_names", "row_count"]
+schema_version = "arrow-schema-sha256:d99956f6be1c8298fb6335e6922aaca67b26b1f5767ec995ac4a01cc33e5d362"
+
+[databases.source]
+origin_kind = "upstream_repo"
+repo_id = "Minthy/BooruCharacters_v0.5"
+revision = "c0039fd9f4496dfa3c620dbb864a6820a2c39dc9"
+license_id = "MIT"
+access_terms = "Public Hugging Face dataset card; upstream terms apply"
+
+[[databases.files]]
+path = "booru_characters.parquet"
+kind = "database"
+bytes = 11793087
+sha256 = "0a60a544202f0c8939f263a3b2bdb2947a203c9364aefb3c9e4ca9f1b8f715d2"
+
+[[references]]
+asset_id = "reference_hdm"
+local_path = "reference/HDM"
+origin_url = "https://github.com/KohakuBlueleaf/HDM.git"
+commit = "5fef7c4b71fe8386b497176021fe458810fdb7c0"
+tracked_worktree_required_clean = true
+
+[[references.licenses]]
+name = "CC-BY-NC-SA-4.0"
+scope = "repository"
+path = "LICENSE"
+bytes = 16254
+sha256 = "c02a039a41caa77050b5d48880810777ec9e9c7c8bb740dca882611478f7319b"
+
+[[references]]
+asset_id = "reference_jlt"
+local_path = "reference/JLT"
+origin_url = "https://github.com/akatsuki-neo/JLT"
+commit = "aca236efa97aab3b7d865fd3d99a270431cf6ae5"
+tracked_worktree_required_clean = true
+
+[[references.licenses]]
+name = "MIT"
+scope = "repository"
+path = "LICENSE"
+bytes = 1069
+sha256 = "0e691a1683455d3cfa0808c60d9cb467accbb842355d2e43074c8efc0aef6532"
+
+[[references]]
+asset_id = "reference_krea2"
+local_path = "reference/krea-2"
+origin_url = "https://github.com/krea-ai/krea-2.git"
+commit = "db3984fbc6e13b34c0064990fc2d95ac64d00058"
+tracked_worktree_required_clean = true
+
+[[references.licenses]]
+name = "Apache-2.0"
+scope = "repository root code"
+path = "LICENSE.md"
+bytes = 11324
+sha256 = "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a"
+
+[[references.licenses]]
+name = "KREA COMMUNITY LICENSE AGREEMENT"
+scope = "assets/hf_samples"
+path = "assets/hf_samples/LICENSE.pdf"
+bytes = 137711
+sha256 = "b82a2805162bde714a4eb27b9063c4fc3345d08a30be055134a6160e5430ba74"

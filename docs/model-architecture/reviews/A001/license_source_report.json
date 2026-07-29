@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "task_id": "A001",
+  "models": {
+    "qwen_text_encoder": {
+      "repo_id": "spawner/Qwen3_5_2b_claude_heretic_spawner",
+      "revision": "7a387e3c9c23e913bbbe0b20fcbd1c5b38c0b96f",
+      "license": "Apache-2.0 local license file",
+      "source_url": "https://modelscope.cn/models/spawner/Qwen3_5_2b_claude_heretic_spawner",
+      "source_ready": true
+    },
+    "mage_vae": {
+      "repo_id": "microsoft/Mage-Flow",
+      "revision": "faca09c18c1c19458e7fbc3f7bce6f7a7d4d01a9",
+      "license": "MIT",
+      "source_url": "https://huggingface.co/microsoft/Mage-Flow",
+      "source_ready": true
+    }
+  },
+  "databases": {
+    "danbooru_metadata_db": {
+      "origin_kind": "user_derived",
+      "derived_from": "Danbooru metadata; user-owned local database snapshot",
+      "schema_sha256": "b6d31640445a6e8b1862cf0b032649f5cfa93b66c6bd9d542ea4ca9d8e2456b1",
+      "runtime_required": false,
+      "source_ready": true
+    },
+    "anime_art_multicaptions_v5": {
+      "repo_id": "Minthy/Anime-Art-Multicaptions-v5.0",
+      "revision": "af09ff411496601582e2780ba4b3c7fe801d978b",
+      "license": "MIT",
+      "runtime_required": false,
+      "source_ready": true
+    },
+    "booru_characters_v05": {
+      "repo_id": "Minthy/BooruCharacters_v0.5",
+      "revision": "c0039fd9f4496dfa3c620dbb864a6820a2c39dc9",
+      "license": "MIT",
+      "runtime_required": false,
+      "source_ready": true
+    }
+  },
+  "references": {
+    "HDM": {
+      "origin": "https://github.com/KohakuBlueleaf/HDM.git",
+      "commit": "5fef7c4b71fe8386b497176021fe458810fdb7c0",
+      "license": "CC-BY-NC-SA-4.0",
+      "ready": true
+    },
+    "JLT": {
+      "origin": "https://github.com/akatsuki-neo/JLT",
+      "commit": "aca236efa97aab3b7d865fd3d99a270431cf6ae5",
+      "license": "MIT",
+      "ready": true
+    },
+    "krea-2": {
+      "origin": "https://github.com/krea-ai/krea-2.git",
+      "commit": "db3984fbc6e13b34c0064990fc2d95ac64d00058",
+      "licenses": [
+        "Apache-2.0 for repository root code",
+        "KREA COMMUNITY LICENSE AGREEMENT for assets/hf_samples"
+      ],
+      "ready": true
+    }
+  }
+}

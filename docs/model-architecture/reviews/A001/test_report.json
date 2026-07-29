@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "task_id": "A001",
+  "hardware": "CPU",
+  "targeted": {
+    "command": "PYTHONPATH=src uv run --frozen pytest -q tests/unit/assets tests/contracts/assets",
+    "passed": 25,
+    "failed": 0,
+    "duration_seconds": 2.90
+  },
+  "ruff": {
+    "command": "uv run --frozen ruff check src/sakuramoon/assets src/sakuramoon/cli tests/unit/assets tests/contracts/assets",
+    "ok": true
+  },
+  "pyright": {
+    "command": "uv run --frozen pyright -p /tmp/sakuramoon-c001-pyrightconfig.json src/sakuramoon/assets src/sakuramoon/cli tests/unit/assets tests/contracts/assets",
+    "locked_venv": ".venv",
+    "mode": "strict",
+    "errors": 0,
+    "warnings": 0
+  },
+  "traceability": {
+    "command": "PYTHONPATH=src /root/shared-nvme/sakuramoon/.venv/bin/python tools/verify_traceability.py --format json",
+    "snapshot_scope": "clean HEAD plus staged A001 diff",
+    "ok": true,
+    "requirements": 219,
+    "source_nodes": 219,
+    "production_modules": 12,
+    "runtime_config_keys": 235,
+    "archive_files": 16
+  },
+  "full_suite": {
+    "command": "PYTHONPATH=src /root/shared-nvme/sakuramoon/.venv/bin/pytest -q",
+    "snapshot_scope": "clean HEAD plus staged A001 diff",
+    "passed": 105,
+    "failed": 0,
+    "duration_seconds": 11.99
+  },
+  "production_manifest_static": {
+    "command": "load_manifest assets/manifest.toml in unit/contract suite",
+    "result": "runtime_models_ready_databases_optional",
+    "model_payloads_read_or_hashed": false,
+    "database_payloads_hashed_once_for_manifest": true
+  },
+  "gpu_used": false
+}
