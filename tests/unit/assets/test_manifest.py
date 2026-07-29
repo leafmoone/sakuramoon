@@ -49,6 +49,16 @@ def test_unknown_key_is_rejected(synthetic_assets: SyntheticAssetTree) -> None:
         load_manifest(synthetic_assets.manifest_path)
 
 
+def test_database_cannot_be_marked_required_for_runtime(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    synthetic_assets.payload["databases"][0]["required_for_runtime"] = True
+    synthetic_assets.write_manifest()
+
+    with pytest.raises(ManifestError, match="databases.0.required_for_runtime"):
+        load_manifest(synthetic_assets.manifest_path)
+
+
 def test_path_traversal_is_rejected(synthetic_assets: SyntheticAssetTree) -> None:
     synthetic_assets.payload["models"][0]["local_path"] = "../model/qwen"
     synthetic_assets.write_manifest()

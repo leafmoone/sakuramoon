@@ -31,40 +31,45 @@ class AssetPreflightError(RuntimeError):
 
 
 class _IdentityWeakRegistry:
-    """Track issued capabilities by identity without extending their lifetime."""
+    """Track immutable issuance snapshots without extending object lifetime."""
 
     def __init__(self) -> None:
-        self._references: dict[int, weakref.ReferenceType[object]] = {}
+        self._records: dict[
+            int,
+            tuple[weakref.ReferenceType[object], tuple[object, ...]],
+        ] = {}
         self._lock = threading.Lock()
 
-    def issue(self, value: object) -> None:
+    def issue(self, value: object, fingerprint: tuple[object, ...]) -> None:
         identity = id(value)
 
         def discard(reference: weakref.ReferenceType[object]) -> None:
             with self._lock:
-                if self._references.get(identity) is reference:
-                    del self._references[identity]
+                record = self._records.get(identity)
+                if record is not None and record[0] is reference:
+                    del self._records[identity]
 
         reference = weakref.ref(value, discard)
         with self._lock:
-            self._references[identity] = reference
+            self._records[identity] = (reference, fingerprint)
 
-    def contains(self, value: object) -> bool:
+    def contains(self, value: object, fingerprint: tuple[object, ...]) -> bool:
         with self._lock:
-            reference = self._references.get(id(value))
-            if reference is None:
+            identity = id(value)
+            record = self._records.get(identity)
+            if record is None:
                 return False
-            referent = cast(
-                object | None,
-                weakref.ReferenceType.__call__(  # pyright: ignore[reportUnknownMemberType]
-                    reference
-                ),
-            )
-            return referent is value
+            reference, issued_fingerprint = record
+            if reference() is not value:
+                return False
+            if issued_fingerprint != fingerprint:
+                del self._records[identity]
+                return False
+            return True
 
     def __len__(self) -> int:
         with self._lock:
-            return len(self._references)
+            return len(self._records)
 
 
 @dataclass(frozen=True)
@@ -117,7 +122,8 @@ class VerifiedAssetFile:
     def require_unchanged(self) -> Path:
         """Return the verified path only while its filesystem identity is unchanged."""
 
-        if type(self) is not VerifiedAssetFile or not _ISSUED_FILES.contains(self):
+        fingerprint = _verified_file_fingerprint(self)
+        if fingerprint is None or not _ISSUED_FILES.contains(self, fingerprint):
             raise AssetPreflightError("asset file capability is not verified")
         if (
             _safe_path(self._base, self.relative_path) != self._path
@@ -132,7 +138,7 @@ class VerifiedAssetFile:
     def verified_root(self) -> Path:
         """Return this file's asset root only while its identity is unchanged."""
 
-        self.require_unchanged()
+        VerifiedAssetFile.require_unchanged(self)
         return self._base
 
 
@@ -151,10 +157,9 @@ class VerifiedAssetSelection:
     def require_unchanged(self) -> None:
         """Hard-fail if the manifest or any verified file changed after inspection."""
 
-        if type(self) is not VerifiedAssetSelection or not _ISSUED_SELECTIONS.contains(self):
+        fingerprint = _verified_selection_fingerprint(self)
+        if fingerprint is None or not _ISSUED_SELECTIONS.contains(self, fingerprint):
             raise AssetPreflightError("asset selection capability is not verified")
-        if type(self.files) is not tuple:
-            raise AssetPreflightError("asset file capability is not verified")
         safe_manifest = _safe_path(self._root, self._manifest_relative_path)
         if (
             safe_manifest != self._manifest_path
@@ -175,17 +180,18 @@ class VerifiedAssetSelection:
         ):
             raise AssetPreflightError("verified asset manifest identity drifted")
         for verified_file in self.files:
+            file_fingerprint = _verified_file_fingerprint(verified_file)
             if (
-                type(verified_file) is not VerifiedAssetFile
-                or not _ISSUED_FILES.contains(verified_file)
+                file_fingerprint is None
+                or not _ISSUED_FILES.contains(verified_file, file_fingerprint)
             ):
                 raise AssetPreflightError("asset file capability is not verified")
-            verified_file.require_unchanged()
+            VerifiedAssetFile.require_unchanged(verified_file)
 
     def verified_path(self, asset_id: str, relative_path: str) -> Path:
         """Revalidate the complete selection and return one declared file path."""
 
-        self.require_unchanged()
+        VerifiedAssetSelection.require_unchanged(self)
         matches = [
             item
             for item in self.files
@@ -193,14 +199,14 @@ class VerifiedAssetSelection:
         ]
         if len(matches) != 1:
             raise AssetPreflightError(f"file was not verified: {asset_id}:{relative_path}")
-        return matches[0].require_unchanged()
+        return VerifiedAssetFile.require_unchanged(matches[0])
 
     def verified_root(self, asset_id: str) -> Path:
         """Return one manifest-bound asset root after revalidating every locked file."""
 
-        self.require_unchanged()
+        VerifiedAssetSelection.require_unchanged(self)
         matches = [item for item in self.files if item.asset_id == asset_id]
-        roots = {item.verified_root() for item in matches}
+        roots = {VerifiedAssetFile.verified_root(item) for item in matches}
         if not matches or len(roots) != 1:
             raise AssetPreflightError(f"asset root was not verified: {asset_id}")
         root = roots.pop()
@@ -212,14 +218,120 @@ class VerifiedAssetSelection:
 def require_verified_selection(value: object) -> VerifiedAssetSelection:
     """Narrow an untrusted wrapper argument to a live verified asset capability."""
 
-    if type(value) is not VerifiedAssetSelection or not _ISSUED_SELECTIONS.contains(value):
+    if type(value) is not VerifiedAssetSelection:
         raise AssetPreflightError("asset selection capability is not verified")
-    value.require_unchanged()
-    return value
+    selection = value
+    fingerprint = _verified_selection_fingerprint(selection)
+    if fingerprint is None or not _ISSUED_SELECTIONS.contains(selection, fingerprint):
+        raise AssetPreflightError("asset selection capability is not verified")
+    VerifiedAssetSelection.require_unchanged(selection)
+    return selection
 
 
 _ISSUED_FILES = _IdentityWeakRegistry()
 _ISSUED_SELECTIONS = _IdentityWeakRegistry()
+_PATH_TYPE = type(Path())
+_FILE_FIELDS = frozenset(
+    {
+        "asset_id",
+        "relative_path",
+        "kind",
+        "bytes",
+        "sha256",
+        "_base",
+        "_path",
+        "_identity",
+    }
+)
+_SELECTION_FIELDS = frozenset(
+    {
+        "manifest_revision",
+        "manifest_sha256",
+        "files",
+        "_root",
+        "_manifest_relative_path",
+        "_manifest_path",
+        "_manifest_identity",
+    }
+)
+
+
+def _path_fingerprint(value: object) -> tuple[str, ...] | None:
+    if type(value) is not _PATH_TYPE:
+        return None
+    return value.parts
+
+
+def _stat_fingerprint(value: object) -> tuple[int, int, int, int, int] | None:
+    if type(value) is not _StatIdentity:
+        return None
+    state = vars(value)
+    names = ("device", "inode", "bytes", "modified_ns", "changed_ns")
+    if set(state) != set(names) or any(type(state[name]) is not int for name in names):
+        return None
+    return cast(tuple[int, int, int, int, int], tuple(state[name] for name in names))
+
+
+def _verified_file_fingerprint(value: object) -> tuple[object, ...] | None:
+    if type(value) is not VerifiedAssetFile:
+        return None
+    state = vars(value)
+    if frozenset(state) != _FILE_FIELDS:
+        return None
+    for name in ("asset_id", "relative_path", "kind", "sha256"):
+        if type(state[name]) is not str:
+            return None
+    if type(state["bytes"]) is not int:
+        return None
+    base = _path_fingerprint(state["_base"])
+    path = _path_fingerprint(state["_path"])
+    identity = _stat_fingerprint(state["_identity"])
+    if base is None or path is None or identity is None:
+        return None
+    return (
+        "file",
+        state["asset_id"],
+        state["relative_path"],
+        state["kind"],
+        state["bytes"],
+        state["sha256"],
+        base,
+        path,
+        identity,
+    )
+
+
+def _verified_selection_fingerprint(value: object) -> tuple[object, ...] | None:
+    if type(value) is not VerifiedAssetSelection:
+        return None
+    state = vars(value)
+    if frozenset(state) != _SELECTION_FIELDS:
+        return None
+    if type(state["manifest_revision"]) is not int:
+        return None
+    if type(state["manifest_sha256"]) is not str:
+        return None
+    if type(state["_manifest_relative_path"]) is not str:
+        return None
+    raw_files = state["files"]
+    if type(raw_files) is not tuple:
+        return None
+    files = cast(tuple[object, ...], raw_files)
+    root = _path_fingerprint(state["_root"])
+    manifest_path = _path_fingerprint(state["_manifest_path"])
+    identity = _stat_fingerprint(state["_manifest_identity"])
+    if root is None or manifest_path is None or identity is None:
+        return None
+    return (
+        "selection",
+        state["manifest_revision"],
+        state["manifest_sha256"],
+        tuple(id(item) for item in files),
+        root,
+        state["_manifest_relative_path"],
+        manifest_path,
+        identity,
+    )
 
 
 @dataclass(frozen=True)
@@ -358,7 +470,10 @@ def _inspect_file(
         _path=path,
         _identity=after,
     )
-    _ISSUED_FILES.issue(verified_file)
+    fingerprint = _verified_file_fingerprint(verified_file)
+    if fingerprint is None:
+        raise AssetPreflightError("asset file capability could not be issued")
+    _ISSUED_FILES.issue(verified_file, fingerprint)
     return [], verified_file
 
 
@@ -623,8 +738,11 @@ def _selection(
         _manifest_path=snapshot.path,
         _manifest_identity=snapshot.identity,
     )
-    _ISSUED_SELECTIONS.issue(selection)
-    selection.require_unchanged()
+    fingerprint = _verified_selection_fingerprint(selection)
+    if fingerprint is None:
+        raise AssetPreflightError("asset selection capability could not be issued")
+    _ISSUED_SELECTIONS.issue(selection, fingerprint)
+    VerifiedAssetSelection.require_unchanged(selection)
     return selection
 
 

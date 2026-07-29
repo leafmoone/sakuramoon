@@ -445,9 +445,9 @@ def test_issued_selection_rejects_nested_file_subclass_without_dispatch(
     forged = object.__new__(forged_type)
     object.__setattr__(selection, "files", (forged, *selection.files[1:]))
 
-    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+    with pytest.raises(AssetPreflightError, match="capability is not verified"):
         selection.require_unchanged()
-    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+    with pytest.raises(AssetPreflightError, match="capability is not verified"):
         require_verified_selection(selection)
 
 
@@ -471,10 +471,147 @@ def test_issued_selection_rejects_equal_but_unissued_file(
         (equal_direct_construction, *selection.files[1:]),
     )
 
-    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+    with pytest.raises(AssetPreflightError, match="capability is not verified"):
         require_verified_selection(selection)
     with pytest.raises(AssetPreflightError, match="file capability is not verified"):
         equal_direct_construction.require_unchanged()
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "asset_id",
+        "relative_path",
+        "kind",
+        "bytes",
+        "sha256",
+        "_base",
+        "_path",
+        "_identity",
+    ),
+)
+def test_issued_file_field_mutation_revokes_capability_before_dispatch(
+    synthetic_assets: SyntheticAssetTree,
+    field: str,
+) -> None:
+    selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    issued_file = selection.files[0]
+    if field in {"asset_id", "relative_path", "kind"}:
+        replacement: object = f"mutated-{getattr(issued_file, field)}"
+    elif field == "bytes":
+        replacement = issued_file.bytes + 1
+    elif field == "sha256":
+        replacement = ("0" if issued_file.sha256[0] != "0" else "1") + issued_file.sha256[1:]
+    elif field == "_base":
+        replacement = issued_file._base / "retarget"  # pyright: ignore[reportPrivateUsage]
+    elif field == "_path":
+        replacement = issued_file._path.with_name("retarget")  # pyright: ignore[reportPrivateUsage]
+    else:
+        identity = issued_file._identity  # pyright: ignore[reportPrivateUsage]
+        replacement = replace(identity, inode=identity.inode + 1)
+    object.__setattr__(issued_file, field, replacement)
+
+    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+        VerifiedAssetSelection.require_unchanged(selection)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "manifest_revision",
+        "manifest_sha256",
+        "files",
+        "_root",
+        "_manifest_relative_path",
+        "_manifest_path",
+        "_manifest_identity",
+    ),
+)
+def test_issued_selection_field_mutation_revokes_capability(
+    synthetic_assets: SyntheticAssetTree,
+    field: str,
+) -> None:
+    selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    if field == "manifest_revision":
+        replacement: object = selection.manifest_revision + 1
+    elif field == "manifest_sha256":
+        replacement = ("0" if selection.manifest_sha256[0] != "0" else "1") + (
+            selection.manifest_sha256[1:]
+        )
+    elif field == "files":
+        replacement = tuple(reversed(selection.files))
+    elif field == "_root":
+        replacement = selection._root / "retarget"  # pyright: ignore[reportPrivateUsage]
+    elif field == "_manifest_relative_path":
+        replacement = "assets/retarget.toml"
+    elif field == "_manifest_path":
+        replacement = selection._manifest_path.with_name(  # pyright: ignore[reportPrivateUsage]
+            "retarget.toml"
+        )
+    else:
+        identity = selection._manifest_identity  # pyright: ignore[reportPrivateUsage]
+        replacement = replace(identity, inode=identity.inode + 1)
+    object.__setattr__(selection, field, replacement)
+
+    with pytest.raises(AssetPreflightError, match="selection capability is not verified"):
+        require_verified_selection(selection)
+
+
+def test_runtime_selection_rejects_grafted_issued_database_files(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    runtime_selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    database_selection = require_databases_ready(
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+        asset_ids=("metadata_db",),
+    )
+    object.__setattr__(runtime_selection, "files", database_selection.files)
+
+    with pytest.raises(AssetPreflightError, match="selection capability is not verified"):
+        require_verified_selection(runtime_selection)
+
+
+def test_instance_method_retarget_is_rejected_without_dispatch(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    invoked: list[str] = []
+
+    def forged_method(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        invoked.append("called")
+
+    object.__setattr__(selection.files[0], "require_unchanged", forged_method)
+    with pytest.raises(AssetPreflightError, match="file capability is not verified"):
+        VerifiedAssetSelection.require_unchanged(selection)
+    assert invoked == []
+
+    fresh_selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+    object.__setattr__(fresh_selection, "require_unchanged", forged_method)
+    with pytest.raises(AssetPreflightError, match="selection capability is not verified"):
+        require_verified_selection(fresh_selection)
+    assert invoked == []
 
 
 def test_issued_capability_registries_are_thread_safe_and_release_on_gc(
@@ -778,4 +915,68 @@ def test_cli_last_resort_io_error_is_redacted(
         "ok": False,
     }
     assert secret not in captured.out
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ("--scope", "SENSITIVE-INVALID-SCOPE"),
+        ("--SENSITIVE-UNKNOWN-OPTION", "value"),
+        ("--scope",),
+        ("--manifest",),
+        ("--root",),
+        ("--scope", "runtime-models", "SENSITIVE-POSITIONAL"),
+    ),
+)
+def test_cli_argparse_errors_are_single_redacted_json(
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+) -> None:
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "error": "invalid command-line arguments",
+        "ok": False,
+    }
+    assert captured.out.count("\n") == 1
+    assert "SENSITIVE" not in captured.out
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("scope", ("runtime-models", "references", "databases"))
+def test_cli_semantic_argument_errors_do_not_echo_sensitive_asset_id(
+    synthetic_assets: SyntheticAssetTree,
+    capsys: pytest.CaptureFixture[str],
+    scope: str,
+) -> None:
+    secret = "SENSITIVE-ASSET-ID"
+    argv = (
+        "--manifest",
+        str(synthetic_assets.manifest_path),
+        "--root",
+        str(synthetic_assets.root),
+        "--scope",
+        scope,
+        "--asset-id",
+        secret,
+    )
+
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "error": "invalid asset inspection request",
+        "ok": False,
+    }
+    assert secret not in captured.out
+    assert captured.err == ""
+
+
+def test_cli_help_remains_normal_stdout_and_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(("--help",)) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("usage:")
+    assert "Inspect immutable SakuraMoon asset locks" in captured.out
     assert captured.err == ""

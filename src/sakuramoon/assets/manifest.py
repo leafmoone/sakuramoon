@@ -187,7 +187,7 @@ class DatabaseAsset(StrictModel):
     local_path: NonEmpty
     lock_state: Literal["ready", "blocked"]
     blockers: Annotated[tuple[BlockerId, ...], BeforeValidator(_list_to_tuple)]
-    required_for_runtime: bool
+    required_for_runtime: Literal[False]
     source: DatabaseSourceIdentity
     schema_version: NonEmpty | None = None
     files: Annotated[tuple[FileLock, ...], BeforeValidator(_list_to_tuple)]

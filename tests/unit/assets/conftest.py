@@ -193,7 +193,7 @@ def synthetic_assets(tmp_path: Path) -> SyntheticAssetTree:
                 "local_path": "db",
                 "lock_state": "ready",
                 "blockers": [],
-                "required_for_runtime": True,
+                "required_for_runtime": False,
                 "source": {
                     "origin_kind": "upstream_repo",
                     "repo_id": "synthetic/metadata",

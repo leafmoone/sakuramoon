@@ -4,7 +4,10 @@ import inspect
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from sakuramoon.assets import (
+    ManifestError,
     inspect_databases,
     inspect_reference_repositories,
     inspect_runtime_models,
@@ -44,6 +47,19 @@ def test_production_manifest_records_ready_models_and_optional_databases_without
     assert all(asset.lock_state == "ready" for asset in manifest.models)
     assert all(asset.lock_state == "ready" for asset in manifest.databases)
     assert all(not asset.required_for_runtime for asset in manifest.databases)
+
+
+def test_manifest_contract_rejects_a_runtime_required_database(tmp_path: Path) -> None:
+    payload = MANIFEST.read_text(encoding="utf-8").replace(
+        "required_for_runtime = false",
+        "required_for_runtime = true",
+        1,
+    )
+    candidate = tmp_path / "manifest.toml"
+    candidate.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(ManifestError, match="databases.0.required_for_runtime"):
+        load_manifest(candidate)
 
 
 def test_all_asset_roots_are_git_ignored_and_payloads_are_not_tracked() -> None:

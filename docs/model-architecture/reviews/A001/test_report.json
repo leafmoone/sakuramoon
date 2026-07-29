@@ -3,7 +3,7 @@
   "task_id": "A001",
   "hardware": "CPU",
   "candidate": {
-    "base_commit": "80692a7",
+    "base_commit": "72bd362",
     "scope": "isolated clone with only the explicit A001 path diff",
     "excluded_concurrent_diffs": ["D001", "D010", "A002 scanner"]
   },
@@ -13,9 +13,9 @@
   },
   "targeted": {
     "command": "UV_PROJECT_ENVIRONMENT=<locked-env> uv run --frozen pytest -q tests/unit/assets tests/contracts/assets/test_asset_boundary.py",
-    "passed": 55,
+    "passed": 84,
     "failed": 0,
-    "duration_seconds": 7.04
+    "duration_seconds": 9.27
   },
   "ruff": {
     "command": "UV_PROJECT_ENVIRONMENT=<locked-env> uv run --frozen ruff check src/sakuramoon tests tools",
@@ -38,9 +38,9 @@
   },
   "full_suite": {
     "command": "UV_PROJECT_ENVIRONMENT=<locked-env> uv run --frozen pytest -q",
-    "passed": 200,
+    "passed": 229,
     "failed": 0,
-    "duration_seconds": 17.55
+    "duration_seconds": 24.93
   },
   "manifest_binding_stability": {
     "command": "five consecutive runs of uv run --frozen pytest -q tests/unit/assets/test_bindings.py",
@@ -54,14 +54,22 @@
       "test_selection_capability_rejects_equal_direct_construction_and_object_new",
       "test_issued_selection_rejects_nested_file_subclass_without_dispatch",
       "test_issued_selection_rejects_equal_but_unissued_file",
+      "test_issued_file_field_mutation_revokes_capability_before_dispatch",
+      "test_issued_selection_field_mutation_revokes_capability",
+      "test_runtime_selection_rejects_grafted_issued_database_files",
+      "test_instance_method_retarget_is_rejected_without_dispatch",
       "test_issued_capability_registries_are_thread_safe_and_release_on_gc"
     ],
     "selection_and_file_exact_type_required": true,
     "identity_issuance_required": true,
+    "immutable_issuance_fingerprint_required": true,
+    "selection_original_file_identity_order_required": true,
+    "fingerprint_mismatch_revokes_before_dispatch": true,
     "dataclass_equality_used_for_issuance": false,
     "weak_registry_retains_capability": false,
     "concurrent_validation_threads": 32,
     "gc_thread_safety_consecutive_runs": 10,
+    "mutation_graft_gc_thread_cases_per_run": 18,
     "task_owner": "A001"
   },
   "cli_failure_contract": {
@@ -69,7 +77,22 @@
     "missing_root_exit": 2,
     "stdout": "single redacted JSON object",
     "stderr": "empty",
-    "traceback": false
+    "traceback": false,
+    "argparse_failure_cases": 6,
+    "semantic_sensitive_argument_cases": 3,
+    "failure_usage_rendered": false,
+    "argv_or_raw_exception_rendered": false,
+    "help_exit": 0
+  },
+  "database_runtime_contract": {
+    "schema": "required_for_runtime: Literal[False]",
+    "true_rejected_by_unit_parse_test": true,
+    "true_rejected_by_contract_test": true
+  },
+  "a002_scanner_compatibility": {
+    "scope": "read-only scan of isolated A001 candidate using current A002 scanner",
+    "sources": 28,
+    "violations": 0
   },
   "production_manifest_static": {
     "command": "load_manifest assets/manifest.toml in unit/contract suite",

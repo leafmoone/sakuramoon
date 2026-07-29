@@ -48,5 +48,15 @@
     "hardware_level": "CPU",
     "gpu_seconds": 0,
     "status": "sealed_capability_remediation_complete_pending_independent_rereview"
+  },
+  "third_review_remediation": {
+    "measurement_scope": "first tracked fingerprint/CLI/DB edit through clean isolated validation and evidence refresh",
+    "agent": "a001_cli_preflight",
+    "started_at_utc": "2026-07-29T20:09:23Z",
+    "ended_at_utc": "2026-07-29T20:12:27Z",
+    "duration_seconds": 184,
+    "hardware_level": "CPU",
+    "gpu_seconds": 0,
+    "status": "third_review_remediation_complete_pending_independent_rereview"
   }
 }

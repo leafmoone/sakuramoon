@@ -6,6 +6,7 @@ import argparse
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NoReturn
 
 from sakuramoon.assets import (
     AssetPreflightError,
@@ -16,8 +17,23 @@ from sakuramoon.assets import (
 )
 
 
+class _CliArgumentError(ValueError):
+    """Raised without retaining or rendering attacker-controlled argv text."""
+
+
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        del message
+        raise _CliArgumentError("invalid command-line arguments")
+
+
+def _error(message: str) -> int:
+    print(json.dumps({"error": message, "ok": False}, sort_keys=True, separators=(",", ":")))
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Inspect immutable SakuraMoon asset locks")
+    parser = _SafeArgumentParser(description="Inspect immutable SakuraMoon asset locks")
     parser.add_argument("--manifest", type=Path, default=Path("assets/manifest.toml"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument(
@@ -30,7 +46,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    try:
+        args = build_parser().parse_args(argv)
+    except _CliArgumentError:
+        return _error("invalid command-line arguments")
+    except SystemExit as exc:
+        if exc.code == 0:
+            return 0
+        return _error("invalid command-line arguments")
     try:
         if args.scope == "runtime-models":
             if args.asset_id:
@@ -46,18 +69,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.asset_id:
                 raise ValueError("--asset-id is only valid for database audits")
             report = inspect_reference_repositories(args.manifest, root=args.root)
-    except (AssetPreflightError, ManifestError, ValueError) as exc:
-        print(json.dumps({"error": str(exc), "ok": False}, sort_keys=True, separators=(",", ":")))
-        return 2
+    except AssetPreflightError:
+        return _error("asset preflight failed")
+    except ManifestError:
+        return _error("asset manifest is invalid")
+    except ValueError:
+        return _error("invalid asset inspection request")
     except OSError:
-        print(
-            json.dumps(
-                {"error": "asset inspection I/O failed", "ok": False},
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        )
-        return 2
+        return _error("asset inspection I/O failed")
     print(report.to_json())
     return 0 if report.ok else 1
 
