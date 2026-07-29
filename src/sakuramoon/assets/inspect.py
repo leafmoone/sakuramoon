@@ -146,6 +146,15 @@ class VerifiedAssetSelection:
         return root
 
 
+def require_verified_selection(value: object) -> VerifiedAssetSelection:
+    """Narrow an untrusted wrapper argument to a live verified asset capability."""
+
+    if not isinstance(value, VerifiedAssetSelection):
+        raise AssetPreflightError("asset selection capability is not verified")
+    value.require_unchanged()
+    return value
+
+
 @dataclass(frozen=True)
 class _ManifestSnapshot:
     manifest: AssetManifest

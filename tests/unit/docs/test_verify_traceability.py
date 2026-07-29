@@ -79,6 +79,7 @@ def repo_copy(tmp_path: Path) -> Path:
         "docs/model-architecture/reviews/A002/artifacts.json",
         "tests/contracts/assets/conftest.py",
         "tests/contracts/assets/test_asset_execution_boundary.py",
+        "tests/unit/assets/conftest.py",
         "tests/unit/assets/test_inspect.py",
         "tests/unit/docs/test_verify_traceability.py",
         "tools/__init__.py",

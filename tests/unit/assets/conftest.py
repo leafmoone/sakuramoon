@@ -55,18 +55,22 @@ def make_reference(
     subprocess.run(("git", "-C", str(repo), "remote", "add", "origin", origin), check=True)
     subprocess.run(("git", "-C", str(repo), "add", "."), check=True)
     subprocess.run(
+        ("git", "-C", str(repo), "config", "user.name", "Synthetic Test"),
+        check=True,
+    )
+    subprocess.run(
         (
             "git",
             "-C",
             str(repo),
-            "-c",
-            "user.name=Synthetic Test",
-            "-c",
-            "user.email=synthetic@example.invalid",
-            "commit",
-            "-qm",
-            "fixture",
+            "config",
+            "user.email",
+            "synthetic@example.invalid",
         ),
+        check=True,
+    )
+    subprocess.run(
+        ("git", "-C", str(repo), "commit", "-qm", "fixture"),
         check=True,
     )
     commit = subprocess.run(

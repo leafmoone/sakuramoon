@@ -4,21 +4,23 @@
   "hardware": "CPU",
   "targeted_boundary_and_git": {
     "command": "uv run --frozen pytest -q tests/contracts/assets/test_asset_execution_boundary.py tests/unit/assets/test_inspect.py",
-    "passed": 54,
+    "passed": 82,
     "failed": 0,
-    "duration_seconds": 2.92
+    "duration_seconds": 4.90
   },
   "governance_and_contract": {
     "command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py tests/contracts/assets/test_asset_execution_boundary.py tests/unit/assets/test_inspect.py",
-    "passed": 90,
+    "passed": 118,
     "failed": 0,
-    "duration_seconds": 11.64
+    "duration_seconds": 11.53
   },
   "scanner_self_check": {
-    "command": "uv run --frozen python -c 'from pathlib import Path; from tools.asset_execution_boundary import python_sources, scan_repository; p=python_sources(Path.cwd()); print(len(p)); print(len(scan_repository(Path.cwd())))'",
-    "python_sources": 29,
+    "command": "uv run --frozen python -c 'from pathlib import Path; from tools.asset_execution_boundary import python_sources, scan_repository; p=python_sources(Path.cwd()); print(f\"sources={len(p)}\"); print(f\"violations={len(scan_repository(Path.cwd()))}\")'",
+    "tracked_python_sources": 28,
+    "python_sources": 28,
     "violations": 0,
-    "includes_scanner_itself": true
+    "includes_scanner_itself": true,
+    "ignored_notebook_checkpoints_excluded": true
   },
   "traceability": {
     "command": "uv run --frozen python tools/verify_traceability.py --format json",
@@ -26,14 +28,17 @@
     "requirements": 221,
     "source_nodes": 221,
     "archive_files": 16,
-    "production_modules": 13,
-    "runtime_config_keys": 235
+    "working_tree_production_modules": 13,
+    "clean_tracked_production_modules": 12,
+    "working_tree_extra_is_ignored_notebook_checkpoint": true,
+    "runtime_config_keys": 235,
+    "registry_revision": 9
   },
   "full_suite": {
     "command": "uv run --frozen pytest -q",
-    "passed": 159,
+    "passed": 187,
     "failed": 0,
-    "duration_seconds": 14.93
+    "duration_seconds": 15.23
   },
   "ruff": {
     "command": "uv run --frozen ruff check src/sakuramoon tests tools",
@@ -44,11 +49,14 @@
     "errors": 0,
     "warnings": 0
   },
-  "review_remediation": {
-    "initial_ai_verdict": "FAIL_changes_required",
-    "initial_infra_verdict": "FAIL_changes_required",
-    "status": "remediation_complete_pending_original_reviewer_rereview"
+  "second_review_remediation": {
+    "second_ai_verdict": "FAIL_changes_required",
+    "second_infra_verdict": "FAIL_changes_required",
+    "status": "second_remediation_complete_pending_original_reviewer_rereview"
   },
+  "validation_notes": [
+    "One intermediate full-suite attempt run alongside other read-only validators observed the existing timing-sensitive manifest-replacement test fail to detect identity drift; its isolated retry passed (1 passed in 0.93s), and the final serial full suite passed 187 tests. No production or test change was made to conceal the transient result."
+  ],
   "gpu_used": false,
   "network_used": false,
   "model_database_dataset_or_reference_payload_read": false

@@ -15,6 +15,7 @@ from sakuramoon.assets import (
     load_manifest,
     require_databases_ready,
     require_runtime_assets_ready,
+    require_verified_selection,
 )
 from sakuramoon.assets import inspect as inspect_module
 from sakuramoon.assets.manifest import QwenAsset, VaeAsset
@@ -283,6 +284,25 @@ def test_verified_model_root_is_bound_to_the_complete_selection(
         selection.verified_root("qwen_text_encoder")
 
 
+def test_untrusted_wrapper_argument_requires_a_live_selection_capability(
+    synthetic_assets: SyntheticAssetTree,
+) -> None:
+    selection = require_runtime_assets_ready(
+        _runtime_assets(synthetic_assets),
+        synthetic_assets.manifest_path,
+        root=synthetic_assets.root,
+    )
+
+    assert require_verified_selection(selection) is selection
+    with pytest.raises(AssetPreflightError, match="capability is not verified"):
+        require_verified_selection(object())
+
+    weights = synthetic_assets.root / "model/qwen/model.safetensors"
+    weights.write_bytes(b"x" * weights.stat().st_size)
+    with pytest.raises(AssetPreflightError, match="identity drifted"):
+        require_verified_selection(selection)
+
+
 def test_database_audit_requires_explicit_known_unique_selection(
     synthetic_assets: SyntheticAssetTree,
 ) -> None:
@@ -426,18 +446,37 @@ def test_reference_git_audit_disables_hostile_local_configuration(
         encoding="utf-8",
     )
     hook.chmod(0o700)
-    for key, value in (
-        ("core.fsmonitor", str(hostile)),
-        ("core.hooksPath", str(hooks)),
-        ("core.pager", str(hostile)),
-        ("pager.status", str(hostile)),
-        ("diff.external", str(hostile)),
-        ("interactive.diffFilter", str(hostile)),
-    ):
-        subprocess.run(
-            ("git", "-C", str(reference), "config", key, value),
-            check=True,
-        )
+    subprocess.run(
+        ("git", "-C", str(reference), "config", "core.fsmonitor", str(hostile)),
+        check=True,
+    )
+    subprocess.run(
+        ("git", "-C", str(reference), "config", "core.hooksPath", str(hooks)),
+        check=True,
+    )
+    subprocess.run(
+        ("git", "-C", str(reference), "config", "core.pager", str(hostile)),
+        check=True,
+    )
+    subprocess.run(
+        ("git", "-C", str(reference), "config", "pager.status", str(hostile)),
+        check=True,
+    )
+    subprocess.run(
+        ("git", "-C", str(reference), "config", "diff.external", str(hostile)),
+        check=True,
+    )
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(reference),
+            "config",
+            "interactive.diffFilter",
+            str(hostile),
+        ),
+        check=True,
+    )
 
     report = inspect_reference_repositories(
         synthetic_assets.manifest_path,

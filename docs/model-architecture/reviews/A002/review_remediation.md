@@ -20,3 +20,26 @@ These verdicts remain failures until the original independent reviewers rereview
 - CPU/static remediation only. It did not read `.env`, model, DB, dataset, cache, or ignored reference contents; did not access the network; and did not use a GPU.
 - It proves execution-boundary enforcement, not real Qwen/Mage-VAE load, forward, VAE posterior mean/round-trip, performance, or any four-GPU requirement. Those gates remain assigned to their later tasks.
 - Status: remediation complete, pending original independent AI and Infra rereview and main-agent acceptance.
+
+## Second independent review verdicts
+
+- AI/model correctness: **FAIL / changes required**. The first remediation kept global, flow-insensitive root sets, so reassignment could retain stale trust; unknown expanded kwargs and ModelScope loader paths were incomplete. The dataset exception and evidence inventory also needed stricter provenance and clean-commit counts.
+- Infra/performance: **FAIL / changes required**. The first remediation could be spoofed by annotations/casts, missed computed loader forms and several reference flows, allowed overly broad test Git shapes, and conflated same-name variables across functions.
+
+These verdicts also remain failures until the original independent reviewers rereview this second remediation. No local status or evidence file represents approval.
+
+## Second remediation
+
+- Replaced global provenance sets with per-module/per-function environments evaluated in statement order. Assignment and reassignment kill a target and its descendants; conservative branch merges retain only valid facts. Function summaries propagate symbolic parameter and return taint across local calls without leaking same-name facts between scopes.
+- Added a runtime capability gate, `require_verified_selection`, which accepts only a real `VerifiedAssetSelection` and immediately calls `require_unchanged()`. The static gate trusts only `require_runtime_assets_ready` results or narrow wrapper parameters passed through this exact gate; annotations and casts do not create selection/root provenance.
+- Expanded model-loader recognition to Transformers, Diffusers, and ModelScope, including aliases, computed `getattr`, `functools.partial`, and `.from_pretrained.__call__`. `trust_remote_code`, `cache_dir`, non-literal policy values, and unknown expanded kwargs fail closed. Hugging Face download APIs include their qualified module paths and remain forbidden.
+- Restricted the dataset exception to the exact `modelscope.hub.snapshot_download.snapshot_download` callable inside `src/sakuramoon/data/modelscope.py::fetch_dataset_shard`, with the exact dataset repo, revision obtained from the locked `load_config().config.data.source.revision` path, and literal `repo_type="dataset"`. Hugging Face lookalikes receive no exception.
+- Extended reference taint through shell command strings, attributes, subscripts, list/dict containers, mutator calls, helper returns/parameters, computed process calls, and `sys.path` slice operations. Reassignment and cross-function same-name benign cases demonstrate the intended kill and scope isolation.
+- Restricted the test-only Git exception to exact test fixture/function identities and exact allowed argv shapes. Calls containing `-c`, alias setup, unknown argv, or appended commands are rejected; the synthetic repository fixture now configures identity through explicit allowed calls.
+- Excluded ignored notebook checkpoint files from scanner inventory so evidence matches a clean tracked checkout: 28 scanned Python sources and 12 tracked production modules. The governance checker may observe an ignored local checkpoint in a dirty developer workspace, but that file is neither scanned nor counted as clean-commit evidence.
+
+## Second-remediation scope and remaining gates
+
+- CPU/static work only. It did not read `.env`, model, DB, dataset, cache, or reference payloads; did not access the network; and did not use a GPU.
+- It still proves only enforcement and provenance. Real Qwen/Mage-VAE load, forward, VAE posterior/round-trip, performance, canary, and all multi-GPU gates remain outside A002.
+- Status: second remediation complete, pending original independent AI and Infra rereview and main-agent acceptance.
