@@ -159,6 +159,45 @@ def test_runtime_model_paths_are_fixed_local_directories(
         RuntimeConfig.model_validate(valid_payload)
 
 
+@pytest.mark.parametrize(
+    "revision",
+    [
+        "master",
+        "A" * 40,
+        "0" * 39,
+        "0" * 41,
+    ],
+)
+def test_toml_dataset_revision_requires_lowercase_commit(
+    valid_payload: dict[str, Any], revision: str
+) -> None:
+    valid_payload["data"]["source"]["revision"] = revision
+
+    with pytest.raises(ValidationError, match="revision"):
+        RuntimeConfig.model_validate(valid_payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("connect_timeout_seconds", 0.0),
+        ("connect_timeout_seconds", 1),
+        ("read_timeout_seconds", 301.0),
+        ("max_retries", -1),
+        ("max_retries", True),
+        ("retry_backoff_seconds", 1),
+        ("stream_chunk_bytes", 65535),
+    ],
+)
+def test_dataset_http_policy_is_strict_and_bounded(
+    valid_payload: dict[str, Any], field: str, value: object
+) -> None:
+    valid_payload["data"]["transport"][field] = value
+
+    with pytest.raises(ValidationError, match=field):
+        RuntimeConfig.model_validate(valid_payload)
+
+
 def test_higher_resolution_stages_cannot_be_enabled(
     valid_payload: dict[str, Any],
 ) -> None:

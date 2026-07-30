@@ -63,7 +63,9 @@ FixedPointZeroTwo = Annotated[ExactFloat, Field(ge=0.02, le=0.02)]
 class StrictModel(BaseModel):
     """Base for immutable, exact-type, unknown-key rejecting config tables."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, allow_inf_nan=False)
+    model_config = ConfigDict(
+        extra="forbid", strict=True, frozen=True, allow_inf_nan=False
+    )
 
 
 class RunConfig(StrictModel):
@@ -120,7 +122,7 @@ class AssetsConfig(StrictModel):
 
 class DataSourceConfig(StrictModel):
     repo_id: Literal["leafmoone/webdataset_danbooru"]
-    revision: Annotated[str, StringConstraints(min_length=1)]
+    revision: Commit
 
 
 class DataManifestConfig(StrictModel):
@@ -141,6 +143,14 @@ class DataCacheConfig(StrictModel):
         if self.low_watermark_gib >= self.high_watermark_gib:
             raise ValueError("cache low watermark must be below high watermark")
         return self
+
+
+class DataTransportConfig(StrictModel):
+    connect_timeout_seconds: Annotated[ExactFloat, Field(gt=0.0, le=300.0)]
+    read_timeout_seconds: Annotated[ExactFloat, Field(gt=0.0, le=300.0)]
+    max_retries: Annotated[int, Field(ge=0, le=10)]
+    retry_backoff_seconds: Annotated[ExactFloat, Field(ge=0.0, le=60.0)]
+    stream_chunk_bytes: Annotated[int, Field(ge=65536, le=16777216)]
 
 
 class DataValidationConfig(StrictModel):
@@ -172,6 +182,7 @@ class DataConfig(StrictModel):
     source: DataSourceConfig
     manifest: DataManifestConfig
     cache: DataCacheConfig
+    transport: DataTransportConfig
     validation: DataValidationConfig
     image: DataImageConfig
     buckets: DataBucketsConfig
@@ -227,7 +238,9 @@ class CaptionConfig(StrictModel):
             "general",
             "nl",
         ):
-            raise ValueError("caption category order differs from the approved protocol")
+            raise ValueError(
+                "caption category order differs from the approved protocol"
+            )
         if self.condition_buckets != (64, 128, 192, 256, 320, 384, 448, 512):
             raise ValueError("condition buckets differ from the approved eight buckets")
         if self.qwen_dense_lengths != (98, 162, 226, 290, 354, 418, 482, 546):
@@ -247,7 +260,9 @@ class TextModelConfig(StrictModel):
     @model_validator(mode="after")
     def validate_blocks(self) -> TextModelConfig:
         if self.hidden_state_blocks != (2, 4, 8, 12, 16, 20, 24):
-            raise ValueError("text hidden-state blocks differ from the approved mapping")
+            raise ValueError(
+                "text hidden-state blocks differ from the approved mapping"
+            )
         return self
 
 
@@ -361,7 +376,9 @@ class CfgConfig(StrictModel):
 class OptimizerConfig(StrictModel):
     name: Literal["torchao_adamw8bit"]
     lr: FixedLearningRate
-    betas: Annotated[tuple[ExactFloat, ExactFloat], BeforeValidator(_toml_array_to_tuple)]
+    betas: Annotated[
+        tuple[ExactFloat, ExactFloat], BeforeValidator(_toml_array_to_tuple)
+    ]
     eps: FixedOptimizerEps
     block_size: Literal[256]
     bf16_stochastic_round: Literal[True]
@@ -446,7 +463,9 @@ class StageConfig(StrictModel):
         }
         actual = (self.predecessor, self.world_size, self.depth, self.resolution)
         if actual != expected[self.name]:
-            raise ValueError("stage topology does not match the approved transition graph")
+            raise ValueError(
+                "stage topology does not match the approved transition graph"
+            )
         if self.name in {"H1", "H2"} and self.enabled:
             raise ValueError("H1/H2 must remain disabled until separately approved")
         return self
@@ -520,7 +539,9 @@ class TimingConfig(StrictModel):
             "evaluation",
         }
         if set(self.phases) != required or len(self.phases) != len(required):
-            raise ValueError("timing phases must contain each required phase exactly once")
+            raise ValueError(
+                "timing phases must contain each required phase exactly once"
+            )
         return self
 
 

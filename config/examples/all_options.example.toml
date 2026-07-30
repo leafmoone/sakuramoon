@@ -55,6 +55,13 @@ range_workers = "BENCHMARK_REQUIRED" # integer > 0
 persistent_workers_per_rank = "BENCHMARK_REQUIRED" # integer > 0
 ready_batches_per_rank = "BENCHMARK_REQUIRED" # integer > 0
 
+[data.transport]
+connect_timeout_seconds = "BENCHMARK_REQUIRED" # TOML float, 0 < value <= 300
+read_timeout_seconds = "BENCHMARK_REQUIRED" # TOML float, 0 < value <= 300
+max_retries = "BENCHMARK_REQUIRED" # integer, 0 <= value <= 10
+retry_backoff_seconds = "BENCHMARK_REQUIRED" # TOML float, 0 <= value <= 60
+stream_chunk_bytes = "BENCHMARK_REQUIRED" # integer, 65536 <= value <= 16777216
+
 [data.validation]
 manifest_path = "REQUIRED_VALIDATION_MANIFEST_PATH"
 manifest_sha256 = "REQUIRED_IMMUTABLE_SHA256"

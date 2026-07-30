@@ -11,7 +11,7 @@ REPOSITORY_ROOT = Path(__file__).parents[3]
 EXAMPLE_PATH = REPOSITORY_ROOT / "config/examples/all_options.example.toml"
 
 SYNTHETIC_VALUES: dict[str, object] = {
-    "data.source.revision": "synthetic-immutable-revision",
+    "data.source.revision": "c" * 40,
     "data.manifest.path": "synthetic/train-manifest.jsonl",
     "data.manifest.sha256": "3" * 64,
     "data.cache.low_watermark_gib": 300,
@@ -20,6 +20,11 @@ SYNTHETIC_VALUES: dict[str, object] = {
     "data.cache.range_workers": 2,
     "data.cache.persistent_workers_per_rank": 2,
     "data.cache.ready_batches_per_rank": 2,
+    "data.transport.connect_timeout_seconds": 10.0,
+    "data.transport.read_timeout_seconds": 30.0,
+    "data.transport.max_retries": 2,
+    "data.transport.retry_backoff_seconds": 0.0,
+    "data.transport.stream_chunk_bytes": 1048576,
     "data.validation.manifest_path": "synthetic/validation-manifest.jsonl",
     "data.validation.manifest_sha256": "4" * 64,
     # Synthetic values exercise schema behavior only. They are not defaults,

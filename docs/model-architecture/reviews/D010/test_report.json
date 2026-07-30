@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "task_id": "D010",
+  "hardware": "CPU",
+  "targeted": {
+    "command": "uv run pytest -q tests/unit/data tests/contracts/data tests/unit/config/test_schema.py tests/unit/config/test_resolve_redact.py",
+    "passed": 80,
+    "failed": 0,
+    "duration_seconds": 1.45
+  },
+  "full_cpu_suite": {
+    "passed": 149,
+    "failed": 0,
+    "duration_seconds": 22.49
+  },
+  "ruff": true,
+  "pyright_errors": 0,
+  "traceability": true,
+  "remote_network_tested": false,
+  "gpu_used": false,
+  "package_review_status": "pending_D010_D015_completion"
+}
