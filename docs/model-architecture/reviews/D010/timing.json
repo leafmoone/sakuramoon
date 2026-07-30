@@ -1,20 +1,28 @@
 {
   "schema_version": 1,
   "task_id": "D010",
-  "phase": "minimal_implementation_and_cleanup",
-  "agent": "root+d010_minimal_streaming",
+  "phase": "canonical_manifest_builder_and_publication",
+  "agent": "root+d010_impl",
   "started_at_utc": null,
-  "ended_at_utc": "2026-07-30T03:24:15Z",
+  "ended_at_utc": "2026-07-30T22:13:05Z",
   "duration_seconds": null,
   "timing_status": "start_not_recorded",
   "hardware_level": "CPU",
   "gpu_seconds": 0,
-  "status": "code_complete_package_review_pending",
+  "status": "code_complete_independent_builder_review_and_production_evidence_pending",
   "package_review_remediation": {
     "measurement_scope": "first tracked remediation edit through final CPU validation",
     "started_at_utc": "2026-07-30T18:14:34Z",
     "ended_at_utc": "2026-07-30T18:15:41Z",
     "duration_seconds": 67,
+    "hardware_level": "CPU",
+    "gpu_seconds": 0
+  },
+  "builder_completion_validation": {
+    "measurement_scope": "final full CPU, Ruff, and strict Pyright validation plus evidence preparation",
+    "started_at_utc": "2026-07-30T22:05:11Z",
+    "ended_at_utc": "2026-07-30T22:13:05Z",
+    "duration_seconds": 474,
     "hardware_level": "CPU",
     "gpu_seconds": 0
   }

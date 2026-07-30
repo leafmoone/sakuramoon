@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 49
+registry_revision = 50
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -4882,6 +4882,7 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/progress/tasks/D010.md",
     "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D010/task.md",
     "docs/model-architecture/reviews/D010/implementation_report.md",
     "docs/model-architecture/reviews/D010/test_report.json",
     "docs/model-architecture/reviews/D010/timing.json",

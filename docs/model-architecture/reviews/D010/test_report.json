@@ -4,15 +4,15 @@
   "hardware": "CPU",
   "targeted": {
     "command": "uv run --frozen pytest -q tests/unit/data/test_dataset_manifest.py tests/unit/data/test_modelscope.py tests/unit/data/test_manifest_cli.py tests/contracts/data/test_manifest_cli_contract.py",
-    "passed": 41,
+    "passed": 55,
     "failed": 0,
-    "duration_seconds": 1.71
+    "duration_seconds": 3.87
   },
   "full_cpu_suite": {
     "command": "uv run --frozen pytest -q tests/unit tests/contracts",
-    "passed": 349,
+    "passed": 477,
     "failed": 0,
-    "duration_seconds": 31.01,
+    "duration_seconds": 39.3,
     "warnings": 24
   },
   "ruff": true,
@@ -21,10 +21,21 @@
   "remote_network_tested": false,
   "gpu_used": false,
   "duplicate_remote_entries_rejected": true,
-  "package_review_status": "initial_finding_remediated_main_agent_acceptance",
+  "canonical_builder": {
+    "explicit_release_sample_inventory": true,
+    "inventory_sha256_bound": true,
+    "source_bound": true,
+    "exact_path_equality": true,
+    "no_clobber": true,
+    "file_and_directory_fsync": true,
+    "structured_redacted_errors": true
+  },
+  "package_review_status": "builder_expansion_independent_review_pending",
   "pending": [
     "production immutable revision",
+    "production release/sample inventory",
     "live remote enumeration and access evidence",
-    "production network throughput"
+    "production network throughput",
+    "fresh independent AI/model and Infra/performance review"
   ]
 }

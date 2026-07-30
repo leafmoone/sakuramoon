@@ -15,7 +15,15 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 from sakuramoon.config import ConfigurationError, resolve_secret
 from sakuramoon.config.schema import DataTransportConfig
-from sakuramoon.data.manifest import DatasetManifest, ShardRecord, is_safe_shard_path
+from sakuramoon.data.manifest import (
+    DatasetManifest,
+    DatasetSourceIdentity,
+    ManifestBuildInventory,
+    RemoteShardRecord,
+    ShardRecord,
+    build_dataset_manifest,
+    is_safe_shard_path,
+)
 
 MODELSCOPE_DATASET_HOST = "modelscope.cn"
 MODELSCOPE_TOKEN_ENVIRONMENT = "MODELSCOPE_API_TOKEN"
@@ -44,13 +52,6 @@ class _RetryableRequestError(Exception):
 
 
 @dataclass(frozen=True)
-class RemoteDatasetFile:
-    path: str
-    bytes: int
-    sha256: str
-
-
-@dataclass(frozen=True)
 class FetchedShard:
     path: Path
     relative_path: str
@@ -70,8 +71,8 @@ class _Writer(Protocol):
     def write(self, payload: bytes, /) -> int: ...
 
 
-def _repo_path(manifest: DatasetManifest) -> str:
-    owner, name = manifest.source.repo_id.split("/", 1)
+def _repo_path(source: DatasetSourceIdentity) -> str:
+    owner, name = source.repo_id.split("/", 1)
     return f"{quote(owner, safe='')}/{quote(name, safe='')}"
 
 
@@ -183,14 +184,14 @@ class ModelScopeDatasetTransport:
             time.sleep(self._policy.retry_backoff_seconds)
         raise DatasetTransportError("ModelScope retry limit exceeded")
 
-    def list_files(self, manifest: DatasetManifest) -> tuple[RemoteDatasetFile, ...]:
-        """List all remote files for the manifest's fixed revision."""
+    def list_files(self, source: DatasetSourceIdentity) -> tuple[RemoteShardRecord, ...]:
+        """List all WebDataset shards for a fixed dataset source revision."""
 
-        files: list[RemoteDatasetFile] = []
+        files: list[RemoteShardRecord] = []
         for page in range(1, _LISTING_MAX_PAGES + 1):
             query = urlencode(
                 {
-                    "Revision": manifest.source.revision,
+                    "Revision": source.revision,
                     "Recursive": "True",
                     "PageNumber": page,
                     "PageSize": _LISTING_PAGE_SIZE,
@@ -198,7 +199,7 @@ class ModelScopeDatasetTransport:
             )
             target = _Target(
                 MODELSCOPE_DATASET_HOST,
-                f"/api/v1/datasets/{_repo_path(manifest)}/repo/tree?{query}",
+                f"/api/v1/datasets/{_repo_path(source)}/repo/tree?{query}",
                 True,
             )
             response, connection = self._with_retries(target)
@@ -232,7 +233,13 @@ class ModelScopeDatasetTransport:
                         continue
                     if not is_safe_shard_path(path):
                         raise TypeError
-                    files.append(RemoteDatasetFile(path, size, sha256.lower()))
+                    files.append(
+                        RemoteShardRecord(
+                            path=path,
+                            bytes=size,
+                            sha256=sha256.lower(),
+                        )
+                    )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 raise DatasetTransportError("ModelScope listing is invalid") from None
             finally:
@@ -246,7 +253,7 @@ class ModelScopeDatasetTransport:
         query = urlencode({"Revision": manifest.source.revision, "FilePath": shard.path})
         target = _Target(
             MODELSCOPE_DATASET_HOST,
-            f"/api/v1/datasets/{_repo_path(manifest)}/repo?{query}",
+            f"/api/v1/datasets/{_repo_path(manifest.source)}/repo?{query}",
             True,
         )
         response, connection = self._with_retries(target)
@@ -272,10 +279,19 @@ def validate_remote_manifest(
     """Require exact path, byte count and SHA equality with remote listing."""
 
     expected = {(item.path, item.bytes, item.sha256) for item in manifest.shards}
-    remote_files = transport.list_files(manifest)
+    remote_files = transport.list_files(manifest.source)
     observed = {(item.path, item.bytes, item.sha256) for item in remote_files}
     if len(remote_files) != len(manifest.shards) or observed != expected:
         raise ShardIntegrityError("remote dataset listing differs from manifest")
+
+
+def build_remote_dataset_manifest(
+    transport: ModelScopeDatasetTransport,
+    inventory: ManifestBuildInventory,
+) -> DatasetManifest:
+    """Combine remote immutable file facts with explicit release/sample facts."""
+
+    return build_dataset_manifest(inventory, transport.list_files(inventory.source))
 
 
 def _verify_existing(path: Path, shard: ShardRecord, chunk_bytes: int) -> bool:

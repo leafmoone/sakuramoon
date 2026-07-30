@@ -13,6 +13,8 @@ from sakuramoon.config.schema import DataTransportConfig
 from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetSourceIdentity,
+    ManifestBuildInventory,
+    ShardBuildRecord,
     ShardRecord,
 )
 from sakuramoon.data.modelscope import (
@@ -23,6 +25,7 @@ from sakuramoon.data.modelscope import (
     FetchedShard,
     ModelScopeDatasetTransport,
     ShardIntegrityError,
+    build_remote_dataset_manifest,
     fetch_dataset_shard,
     validate_remote_manifest,
 )
@@ -178,7 +181,7 @@ def test_listing_uses_fixed_repo_revision_and_paginates(
 ) -> None:
     http = _install(monkeypatch, [_Plan(_listing([_entry()])), _Plan(_listing([]))])
 
-    files = _transport(monkeypatch).list_files(_manifest())
+    files = _transport(monkeypatch).list_files(_manifest().source)
 
     assert len(files) == 1
     assert len(http.requests) == 2
@@ -220,6 +223,31 @@ def test_remote_listing_match(monkeypatch: pytest.MonkeyPatch) -> None:
         [_Plan(_listing([_entry(), metadata])), _Plan(_listing([]))],
     )
     validate_remote_manifest(_transport(monkeypatch), _manifest())
+
+
+def test_remote_builder_uses_explicit_release_and_sample_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _manifest().source
+    inventory = ManifestBuildInventory(
+        schema_version=1,
+        source=source,
+        shards=(
+            ShardBuildRecord(
+                path=SHARD_PATH,
+                release="explicit-release",
+                samples=99,
+            ),
+        ),
+    )
+    _install(monkeypatch, [_Plan(_listing([_entry()])), _Plan(_listing([]))])
+
+    manifest = build_remote_dataset_manifest(_transport(monkeypatch), inventory)
+
+    assert manifest.shards[0].release == "explicit-release"
+    assert manifest.shards[0].samples == 99
+    assert manifest.shards[0].bytes == len(CONTENT)
+    assert manifest.shards[0].sha256 == hashlib.sha256(CONTENT).hexdigest()
 
 
 def test_fetch_streams_to_partial_and_atomically_publishes(
