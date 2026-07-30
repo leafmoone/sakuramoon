@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 42
+registry_revision = 43
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -259,6 +259,8 @@ benchmarks = [
     "benchmarks/qwen/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/DATA/**",
+    "docs/model-architecture/reviews/D014/**",
     "artifacts/qwen/**",
 ]
 hardware = "1GPU"
@@ -506,6 +508,7 @@ artifacts = [
     "docs/model-architecture/reviews/D011/**",
     "docs/model-architecture/reviews/D012/**",
     "docs/model-architecture/reviews/D013/**",
+    "docs/model-architecture/reviews/D014/**",
     "artifacts/data/**",
 ]
 hardware = "1GPU"
@@ -2358,7 +2361,16 @@ superseded_by = ""
 implementation_commit_ref = "task:D014"
 implementation_paths = [
     "src/sakuramoon/data/serialize.py",
+    "tests/contracts/text_protocol/test_caption_serializer.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D014.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D014/implementation_report.md",
+    "docs/model-architecture/reviews/D014/test_report.json",
+    "docs/model-architecture/reviews/D014/timing.json",
+    "docs/model-architecture/reviews/D014/ai_review.md",
+    "docs/model-architecture/reviews/D014/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -2383,6 +2395,8 @@ benchmarks = [
     "benchmarks/qwen/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/DATA/**",
+    "docs/model-architecture/reviews/D014/**",
     "artifacts/qwen/**",
 ]
 not_applicable_fields = [
@@ -3366,7 +3380,16 @@ superseded_by = ""
 implementation_commit_ref = "task:D014"
 implementation_paths = [
     "src/sakuramoon/data/serialize.py",
+    "tests/contracts/text_protocol/test_caption_serializer.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D014.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D014/implementation_report.md",
+    "docs/model-architecture/reviews/D014/test_report.json",
+    "docs/model-architecture/reviews/D014/timing.json",
+    "docs/model-architecture/reviews/D014/ai_review.md",
+    "docs/model-architecture/reviews/D014/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -3392,6 +3415,8 @@ benchmarks = [
     "benchmarks/attention/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/DATA/**",
+    "docs/model-architecture/reviews/D014/**",
     "artifacts/kernels/**",
 ]
 not_applicable_fields = [

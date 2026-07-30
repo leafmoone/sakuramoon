@@ -3,9 +3,17 @@
   "task_id": "D014",
   "hardware": "CPU",
   "targeted": {
-    "command": "uv run pytest -q tests/unit/data/test_caption.py tests/contracts/text_protocol/test_caption_serializer.py",
-    "passed": 31,
-    "failed": 0
+    "command": "uv run --frozen pytest -q tests/unit/data/test_caption.py tests/contracts/text_protocol/test_caption_serializer.py",
+    "passed": 33,
+    "failed": 0,
+    "duration_seconds": 9.19
+  },
+  "full_cpu_suite": {
+    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+    "passed": 362,
+    "failed": 0,
+    "warnings": 24,
+    "duration_seconds": 27.61
   },
   "ruff": true,
   "pyright_errors": 0,
@@ -17,5 +25,17 @@
   "all_condition_dropped": 10090,
   "all_condition_rate": 0.1009,
   "gpu_used": false,
-  "package_review_status": "pending_D010_D015_completion"
+  "package_review_status": "initial_finding_remediated_final_package_rereview_pending",
+  "artist_boundary_contracts": [
+    "oversized first source skipped for valid later source",
+    "combined fitting sources trimmed at complete trailing boundaries",
+    "unique oversized source hard fails",
+    "all oversized sources hard fail"
+  ],
+  "pending": [
+    "eleven non-global dropout decisions",
+    "production metadata canonical mapping",
+    "non-global dropout and truncation distributions",
+    "collated padding behavior"
+  ]
 }

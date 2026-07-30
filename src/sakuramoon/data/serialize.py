@@ -109,10 +109,24 @@ def serialize_caption(
     nl_text = plan.nl_text
     truncated = False
 
+    if artists:
+        fitting_artists: list[Tag] = []
+        for artist in artists:
+            individual_ids = _encode(tokenizer, artist.text)
+            if not individual_ids:
+                raise CaptionSerializationError("tokenizer produced no Artist tokens")
+            if len(suffix_ids) + len(individual_ids) <= TEXT_CONDITION_MAX:
+                fitting_artists.append(artist)
+            else:
+                truncated = True
+        if not fitting_artists:
+            raise CaptionSerializationError(
+                "Artist segment cannot fit without splitting a tag"
+            )
+        artists = fitting_artists
+
     artist_text = _artist_text(artists)
     artist_ids = _encode(tokenizer, artist_text)
-    if artists and not artist_ids:
-        raise CaptionSerializationError("tokenizer produced no Artist tokens")
     while len(suffix_ids) + len(artist_ids) > TEXT_CONDITION_MAX and len(artists) > 1:
         artists.pop()
         truncated = True

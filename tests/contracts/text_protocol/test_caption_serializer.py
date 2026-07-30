@@ -174,11 +174,34 @@ def test_artist_reservation_keeps_at_least_one_complete_source() -> None:
     assert result.use_null_style is False
 
 
+def test_artist_reservation_skips_oversized_first_source_for_later_valid_source() -> None:
+    tokenizer = _CharacterTokenizer()
+    result = serialize_caption(
+        _plan(artists=(_tag("a" * 600), _tag("valid artist"))),
+        tokenizer,
+        _framing(tokenizer),
+    )
+
+    assert result.artist_text == "valid artist"
+    assert result.truncated is True
+    assert result.use_null_style is False
+
+
 def test_unique_oversized_artist_is_a_hard_failure() -> None:
     tokenizer = _CharacterTokenizer()
     with pytest.raises(CaptionSerializationError, match="Artist"):
         serialize_caption(
             _plan(artists=(_tag("a" * 600),)), tokenizer, _framing(tokenizer)
+        )
+
+
+def test_all_oversized_artists_are_a_hard_failure() -> None:
+    tokenizer = _CharacterTokenizer()
+    with pytest.raises(CaptionSerializationError, match="Artist"):
+        serialize_caption(
+            _plan(artists=(_tag("a" * 600), _tag("b" * 700))),
+            tokenizer,
+            _framing(tokenizer),
         )
 
 
