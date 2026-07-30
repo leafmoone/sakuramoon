@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 38
+registry_revision = 39
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -501,6 +501,8 @@ benchmarks = [
     "benchmarks/data/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/DATA/**",
+    "docs/model-architecture/reviews/D010/**",
     "artifacts/data/**",
 ]
 hardware = "1GPU"
@@ -4775,7 +4777,19 @@ implementation_paths = [
     "src/sakuramoon/data/modelscope.py",
     "src/sakuramoon/cli/manifest.py",
     "src/sakuramoon/config/schema.py",
+    "tests/unit/data/test_dataset_manifest.py",
+    "tests/unit/data/test_modelscope.py",
+    "tests/unit/data/test_manifest_cli.py",
+    "tests/contracts/data/test_manifest_cli_contract.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D010.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D010/implementation_report.md",
+    "docs/model-architecture/reviews/D010/test_report.json",
+    "docs/model-architecture/reviews/D010/timing.json",
+    "docs/model-architecture/reviews/D010/ai_review.md",
+    "docs/model-architecture/reviews/D010/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -4797,6 +4811,8 @@ benchmarks = [
     "benchmarks/data/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/DATA/**",
+    "docs/model-architecture/reviews/D010/**",
     "artifacts/data/**",
 ]
 not_applicable_fields = [

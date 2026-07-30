@@ -193,7 +193,12 @@ def test_listing_uses_fixed_repo_revision_and_paginates(
 
 @pytest.mark.parametrize(
     "entries",
-    [[], [_entry(size=len(CONTENT) + 1)], [_entry(sha256="f" * 64)]],
+    [
+        [],
+        [_entry(size=len(CONTENT) + 1)],
+        [_entry(sha256="f" * 64)],
+        [_entry(), _entry()],
+    ],
 )
 def test_remote_listing_must_match_manifest(
     entries: list[dict[str, object]], monkeypatch: pytest.MonkeyPatch

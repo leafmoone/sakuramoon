@@ -5,3 +5,9 @@ D010 implements the minimal remote WebDataset boundary. A canonical JSON manifes
 The implementation deliberately omits the discarded local-asset machinery and does not add resume, cache coordination, hostile filesystem defenses, or a second transport abstraction. It does not access `reference/`, local model weights, `.env`, or production dataset payloads.
 
 Production dataset enumeration and an actual network smoke require the chosen immutable dataset revision and valid token at runtime. Those inputs are not inferred by code.
+
+The Data package review found that comparing remote entries as a set could hide an
+identical duplicate. The remediated validator requires both exact entry count and exact
+`(path, bytes, SHA-256)` equality, with a negative contract for duplicate listing
+records. Direct independent re-review startup was unavailable; the main agent completed
+remediation acceptance without claiming an independent final pass.

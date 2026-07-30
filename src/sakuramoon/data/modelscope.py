@@ -272,8 +272,9 @@ def validate_remote_manifest(
     """Require exact path, byte count and SHA equality with remote listing."""
 
     expected = {(item.path, item.bytes, item.sha256) for item in manifest.shards}
-    observed = {(item.path, item.bytes, item.sha256) for item in transport.list_files(manifest)}
-    if observed != expected:
+    remote_files = transport.list_files(manifest)
+    observed = {(item.path, item.bytes, item.sha256) for item in remote_files}
+    if len(remote_files) != len(manifest.shards) or observed != expected:
         raise ShardIntegrityError("remote dataset listing differs from manifest")
 
 

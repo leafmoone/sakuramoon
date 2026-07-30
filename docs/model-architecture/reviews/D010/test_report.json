@@ -3,20 +3,28 @@
   "task_id": "D010",
   "hardware": "CPU",
   "targeted": {
-    "command": "uv run pytest -q tests/unit/data tests/contracts/data tests/unit/config/test_schema.py tests/unit/config/test_resolve_redact.py",
-    "passed": 80,
+    "command": "uv run --frozen pytest -q tests/unit/data/test_dataset_manifest.py tests/unit/data/test_modelscope.py tests/unit/data/test_manifest_cli.py tests/contracts/data/test_manifest_cli_contract.py",
+    "passed": 41,
     "failed": 0,
-    "duration_seconds": 1.45
+    "duration_seconds": 1.71
   },
   "full_cpu_suite": {
-    "passed": 149,
+    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+    "passed": 349,
     "failed": 0,
-    "duration_seconds": 22.49
+    "duration_seconds": 31.01,
+    "warnings": 24
   },
   "ruff": true,
   "pyright_errors": 0,
   "traceability": true,
   "remote_network_tested": false,
   "gpu_used": false,
-  "package_review_status": "pending_D010_D015_completion"
+  "duplicate_remote_entries_rejected": true,
+  "package_review_status": "initial_finding_remediated_main_agent_acceptance",
+  "pending": [
+    "production immutable revision",
+    "live remote enumeration and access evidence",
+    "production network throughput"
+  ]
 }
