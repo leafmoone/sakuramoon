@@ -1,0 +1,131 @@
+{
+  "schema_version": 2,
+  "command": "PYTHONPATH=src uv run python benchmarks/attention/benchmark_fa4_varlen.py --warmup 20 --repeats 100",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.10.0+cu128",
+  "flash_attn_4": "4.0.0b24",
+  "nvidia_cutlass_dsl": "4.6.0.dev0",
+  "methodology": {
+    "pure_device": "one CUDA Event interval around 100 unsynchronized calls, divided by 100",
+    "synchronized_wall": "perf_counter around each call followed by torch.cuda.synchronize",
+    "dense_performance_reference": "each sample is a separate SDPA call with attn_mask=None",
+    "dense_numerical_reference": "a full-True mask is allowed for correctness only and is excluded from performance results",
+    "pack_gqa": true
+  },
+  "user_confirmed_independent_recheck": {
+    "pure_device": {
+      "fa4_ms": 0.2217,
+      "dense_sdpa_ms": 0.2932,
+      "speedup": 1.3225
+    },
+    "synchronized_wall": {
+      "fa4_ms": 0.2945,
+      "dense_sdpa_ms": 0.3327,
+      "speedup": 1.1296
+    },
+    "pack_gqa_true_ms": 0.2243,
+    "pack_gqa_false_ms": 0.2262,
+    "full_true_mask_dense_ms": 2.77
+  },
+  "correctness": {
+    "lengths": [113, 197],
+    "output_same_backend_repeat_p99": 0.0,
+    "output_dense_reference_p99": 0.0009765625,
+    "output_derived_p99_tolerance": 0.002,
+    "loss_same_backend_repeat_abs": 0.0,
+    "loss_dense_reference_abs": 2.4933251552283764e-7,
+    "gradients": {
+      "query": {
+        "same_backend_repeat_p99": 0.0,
+        "dense_reference_p99": 1.862645149230957e-9,
+        "derived_p99_tolerance": 1e-7
+      },
+      "key": {
+        "same_backend_repeat_p99": 0.0,
+        "dense_reference_p99": 9.816139936447144e-7,
+        "derived_p99_tolerance": 3e-6
+      },
+      "value": {
+        "same_backend_repeat_p99": 0.0,
+        "dense_reference_p99": 9.872019290924072e-7,
+        "derived_p99_tolerance": 3e-6
+      }
+    }
+  },
+  "full_module_correctness": {
+    "lengths": [11, 17],
+    "all_named_parameter_gradients_present": true,
+    "parameter_names": [
+      "content_gate.weight",
+      "k_proj.weight",
+      "out_proj.weight",
+      "q_proj.weight",
+      "qk_rope.k_norm.weight",
+      "qk_rope.q_norm.weight",
+      "v_proj.weight"
+    ],
+    "output_same_backend_repeat_p99": 0.0,
+    "output_dense_reference_p99": 0.00104522705078125,
+    "output_derived_p99_tolerance": 0.002,
+    "loss_same_backend_repeat_abs": 0.0,
+    "loss_dense_reference_abs": 1.0159565135836601e-6,
+    "all_parameter_gradient_dense_reference_p99": {
+      "content_gate.weight": 5.21540641784668e-8,
+      "k_proj.weight": 3.927946090698242e-5,
+      "out_proj.weight": 1.4901161193847656e-7,
+      "q_proj.weight": 1.4901161193847656e-7,
+      "qk_rope.k_norm.weight": 4.0531158447265625e-5,
+      "qk_rope.q_norm.weight": 3.5762786865234375e-7,
+      "v_proj.weight": 4.7206878662109375e-5
+    },
+    "all_parameter_gradient_same_backend_repeat_p99": {
+      "content_gate.weight": 0.0,
+      "k_proj.weight": 0.0,
+      "out_proj.weight": 0.0,
+      "q_proj.weight": 0.0,
+      "qk_rope.k_norm.weight": 0.0,
+      "qk_rope.q_norm.weight": 0.0,
+      "v_proj.weight": 0.0
+    },
+    "update_learning_rate": 64.0,
+    "all_parameters_updated": true,
+    "all_parameter_update_dense_reference_p99": {
+      "content_gate.weight": 0.000030517578125,
+      "k_proj.weight": 0.00250244140625,
+      "out_proj.weight": 0.00006103515625,
+      "q_proj.weight": 0.00006103515625,
+      "qk_rope.k_norm.weight": 0.002593994140625,
+      "qk_rope.q_norm.weight": 0.00002288818359375,
+      "v_proj.weight": 0.003021240234375
+    }
+  },
+  "performance_reproduction": {
+    "lengths": [1028, 1540],
+    "total_tokens": 2568,
+    "warmup_iterations": 20,
+    "measured_iterations": 100,
+    "pure_device": {
+      "fa4_ms": 0.21798816680908203,
+      "dense_sdpa_ms": 0.2895052719116211,
+      "speedup": 1.3280779234460698,
+      "fa4_tokens_per_second": 11780455.965066677,
+      "dense_sdpa_tokens_per_second": 8870304.789420027
+    },
+    "synchronized_wall": {
+      "fa4_ms_mean": 0.28908299282193184,
+      "fa4_ms_p50": 0.28863362967967987,
+      "fa4_ms_p95": 0.29166415333747864,
+      "dense_sdpa_ms_mean": 0.32119058072566986,
+      "dense_sdpa_ms_p50": 0.3203265368938446,
+      "dense_sdpa_ms_p95": 0.32179057598114014,
+      "speedup": 1.111067024698736
+    },
+    "profiler": {
+      "iterations": 20,
+      "fa4_cuda_kernels_per_iteration": 1.0,
+      "kernel_gap_us_p50": 1.087999999999738,
+      "kernel_gap_us_p95": 1.88799999999992,
+      "kernel_gap_us_max": 43.13599999999997
+    }
+  }
+}

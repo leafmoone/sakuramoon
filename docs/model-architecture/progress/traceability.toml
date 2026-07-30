@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 26
+registry_revision = 27
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -2883,7 +2883,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C05-003"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "packing_rope"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2895,8 +2895,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:K001"
+implementation_paths = [
+    "src/sakuramoon/model/attention.py",
+    "tests/unit/model/test_fa4.py",
+    "tests/gpu/fa4/test_varlen_attention.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3590,7 +3595,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C06-006"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "dit"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3602,8 +3607,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:K001"
+implementation_paths = [
+    "src/sakuramoon/model/attention.py",
+    "tests/unit/model/test_fa4.py",
+    "tests/gpu/fa4/test_varlen_attention.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -7788,7 +7798,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-043"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "dit"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -7801,8 +7811,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:K001"
+implementation_paths = [
+    "src/sakuramoon/model/attention.py",
+    "tests/unit/model/test_fa4.py",
+    "tests/gpu/fa4/test_varlen_attention.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

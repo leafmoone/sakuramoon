@@ -1,12 +1,150 @@
-"""Dense SDPA reference attention with native grouped-query heads."""
+"""Dense reference and FA4 varlen grouped-query attention."""
 
 from __future__ import annotations
+
+import importlib
+from dataclasses import dataclass
+from itertools import pairwise
+from typing import Protocol, cast
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from sakuramoon.conditioning.rope import QKRoPE2D
+
+FA4_QUERY_HEADS = 20
+FA4_KV_HEADS = 5
+FA4_HEAD_DIM = 128
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedCuSeqlens:
+    """CUDA sequence boundaries validated once at the packed-batch boundary."""
+
+    tensor: torch.Tensor
+    total_tokens: int
+    max_seqlen: int
+    batch_size: int
+
+
+def validate_cu_seqlens(
+    cu_seqlens: torch.Tensor,
+    *,
+    total_tokens: int,
+    max_seqlen: int,
+) -> ValidatedCuSeqlens:
+    """Validate FA4 boundaries once before sharing them across DiT blocks."""
+
+    if isinstance(total_tokens, bool) or total_tokens <= 0:
+        raise ValueError("total_tokens must be a positive integer")
+    if isinstance(max_seqlen, bool) or max_seqlen <= 0:
+        raise ValueError("max_seqlen must be a positive integer")
+    if (
+        cu_seqlens.ndim != 1
+        or cu_seqlens.numel() < 2
+        or cu_seqlens.dtype != torch.int32
+        or not cu_seqlens.is_cuda
+    ):
+        raise ValueError("cu_seqlens must be CUDA int32 with shape [batch+1]")
+    if not cu_seqlens.is_contiguous():
+        raise ValueError("cu_seqlens must be contiguous")
+
+    # This is the only D2H synchronization. The returned handle is reused by every
+    # block in the model.
+    boundaries = cast(
+        list[int],
+        cu_seqlens.detach().to(device="cpu", dtype=torch.int64).tolist(),  # pyright: ignore[reportUnknownMemberType]
+    )
+    if boundaries[0] != 0:
+        raise ValueError("cu_seqlens must start at zero")
+    if boundaries[-1] != total_tokens:
+        raise ValueError("cu_seqlens must end at total_tokens")
+    lengths = [end - start for start, end in pairwise(boundaries)]
+    if any(length <= 0 for length in lengths):
+        raise ValueError("cu_seqlens boundaries must be strictly increasing")
+    if max(lengths) != max_seqlen:
+        raise ValueError("max_seqlen must equal the longest sequence")
+    return ValidatedCuSeqlens(
+        tensor=cu_seqlens,
+        total_tokens=total_tokens,
+        max_seqlen=max_seqlen,
+        batch_size=len(lengths),
+    )
+
+
+class _FA4VarlenCallable(Protocol):
+    def __call__(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        causal: bool,
+        pack_gqa: bool,
+        deterministic: bool,
+        return_lse: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+
+def fa4_varlen_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    boundaries: ValidatedCuSeqlens,
+) -> torch.Tensor:
+    """Run the locked FA4 self-attention kernel on padding-free sequences."""
+
+    total_tokens = query.shape[0] if query.ndim == 3 else -1
+    if query.shape != (total_tokens, FA4_QUERY_HEADS, FA4_HEAD_DIM):
+        raise ValueError("query must have shape [T,20,128]")
+    expected_kv_shape = (total_tokens, FA4_KV_HEADS, FA4_HEAD_DIM)
+    if key.shape != expected_kv_shape or value.shape != expected_kv_shape:
+        raise ValueError("key and value must have shape [T,5,128]")
+    if any(tensor.dtype != torch.bfloat16 for tensor in (query, key, value)):
+        raise TypeError("FA4 production attention requires BF16 query, key, and value")
+    if not all(tensor.is_cuda for tensor in (query, key, value)):
+        raise ValueError("FA4 production attention requires CUDA tensors")
+    if key.device != query.device or value.device != query.device:
+        raise ValueError("query, key, and value must share one CUDA device")
+    if boundaries.total_tokens != total_tokens:
+        raise ValueError("validated boundaries do not match the token count")
+    if boundaries.tensor.device != query.device:
+        raise ValueError("cu_seqlens and query must share one CUDA device")
+    if not all(tensor.is_contiguous() for tensor in (query, key, value)):
+        raise ValueError("FA4 query, key, and value must be contiguous")
+
+    try:
+        fa4_module = importlib.import_module("flash_attn.cute")
+    except ImportError as exc:
+        raise RuntimeError(
+            "flash-attn-4 is required for the fa4_varlen backend"
+        ) from exc
+    flash_attn_varlen_func = cast(
+        _FA4VarlenCallable,
+        fa4_module.flash_attn_varlen_func,
+    )
+
+    output, _lse = flash_attn_varlen_func(
+        query,
+        key,
+        value,
+        cu_seqlens_q=boundaries.tensor,
+        cu_seqlens_k=boundaries.tensor,
+        max_seqlen_q=boundaries.max_seqlen,
+        max_seqlen_k=boundaries.max_seqlen,
+        causal=False,
+        pack_gqa=True,
+        deterministic=False,
+        return_lse=False,
+    )
+    if output.shape != query.shape or output.dtype != torch.bfloat16:
+        raise RuntimeError("FA4 returned an unexpected output shape or dtype")
+    return output
 
 
 def dense_attention_mask(token_mask: torch.Tensor) -> torch.Tensor:
@@ -104,7 +242,10 @@ class DenseGQAAttention(nn.Module):
             raise ValueError("attention_mask must have shape [B,1,L,L]")
         if attention_mask.dtype != torch.bool:
             raise TypeError("attention_mask must be boolean with True meaning allowed")
-        if coordinates.shape != (batch, length, 2) or coordinates.dtype != torch.float32:
+        if (
+            coordinates.shape != (batch, length, 2)
+            or coordinates.dtype != torch.float32
+        ):
             raise ValueError("coordinates must be FP32 with shape [B,L,2]")
 
         query = self.q_proj(tokens).view(
@@ -157,4 +298,112 @@ class DenseGQAAttention(nn.Module):
         return output * valid_queries.unsqueeze(-1)
 
 
-__all__ = ["DenseGQAAttention", "dense_attention_mask"]
+class FA4VarlenGQAAttention(nn.Module):
+    """Production DiT attention over T024 padding-free packed tokens."""
+
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        q_heads: int,
+        kv_heads: int,
+        head_dim: int,
+        rope_nope_dim: int,
+        rope_y_dim: int,
+        rope_x_dim: int,
+        rope_position_scale: float,
+        rope_theta: float,
+        norm_eps: float,
+        linear_dtype: torch.dtype,
+        projection_bias: bool,
+        dropout: float,
+    ) -> None:
+        super().__init__()
+        if (
+            hidden_size != FA4_QUERY_HEADS * FA4_HEAD_DIM
+            or q_heads != FA4_QUERY_HEADS
+            or kv_heads != FA4_KV_HEADS
+            or head_dim != FA4_HEAD_DIM
+        ):
+            raise ValueError(
+                "FA4 production attention is locked to d=2560, 20Q/5KV, head_dim=128"
+            )
+        if linear_dtype != torch.bfloat16:
+            raise ValueError("FA4 production projections require BF16")
+        if projection_bias or dropout != 0.0:
+            raise ValueError("DiT attention requires bias=false and dropout=0")
+        self.hidden_size = hidden_size
+        self.q_heads = q_heads
+        self.kv_heads = kv_heads
+        self.head_dim = head_dim
+        self.q_proj = nn.Linear(
+            hidden_size, hidden_size, bias=False, dtype=linear_dtype
+        )
+        self.k_proj = nn.Linear(
+            hidden_size,
+            kv_heads * head_dim,
+            bias=False,
+            dtype=linear_dtype,
+        )
+        self.v_proj = nn.Linear(
+            hidden_size,
+            kv_heads * head_dim,
+            bias=False,
+            dtype=linear_dtype,
+        )
+        self.content_gate = nn.Linear(
+            hidden_size, hidden_size, bias=False, dtype=linear_dtype
+        )
+        self.out_proj = nn.Linear(
+            hidden_size, hidden_size, bias=False, dtype=linear_dtype
+        )
+        self.qk_rope = QKRoPE2D(
+            head_dim=head_dim,
+            nope_dim=rope_nope_dim,
+            y_dim=rope_y_dim,
+            x_dim=rope_x_dim,
+            position_scale=rope_position_scale,
+            theta=rope_theta,
+            norm_eps=norm_eps,
+        )
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        boundaries: ValidatedCuSeqlens,
+        coordinates: torch.Tensor,
+    ) -> torch.Tensor:
+        if tokens.ndim != 2 or tokens.shape[-1] != self.hidden_size:
+            raise ValueError("tokens must have shape [T,2560]")
+        if tokens.dtype != torch.bfloat16 or not tokens.is_cuda:
+            raise ValueError("FA4 production tokens must be CUDA BF16")
+        if (
+            coordinates.shape != (tokens.shape[0], 2)
+            or coordinates.dtype != torch.float32
+        ):
+            raise ValueError("coordinates must be FP32 with shape [T,2]")
+        if coordinates.device != tokens.device:
+            raise ValueError("coordinates and tokens must share one CUDA device")
+
+        query = self.q_proj(tokens).view(-1, self.q_heads, self.head_dim)
+        key = self.k_proj(tokens).view(-1, self.kv_heads, self.head_dim)
+        value = self.v_proj(tokens).view(-1, self.kv_heads, self.head_dim)
+        query, key = self.qk_rope(query, key, coordinates)
+        attended = fa4_varlen_attention(
+            query.contiguous(),
+            key.contiguous(),
+            value.contiguous(),
+            boundaries,
+        ).reshape(-1, self.hidden_size)
+        gated = attended * torch.sigmoid(self.content_gate(tokens))
+        return self.out_proj(gated)
+
+
+__all__ = [
+    "DenseGQAAttention",
+    "FA4VarlenGQAAttention",
+    "ValidatedCuSeqlens",
+    "dense_attention_mask",
+    "fa4_varlen_attention",
+    "validate_cu_seqlens",
+]
