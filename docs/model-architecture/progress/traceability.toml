@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 29
+registry_revision = 30
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -3929,7 +3929,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-001"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "objective"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3941,8 +3941,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M033"
+implementation_paths = [
+    "src/sakuramoon/objective/flow.py",
+    "tests/unit/objective/test_flow.py",
+    "tests/gpu/objective/test_flow_sampling.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3974,7 +3979,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-002"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "objective"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3986,8 +3991,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M033"
+implementation_paths = [
+    "src/sakuramoon/objective/flow.py",
+    "tests/unit/objective/test_flow.py",
+    "tests/gpu/objective/test_flow_sampling.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -4020,7 +4030,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-003"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "objective"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4032,8 +4042,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M033"
+implementation_paths = [
+    "src/sakuramoon/objective/flow.py",
+    "tests/unit/objective/test_flow.py",
+    "tests/gpu/objective/test_flow_sampling.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -4065,7 +4080,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-004"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "objective"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4077,8 +4092,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M033"
+implementation_paths = [
+    "src/sakuramoon/objective/flow.py",
+    "tests/unit/objective/test_flow.py",
+    "tests/gpu/objective/test_flow_sampling.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -4111,7 +4131,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-005"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "objective"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4123,8 +4143,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M033"
+implementation_paths = [
+    "src/sakuramoon/sampling/heun.py",
+    "tests/unit/sampling/test_heun.py",
+    "tests/gpu/objective/test_flow_sampling.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
