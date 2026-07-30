@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "task_id": "D011",
+  "hardware": "CPU",
+  "targeted": {
+    "command": "uv run pytest -q tests/unit/data/test_metadata.py tests/unit/data/test_validation.py",
+    "passed": 17,
+    "failed": 0
+  },
+  "data_suite_passed": 57,
+  "full_cpu_suite_passed": 168,
+  "ruff": true,
+  "pyright_errors": 0,
+  "production_metadata_scanned": false,
+  "production_validation_shard_created": false,
+  "gpu_used": false,
+  "package_review_status": "pending_D010_D015_completion"
+}
