@@ -311,6 +311,10 @@ phases = [
 [evaluation]
 stage_end = true
 explicit_job = true # fixed
+prompt_manifest_path = "REQUIRED_PROMPT_MANIFEST_PATH"
+prompt_manifest_sha256 = "REQUIRED_IMMUTABLE_SHA256"
+gpu_index = "BENCHMARK_REQUIRED" # integer >= 0
+training_paused = "BENCHMARK_REQUIRED" # boolean; evaluator resource plan
 
 [evaluation.sampling]
 solver = "heun_linear_time_final_euler" # fixed
@@ -324,6 +328,8 @@ every_successful_updates = "BENCHMARK_REQUIRED" # integer > 0
 trend_samples = "BENCHMARK_REQUIRED" # integer > 0
 acceptance_samples = 50000 # example only; benchmark may explicitly revise
 feature_extractor = "REQUIRED_LOCKED_FEATURE_EXTRACTOR"
+feature_extractor_version = "REQUIRED_LOCKED_VERSION"
+preprocess_sha256 = "REQUIRED_IMMUTABLE_SHA256"
 real_stats_sha256 = "REQUIRED_IMMUTABLE_SHA256"
 
 [evaluation.is]

@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 47
+registry_revision = 48
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -11237,7 +11237,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-005"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11250,8 +11250,14 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "c79fafeed7b02dad70f9aa633f62c79ee8d708ef"
+implementation_paths = [
+    "src/sakuramoon/telemetry/metrics.py",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/progress/tasks/T051.md",
+    "docs/model-architecture/reviews/T051/test_report.json",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -11288,7 +11294,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-006"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11301,8 +11307,18 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T052"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/eval/metrics.py",
+    "src/sakuramoon/eval/schedule.py",
+    "src/sakuramoon/cli/eval.py",
+    "tests/unit/eval/test_fid_is_metrics.py",
+    "tests/gpu/eval/test_metric_pipeline.py",
+    "tests/unit/eval/test_spec_schedule.py",
+    "tests/unit/config/test_eval_jobs.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -11339,7 +11355,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-007"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11352,8 +11368,14 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T052"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "config/examples/all_options.example.toml",
+    "src/sakuramoon/eval/schedule.py",
+    "tests/unit/eval/test_spec_schedule.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -11390,7 +11412,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-008"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11403,8 +11425,15 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T052"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/eval/spec.py",
+    "src/sakuramoon/cli/eval.py",
+    "tests/unit/eval/test_spec_schedule.py",
+    "tests/unit/config/test_eval_jobs.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -11441,7 +11470,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-009"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11454,8 +11483,15 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T052"
+implementation_paths = [
+    "src/sakuramoon/eval/spec.py",
+    "src/sakuramoon/eval/artifacts.py",
+    "src/sakuramoon/eval/vae_reconstruction.py",
+    "tests/unit/eval/test_artifacts_quality.py",
+    "tests/unit/eval/test_vae_reconstruction.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -11492,7 +11528,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-010"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11505,8 +11541,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T052"
+implementation_paths = [
+    "src/sakuramoon/eval/artifacts.py",
+    "src/sakuramoon/eval/manual_quality.py",
+    "tests/unit/eval/test_artifacts_quality.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -11543,7 +11584,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-011"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11556,8 +11597,15 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T052"
+implementation_paths = [
+    "src/sakuramoon/eval/spec.py",
+    "src/sakuramoon/eval/artifacts.py",
+    "src/sakuramoon/cli/eval.py",
+    "tests/unit/eval/test_artifacts_quality.py",
+    "tests/unit/config/test_eval_jobs.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -11594,7 +11642,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-012"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11607,8 +11655,17 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T052"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/config/load.py",
+    "src/sakuramoon/config/redact.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/config/test_schema.py",
+    "tests/unit/config/test_load.py",
+    "tests/unit/config/test_eval_jobs.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

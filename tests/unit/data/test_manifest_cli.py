@@ -64,10 +64,16 @@ SYNTHETIC_VALUES: dict[str, object] = {
     "evaluation.fid.every_successful_updates": 10,
     "evaluation.fid.trend_samples": 100,
     "evaluation.fid.feature_extractor": "synthetic-locked-extractor",
+    "evaluation.fid.feature_extractor_version": "synthetic-version",
+    "evaluation.fid.preprocess_sha256": "6" * 64,
     "evaluation.fid.real_stats_sha256": "5" * 64,
     "evaluation.is.every_successful_updates": 10,
     "evaluation.is.trend_samples": 100,
     "evaluation.is.splits": 10,
+    "evaluation.prompt_manifest_path": "synthetic/prompts.json",
+    "evaluation.prompt_manifest_sha256": "7" * 64,
+    "evaluation.gpu_index": 0,
+    "evaluation.training_paused": True,
 }
 
 

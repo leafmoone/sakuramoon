@@ -552,6 +552,8 @@ class FidConfig(StrictModel):
     trend_samples: PositiveInt
     acceptance_samples: PositiveInt
     feature_extractor: Annotated[str, StringConstraints(min_length=1)]
+    feature_extractor_version: Annotated[str, StringConstraints(min_length=1)]
+    preprocess_sha256: Sha256
     real_stats_sha256: Sha256
 
 
@@ -566,6 +568,10 @@ class IsConfig(StrictModel):
 class EvaluationConfig(StrictModel):
     stage_end: Literal[True]
     explicit_job: Literal[True]
+    prompt_manifest_path: Annotated[str, StringConstraints(min_length=1)]
+    prompt_manifest_sha256: Sha256
+    gpu_index: NonNegativeInt
+    training_paused: bool
     sampling: SamplingConfig
     fid: FidConfig
     is_: IsConfig = Field(alias="is")
