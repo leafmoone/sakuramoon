@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "task_id": "D015",
+  "targeted_passed": 10,
+  "data_text_protocol_passed": 132,
+  "full_cpu_passed": 244,
+  "real_webdataset_tar": true,
+  "persistent_worker_sweep": [1, 2, 3],
+  "validation_excluded_before_decode": true,
+  "gpu_tested": true,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "batch_image_shape": [1, 3, 512, 512],
+  "qwen_dense_length": 98,
+  "qwen_output_shape": [1, 98, 7, 2048],
+  "vae_latent_shape": [1, 128, 32, 32],
+  "finite_outputs": true,
+  "peak_memory_mib": 3821.5,
+  "production_metadata_mapping": "pending",
+  "production_performance_sweep": false,
+  "package_review_status": "pending"
+}
