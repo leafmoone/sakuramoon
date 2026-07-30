@@ -110,9 +110,7 @@ class GlobalConditioner(nn.Module):
             }
         )
         self.final_activation = nn.SiLU()
-        self.final_projection = nn.Linear(
-            hidden_dim, final_modulation_size, bias=True
-        )
+        self.final_projection = nn.Linear(hidden_dim, final_modulation_size, bias=True)
         nn.init.zeros_(self.shared_block_projection.weight)
         for bias in self.block_biases.values():
             nn.init.zeros_(bias)
@@ -134,10 +132,12 @@ class GlobalConditioner(nn.Module):
             or size_scale.dtype != torch.float32
             or aspect.dtype != torch.float32
         ):
-            raise ValueError("timestep, size_scale, and aspect must be matching FP32 vectors")
-        if bool(((timestep < 0.0) | (timestep > 1.0)).any().item()):
-            raise ValueError("timestep must be in [0,1]")
-        if not slot_ids or any(slot_id not in self.active_slot_ids for slot_id in slot_ids):
+            raise ValueError(
+                "timestep, size_scale, and aspect must be matching FP32 vectors"
+            )
+        if not slot_ids or any(
+            slot_id not in self.active_slot_ids for slot_id in slot_ids
+        ):
             raise ValueError("slot_ids are empty or not present in this topology")
 
         device_type = timestep.device.type

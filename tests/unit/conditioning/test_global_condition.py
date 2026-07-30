@@ -119,11 +119,11 @@ def test_active_slot_selection_removes_only_the_slot_axis() -> None:
         output.block.for_active_index(2)
 
 
-def test_rejects_invalid_timestep_and_slot() -> None:
+def test_rejects_invalid_timestep_metadata_and_slot() -> None:
     module = _module()
     with pytest.raises(ValueError, match="timestep"):
         module(
-            torch.tensor([1.1], dtype=torch.float32),
+            torch.tensor([0.5], dtype=torch.float64),
             torch.tensor([0.0], dtype=torch.float32),
             torch.tensor([0.0], dtype=torch.float32),
             (0,),

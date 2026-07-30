@@ -17,5 +17,7 @@
   "backward_ms": 115.516,
   "peak_memory_mib": 301.2,
   "finite_gradients": true,
-  "package_review_status": "pending"
+  "conditioner_d2h_syncs_per_forward": 0,
+  "metadata_validation_passed": true,
+  "package_review_status": "pending_rereview"
 }
