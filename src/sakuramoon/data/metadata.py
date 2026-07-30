@@ -5,9 +5,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from sakuramoon.data.manifest import ShardRecord
+
 
 class MetadataError(ValueError):
     """A metadata row does not satisfy the fields required by the data pipeline."""
+
+
+def _is_valid_field_name(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and value == value.strip()
 
 
 @dataclass(frozen=True)
@@ -20,6 +26,28 @@ class MetadataRecord:
     height: int
     caption_available: bool
     raw: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class MetadataFieldMapping:
+    """Explicit raw metadata keys; production values have no code defaults."""
+
+    id_field: str
+    width_field: str
+    height_field: str
+    caption_available_field: str
+
+    def __post_init__(self) -> None:
+        values = (
+            self.id_field,
+            self.width_field,
+            self.height_field,
+            self.caption_available_field,
+        )
+        if any(not _is_valid_field_name(value) for value in values):
+            raise MetadataError("metadata field mapping keys must be non-empty strings")
+        if len(set(values)) != len(values):
+            raise MetadataError("metadata field mapping keys must be unique")
 
 
 @dataclass(frozen=True)
@@ -49,7 +77,11 @@ def parse_metadata(raw: Mapping[str, object]) -> MetadataRecord:
     caption_available = raw["caption_available"]
     if type(sample_id) is not int or sample_id <= 0:
         raise MetadataError("metadata id must be a positive integer")
-    if not isinstance(release, str) or not release.strip():
+    if (
+        not isinstance(release, str)
+        or not release
+        or release != release.strip()
+    ):
         raise MetadataError("metadata release must be a non-empty string")
     if type(width) is not int or width <= 0:
         raise MetadataError("metadata width must be a positive integer")
@@ -63,6 +95,43 @@ def parse_metadata(raw: Mapping[str, object]) -> MetadataRecord:
         width=width,
         height=height,
         caption_available=caption_available,
+        raw=dict(raw),
+    )
+
+
+def parse_shard_metadata(
+    raw: Mapping[str, object],
+    *,
+    shard: ShardRecord,
+    fields: MetadataFieldMapping,
+) -> MetadataRecord:
+    """Map explicit raw keys while taking release only from the D010 shard record."""
+
+    mapped_names = (
+        fields.id_field,
+        fields.width_field,
+        fields.height_field,
+        fields.caption_available_field,
+    )
+    missing = tuple(name for name in mapped_names if name not in raw)
+    if missing:
+        raise MetadataError(
+            f"metadata is missing mapped fields: {', '.join(missing)}"
+        )
+    normalized = {
+        "id": raw[fields.id_field],
+        "release": shard.release,
+        "width": raw[fields.width_field],
+        "height": raw[fields.height_field],
+        "caption_available": raw[fields.caption_available_field],
+    }
+    parsed = parse_metadata(normalized)
+    return MetadataRecord(
+        id=parsed.id,
+        release=parsed.release,
+        width=parsed.width,
+        height=parsed.height,
+        caption_available=parsed.caption_available,
         raw=dict(raw),
     )
 

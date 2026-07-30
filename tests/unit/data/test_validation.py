@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import json
+import tarfile
+from pathlib import Path
 
 import pytest
 
 from sakuramoon.data.metadata import MetadataRecord
 from sakuramoon.data.validation import (
     VALIDATION_SAMPLE_COUNT,
+    ValidationBundleExistsError,
+    ValidationEntry,
+    ValidationSelection,
     ValidationSelectionError,
+    ValidationShardMember,
+    ValidationShardSample,
+    ValidationStratum,
     exclude_validation_records,
     select_validation_records,
     validation_manifest_bytes,
+    write_validation_bundle,
 )
 
 
@@ -89,6 +98,20 @@ def test_selection_rejects_duplicate_or_insufficient_ids() -> None:
         select_validation_records(duplicate, seed=1, aspect_bucket=_bucket)
 
 
+def test_selection_type_rejects_noncanonical_cardinality_ids_and_seed() -> None:
+    stratum = ValidationStratum("release-a", "wide", True)
+    entries = tuple(
+        ValidationEntry(sample_id, stratum)
+        for sample_id in range(1, VALIDATION_SAMPLE_COUNT + 1)
+    )
+    with pytest.raises(ValidationSelectionError, match="exactly 2,000"):
+        ValidationSelection(entries=entries[:-1], seed=1)
+    with pytest.raises(ValidationSelectionError, match="sorted positive"):
+        ValidationSelection(entries=tuple(reversed(entries)), seed=1)
+    with pytest.raises(ValidationSelectionError, match="seed"):
+        ValidationSelection(entries=entries, seed=True)
+
+
 @pytest.mark.parametrize("bucket", ["", " ", 1])
 def test_selection_rejects_invalid_bucket_resolver_result(bucket: object) -> None:
     with pytest.raises(ValidationSelectionError, match="invalid key"):
@@ -125,3 +148,94 @@ def test_validation_manifest_jsonl_is_deterministic() -> None:
     parsed = json.loads(lines[0])
     assert set(parsed) == {"aspect_bucket", "caption_available", "id", "release"}
     assert [json.loads(line)["id"] for line in lines] == sorted(selection.ids)
+
+
+def _validation_samples(
+    ids: tuple[int, ...],
+) -> tuple[ValidationShardSample, ...]:
+    return tuple(
+        ValidationShardSample(
+            id=sample_id,
+            members=(
+                ValidationShardMember(
+                    suffix="json",
+                    payload=json.dumps(
+                        {"id": sample_id}, separators=(",", ":")
+                    ).encode(),
+                ),
+            ),
+        )
+        for sample_id in ids
+    )
+
+
+def test_validation_bundle_is_deterministic_exact_and_no_clobber(
+    tmp_path: Path,
+) -> None:
+    selection = select_validation_records(_records(), seed=99, aspect_bucket=_bucket)
+    ordered_ids = tuple(entry.id for entry in selection.entries)
+    samples = _validation_samples(ordered_ids)
+
+    first = write_validation_bundle(selection, samples, tmp_path / "first")
+    second = write_validation_bundle(selection, samples, tmp_path / "second")
+
+    assert first.manifest_path.read_bytes() == validation_manifest_bytes(selection)
+    assert first.manifest_sha256 == second.manifest_sha256
+    assert first.shard_path.read_bytes() == second.shard_path.read_bytes()
+    assert first.shard_sha256 == second.shard_sha256
+    assert first.shard_bytes == second.shard_bytes > 0
+    with tarfile.open(first.shard_path, mode="r:") as archive:
+        members = archive.getmembers()
+        assert len(members) == VALIDATION_SAMPLE_COUNT
+        assert tuple(member.name for member in members) == tuple(
+            f"{sample_id}.json" for sample_id in ordered_ids
+        )
+        assert all(member.mtime == 0 for member in members)
+        first_payload = archive.extractfile(members[0])
+        assert first_payload is not None
+        assert json.load(first_payload) == {"id": ordered_ids[0]}
+
+    with pytest.raises(ValidationBundleExistsError, match="already exists"):
+        write_validation_bundle(selection, samples, first.root)
+    assert first.shard_path.read_bytes() == second.shard_path.read_bytes()
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "out_of_order"])
+def test_validation_bundle_rejects_id_drift_and_cleans_temporary_directory(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    selection = select_validation_records(_records(), seed=17, aspect_bucket=_bucket)
+    ids = [entry.id for entry in selection.entries]
+    if mutation == "missing":
+        ids.pop()
+    elif mutation == "extra":
+        ids.append(max(ids) + 1)
+    else:
+        ids[0], ids[1] = ids[1], ids[0]
+
+    destination = tmp_path / "validation"
+    with pytest.raises(ValidationSelectionError, match="validation shard"):
+        write_validation_bundle(
+            selection,
+            _validation_samples(tuple(ids)),
+            destination,
+        )
+
+    assert not destination.exists()
+    assert not tuple(tmp_path.glob(".validation.*.tmp"))
+
+
+def test_validation_shard_members_are_nonempty_sorted_unique_and_safe() -> None:
+    with pytest.raises(ValidationSelectionError, match="must have members"):
+        ValidationShardSample(id=1, members=())
+    with pytest.raises(ValidationSelectionError, match="sorted and unique"):
+        ValidationShardSample(
+            id=1,
+            members=(
+                ValidationShardMember("json", b"{}"),
+                ValidationShardMember("jpg", b"x"),
+            ),
+        )
+    with pytest.raises(ValidationSelectionError, match="suffix is invalid"):
+        ValidationShardMember("../json", b"{}")

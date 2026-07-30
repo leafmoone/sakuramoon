@@ -4,32 +4,47 @@
   "hardware": "CPU",
   "targeted": {
     "command": "uv run --frozen pytest -q tests/unit/data/test_metadata.py tests/unit/data/test_validation.py",
-    "passed": 19,
+    "passed": 31,
     "failed": 0,
-    "duration_seconds": 0.34
+    "duration_seconds": 2.13
   },
   "full_cpu_suite": {
     "command": "uv run --frozen pytest -q tests/unit tests/contracts",
-    "passed": 351,
+    "passed": 489,
     "failed": 0,
     "warnings": 24,
-    "duration_seconds": 30.48
+    "duration_seconds": 36.01
   },
   "ruff": true,
   "pyright_errors": 0,
   "production_metadata_scanned": false,
   "production_validation_shard_created": false,
   "gpu_used": false,
+  "explicit_metadata_mapping": {
+    "code_defaults": false,
+    "release_bound_to_d010_shard": true,
+    "raw_mapping_preserved": true
+  },
+  "validation_bundle_code": {
+    "exact_2000_sorted_unique_ids": true,
+    "deterministic_ustar": true,
+    "bounded_per_sample_streaming": true,
+    "no_clobber": true,
+    "file_and_directory_fsync": true,
+    "atomic_directory_publication": true,
+    "id_drift_cleanup": true
+  },
   "invalid_aspect_bucket_keys_rejected": [
     "empty string",
     "whitespace-only string",
     "non-string"
   ],
-  "package_review_status": "initial_finding_remediated_main_agent_acceptance",
+  "package_review_status": "mapping_and_bundle_expansion_independent_review_pending",
   "pending": [
     "production metadata field mapping",
     "approximately 11M-ID uniqueness scan",
-    "independent validation shard publication",
-    "full zero-leak training dry run"
+    "real-payload validation bundle publication",
+    "full zero-leak training dry run",
+    "fresh independent AI/model and Infra/performance review"
   ]
 }

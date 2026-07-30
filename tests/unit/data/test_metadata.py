@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import pytest
 
+from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.metadata import (
     MetadataError,
+    MetadataFieldMapping,
     MetadataRecord,
     parse_metadata,
+    parse_shard_metadata,
     scan_duplicate_ids,
 )
 
@@ -46,6 +49,7 @@ def test_parse_metadata_reads_only_minimum_contract_and_preserves_raw() -> None:
         ("id", 0, "positive integer"),
         ("id", True, "positive integer"),
         ("release", "", "non-empty string"),
+        ("release", " release-a ", "non-empty string"),
         ("width", 0, "positive integer"),
         ("height", 1.5, "positive integer"),
         ("caption_available", 1, "boolean"),
@@ -87,3 +91,72 @@ def test_unique_id_report_is_empty() -> None:
     assert report.duplicate_ids == ()
     assert report.duplicate_occurrences == 0
     assert report.has_duplicates is False
+
+
+def _shard() -> ShardRecord:
+    return ShardRecord(
+        path="release-a/000001.tar",
+        release="trusted-release",
+        bytes=1,
+        sha256="a" * 64,
+        samples=1,
+    )
+
+
+def test_explicit_field_mapping_uses_shard_release_and_preserves_raw() -> None:
+    fields = MetadataFieldMapping(
+        id_field="logical_id",
+        width_field="image_width",
+        height_field="image_height",
+        caption_available_field="has_caption",
+    )
+    raw: dict[str, object] = {
+        "logical_id": 23,
+        "image_width": 1024,
+        "image_height": 768,
+        "has_caption": True,
+        "release": "untrusted-raw-release",
+        "caption_payload": {"nl": "synthetic"},
+    }
+
+    record = parse_shard_metadata(raw, shard=_shard(), fields=fields)
+
+    assert record == MetadataRecord(
+        id=23,
+        release="trusted-release",
+        width=1024,
+        height=768,
+        caption_available=True,
+        raw=raw,
+    )
+
+
+def test_explicit_field_mapping_rejects_missing_or_invalid_values() -> None:
+    fields = MetadataFieldMapping("id", "w", "h", "caption")
+    with pytest.raises(MetadataError, match="missing mapped fields: caption"):
+        parse_shard_metadata(
+            {"id": 1, "w": 512, "h": 512},
+            shard=_shard(),
+            fields=fields,
+        )
+    with pytest.raises(MetadataError, match="boolean"):
+        parse_shard_metadata(
+            {"id": 1, "w": 512, "h": 512, "caption": 1},
+            shard=_shard(),
+            fields=fields,
+        )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ("", "w", "h", "caption"),
+        (" id", "w", "h", "caption"),
+        ("id", "id", "h", "caption"),
+    ],
+)
+def test_field_mapping_has_no_empty_whitespace_or_duplicate_keys(
+    values: tuple[str, str, str, str],
+) -> None:
+    with pytest.raises(MetadataError, match="mapping keys"):
+        MetadataFieldMapping(*values)
