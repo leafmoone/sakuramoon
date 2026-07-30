@@ -68,6 +68,7 @@ def repo_copy(tmp_path: Path) -> Path:
         "docs/model-architecture/progress/asset-policy.md",
         "docs/model-architecture/progress/tasks/R001.md",
         "docs/model-architecture/progress/tasks/R002.md",
+        "docs/model-architecture/progress/tasks/D001.md",
         "docs/model-architecture/progress/tasks/A002.md",
         "docs/model-architecture/progress/time-log.jsonl",
         "docs/model-architecture/reviews/R001/implementation_report.md",
@@ -86,6 +87,13 @@ def repo_copy(tmp_path: Path) -> Path:
         "docs/model-architecture/reviews/R002/fresh-env-report.json",
         "docs/model-architecture/reviews/R002/cold-rebuild-report.json",
         "docs/model-architecture/reviews/R002/timing.json",
+        "docs/model-architecture/reviews/D001/implementation_report.md",
+        "docs/model-architecture/reviews/D001/test_report.json",
+        "docs/model-architecture/reviews/D001/timing.json",
+        "docs/model-architecture/reviews/D001/artifacts.json",
+        "docs/model-architecture/reviews/D001/traceability-report.json",
+        "docs/model-architecture/reviews/D001/ai_review.md",
+        "docs/model-architecture/reviews/D001/infra_review.md",
         "tests/unit/assets/test_local_models.py",
         "tests/unit/config/conftest.py",
         "tests/unit/config/test_resolve_redact.py",
@@ -350,6 +358,17 @@ def test_requirement_id_history_rejects_exchange_and_reuse() -> None:
     vt._validate_registry_history([baseline, unchanged_revision], errors)
     assert any("registry_revision must increment by exactly one" in error for error in errors)
 
+
+def test_bootstrap_binding_anchor_rejects_exchange_without_history() -> None:
+    exchanged = copy.deepcopy(load_registry(ROOT))
+    first, second = exchanged["requirements"][:2]
+    first["id"], second["id"] = second["id"], first["id"]
+
+    errors: list[str] = []
+    vt._validate_registry_history([exchanged], errors)
+
+    assert any("trusted locator anchor" in error for error in errors)
+
 @pytest.mark.parametrize("target_is_directory", [False, True])
 def test_archive_symlink_is_rejected(
     repo_copy: Path, tmp_path: Path, target_is_directory: bool
@@ -372,14 +391,6 @@ def test_reverse_module_and_config_inventory_is_required(repo_copy: Path) -> Non
     config.parent.mkdir(exist_ok=True)
     config.write_text("unexpected = 1\n", encoding="utf-8")
 
-    def mutate(data: dict[str, Any]) -> None:
-        data["inventory"]["no_modules_reason"] = ""
-        data["inventory"]["no_configs_reason"] = ""
-        for item in (*data["profiles"], *data["requirements"]):
-            if item.get("profile", item.get("name")) == "reference_execution_boundary":
-                item["modules"] = ["src/sakuramoon/__init__.py"]
-
-    rewrite_registry(repo_copy, mutate)
     errors = error_text(repo_copy)
     assert "production module has no reverse requirement mapping" in errors
     assert "runtime config key has no reverse requirement mapping" in errors
@@ -426,7 +437,7 @@ def test_one_gpu_evidence_cannot_close_four_gpu_requirement(repo_copy: Path) -> 
 
 def test_verified_requirement_requires_real_independent_evidence(repo_copy: Path) -> None:
     review_dir = repo_copy / "docs/model-architecture/reviews/D001"
-    review_dir.mkdir(parents=True)
+    review_dir.mkdir(parents=True, exist_ok=True)
     ai_review = review_dir / "ai_review.md"
     infra_review = review_dir / "infra_review.md"
     ai_review.write_text("AI review passed.\n", encoding="utf-8")

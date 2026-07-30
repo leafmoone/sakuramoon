@@ -13,5 +13,13 @@
     "duration_seconds": 922,
     "hardware_level": "CPU",
     "gpu_seconds": 0
+  },
+  "foundation_review_remediation": {
+    "measurement_scope": "first tracked remediation edit through final CPU validation",
+    "started_at_utc": "2026-07-30T17:42:33Z",
+    "ended_at_utc": "2026-07-30T17:50:54Z",
+    "duration_seconds": 501,
+    "hardware_level": "CPU",
+    "gpu_seconds": 0
   }
 }

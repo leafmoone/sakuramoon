@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 35
+registry_revision = 36
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -246,6 +246,7 @@ modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/caption.py",
     "src/sakuramoon/data/serialize.py",
+    "src/sakuramoon/encoders/__init__.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -279,6 +280,7 @@ config_keys = [
     "model.style.*",
 ]
 modules = [
+    "src/sakuramoon/conditioning/__init__.py",
     "src/sakuramoon/encoders/qwen.py",
     "src/sakuramoon/conditioning/norm.py",
     "src/sakuramoon/conditioning/bidirectional.py",
@@ -909,7 +911,17 @@ superseded_by = ""
 implementation_commit_ref = "task:D001"
 implementation_paths = [
     "tools/verify_traceability.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D001.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D001/implementation_report.md",
+    "docs/model-architecture/reviews/D001/test_report.json",
+    "docs/model-architecture/reviews/D001/timing.json",
+    "docs/model-architecture/reviews/D001/artifacts.json",
+    "docs/model-architecture/reviews/D001/traceability-report.json",
+    "docs/model-architecture/reviews/D001/ai_review.md",
+    "docs/model-architecture/reviews/D001/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -952,7 +964,17 @@ superseded_by = ""
 implementation_commit_ref = "task:D001"
 implementation_paths = [
     "tools/verify_traceability.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D001.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D001/implementation_report.md",
+    "docs/model-architecture/reviews/D001/test_report.json",
+    "docs/model-architecture/reviews/D001/timing.json",
+    "docs/model-architecture/reviews/D001/artifacts.json",
+    "docs/model-architecture/reviews/D001/traceability-report.json",
+    "docs/model-architecture/reviews/D001/ai_review.md",
+    "docs/model-architecture/reviews/D001/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []

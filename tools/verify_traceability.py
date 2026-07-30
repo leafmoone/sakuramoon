@@ -129,6 +129,12 @@ CANONICAL_SOURCES: dict[str, dict[str, object]] = {
 TRUSTED_ARCHIVE_MANIFEST_SHA256 = (
     "8080e7d8e02345c5b6487b34de5d666630f524ddb9eca4c22e21ccedbffbee04"
 )
+TRUSTED_REQUIREMENT_BINDING_SHA256S = frozenset(
+    {
+        "999eff1fece89b69eba0497d60bdf8adc358d0f7f2a5243c1e17a591a233bb6b",
+        "626d7348cff00d6a89282bebf274b3c8e25ed36e1fd662ceed7020ebdd9470f2",
+    }
+)
 BASELINE_REQUIREMENT_MAXIMA = {
     "ARCH": 2,
     "C01": 5,
@@ -477,6 +483,32 @@ def _baseline_requirement_ids() -> set[str]:
     }
 
 
+def _requirement_bindings_sha256(
+    requirements: Sequence[Mapping[str, Any]],
+) -> str:
+    baseline_ids = _baseline_requirement_ids()
+    fields = (
+        "id",
+        "source_path",
+        "heading_path",
+        "node_kind",
+        "source_fingerprint",
+        "source_occurrence",
+    )
+    bindings = [
+        {field: requirement[field] for field in fields}
+        for requirement in sorted(requirements, key=lambda item: cast(str, item["id"]))
+        if requirement["id"] in baseline_ids
+    ]
+    payload = json.dumps(
+        bindings,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256_bytes(payload)
+
+
 def _validate_bootstrap_bindings(
     requirements: Sequence[Mapping[str, Any]], errors: list[str]
 ) -> None:
@@ -488,6 +520,13 @@ def _validate_bootstrap_bindings(
     if missing:
         errors.append(f"bootstrap requirement IDs were removed: {missing}")
         return
+    digest = _requirement_bindings_sha256(requirements)
+    if digest not in TRUSTED_REQUIREMENT_BINDING_SHA256S:
+        errors.append(
+            "bootstrap requirement bindings do not match a trusted locator anchor"
+        )
+
+
 def _validate_registry_history(
     snapshots: Sequence[Mapping[str, Any]], errors: list[str]
 ) -> None:
@@ -689,6 +728,7 @@ def _validate_inventory(
     root: Path,
     inventory: Mapping[str, Any],
     requirements: Sequence[Mapping[str, Any]],
+    profiles: Sequence[Mapping[str, Any]],
     errors: list[str],
 ) -> tuple[int, int]:
     context = "inventory"
@@ -702,8 +742,12 @@ def _validate_inventory(
     config_root = inventory["config_root"]
     _validate_repo_path(root, module_root, "inventory.module_root", errors)
     _validate_repo_path(root, config_root, "inventory.config_root", errors)
+    blanket_module_pattern = f"{module_root.rstrip('/')}/**"
     module_patterns = [
-        pattern for requirement in requirements for pattern in requirement["modules"]
+        pattern
+        for item in (*requirements, *profiles)
+        for pattern in item["modules"]
+        if pattern != blanket_module_pattern
     ]
     config_patterns = [
         pattern for requirement in requirements for pattern in requirement["config_keys"]
@@ -1126,7 +1170,7 @@ def verify(root: Path, registry_path: Path = REGISTRY_PATH) -> VerificationRepor
 
     archive_count = _validate_archive(root, data["archive_manifest"], errors)
     module_count, config_count = _validate_inventory(
-        root, data["inventory"], requirements, errors
+        root, data["inventory"], requirements, profiles, errors
     )
     documentation = [
         path.relative_to(root).as_posix()

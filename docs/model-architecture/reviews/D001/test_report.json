@@ -8,24 +8,28 @@
     {
       "command": "uv run pytest -q tests/unit/docs/test_verify_traceability.py",
       "result": "36 passed",
-      "duration_seconds": 9.68
+      "duration_seconds": 11.31
     },
     {
-      "command": "env PYTHONPATH=src uv run pytest -q",
-      "result": "119 passed",
-      "duration_seconds": 13.07
+      "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+      "result": "343 passed, 24 warnings",
+      "duration_seconds": 28.08
     },
     {
       "command": "uv run ruff check tools/verify_traceability.py tests/unit/docs/test_verify_traceability.py",
       "result": "passed"
     },
     {
-      "command": "uv run pyright -p .pyright-d001-remediation.json --stats",
-      "result": "2 source files, 0 errors, 0 warnings"
+      "command": "uv run --frozen pyright tools/verify_traceability.py tests/unit/docs/test_verify_traceability.py",
+      "result": "0 errors, 0 warnings"
     },
     {
       "command": "uv run python tools/verify_traceability.py",
-      "result": "219 requirements, 219 source nodes, 16 archive files, 13 production modules, 235 runtime config keys; passed"
+      "result": "221 requirements, 221 source nodes, 16 archive files, 67 production modules, 234 runtime config keys; passed"
+    },
+    {
+      "command": "uv lock --check",
+      "result": "resolved 95 packages; passed"
     }
   ],
   "negative_contracts": [
@@ -36,16 +40,18 @@
     "dangling, cyclic, or non-terminal status edges",
     "archive checksum change, archive-plus-manifest co-tamper, or symlink",
     "bootstrap requirement ID exchange",
+    "bootstrap requirement ID exchange without Git history",
     "historical locator reassignment, stable ID removal, or later reuse",
     "registry revision skip or reuse",
-    "orphan production module or runtime config key",
+    "orphan production module or runtime config key despite a repository-root cross-cutting glob",
     "inventory wildcard ignore",
     "forged or insufficient verification evidence",
     "repository path traversal or source symlink",
     "current change without revision/changelog"
   ],
   "notes": [
-    "The full suite sets PYTHONPATH=src because this uv project intentionally uses package=false.",
-    "The strict Pyright configuration file is an ephemeral validation input and is not tracked."
+    "The complete CPU suite is tests/unit plus tests/contracts; tests/gpu is validated only by the owning single-GPU tasks.",
+    "An attempted unscoped default suite entered tests/gpu and was terminated after 120 seconds without a test failure; it is not counted as D001 evidence.",
+    "Direct independent re-review startup did not return a valid task name, so the final review files distinguish the original independent findings from main-agent remediation acceptance."
   ]
 }
