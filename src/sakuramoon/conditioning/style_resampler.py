@@ -24,12 +24,19 @@ class _ResidualSwiGLU(nn.Module):
         intermediate_size: int,
         norm_eps: float,
         projection_bias: bool,
+        linear_dtype: torch.dtype,
     ) -> None:
         super().__init__()
         self.norm = FP32RMSNorm(hidden_size, norm_eps)
-        self.gate = nn.Linear(hidden_size, intermediate_size, bias=projection_bias)
-        self.up = nn.Linear(hidden_size, intermediate_size, bias=projection_bias)
-        self.down = nn.Linear(intermediate_size, hidden_size, bias=projection_bias)
+        self.gate = nn.Linear(
+            hidden_size, intermediate_size, bias=projection_bias, dtype=linear_dtype
+        )
+        self.up = nn.Linear(
+            hidden_size, intermediate_size, bias=projection_bias, dtype=linear_dtype
+        )
+        self.down = nn.Linear(
+            intermediate_size, hidden_size, bias=projection_bias, dtype=linear_dtype
+        )
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         normalized = self.norm(tensor)
@@ -49,31 +56,55 @@ class StyleResampler(nn.Module):
         norm_eps: float,
         init_std: float,
         projection_bias: bool,
+        linear_dtype: torch.dtype,
+        sensitive_dtype: torch.dtype,
     ) -> None:
         super().__init__()
         if query_count <= 0 or init_std <= 0.0:
             raise ValueError("query_count and init_std must be positive")
+        if linear_dtype not in (torch.float32, torch.bfloat16):
+            raise ValueError("linear_dtype must be float32 or bfloat16")
+        if sensitive_dtype != torch.float32:
+            raise ValueError("sensitive style parameters must use float32")
         self.input_size = input_size
         self.query_count = query_count
         self.shared_norm = FP32RMSNorm(input_size, norm_eps)
-        self.layer_embedding = nn.Parameter(torch.empty(7, input_size))
-        self.input_projection = nn.Linear(input_size, hidden_size, bias=projection_bias)
-        self.queries = nn.Parameter(torch.empty(query_count, hidden_size))
+        self.layer_embedding = nn.Parameter(
+            torch.empty(7, input_size, dtype=sensitive_dtype)
+        )
+        self.input_projection = nn.Linear(
+            input_size,
+            hidden_size,
+            bias=projection_bias,
+            dtype=linear_dtype,
+        )
+        self.queries = nn.Parameter(
+            torch.empty(query_count, hidden_size, dtype=sensitive_dtype)
+        )
         self.cross_attention = nn.MultiheadAttention(
             hidden_size,
             attention_heads,
             dropout=0.0,
             bias=projection_bias,
             batch_first=True,
+            dtype=linear_dtype,
         )
         self.style_mlp = _ResidualSwiGLU(
             hidden_size,
             intermediate_size,
             norm_eps,
             projection_bias,
+            linear_dtype,
         )
-        self.output_projection = nn.Linear(hidden_size, output_size, bias=projection_bias)
-        self.null_tokens = nn.Parameter(torch.empty(query_count, output_size))
+        self.output_projection = nn.Linear(
+            hidden_size,
+            output_size,
+            bias=projection_bias,
+            dtype=linear_dtype,
+        )
+        self.null_tokens = nn.Parameter(
+            torch.empty(query_count, output_size, dtype=sensitive_dtype)
+        )
         nn.init.normal_(self.layer_embedding, std=init_std)
         nn.init.normal_(self.queries, std=init_std)
         nn.init.normal_(self.null_tokens, std=init_std)
@@ -113,12 +144,18 @@ class StyleResampler(nn.Module):
             safe_indices = artist_token_indices.clamp(min=0)
             gather_index = safe_indices[:, :, None, None].expand(-1, -1, 7, self.input_size)
             selected = torch.gather(qwen_states.detach(), dim=1, index=gather_index)
-            selected = self.shared_norm(selected) + self.layer_embedding[None, None]
+            selected = self.shared_norm(selected) + self.layer_embedding.to(
+                selected.dtype
+            )[None, None]
             memory = self.input_projection(selected).flatten(1, 2)
             memory_mask = artist_mask[:, :, None].expand(-1, -1, 7).flatten(1, 2)
             memory = memory[active_samples]
             memory_mask = memory_mask[active_samples]
-            queries = self.queries.unsqueeze(0).expand(memory.shape[0], -1, -1)
+            queries = (
+                self.queries.to(memory.dtype)
+                .unsqueeze(0)
+                .expand(memory.shape[0], -1, -1)
+            )
             attended, _ = self.cross_attention(
                 queries,
                 memory,

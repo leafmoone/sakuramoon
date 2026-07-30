@@ -16,6 +16,8 @@ def _resampler() -> StyleResampler:
         norm_eps=1e-6,
         init_std=0.02,
         projection_bias=False,
+        linear_dtype=torch.float32,
+        sensitive_dtype=torch.float32,
     )
 
 

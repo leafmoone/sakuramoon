@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 30
+registry_revision = 31
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -5107,7 +5107,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C12-003"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -5119,8 +5119,15 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T040"
+implementation_paths = [
+    "src/sakuramoon/optim/adamw8bit.py",
+    "src/sakuramoon/optim/groups.py",
+    "src/sakuramoon/optim/stochastic_rounding.py",
+    "tests/gpu/optim/test_adamw8bit.py",
+    "tests/gpu/optim/test_production_state.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -5161,7 +5168,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C12-004"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -5173,8 +5180,17 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T040"
+implementation_paths = [
+    "src/sakuramoon/conditioning/bidirectional.py",
+    "src/sakuramoon/conditioning/style_resampler.py",
+    "src/sakuramoon/conditioning/text_mixer.py",
+    "src/sakuramoon/optim/groups.py",
+    "tests/unit/conditioning/test_style_resampler.py",
+    "tests/unit/conditioning/test_text_mixer.py",
+    "tests/unit/optim/test_groups_clip.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -8332,7 +8348,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-053"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -8345,8 +8361,16 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T040"
+implementation_paths = [
+    "src/sakuramoon/optim/adamw8bit.py",
+    "src/sakuramoon/optim/groups.py",
+    "src/sakuramoon/optim/stochastic_rounding.py",
+    "tests/unit/optim/test_groups_clip.py",
+    "tests/gpu/optim/test_adamw8bit.py",
+    "tests/gpu/optim/test_production_state.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -8387,7 +8411,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-054"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -8400,8 +8424,14 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T040"
+implementation_paths = [
+    "src/sakuramoon/optim/adamw8bit.py",
+    "src/sakuramoon/optim/groups.py",
+    "src/sakuramoon/optim/stochastic_rounding.py",
+    "tests/gpu/optim/test_adamw8bit.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

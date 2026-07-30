@@ -16,6 +16,8 @@ def _conditioner() -> TextConditioner:
         mix_gate_init=0.0,
         layer_scale_init=1.0,
         projection_bias=False,
+        linear_dtype=torch.float32,
+        sensitive_dtype=torch.float32,
     )
 
 

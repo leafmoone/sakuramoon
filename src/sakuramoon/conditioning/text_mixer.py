@@ -32,28 +32,49 @@ class TextConditioner(nn.Module):
         mix_gate_init: float,
         layer_scale_init: float,
         projection_bias: bool,
+        linear_dtype: torch.dtype,
+        sensitive_dtype: torch.dtype,
     ) -> None:
         super().__init__()
         if adapter_size <= 0 or groups <= 0 or adapter_size % groups:
             raise ValueError("adapter_size must be divisible by groups")
+        if linear_dtype not in (torch.float32, torch.bfloat16):
+            raise ValueError("linear_dtype must be float32 or bfloat16")
+        if sensitive_dtype != torch.float32:
+            raise ValueError("sensitive text parameters must use float32")
         self.input_size = input_size
         self.adapter_size = adapter_size
         self.groups = groups
         self.group_size = adapter_size // groups
         self.layer_norms = nn.ModuleList(FP32RMSNorm(input_size, norm_eps) for _ in range(7))
-        self.shared_projection = nn.Linear(input_size, adapter_size, bias=projection_bias)
-        self.gate_weight = nn.Parameter(torch.zeros(7, groups, self.group_size))
-        self.gate_bias = nn.Parameter(torch.zeros(7, groups))
-        self.mix_gate = nn.Parameter(torch.tensor(float(mix_gate_init)))
+        self.shared_projection = nn.Linear(
+            input_size,
+            adapter_size,
+            bias=projection_bias,
+            dtype=linear_dtype,
+        )
+        self.gate_weight = nn.Parameter(
+            torch.zeros(7, groups, self.group_size, dtype=sensitive_dtype)
+        )
+        self.gate_bias = nn.Parameter(torch.zeros(7, groups, dtype=sensitive_dtype))
+        self.mix_gate = nn.Parameter(
+            torch.tensor(float(mix_gate_init), dtype=sensitive_dtype)
+        )
         self.refinement = BidirectionalAttentionOnly(
             hidden_size=adapter_size,
             num_heads=attention_heads,
             norm_eps=norm_eps,
             layer_scale_init=layer_scale_init,
             projection_bias=projection_bias,
+            linear_dtype=linear_dtype,
         )
         self.output_norm = FP32RMSNorm(adapter_size, norm_eps)
-        self.output_projection = nn.Linear(adapter_size, output_size, bias=projection_bias)
+        self.output_projection = nn.Linear(
+            adapter_size,
+            output_size,
+            bias=projection_bias,
+            dtype=linear_dtype,
+        )
 
     def forward(
         self,
@@ -86,12 +107,17 @@ class TextConditioner(nn.Module):
         )
         grouped = projected.view(*projected.shape[:-1], self.groups, self.group_size)
         scores = (
-            torch.einsum("bmlgh,lgh->bmlg", grouped, self.gate_weight)
+            torch.einsum("bmlgh,lgh->bmlg", grouped.float(), self.gate_weight)
             / math.sqrt(self.group_size)
             + self.gate_bias[None, None]
         )
         weights = scores.softmax(dim=2)
-        mixed = (grouped * weights.unsqueeze(-1)).sum(dim=2).flatten(-2)
+        mixed = (
+            (grouped.float() * weights.unsqueeze(-1))
+            .sum(dim=2)
+            .flatten(-2)
+            .to(grouped.dtype)
+        )
         deepest = projected[:, :, -1]
         tokens = deepest + self.mix_gate.to(deepest.dtype) * (mixed - deepest)
         tokens = self.refinement(tokens, main_mask)
