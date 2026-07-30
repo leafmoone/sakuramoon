@@ -3,16 +3,33 @@
   "task_id": "D011",
   "hardware": "CPU",
   "targeted": {
-    "command": "uv run pytest -q tests/unit/data/test_metadata.py tests/unit/data/test_validation.py",
-    "passed": 17,
-    "failed": 0
+    "command": "uv run --frozen pytest -q tests/unit/data/test_metadata.py tests/unit/data/test_validation.py",
+    "passed": 19,
+    "failed": 0,
+    "duration_seconds": 0.34
   },
-  "data_suite_passed": 57,
-  "full_cpu_suite_passed": 168,
+  "full_cpu_suite": {
+    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+    "passed": 351,
+    "failed": 0,
+    "warnings": 24,
+    "duration_seconds": 30.48
+  },
   "ruff": true,
   "pyright_errors": 0,
   "production_metadata_scanned": false,
   "production_validation_shard_created": false,
   "gpu_used": false,
-  "package_review_status": "pending_D010_D015_completion"
+  "invalid_aspect_bucket_keys_rejected": [
+    "empty string",
+    "whitespace-only string",
+    "non-string"
+  ],
+  "package_review_status": "initial_finding_remediated_main_agent_acceptance",
+  "pending": [
+    "production metadata field mapping",
+    "approximately 11M-ID uniqueness scan",
+    "independent validation shard publication",
+    "full zero-leak training dry run"
+  ]
 }

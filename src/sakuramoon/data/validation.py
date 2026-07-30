@@ -62,6 +62,12 @@ def _stable_rank(seed: int, stratum: ValidationStratum, sample_id: int) -> bytes
     return hashlib.sha256(payload).digest()
 
 
+def _validated_bucket_key(value: object) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValidationSelectionError("aspect bucket resolver returned an invalid key")
+    return value
+
+
 def _allocate_counts(
     sizes: dict[ValidationStratum, int], total: int
 ) -> dict[ValidationStratum, int]:
@@ -112,9 +118,7 @@ def select_validation_records(
 
     grouped: dict[ValidationStratum, list[MetadataRecord]] = {}
     for record in records:
-        bucket = aspect_bucket(record.width, record.height)
-        if not bucket:
-            raise ValidationSelectionError("aspect bucket resolver returned an invalid key")
+        bucket = _validated_bucket_key(aspect_bucket(record.width, record.height))
         stratum = ValidationStratum(
             release=record.release,
             aspect_bucket=bucket,

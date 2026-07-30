@@ -89,10 +89,13 @@ def test_selection_rejects_duplicate_or_insufficient_ids() -> None:
         select_validation_records(duplicate, seed=1, aspect_bucket=_bucket)
 
 
-def test_selection_rejects_invalid_bucket_resolver_result() -> None:
+@pytest.mark.parametrize("bucket", ["", " ", 1])
+def test_selection_rejects_invalid_bucket_resolver_result(bucket: object) -> None:
     with pytest.raises(ValidationSelectionError, match="invalid key"):
         select_validation_records(
-            _records(2000), seed=1, aspect_bucket=lambda width, height: ""
+            _records(2000),
+            seed=1,
+            aspect_bucket=lambda width, height: bucket,  # type: ignore[return-value]
         )
 
 
