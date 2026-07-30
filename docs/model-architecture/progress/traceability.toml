@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 19
+registry_revision = 20
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -315,8 +315,9 @@ config_keys = [
     "kernels.*",
 ]
 modules = [
-    "src/sakuramoon/model/packing.py",
-    "src/sakuramoon/model/rope.py",
+    "src/sakuramoon/conditioning/modality.py",
+    "src/sakuramoon/conditioning/packing.py",
+    "src/sakuramoon/conditioning/rope.py",
     "src/sakuramoon/model/attention.py",
 ]
 reference_modules = []
@@ -2724,7 +2725,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C05-001"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "packing_rope"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2736,8 +2737,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T024"
+implementation_paths = [
+    "src/sakuramoon/conditioning/modality.py",
+    "src/sakuramoon/conditioning/packing.py",
+    "src/sakuramoon/conditioning/rope.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2772,7 +2778,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C05-002"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "packing_rope"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2784,8 +2790,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T024"
+implementation_paths = [
+    "src/sakuramoon/conditioning/modality.py",
+    "src/sakuramoon/conditioning/packing.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2868,7 +2878,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C05-004"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "packing_rope"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2880,8 +2890,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T024"
+implementation_paths = [
+    "src/sakuramoon/conditioning/rope.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2916,7 +2929,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C05-005"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "packing_rope"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2928,8 +2941,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T024"
+implementation_paths = [
+    "src/sakuramoon/conditioning/rope.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2964,7 +2980,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C05-006"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "packing_rope"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2976,8 +2992,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T024"
+implementation_paths = [
+    "src/sakuramoon/conditioning/rope.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3012,7 +3031,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C05-007"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "packing_rope"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3024,8 +3043,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T024"
+implementation_paths = [
+    "src/sakuramoon/conditioning/norm.py",
+    "src/sakuramoon/conditioning/rope.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3060,7 +3083,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C05-008"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "packing_rope"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3072,8 +3095,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T024"
+implementation_paths = [
+    "src/sakuramoon/conditioning/packing.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

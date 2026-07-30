@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "task_id": "T024",
+  "cpu_unit_passed": 5,
+  "gpu_tested": true,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "packed_shape": [2113, 2560],
+  "cu_seqlens": [0, 1060, 2113],
+  "query_heads": 20,
+  "key_heads": 5,
+  "packing_ms": [0.644, 0.773, 0.543],
+  "rope_forward_ms": [1.188, 1.061, 1.026],
+  "rope_backward_ms": [1.324, 1.145, 1.119],
+  "peak_memory_mib": 192.7,
+  "finite_outputs_and_gradients": true,
+  "package_review_status": "pending"
+}
