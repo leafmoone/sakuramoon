@@ -66,6 +66,16 @@
       "executor": "r002_tooling_entrypoints",
       "command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py",
       "tool_reported_seconds": 12.53
+    },
+    {
+      "executor": "main_agent",
+      "command": "uv run --frozen pytest -q tests/unit/environment/test_uv_version.py",
+      "tool_reported_seconds": 0.15
+    },
+    {
+      "executor": "main_agent",
+      "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+      "tool_reported_seconds": 25.35
     }
   ],
   "development_duration_seconds": null,

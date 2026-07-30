@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "task_id": "R002",
   "result": "pass",
   "integration_status": "main-agent full-suite recheck passed after A002 worktree stabilized",
@@ -32,7 +32,7 @@
     {
       "name": "cold_rebuild_lock_input_binding",
       "status": "pass",
-      "detail": "Start/current pyproject files differ only in tooling configuration. Canonical JSON over project, dependency-groups and tool.uv is 1678 bytes with identical SHA-256 7f10b80856f5e6d20b6637c416f753980a7347a3c3e64c601c289b0afb3035cf."
+      "detail": "The historical cold rebuild used uv 0.12.0. Adding required-version changes the canonical tool-input digest to a1a3559fcdf9454bd7a04a14664718a46d0f9b15e321202123a35bfe4df28d5d without changing dependencies, sources, build variables or uv.lock."
     },
     {
       "name": "configured_uv_cache",
@@ -119,6 +119,18 @@
       "name": "license_inventory",
       "status": "pass",
       "detail": "The R002 license inventory is explicitly bound to the canonical uv.lock SHA-256 and records all 94 installed distributions; all have declared or bundled-license classification."
+    },
+    {
+      "name": "exact_uv_tool_gate",
+      "command": "uv run --frozen pytest -q tests/unit/environment/test_uv_version.py",
+      "status": "pass",
+      "detail": "2 tests passed: the project requires exactly uv 0.12.0 and a real uv lock subprocess rejects an incompatible ==0.0.1 requirement."
+    },
+    {
+      "name": "foundation_remediation_full_cpu_suite",
+      "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+      "status": "pass",
+      "detail": "342 tests passed after the exact uv tool gate and isolated traceability fixture update."
     }
   ],
   "historical_attempts": [

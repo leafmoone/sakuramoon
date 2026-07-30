@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 34
+registry_revision = 35
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -8233,8 +8233,11 @@ implementation_paths = [
     "docs/model-architecture/reviews/R002/cold-rebuild-report.json",
     "docs/model-architecture/reviews/R002/timing.json",
     "docs/model-architecture/reviews/R002/implementation_report.md",
+    "docs/model-architecture/reviews/R002/ai_review.md",
+    "docs/model-architecture/reviews/R002/infra_review.md",
     "docs/model-architecture/progress/time-log.jsonl",
     "tests/unit/docs/test_verify_traceability.py",
+    "tests/unit/environment/test_uv_version.py",
 ]
 evidence_hardware = ""
 evidence_artifacts = []

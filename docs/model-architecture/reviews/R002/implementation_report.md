@@ -6,7 +6,7 @@ R002 建立 Linux x86_64/Python 3.12 的 uv lock、CUDA 12.8/PyTorch ABI 组合�
 
 ## 实现摘要
 
-- 安装并固定 uv 0.12.0；`pyproject.toml` 和 `uv.lock` 限定 Linux x86_64/Python 3.12。
+- 安装并固定 uv 0.12.0；`pyproject.toml` 以精确 `required-version` 硬失败拒绝其他 uv 版本，并与 `uv.lock` 一同限定 Linux x86_64/Python 3.12。
 - 采用 PyTorch `2.10.0+cu128` / TorchAO `0.16.0` / Triton `3.6.0`，避免 torch 2.11 对 causal-conv wheel 的额外源码耦合。
 - 精确锁定 FA4 `4.0.0b24`、CuTeDSL `4.6.0.dev0`、Quack `0.5.3`、FLA `0.5.2` 和 Transformers `5.14.1`。
 - 移除全局 prerelease 选择，并直接锁定稳定的 tokenizers、hf-xet 与 sentry-sdk；FA4/CuTeDSL/apache-tvm-ffi 的预发布状态属于明确上游 ABI 约束。
@@ -38,7 +38,7 @@ R002 建立 Linux x86_64/Python 3.12 的 uv lock、CUDA 12.8/PyTorch ABI 组合�
 - `causal-conv1d==1.6.2.post1` 从完整 commit `4f6ae4e26ae5fe8af9372f8d312ab25cc4595223` 编译。工具链为 CPython 3.12.3、GCC/G++ 13.3.0、CUDA 12.8.93、CMake 3.31.6、Ninja 1.11.1、glibc 2.39、Torch 2.10.0+cu128；CXX11 ABI=True，build vars 为 `CAUSAL_CONV1D_FORCE_BUILD=TRUE`、`CAUSAL_CONV1D_FORCE_CXX11_ABI=TRUE`、`MAX_JOBS=4`。
 - 冷构建 extension 为 270,042,496 bytes、SHA-256 `0a216693f3733015216ac936d183cf7ce8e9298c8e880d3ad81ddccc68232903`；cache-warm 项目 extension 为 270,041,048 bytes、SHA-256 `51655c843d2f8228884007b178b42c89eb0dd052495e68029602e39986a93b0e`。绝对构建路径进入未剥离 debug 信息并改变 ELF BuildID，因此两者非 bit-identical；这不阻塞可冷重建结论，但禁止宣称逐字节可复现。
 - 22 个关键 imports 全部通过，测试环境显式禁用 CUDA 可见性并设置 Hugging Face/Transformers/W&B offline。未执行 kernel，没有访问模型、数据、DB、reference 或 `.env`。
-- 冷构建开始时的 `pyproject.toml` 为 2084 bytes、SHA-256 `77ef980615f6a501330a6943bf2995632fdb7583a4eaf5747a7f08574566bd9a`；当前文件为 2501 bytes、SHA-256 `b718f6c8c235af6df19d7fa10cd1f49348907844ad3ed5ffff65716d5dc87fc2`。差异仅为工具入口。对 `[project]`、`[dependency-groups]` 和完整 `[tool.uv]` 生成排序、紧凑 canonical JSON 后，两者均为 1678 bytes，SHA-256 均为 `7f10b80856f5e6d20b6637c416f753980a7347a3c3e64c601c289b0afb3035cf`。
+- 冷构建开始时的 `pyproject.toml` 为 2084 bytes、SHA-256 `77ef980615f6a501330a6943bf2995632fdb7583a4eaf5747a7f08574566bd9a`。Foundation 复审修复后的当前文件为 2531 bytes、SHA-256 `0fa1c0488ce0acbb573340f81f017a88a0fff2c5e530babf79f9efc31f6bbea3`。修复前 `[project]`、`[dependency-groups]` 和完整 `[tool.uv]` canonical JSON 为 1678 bytes、SHA-256 `7f10b80856f5e6d20b6637c416f753980a7347a3c3e64c601c289b0afb3035cf`；新增精确 uv 工具门槛后为 1708 bytes、SHA-256 `a1a3559fcdf9454bd7a04a14664718a46d0f9b15e321202123a35bfe4df28d5d`。依赖、source、build variables 与 `uv.lock` 未改变，冷重建所用工具本来就是 0.12.0，因此不重跑 2002 秒源码构建。
 
 ## Foundation Infra 预审修复
 
@@ -59,4 +59,4 @@ R002 建立 Linux x86_64/Python 3.12 的 uv lock、CUDA 12.8/PyTorch ABI 组合�
 
 ## 结论
 
-R002 的依赖锁、cache-warm fresh-venv、空 cache 源码冷重建、默认工程入口与 OPEN-049 追踪登记针对性验收通过，状态进入“等待 Foundation 包级独立复审”。Bit-for-bit 构建、kernel、四卡、真实模型和正式训练门槛未关闭。
+R002 的依赖锁、精确 uv 工具门槛、cache-warm fresh-venv、空 cache 源码冷重建、默认工程入口与 OPEN-049 追踪登记针对性验收通过。Foundation 独立 AI 审查通过；Infra 唯一阻塞项已修复并由真实版本拒绝负测试验收。Bit-for-bit 构建、kernel、四卡、真实模型和正式训练门槛未关闭。
