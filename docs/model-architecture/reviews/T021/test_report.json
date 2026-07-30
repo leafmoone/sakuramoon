@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "task_id": "T021",
+  "cpu_unit_passed": 3,
+  "strict_local_weight_load": true,
+  "gpu_tested": true,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "bf16_dense_lengths": [98, 162, 226, 290, 354, 418, 482, 546],
+  "output_contract": "[1,L,7,2048]",
+  "steady_forward_ms": [34.722, 38.202, 36.180, 34.941, 34.677, 36.513, 37.139, 36.994],
+  "peak_memory_mib": 3700.4,
+  "finite_outputs": true,
+  "trainable_parameters": 0,
+  "visual_module_present": false,
+  "package_review_status": "pending"
+}

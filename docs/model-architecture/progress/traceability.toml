@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 15
+registry_revision = 16
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -269,6 +269,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[profiles]]
 name = "text_style"
 owner_tasks = [
+    "T021",
     "T022",
     "T023",
 ]
@@ -277,11 +278,13 @@ config_keys = [
     "model.style.*",
 ]
 modules = [
+    "src/sakuramoon/encoders/qwen.py",
     "src/sakuramoon/conditioning/text.py",
     "src/sakuramoon/conditioning/style.py",
 ]
 reference_modules = []
 tests = [
+    "tests/**/qwen*",
     "tests/**/text*",
     "tests/**/style*",
 ]
@@ -1653,7 +1656,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-001"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1666,8 +1669,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T021"
+implementation_paths = [
+    "src/sakuramoon/encoders/qwen.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2279,7 +2285,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C04-001"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "text_style"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2292,8 +2298,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T021"
+implementation_paths = [
+    "src/sakuramoon/encoders/qwen.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2303,11 +2312,13 @@ config_keys = [
     "model.style.*",
 ]
 modules = [
+    "src/sakuramoon/encoders/qwen.py",
     "src/sakuramoon/conditioning/text.py",
     "src/sakuramoon/conditioning/style.py",
 ]
 reference_modules = []
 tests = [
+    "tests/**/qwen*",
     "tests/**/text*",
     "tests/**/style*",
 ]
