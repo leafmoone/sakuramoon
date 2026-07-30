@@ -32,8 +32,10 @@
 
 ## 执行协议
 
-- 启动子代理时，第一步必须直接调用 `collaboration.spawn_agent`。禁止通过 `exec`、JavaScript、`shell_command`、打印字符串或其他间接方式尝试调用。
-- `collaboration.spawn_agent` 直接调用失败时，只报告失败并立即停止该次启动；不得自动重试，不得输出 `ready`、`spawn`、`no-op` 等占位信息。
+- 启动子代理时，第一步必须把工具调用目标直接设为 `collaboration.spawn_agent`，并向它传入 `task_name`、`message` 与所需的 `fork_turns`。禁止把调用写进 `exec`、JavaScript、`shell_command`、终端命令、打印字符串或其他间接执行环境。
+- 只有 `collaboration.spawn_agent` 返回明确的任务名才算启动成功。主代理必须立即向用户显示该任务名，并通过代理回执或 `collaboration.list_agents` 确认其已运行；不得把占位文本、shell 输出或主代理自己的说明当作成功。
+- 预期启动子代理却误路由到 `exec` 或任何其他工具时，该次操作视为从未启动。主代理必须立即纠正工具目标并重新直接调用 `collaboration.spawn_agent`，直到收到任务名；不得因为一次错误路由停止子代理启动、当前任务或整个目标。
+- `collaboration.spawn_agent` 本身返回真实错误时，主代理应显示原始错误，直接用 `collaboration.list_agents` 检查槽位与现有代理状态，然后继续直接重试可用槽位。等待启动返回或代理回执必须有界并持续显示状态，禁止静默卡死；不得输出 `ready`、`spawn`、`no-op` 等占位信息。
 - 在依赖已满足、接口已冻结、写路径与 GPU/NVMe 资源不冲突时，尽量保持并发槽位满载；子代理完成后立即将释放槽位复用于可安全推进的后续工作。依赖未满足时只允许只读预审，不得提前实现或关闭任务。
 - 低中风险任务按里程碑包执行：Foundation=`R002,D001,C001,A001`；Data=`D010-D015`；Encoders/Conditioning=`T020-T024`；Dense Model=`M030-M033`；Training Utilities=`T050-T053`。
 - 低中风险任务包复用一个实现代理；包结束后由独立审查代理逐 ID 给出 AI/模型正确性与 Infra/性能结论。问题只交回受影响任务，不重跑无关任务。
