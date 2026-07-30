@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "task_id": "D012",
+  "hardware": "CPU",
+  "targeted": {
+    "command": "uv run pytest -q tests/unit/data/test_cache.py tests/unit/data/test_state.py",
+    "passed": 14,
+    "failed": 0
+  },
+  "ruff": true,
+  "pyright_errors": 0,
+  "production_cache_benchmark_run": false,
+  "disk_full_injection_run": false,
+  "gpu_used": false,
+  "package_review_status": "pending_D010_D015_completion"
+}

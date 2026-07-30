@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 16
+registry_revision = 17
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -4694,7 +4694,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C11-006"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "data"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4706,8 +4706,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D012"
+implementation_paths = [
+    "src/sakuramoon/data/cache.py",
+    "src/sakuramoon/data/state.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
