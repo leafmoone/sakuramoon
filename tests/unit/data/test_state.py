@@ -13,6 +13,7 @@ from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetSourceIdentity,
     ShardRecord,
+    manifest_sha256,
 )
 from sakuramoon.data.modelscope import FetchedShard, ModelScopeDatasetTransport
 from sakuramoon.data.state import (
@@ -23,10 +24,10 @@ from sakuramoon.data.state import (
 )
 
 
-def _manifest() -> DatasetManifest:
+def _manifest(revision: str = "b" * 40) -> DatasetManifest:
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="b" * 40,
+        revision=revision,
         license_id="synthetic-license",
         access_terms="synthetic-terms",
     )
@@ -148,12 +149,46 @@ def test_state_rejects_unknown_keys_and_paths(tmp_path: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
+                "manifest_sha256": manifest_sha256(manifest),
                 "completed": ["missing.tar"],
                 "active": None,
                 "replayed_shards": 0,
                 "replayed_samples": 0,
                 "unexpected": True,
+            }
+        )
+    )
+
+    with pytest.raises(ShardStateError, match="invalid"):
+        ShardStateStore(path, manifest).load()
+
+
+def test_state_rejects_different_manifest_with_identical_paths(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    original = _manifest()
+    original_store = ShardStateStore(path, original)
+    original_store.begin(ShardRunState.empty(), original.shards[0].path)
+
+    changed = _manifest("c" * 40)
+    assert tuple(shard.path for shard in changed.shards) == tuple(
+        shard.path for shard in original.shards
+    )
+    with pytest.raises(ShardStateError, match="invalid"):
+        ShardStateStore(path, changed).load()
+
+
+def test_state_rejects_legacy_unbound_schema(tmp_path: Path) -> None:
+    manifest = _manifest()
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "completed": [manifest.shards[0].path],
+                "active": None,
+                "replayed_shards": 0,
+                "replayed_samples": 0,
             }
         )
     )

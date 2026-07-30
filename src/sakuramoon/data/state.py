@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from sakuramoon.data.cache import CachedShard, ShardCache
-from sakuramoon.data.manifest import DatasetManifest, DatasetManifestError
+from sakuramoon.data.manifest import (
+    DatasetManifest,
+    DatasetManifestError,
+    manifest_sha256,
+)
 
 
 class ShardStateError(RuntimeError):
@@ -28,13 +32,14 @@ class ShardRunState:
         return cls(completed=(), active=None, replayed_shards=0, replayed_samples=0)
 
 
-def _payload(state: ShardRunState) -> dict[str, object]:
+def _payload(state: ShardRunState, manifest_digest: str) -> dict[str, object]:
     return {
         "active": state.active,
         "completed": list(state.completed),
+        "manifest_sha256": manifest_digest,
         "replayed_samples": state.replayed_samples,
         "replayed_shards": state.replayed_shards,
-        "schema_version": 1,
+        "schema_version": 2,
     }
 
 
@@ -44,6 +49,7 @@ class ShardStateStore:
     def __init__(self, path: Path, manifest: DatasetManifest) -> None:
         self.path = path
         self.manifest = manifest
+        self._manifest_sha256 = manifest_sha256(manifest)
         self._known_paths = frozenset(shard.path for shard in manifest.shards)
 
     def load(self) -> ShardRunState:
@@ -54,12 +60,16 @@ class ShardStateStore:
             if set(document) != {
                 "active",
                 "completed",
+                "manifest_sha256",
                 "replayed_samples",
                 "replayed_shards",
                 "schema_version",
             }:
                 raise ValueError
-            if document["schema_version"] != 1:
+            if (
+                document["schema_version"] != 2
+                or document["manifest_sha256"] != self._manifest_sha256
+            ):
                 raise ValueError
             active = document["active"]
             completed = cast(object, document["completed"])
@@ -96,7 +106,12 @@ class ShardStateStore:
     def save(self, state: ShardRunState) -> None:
         temporary = self.path.with_name(f".{self.path.name}.tmp")
         body = (
-            json.dumps(_payload(state), sort_keys=True, separators=(",", ":")) + "\n"
+            json.dumps(
+                _payload(state, self._manifest_sha256),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
         ).encode()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
