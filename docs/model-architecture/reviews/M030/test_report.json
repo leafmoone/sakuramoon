@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "task_id": "M030",
+  "cpu_tests_passed": 11,
+  "ruff_passed": true,
+  "pyright_passed": true,
+  "gpu_tested": true,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "model_dim": 2560,
+  "stable_slots": 24,
+  "active_slots": 16,
+  "batch_size": 2,
+  "block_shape": [2, 16, 2560],
+  "final_shape": [2, 2560],
+  "dtype": "float32",
+  "forward_ms": [0.627, 0.586, 0.565, 0.561, 0.560, 0.545, 0.531, 0.542, 0.550, 0.539],
+  "backward_ms": 115.516,
+  "peak_memory_mib": 301.2,
+  "finite_gradients": true,
+  "package_review_status": "pending"
+}

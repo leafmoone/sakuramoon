@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 23
+registry_revision = 24
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -380,17 +380,17 @@ owner_tasks = [
     "M032",
 ]
 config_keys = [
-    "model.conditioning.*",
-    "model.output_head.*",
+    "model.condition.*",
+    "model.head.*",
 ]
 modules = [
-    "src/sakuramoon/model/conditioning.py",
-    "src/sakuramoon/model/head.py",
+    "src/sakuramoon/conditioning/global_condition.py",
+    "src/sakuramoon/model/output_head.py",
 ]
 reference_modules = []
 tests = [
-    "tests/**/conditioning*",
-    "tests/**/head*",
+    "tests/unit/conditioning/test_global_condition.py",
+    "tests/unit/model/test_output_head.py",
 ]
 benchmarks = [
     "benchmarks/model/**",
@@ -3611,7 +3611,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C07-001"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "conditioning"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3623,24 +3623,25 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M030"
+implementation_paths = [
+    "src/sakuramoon/conditioning/global_condition.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "model.conditioning.*",
-    "model.output_head.*",
+    "model.condition.*",
+    "model.head.*",
 ]
 modules = [
-    "src/sakuramoon/model/conditioning.py",
-    "src/sakuramoon/model/head.py",
+    "src/sakuramoon/conditioning/global_condition.py",
 ]
 reference_modules = []
 tests = [
-    "tests/**/conditioning*",
-    "tests/**/head*",
+    "tests/unit/conditioning/test_global_condition.py",
 ]
 benchmarks = [
     "benchmarks/model/**",
@@ -3656,7 +3657,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C07-002"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "conditioning"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3668,24 +3669,25 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M030"
+implementation_paths = [
+    "src/sakuramoon/conditioning/global_condition.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "model.conditioning.*",
-    "model.output_head.*",
+    "model.condition.*",
+    "model.head.*",
 ]
 modules = [
-    "src/sakuramoon/model/conditioning.py",
-    "src/sakuramoon/model/head.py",
+    "src/sakuramoon/conditioning/global_condition.py",
 ]
 reference_modules = []
 tests = [
-    "tests/**/conditioning*",
-    "tests/**/head*",
+    "tests/unit/conditioning/test_global_condition.py",
 ]
 benchmarks = [
     "benchmarks/model/**",
@@ -3701,7 +3703,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C07-003"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "conditioning"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3713,24 +3715,25 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M030"
+implementation_paths = [
+    "src/sakuramoon/conditioning/global_condition.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "model.conditioning.*",
-    "model.output_head.*",
+    "model.condition.*",
+    "model.head.*",
 ]
 modules = [
-    "src/sakuramoon/model/conditioning.py",
-    "src/sakuramoon/model/head.py",
+    "src/sakuramoon/conditioning/global_condition.py",
 ]
 reference_modules = []
 tests = [
-    "tests/**/conditioning*",
-    "tests/**/head*",
+    "tests/unit/conditioning/test_global_condition.py",
 ]
 benchmarks = [
     "benchmarks/model/**",
@@ -3746,7 +3749,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C07-004"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "conditioning"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3758,24 +3761,25 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M030"
+implementation_paths = [
+    "src/sakuramoon/conditioning/global_condition.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "model.conditioning.*",
-    "model.output_head.*",
+    "model.condition.*",
+    "model.head.*",
 ]
 modules = [
-    "src/sakuramoon/model/conditioning.py",
-    "src/sakuramoon/model/head.py",
+    "src/sakuramoon/conditioning/global_condition.py",
 ]
 reference_modules = []
 tests = [
-    "tests/**/conditioning*",
-    "tests/**/head*",
+    "tests/unit/conditioning/test_global_condition.py",
 ]
 benchmarks = [
     "benchmarks/model/**",
@@ -3810,17 +3814,17 @@ evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "model.conditioning.*",
-    "model.output_head.*",
+    "model.condition.*",
+    "model.head.*",
 ]
 modules = [
-    "src/sakuramoon/model/conditioning.py",
-    "src/sakuramoon/model/head.py",
+    "src/sakuramoon/conditioning/global_condition.py",
+    "src/sakuramoon/model/output_head.py",
 ]
 reference_modules = []
 tests = [
-    "tests/**/conditioning*",
-    "tests/**/head*",
+    "tests/unit/conditioning/test_global_condition.py",
+    "tests/unit/model/test_output_head.py",
 ]
 benchmarks = [
     "benchmarks/model/**",
@@ -3855,17 +3859,17 @@ evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "model.conditioning.*",
-    "model.output_head.*",
+    "model.condition.*",
+    "model.head.*",
 ]
 modules = [
-    "src/sakuramoon/model/conditioning.py",
-    "src/sakuramoon/model/head.py",
+    "src/sakuramoon/conditioning/global_condition.py",
+    "src/sakuramoon/model/output_head.py",
 ]
 reference_modules = []
 tests = [
-    "tests/**/conditioning*",
-    "tests/**/head*",
+    "tests/unit/conditioning/test_global_condition.py",
+    "tests/unit/model/test_output_head.py",
 ]
 benchmarks = [
     "benchmarks/model/**",
