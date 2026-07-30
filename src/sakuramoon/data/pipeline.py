@@ -21,7 +21,7 @@ from sakuramoon.data.caption import (
     CaptionFields,
     build_caption_plan,
 )
-from sakuramoon.data.image_ops import prepare_image
+from sakuramoon.data.image_ops import ImageRejected, prepare_image
 from sakuramoon.data.manifest import DatasetManifest
 from sakuramoon.data.metadata import MetadataRecord, parse_metadata
 from sakuramoon.data.serialize import (
@@ -220,6 +220,8 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                     min_crop_retention=self.min_crop_retention,
                     crop_seed=identity.crop_seed,
                 )
+        except ImageRejected:
+            return None
         except (OSError, Image.DecompressionBombError):
             raise PipelineSampleError("WebDataset image decode failed") from None
         assignment = processed.assignment

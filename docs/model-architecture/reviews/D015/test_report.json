@@ -1,9 +1,21 @@
 {
   "schema_version": 1,
   "task_id": "D015",
-  "targeted_passed": 10,
+  "targeted": {
+    "command": "uv run --frozen pytest -q tests/unit/data/test_pipeline.py tests/unit/data/test_collate.py",
+    "passed": 12,
+    "failed": 0,
+    "warnings": 6,
+    "duration_seconds": 3.36
+  },
   "data_text_protocol_passed": 132,
-  "full_cpu_passed": 244,
+  "full_cpu_suite": {
+    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+    "passed": 364,
+    "failed": 0,
+    "warnings": 24,
+    "duration_seconds": 32.64
+  },
   "real_webdataset_tar": true,
   "persistent_worker_sweep": [1, 2, 3],
   "validation_excluded_before_decode": true,
@@ -15,7 +27,18 @@
   "vae_latent_shape": [1, 128, 32, 32],
   "finite_outputs": true,
   "peak_memory_mib": 3821.5,
+  "gpu_rerun_for_cpu_remediation": false,
+  "image_rejection_contracts": [
+    "no_upscale skips sample and continues iteration",
+    "retention skips sample and continues iteration"
+  ],
   "production_metadata_mapping": "pending",
   "production_performance_sweep": false,
-  "package_review_status": "pending"
+  "package_review_status": "initial_finding_remediated_final_package_rereview_pending",
+  "pending": [
+    "production metadata mapping",
+    "eleven non-global dropout decisions",
+    "full validation zero-leak scan",
+    "cold-cache throughput, ready-wait, RSS, and rejection counts"
+  ]
 }

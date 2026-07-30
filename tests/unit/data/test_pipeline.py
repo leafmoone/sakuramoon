@@ -61,8 +61,14 @@ def _empty_fields(raw: Mapping[str, object]) -> CaptionFields:
 
 
 def _jpeg() -> bytes:
+    return _jpeg_size(640, 512)
+
+
+def _jpeg_size(width: int, height: int) -> bytes:
     output = io.BytesIO()
-    Image.new("RGB", (640, 512), color=(10, 20, 30)).save(output, format="JPEG")
+    Image.new("RGB", (width, height), color=(10, 20, 30)).save(
+        output, format="JPEG"
+    )
     return output.getvalue()
 
 
@@ -122,6 +128,41 @@ def test_real_webdataset_iteration_excludes_validation_before_decode(
     assert parser_calls == 1
 
 
+@pytest.mark.parametrize(
+    ("bucket", "rejected_image", "valid_image"),
+    [
+        (BucketShape(512, 512), _jpeg_size(500, 500), _jpeg_size(640, 512)),
+        (BucketShape(256, 1024), _jpeg_size(2000, 300), _jpeg_size(1024, 256)),
+    ],
+    ids=["no_upscale", "retention"],
+)
+def test_image_rejection_skips_sample_and_continues_real_tar_iteration(
+    tmp_path: Path,
+    bucket: BucketShape,
+    rejected_image: bytes,
+    valid_image: bytes,
+) -> None:
+    shard = tmp_path / "samples.tar"
+    _write_tar(shard, ((1, rejected_image), (2, valid_image)))
+    pipeline = WebDatasetPipeline(
+        shard_paths=(shard,),
+        validation_ids=frozenset(),
+        buckets=(bucket,),
+        min_crop_retention=0.8,
+        probabilities=_probabilities(),
+        tokenizer=_Tokenizer(),
+        framing=FramingContract(34, 5, 0),
+        caption_fields_parser=_empty_fields,
+        base_seed=9,
+        stage="S0",
+        pass_index=0,
+    )
+
+    samples = tuple(pipeline)
+
+    assert tuple(sample.sample_id for sample in samples) == (2,)
+
+
 def test_rng_identity_changes_by_stage_pass_and_domain() -> None:
     first = rng_identity(base_seed=4, stage="S0", pass_index=0, sample_id=10)
     repeated = rng_identity(base_seed=4, stage="S0", pass_index=0, sample_id=10)
@@ -167,10 +208,7 @@ def test_persistent_worker_sweep_consumes_each_shard_once(
         pin_memory=False,
     )
 
-    consumed = sorted(
-        int(batch.sample_ids[0].item())
-        for batch in loader
-    )
+    consumed = sorted(int(batch.sample_ids[0].item()) for batch in loader)
 
     assert consumed == [1, 2, 3]
 

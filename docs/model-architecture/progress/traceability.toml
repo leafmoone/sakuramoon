@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 43
+registry_revision = 44
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -509,6 +509,7 @@ artifacts = [
     "docs/model-architecture/reviews/D012/**",
     "docs/model-architecture/reviews/D013/**",
     "docs/model-architecture/reviews/D014/**",
+    "docs/model-architecture/reviews/D015/**",
     "artifacts/data/**",
 ]
 hardware = "1GPU"
@@ -4923,7 +4924,16 @@ implementation_commit_ref = "task:D015"
 implementation_paths = [
     "src/sakuramoon/data/pipeline.py",
     "src/sakuramoon/data/collate.py",
+    "tests/unit/data/test_pipeline.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D015.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D015/implementation_report.md",
+    "docs/model-architecture/reviews/D015/test_report.json",
+    "docs/model-architecture/reviews/D015/timing.json",
+    "docs/model-architecture/reviews/D015/ai_review.md",
+    "docs/model-architecture/reviews/D015/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -4945,6 +4955,8 @@ benchmarks = [
     "benchmarks/data/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/DATA/**",
+    "docs/model-architecture/reviews/D015/**",
     "artifacts/data/**",
 ]
 not_applicable_fields = [
@@ -4979,7 +4991,16 @@ implementation_paths = [
     "src/sakuramoon/data/collate.py",
     "src/sakuramoon/encoders/qwen.py",
     "src/sakuramoon/encoders/mage_vae.py",
+    "tests/unit/data/test_pipeline.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D015.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D015/implementation_report.md",
+    "docs/model-architecture/reviews/D015/test_report.json",
+    "docs/model-architecture/reviews/D015/timing.json",
+    "docs/model-architecture/reviews/D015/ai_review.md",
+    "docs/model-architecture/reviews/D015/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -5001,6 +5022,8 @@ benchmarks = [
     "benchmarks/data/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/DATA/**",
+    "docs/model-architecture/reviews/D015/**",
     "artifacts/data/**",
 ]
 not_applicable_fields = [
