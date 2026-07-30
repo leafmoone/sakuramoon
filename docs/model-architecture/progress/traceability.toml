@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 20
+registry_revision = 21
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -1471,7 +1471,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C02-004"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "vae"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1483,8 +1483,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D013"
+implementation_paths = [
+    "src/sakuramoon/data/buckets.py",
+    "src/sakuramoon/data/image_ops.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1518,7 +1522,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C02-005"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "vae"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1530,8 +1534,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D013"
+implementation_paths = [
+    "src/sakuramoon/data/buckets.py",
+    "src/sakuramoon/data/image_ops.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -4185,7 +4193,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C10-003"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4197,8 +4205,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D013"
+implementation_paths = [
+    "src/sakuramoon/data/buckets.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -4232,7 +4243,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C10-004"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4244,8 +4255,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D013"
+implementation_paths = [
+    "src/sakuramoon/data/buckets.py",
+    "src/sakuramoon/data/image_ops.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
