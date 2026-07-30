@@ -1,6 +1,7 @@
 # T042 Infra review
 
-Status: PASS for the implemented single-GPU scope; no blocking T042 findings.
+Status: prior raw/model-only PASS remains valid. Fresh independent review of the
+PMA/release/policy expansion is pending.
 
 ## Publication and failure behavior
 
@@ -101,8 +102,9 @@ preflight waiver: the default NVML mismatch remains a hard environment blocker.
 
 Four-rank state, barriers, concurrent publication, DDP/NCCL restore, and
 all-rank identity remain pending until 4x RTX 5090 hardware is available.
-Checkpoint scheduling/retention and forced stage/growth points remain
-T043/T050. PMA/release writers, actual NFS/NVMe durability and performance,
+Operational cadence/retention integration, actual NFS/NVMe durability and performance,
 measured host RSS, cache-high-water checkpoint reservation, fault-injection
 matrices, and formal stage canaries remain pending. No long training was run,
-and this PASS must not be used to close any of those gates.
+and this PASS must not be used to close any of those gates. The later
+PMA/release/cadence/retention expansion also requires fresh review before its
+single-GPU code evidence can be accepted.

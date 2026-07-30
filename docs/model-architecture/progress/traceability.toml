@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 53
+registry_revision = 54
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -744,6 +744,33 @@ not_applicable_fields = [
     "benchmarks",
 ]
 not_applicable_reason = "The local-model execution boundary has no reference module or benchmark."
+
+[[profiles]]
+name = "checkpoint_release"
+owner_tasks = [
+    "T042",
+]
+config_keys = [
+    "checkpoint.*",
+]
+modules = [
+    "src/sakuramoon/checkpoint/pma.py",
+    "src/sakuramoon/checkpoint/policy.py",
+]
+reference_modules = []
+tests = [
+    "tests/unit/checkpoint/test_pma_policy.py",
+]
+benchmarks = []
+artifacts = [
+    "docs/model-architecture/reviews/T042/**",
+]
+hardware = "CPU"
+not_applicable_fields = [
+    "reference_modules",
+    "benchmarks",
+]
+not_applicable_reason = "PMA/release publication is a CPU checkpoint-lifecycle operation and has no reference implementation or standalone performance benchmark in this task."
 
 [[profiles]]
 name = "reference_execution_boundary"
@@ -4344,8 +4371,8 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-006"
 kind = "requirement"
-status = "planned"
-profile = "objective"
+status = "implemented"
+profile = "checkpoint_release"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
     "9. 训练目标、CFG 与采样",
@@ -4356,8 +4383,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T042"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/pma.py",
+    "tests/unit/checkpoint/test_pma_policy.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -5710,7 +5741,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C12-008"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -5722,8 +5753,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T042"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/policy.py",
+    "tests/unit/checkpoint/test_pma_policy.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -9092,7 +9127,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-060"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -9105,8 +9140,18 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T042"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/__init__.py",
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/pma.py",
+    "src/sakuramoon/checkpoint/policy.py",
+    "src/sakuramoon/checkpoint/save.py",
+    "src/sakuramoon/checkpoint/schema.py",
+    "tests/unit/checkpoint/test_checkpoint.py",
+    "tests/unit/checkpoint/test_pma_policy.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

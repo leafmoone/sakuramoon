@@ -1,6 +1,7 @@
 # T042 AI review
 
-Status: PASS for the implemented single-GPU scope; no blocking findings.
+Status: prior raw/model-only PASS remains valid. Fresh independent review of the
+PMA/release/policy expansion is pending.
 
 The independent review confirmed that raw and model-only artifacts use distinct kinds and publication names. Raw resume requires `CheckpointKind.RAW`, while the model-only loader requires `CheckpointKind.MODEL_ONLY`; PMA and release remain non-resumable artifact kinds. Model tensors are deterministically sharded by sorted canonical FQN, and load rejects any FQN, dtype, shape, declared-size, architecture, parameter-schema or full checkpoint-identity mismatch.
 
@@ -10,4 +11,4 @@ The checkpoint boundary is exactly the unwrapped `TrainableComposite` with `dit`
 
 The reviewer ran 81 CPU tests covering checkpoint plus the directly affected conditioning, model, optimizer and train contracts. Ruff, strict Pyright, traceability verification and `git diff --check` all passed.
 
-Four-rank sharding/barriers and all-rank state equality remain pending until four RTX 5090 GPUs are available. Growth migration remains T043, checkpoint scheduling/retention remains T043/T050, and full PMA/release production remains pending; this review does not close those boundaries.
+Four-rank sharding/barriers and all-rank state equality remain pending until four RTX 5090 GPUs are available. Growth migration remains T043. The new PMA/release/cadence/retention code and its CPU contracts were added after this review and therefore are not covered by this PASS until a fresh reviewer signs them off.

@@ -263,8 +263,10 @@ def _save(
     if state is not None and state.growth.active_slot_ids != active_slot_ids_from_module(module):
         raise ValueError("checkpoint growth state differs from model active slots")
     destination_root.mkdir(parents=True, exist_ok=True)
+    if destination_root.is_symlink() or not destination_root.is_dir():
+        raise ValueError("checkpoint destination must be a real directory")
     target = destination_root / _target_name(kind, identity)
-    if target.exists():
+    if target.exists() or target.is_symlink():
         raise FileExistsError(f"checkpoint target already exists: {target.name}")
     temporary = destination_root / f".{target.name}.{uuid.uuid4().hex}.tmp"
     temporary.mkdir()

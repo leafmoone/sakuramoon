@@ -371,6 +371,22 @@ def test_parent_fsync_failure_rolls_back_published_directory(
     assert discover_complete_checkpoints(tmp_path) == ()
 
 
+def test_save_rejects_symlink_destination_and_dangling_target(tmp_path: Path) -> None:
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="real directory"):
+        save_model_only(linked_root, _identity(), _tiny_composite())
+
+    target = tmp_path / "model_12_unit"
+    target.symlink_to(tmp_path / "missing", target_is_directory=True)
+    with pytest.raises(FileExistsError, match="already exists"):
+        save_model_only(tmp_path, _identity(), _tiny_composite())
+    assert target.is_symlink()
+
+
 def test_growth_state_rejects_noncanonical_range_slots() -> None:
     with pytest.raises(ValueError, match="canonical"):
         GrowthCheckpointState(tuple(range(16)), 1.0, "S0", 1, 256, None, None)
