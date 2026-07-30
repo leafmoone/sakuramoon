@@ -4,7 +4,7 @@
 
 A002 已将用户确认的两条资产执行边界写入现行决定、仓库规则、路线图与资产策略，并通过合同测试建立机器保护。实现没有读取或执行 `reference/` 内容、没有读取 `.env`、没有下载/哈希/加载模型、没有使用 GPU，也没有创建性能占位。
 
-首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17`、`70981e19510c5a6c7d7889d6042b5e8a55887931`、`9081104ba0a87ce72efbeac3125f975b7e3fb71d`、`cadd87391ef07ed7edb2932e8e2b339b268838ff` 后的独立 AI/Infra 审查均提出 changes required。现已完成 `review_remediation.md` 所列第八轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
+首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17`、`70981e19510c5a6c7d7889d6042b5e8a55887931`、`9081104ba0a87ce72efbeac3125f975b7e3fb71d`、`cadd87391ef07ed7edb2932e8e2b339b268838ff` 后的独立 AI/Infra 审查提出 changes required；提交 `477d0a76027dec67dd42c8824108238415d6728f` 的 Infra 复审又发现反射 callable 与 module namespace 两个根因。现已完成 `review_remediation.md` 所列第九轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
 
 ## 实现摘要
 
@@ -97,3 +97,17 @@ A002 已将用户确认的两条资产执行边界写入现行决定、仓库规
 - 结果：307 passed / 1 skipped boundary contracts（25.22 秒 pytest、25.838 秒 wall）、505 passed / 1 skipped full tests（47.18/47.784 秒）、28 Python sources/0 violations（20.249 秒）、Ruff PASS（0.273 秒）、strict Pyright 0 errors/0 warnings（3.991 秒）、traceability 221 requirements/source nodes PASS（1.054 秒）。唯一 skip 是 clean tree 不存在共享 D010 source；tracked fixture/pin success path 已通过。
 - Shared compatibility：共享树的 D010 AST/fixture 一致性实际通过，boundary contracts 308/308（32.61 秒），scanner 36 Python sources/0 violations（31.595 秒）。该结果不是 D010 远端 WebDataset 流式证据。
 - 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有联网、模型/数据下载、GPU 工作或性能 artifact。状态保持第八轮修复完成、等待独立 AI/Infra 复审。
+
+## 第九轮修复摘要
+
+- Callable 名称在 direct special-call 判定前统一剥离任意重复尾随 `.__call__`。`getattr.__call__`、重复链及 `builtins.getattr.__call__` 因而与直接 `getattr` 产生相同的可审计 member fact，并把 model-loader provenance 保留到实际调用。
+- `getattr`、`vars`、object/type attribute access、execution-namespace inspection 与静态/高阶 member selector 统一成为 security-sensitive callable。该分类经普通 fact 与递归容器传播；通过 `partial`/`partialmethod` 绑定，或进入 `operator.call`、`map`/`next`、本地 wrapper 与未知跨模块 adapter 时，复用 common higher-order security gate 硬失败。
+- Production `.__dict__` 作为 execution-namespace reflection 被拒绝，封闭 `sys.__dict__["modules"]["builtins"]`、`builtins.__dict__`、`importlib.__dict__` 和敏感库 module/class namespace 恢复，同时保留显式 local member 的 literal `getattr.__call__` 正例。
+- 现有 verified model root、`VerifiedAssetSelection`、synthetic Git helper、D010 network capability 与 frozen D010 fixture/pin 邻接合同全部保持通过。
+
+## 第九轮验证结论
+
+- 隔离候选使用 base `477d0a76027dec67dd42c8824108238415d6728f`，只叠加 `tools/asset_execution_boundary.py` 与 `tests/contracts/assets/test_asset_execution_boundary.py`；并行 D001/D010 与全部 A002 evidence edits 均排除。
+- 结果：328 passed / 1 skipped boundary contracts（24.22 秒 pytest、24.82 秒 wall）、526 passed / 1 skipped full tests（47.33/47.81 秒）、28 Python sources/0 violations（20.67 秒）、Ruff PASS（0.11 秒）、strict Pyright 0 errors/0 warnings（3.70 秒）、traceability 221 requirements/source nodes PASS（0.92 秒）。唯一 skip 是 clean tree 不存在共享 D010 source；tracked fixture digest 与 zero-violation pin path 已通过。
+- Shared compatibility：D010 equality 随 329/329 boundary contracts 通过，scanner 36 Python sources/0 violations（30.97 秒）。Clean scanner 低于受审 R8 的 21.729 秒，shared scanner 低于第八轮 31.595 秒，未观察到 R9 性能回退。
+- 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有联网、模型/数据下载、GPU 工作或性能 artifact。状态保持第九轮修复完成、等待独立 AI/Infra 复审。

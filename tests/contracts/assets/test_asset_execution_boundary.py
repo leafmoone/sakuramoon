@@ -1759,6 +1759,115 @@ def test_reflective_model_loader_adapters_are_forbidden(source: str) -> None:
     assert "callable_reflection_forbidden" in _codes(source)
 
 
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "getattr.__call__",
+        "getattr.__call__.__call__",
+        "builtins.getattr.__call__",
+    ],
+)
+def test_getattr_call_chain_preserves_model_loader_provenance(selector: str) -> None:
+    source = f'''
+import builtins
+from transformers import AutoModel
+loader = {selector}(AutoModel, "from_pretrained")
+loader("remote/model")
+'''
+
+    codes = _codes(source)
+    assert "unverified_model_source" in codes
+    assert "model_network_enabled" in codes
+
+
+@pytest.mark.parametrize("adapter", ["partial", "partialmethod"])
+def test_partial_call_chain_cannot_bind_reflection_callables(adapter: str) -> None:
+    source = f'''
+from functools import {adapter}
+from transformers import AutoModel
+resolver = {adapter}(getattr.__call__.__call__, AutoModel)
+loader = resolver("from_pretrained")
+loader("remote/model")
+'''
+
+    assert "callable_reflection_forbidden" in _codes(source)
+
+
+@pytest.mark.parametrize(
+    "recovery",
+    [
+        'operator.call(getattr, AutoModel, "from_pretrained")',
+        'operator.call(getattr.__call__, AutoModel, "from_pretrained")',
+        'next(map(getattr, (AutoModel,), ("from_pretrained",)))',
+        'next(map(getattr.__call__, (AutoModel,), ("from_pretrained",)))',
+    ],
+)
+def test_higher_order_adapters_cannot_launder_reflection_callables(
+    recovery: str,
+) -> None:
+    source = f'''
+import operator
+from transformers import AutoModel
+loader = {recovery}
+loader("remote/model")
+'''
+
+    codes = _codes(source)
+    assert "sensitive_callable_escape" in codes
+    assert "security_capability_escape_forbidden" in codes
+
+
+@pytest.mark.parametrize(
+    "reflection_callable",
+    [
+        "getattr",
+        "vars",
+        "object.__getattribute__",
+        "type.__getattribute__",
+        "inspect.getclosurevars",
+        "inspect.getattr_static",
+    ],
+)
+def test_unknown_adapter_rejects_every_reflection_callable_class(
+    reflection_callable: str,
+) -> None:
+    source = f'''
+import inspect
+from sakuramoon.adapters import adapt
+adapt({reflection_callable})
+'''
+
+    codes = _codes(source)
+    assert "sensitive_callable_escape" in codes
+    assert "security_capability_escape_forbidden" in codes
+
+
+def test_local_adapter_cannot_drop_reflection_callable_classification() -> None:
+    source = '''
+from transformers import AutoModel
+def identity(callback):
+    return callback
+loader = identity(getattr)(AutoModel, "from_pretrained")
+loader("remote/model")
+'''
+
+    codes = _codes(source)
+    assert "sensitive_callable_escape" in codes
+    assert "unverified_model_source" in codes
+
+
+def test_getattr_call_chain_keeps_provably_safe_local_member_access() -> None:
+    source = '''
+class Reporter:
+    def run(self, value):
+        return value
+reporter = Reporter()
+getattr.__call__.__call__(reporter, "run")("payload")
+'''
+
+    assert scan_source(source, "src/sakuramoon/report.py") == ()
+
+
 @pytest.mark.parametrize("adapter", ["partial", "partialmethod"])
 def test_partial_reflection_adapters_cannot_resolve_model_loaders(
     adapter: str,
@@ -1807,6 +1916,36 @@ def test_builtin_namespace_reflection_is_forbidden(source: str) -> None:
         "namespace_reflection_forbidden",
         "dynamic_getattr_forbidden",
     } & _codes(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '''
+import sys
+from transformers import AutoModel
+namespace = sys.__dict__["modules"]["builtins"]
+loader = namespace.getattr(AutoModel, "from_pretrained")
+loader("remote/model")
+''',
+        '''
+import builtins
+from transformers import AutoModel
+loader = builtins.__dict__["getattr"](AutoModel, "from_pretrained")
+loader("remote/model")
+''',
+        '''
+import importlib
+importlib.__dict__["import_module"]("reference.JLT")
+''',
+        '''
+import transformers
+transformers.__dict__["AutoModel"].from_pretrained("remote/model")
+''',
+    ],
+)
+def test_module_dict_cannot_recover_execution_callables(source: str) -> None:
+    assert "namespace_reflection_forbidden" in _codes(source)
 
 
 @pytest.mark.parametrize(

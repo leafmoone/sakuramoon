@@ -3,7 +3,7 @@
   "task_id": "A002",
   "hardware": "CPU",
   "candidate": {
-    "base_commit": "cadd87391ef07ed7edb2932e8e2b339b268838ff",
+    "base_commit": "477d0a76027dec67dd42c8824108238415d6728f",
     "overlaid_paths": [
       "tools/asset_execution_boundary.py",
       "tests/contracts/assets/test_asset_execution_boundary.py"
@@ -13,36 +13,36 @@
       "D010",
       "A002 documentation and evidence"
     ],
-    "worktree": "/root/shared-nvme/sakuramoon-a002-eighth-JIsDZO/repo",
+    "worktree": "/root/shared-nvme/sakuramoon-a002-ninth-ynB7BR/repo",
     "diff_check": "passed"
   },
   "review_remediation": {
-    "reviewed_commit": "cadd87391ef07ed7edb2932e8e2b339b268838ff",
-    "ai_verdict": "FAIL_changes_required",
+    "reviewed_commit": "477d0a76027dec67dd42c8824108238415d6728f",
+    "ai_verdict": "pending_independent_rereview",
     "infra_verdict": "FAIL_changes_required",
-    "status": "eighth_remediation_complete_pending_independent_rereview"
+    "status": "ninth_remediation_complete_pending_independent_rereview"
   },
   "boundary_contract": {
     "command": "uv run --frozen pytest -q tests/contracts/assets/test_asset_execution_boundary.py",
-    "passed": 307,
+    "passed": 328,
     "failed": 0,
     "skipped": 1,
-    "wall_duration_seconds": 25.838,
-    "pytest_reported_duration_seconds": 25.22
+    "wall_duration_seconds": 24.82,
+    "pytest_reported_duration_seconds": 24.22
   },
   "full_suite": {
     "command": "uv run --frozen pytest -q",
-    "passed": 505,
+    "passed": 526,
     "failed": 0,
     "skipped": 1,
-    "wall_duration_seconds": 47.784,
-    "pytest_reported_duration_seconds": 47.18
+    "wall_duration_seconds": 47.81,
+    "pytest_reported_duration_seconds": 47.33
   },
   "scanner_self_check": {
     "command": "uv run --frozen python -c '<scan_repository and python_sources>'",
     "python_sources": 28,
     "violations": 0,
-    "wall_duration_seconds": 20.249,
+    "wall_duration_seconds": 20.67,
     "includes_scanner_itself": true,
     "ignored_notebook_checkpoints_excluded": true,
     "execution_scope": "preflight and validation only; not called by the training hot path"
@@ -51,21 +51,21 @@
     "command": "uv run python -c '<scan_repository and python_sources>'",
     "python_sources": 36,
     "violations": 0,
-    "wall_duration_seconds": 31.595,
-    "boundary_contract_passed": 308,
+    "wall_duration_seconds": 30.97,
+    "boundary_contract_passed": 329,
     "class_fixture_equality": "passed",
     "notes": "Includes concurrent frozen D010; static compatibility only, not remote WebDataset streaming evidence."
   },
   "ruff": {
     "command": "uv run --frozen ruff check .",
     "ok": true,
-    "wall_duration_seconds": 0.273
+    "wall_duration_seconds": 0.11
   },
   "pyright": {
     "command": "uv run --frozen pyright",
     "errors": 0,
     "warnings": 0,
-    "wall_duration_seconds": 3.991
+    "wall_duration_seconds": 3.70
   },
   "traceability": {
     "command": "uv run --frozen python tools/verify_traceability.py",
@@ -76,21 +76,22 @@
     "production_modules": 12,
     "runtime_config_keys": 235,
     "errors": [],
-    "wall_duration_seconds": 1.054,
+    "wall_duration_seconds": 0.92,
     "registry_revision": 11,
-    "registry_unchanged_reason": "eighth remediation did not add or move a requirement and did not change mapping, path, or status"
+    "registry_unchanged_reason": "ninth remediation did not add or move a requirement and did not change mapping, path, or status"
   },
   "environment": {
-    "source_isolation": "detached git worktree at cadd873 with only the two A002 code/test paths overlaid",
-    "dependency_environment": "main checkout locked uv .venv reused by symlink",
+    "source_isolation": "detached shared Git clone at 477d0a7 with only the two A002 code/test paths overlaid",
+    "dependency_environment": "main checkout locked uv .venv reused through UV_PROJECT_ENVIRONMENT; a transient local symlink was used only for the strict Pyright rerun and then removed",
     "dependency_materialization_attempted": false
   },
   "validation_notes": [
-    "Security facts cannot enter function defaults or dynamic annotations, and callable default/annotation namespaces cannot be recovered through direct attributes, literal getattr, or typing.get_type_hints.",
-    "Partial reflection adapters, sys.modules/__builtins__ recovery, inspect.getmembers, and synthetic Git default/partial escape fail closed.",
+    "Reflection callables retain security classification through ordinary calls, repeated trailing .__call__, partial/partialmethod, operator.call, map/next, local wrappers, and unknown cross-module adapters.",
+    "Production module/class __dict__ namespaces cannot recover builtins, import helpers, model loaders, or other execution callables.",
     "A tracked compressed source fixture contains the complete frozen D010 class; its payload hash, normalized class digest, and zero-violation scan make the structural pin success path replayable without D010 source.",
     "The clean candidate skips only the optional shared-D010 equality check; that check ran and passed in the shared tree.",
-    "The shared D010 scan establishes static compatibility only; D010 remote streaming gates remain open in D010."
+    "The shared D010 scan establishes static compatibility only; D010 remote streaming gates remain open in D010.",
+    "Clean scanner time 20.67 seconds is below the reviewed R8 result 21.729 seconds; shared scanner time 30.97 seconds is below the eighth-remediation result 31.595 seconds."
   ],
   "gpu_used": false,
   "dependency_network_used": false,

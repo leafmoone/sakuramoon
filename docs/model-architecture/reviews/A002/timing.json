@@ -145,5 +145,27 @@
       "traceability_wall": 1.054
     },
     "status": "eighth_remediation_complete_pending_independent_rereview"
+  },
+  "ninth_review_remediation_validation": {
+    "measurement_scope": "post-477d0a7 independent-review remediation and final A002-only isolated validation",
+    "agent": "a002_ninth_impl",
+    "started_at_utc": null,
+    "ended_at_utc": "2026-07-30T00:01:20Z",
+    "duration_seconds": null,
+    "timing_status": "task_dispatch_timestamp_not_captured",
+    "hardware_level": "CPU",
+    "gpu_seconds": 0,
+    "measured_commands_seconds": {
+      "boundary_contract_wall": 24.82,
+      "boundary_contract_pytest": 24.22,
+      "full_suite_wall": 47.81,
+      "full_suite_pytest": 47.33,
+      "scanner_wall": 20.67,
+      "shared_d010_scanner_wall": 30.97,
+      "ruff_wall": 0.11,
+      "pyright_wall": 3.70,
+      "traceability_wall": 0.92
+    },
+    "status": "ninth_remediation_complete_pending_independent_rereview"
   }
 }

@@ -97,6 +97,19 @@ _NAMESPACE_REFLECTION_CALLS = frozenset(
         "typing.get_type_hints",
     }
 )
+_REFLECTION_CALLABLES = _NAMESPACE_REFLECTION_CALLS | frozenset(
+    {
+        "builtins.getattr",
+        "builtins.object.__getattribute__",
+        "builtins.type.__getattribute__",
+        "builtins.vars",
+        "getattr",
+        "inspect.getattr_static",
+        "operator.attrgetter",
+        "operator.methodcaller",
+        "vars",
+    }
+)
 _FRAME_NAMESPACE_ATTRIBUTES = frozenset(
     {
         "ag_frame",
@@ -110,6 +123,7 @@ _FRAME_NAMESPACE_ATTRIBUTES = frozenset(
         "__annotations__",
         "__closure__",
         "__code__",
+        "__dict__",
         "__defaults__",
         "__globals__",
         "__kwdefaults__",
@@ -459,6 +473,16 @@ def _safe_test_relative_literal(value: str) -> bool:
     )
 
 
+def _canonical_callable_name(name: str) -> str:
+    while name.endswith(".__call__"):
+        name = name.removesuffix(".__call__")
+    return name
+
+
+def _reflection_callable_name(name: str) -> bool:
+    return _canonical_callable_name(name) in _REFLECTION_CALLABLES
+
+
 def _union_taints(values: Iterable[frozenset[str]]) -> frozenset[str]:
     result: set[str] = set()
     for value in values:
@@ -469,11 +493,13 @@ def _union_taints(values: Iterable[frozenset[str]]) -> frozenset[str]:
 def _sensitive_callable(value: _Callable | None) -> bool:
     if value is None:
         return False
-    name = value.name
-    while name.endswith(".__call__"):
-        name = name.removesuffix(".__call__")
+    name = _canonical_callable_name(value.name)
     return (
-        (name.endswith(".from_pretrained") and name.startswith(_MODEL_LOADER_PREFIXES))
+        _reflection_callable_name(name)
+        or (
+            name.endswith(".from_pretrained")
+            and name.startswith(_MODEL_LOADER_PREFIXES)
+        )
         or name in _DOWNLOAD_CALLS
         or name in _DYNAMIC_IMPORT_CALLS
         or name in _DYNAMIC_CODE_CALLS
@@ -1272,8 +1298,7 @@ class _Analyzer:
         return replace(fact, taints=frozenset(taints))
 
     def _model_loader(self, name: str) -> bool:
-        while name.endswith(".__call__"):
-            name = name.removesuffix(".__call__")
+        name = _canonical_callable_name(name)
         return name.endswith(".from_pretrained") and name.startswith(
             _MODEL_LOADER_PREFIXES
         )
@@ -2561,9 +2586,7 @@ except (OSError, ValueError):
                 "forbidden_download",
                 "direct HubApi method calls are outside the exact D010 transport",
             )
-        reflection_name = name
-        while reflection_name.endswith(".__call__"):
-            reflection_name = reflection_name.removesuffix(".__call__")
+        reflection_name = _canonical_callable_name(name)
         if (
             (
                 self.path.startswith("src/sakuramoon/")
@@ -2817,7 +2840,7 @@ except (OSError, ValueError):
                 network_target=target_constructor_allowed,
             )
 
-        if name in {"builtins.getattr", "getattr"} and len(call.args) >= 2:
+        if reflection_name in {"builtins.getattr", "getattr"} and len(call.args) >= 2:
             base = self._callable(call.args[0], env)
             base_fact = self._eval(call.args[0], env)
             base_place = self._place(call.args[0], env)
@@ -3001,16 +3024,7 @@ except (OSError, ValueError):
                     self.path.startswith("src/sakuramoon/")
                     or self.path == "tests/unit/assets/conftest.py"
                 )
-                and (
-                    target.name
-                    in {
-                        "builtins.getattr",
-                        "builtins.vars",
-                        "getattr",
-                        "vars",
-                    }
-                    or target.name.endswith(".__getattribute__")
-                )
+                and _reflection_callable_name(target.name)
             ):
                 self.add(
                     call,
@@ -3149,9 +3163,7 @@ except (OSError, ValueError):
         if not self._model_loader(name):
             self._reject_opaque_security_capability(call, argument_facts)
 
-        canonical = name
-        while canonical.endswith(".__call__"):
-            canonical = canonical.removesuffix(".__call__")
+        canonical = _canonical_callable_name(name)
         if canonical == "ambiguous-sensitive.*":
             self.add(
                 call,
