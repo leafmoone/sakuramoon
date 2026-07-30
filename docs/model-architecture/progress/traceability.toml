@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 46
+registry_revision = 47
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -11063,7 +11063,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-002"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11076,8 +11076,16 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T051"
+implementation_paths = [
+    "src/sakuramoon/telemetry/__init__.py",
+    "src/sakuramoon/telemetry/metrics.py",
+    "src/sakuramoon/telemetry/wandb_sink.py",
+    "tests/unit/telemetry/test_metrics.py",
+    "tests/unit/telemetry/test_wandb_sink.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/reviews/T051/test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -11114,7 +11122,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-003"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11127,8 +11135,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T051"
+implementation_paths = [
+    "src/sakuramoon/telemetry/metrics.py",
+    "tests/unit/telemetry/test_metrics.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/reviews/T051/test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -11165,7 +11178,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OBS-004"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "observability"
 source_path = "docs/model-architecture/current/observability-and-evaluation.md"
 heading_path = [
@@ -11178,8 +11191,16 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T051"
+implementation_paths = [
+    "src/sakuramoon/telemetry/metrics.py",
+    "src/sakuramoon/telemetry/timers.py",
+    "src/sakuramoon/telemetry/nvtx.py",
+    "tests/unit/telemetry/test_timers_nvtx.py",
+    "tests/gpu/telemetry/test_cuda_timer.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/reviews/T051/test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

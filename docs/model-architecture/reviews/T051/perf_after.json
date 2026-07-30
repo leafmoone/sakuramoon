@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "task_id": "T051",
+  "kind": "timing_overhead_instrumented",
+  "hardware": "NVIDIA GeForce RTX 5090",
+  "operation": "200 sequential torch.mm calls with one CUDA event range per call",
+  "warmup_runs": 1,
+  "measured_runs": 5,
+  "seconds": [0.009653494, 0.009430246, 0.009128445, 0.009182088, 0.009463652],
+  "median_seconds": 0.009430246,
+  "overhead_percent": 0.8057407532119587,
+  "threshold_percent_exclusive_max": 1.0,
+  "passed": true
+}

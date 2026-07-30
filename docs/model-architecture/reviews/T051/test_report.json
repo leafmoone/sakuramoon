@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "task_id": "T051",
+  "targeted_cpu": {
+    "command": "uv run --frozen pytest -q tests/unit/telemetry",
+    "passed": 14,
+    "failed": 0,
+    "duration_seconds": 2.51
+  },
+  "targeted_single_gpu": {
+    "command": "uv run --frozen pytest -q tests/gpu/telemetry/test_cuda_timer.py",
+    "passed": 1,
+    "failed": 0,
+    "warnings": 1,
+    "duration_seconds": 2.38,
+    "gpu": "NVIDIA GeForce RTX 5090"
+  },
+  "full_cpu_suite": {
+    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+    "passed": 409,
+    "failed": 0,
+    "warnings": 24,
+    "duration_seconds": 32.72
+  },
+  "ruff": "passed",
+  "strict_pyright": "passed",
+  "traceability": {
+    "passed": true,
+    "requirements": 221,
+    "production_modules": 77,
+    "runtime_config_keys": 234
+  },
+  "timing_overhead_percent": 0.8057407532119587,
+  "four_gpu_overhead": "blocked:four_gpu_scope",
+  "independent_package_review": "pending:continue_without_agents"
+}
