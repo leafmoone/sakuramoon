@@ -1,7 +1,19 @@
 {
   "schema_version": 1,
   "task_id": "T020",
-  "cpu_unit_passed": 2,
+  "targeted_cpu": {
+    "command": "uv run --frozen pytest -q tests/unit/encoders/test_mage_vae.py tests/unit/eval/test_vae_reconstruction.py",
+    "passed": 20,
+    "failed": 0,
+    "duration_seconds": 2.17
+  },
+  "full_cpu_suite": {
+    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+    "passed": 382,
+    "failed": 0,
+    "warnings": 24,
+    "duration_seconds": 31.54
+  },
   "strict_local_weight_load": true,
   "gpu_tested": true,
   "gpu": "NVIDIA GeForce RTX 5090",
@@ -11,6 +23,19 @@
   "encode_ms": [9.402, 8.707, 8.501],
   "decode_ms": [11.495, 10.948, 10.754],
   "finite_outputs": true,
+  "gpu_rerun_for_cpu_evaluator": false,
+  "quality_evaluator_implemented": true,
+  "quality_evaluator_contracts": {
+    "total_samples": 2000,
+    "stratified_samples": 1600,
+    "risk_samples": 400,
+    "median_lpips_max": 0.03,
+    "p95_lpips_max": 0.08,
+    "median_ssim_min": 0.94,
+    "severe_error_rate_strict_max": 0.01,
+    "detail_loss_rate_strict_max": 0.05
+  },
   "quality_gate_status": "pending_2000_image_evaluation",
-  "package_review_status": "pending"
+  "latent_statistics_status": "pending_50000_to_100000_images",
+  "package_review_status": "implemented_code_package_rereview_pending"
 }

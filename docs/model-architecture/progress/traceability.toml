@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 44
+registry_revision = 45
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -223,6 +223,7 @@ benchmarks = [
     "benchmarks/vae/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/T020/**",
     "artifacts/vae/**",
 ]
 hardware = "1GPU"
@@ -1404,7 +1405,19 @@ superseded_by = ""
 implementation_commit_ref = "task:T020"
 implementation_paths = [
     "src/sakuramoon/encoders/mage_vae.py",
+    "src/sakuramoon/eval/__init__.py",
+    "src/sakuramoon/eval/vae_reconstruction.py",
+    "tests/unit/encoders/test_mage_vae.py",
+    "tests/unit/eval/test_vae_reconstruction.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/T020.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/T020/implementation_report.md",
+    "docs/model-architecture/reviews/T020/test_report.json",
+    "docs/model-architecture/reviews/T020/timing.json",
+    "docs/model-architecture/reviews/T020/ai_review.md",
+    "docs/model-architecture/reviews/T020/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -1430,6 +1443,7 @@ benchmarks = [
     "benchmarks/vae/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/T020/**",
     "artifacts/vae/**",
 ]
 not_applicable_fields = [
@@ -1440,7 +1454,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C02-002"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "vae"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1452,8 +1466,20 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T020"
+implementation_paths = [
+    "src/sakuramoon/encoders/mage_vae.py",
+    "tests/unit/encoders/test_mage_vae.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/T020.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/T020/implementation_report.md",
+    "docs/model-architecture/reviews/T020/test_report.json",
+    "docs/model-architecture/reviews/T020/timing.json",
+    "docs/model-architecture/reviews/T020/ai_review.md",
+    "docs/model-architecture/reviews/T020/infra_review.md",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1477,6 +1503,7 @@ benchmarks = [
     "benchmarks/vae/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/T020/**",
     "artifacts/vae/**",
 ]
 not_applicable_fields = [
@@ -1487,7 +1514,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C02-003"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "vae"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1499,8 +1526,20 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T020"
+implementation_paths = [
+    "src/sakuramoon/encoders/mage_vae.py",
+    "tests/unit/encoders/test_mage_vae.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/T020.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/T020/implementation_report.md",
+    "docs/model-architecture/reviews/T020/test_report.json",
+    "docs/model-architecture/reviews/T020/timing.json",
+    "docs/model-architecture/reviews/T020/ai_review.md",
+    "docs/model-architecture/reviews/T020/infra_review.md",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1524,6 +1563,7 @@ benchmarks = [
     "benchmarks/vae/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/T020/**",
     "artifacts/vae/**",
 ]
 not_applicable_fields = [
@@ -1683,7 +1723,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C02-007"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "vae"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1695,8 +1735,21 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T020"
+implementation_paths = [
+    "src/sakuramoon/eval/__init__.py",
+    "src/sakuramoon/eval/vae_reconstruction.py",
+    "tests/unit/eval/test_vae_reconstruction.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/T020.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/T020/implementation_report.md",
+    "docs/model-architecture/reviews/T020/test_report.json",
+    "docs/model-architecture/reviews/T020/timing.json",
+    "docs/model-architecture/reviews/T020/ai_review.md",
+    "docs/model-architecture/reviews/T020/infra_review.md",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1720,6 +1773,7 @@ benchmarks = [
     "benchmarks/vae/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/T020/**",
     "artifacts/vae/**",
 ]
 not_applicable_fields = [

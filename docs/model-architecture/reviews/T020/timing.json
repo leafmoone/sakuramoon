@@ -4,5 +4,13 @@
   "duration_seconds": null,
   "timing_status": "implementation_start_not_recorded",
   "ended_at_utc": "2026-07-30T03:49:20Z",
-  "gpu_seconds": 11
+  "gpu_seconds": 11,
+  "quality_evaluator_implementation": {
+    "measurement_scope": "first tracked evaluator edit through final CPU validation",
+    "started_at_utc": "2026-07-30T18:53:33Z",
+    "ended_at_utc": "2026-07-30T18:56:08Z",
+    "duration_seconds": 155,
+    "hardware_level": "CPU",
+    "gpu_seconds": 0
+  }
 }
