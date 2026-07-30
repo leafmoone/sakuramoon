@@ -25,9 +25,14 @@ from sakuramoon.eval.spec import (
     PromptManifest,
 )
 from sakuramoon.eval.vae_reconstruction import (
+    ReconstructionBatch,
+    ReconstructionEvaluation,
+    ReconstructionMetricIdentity,
     ReconstructionObservation,
     ReconstructionQualityReport,
+    evaluate_reconstruction_batches,
     summarize_reconstruction_quality,
+    write_reconstruction_evaluation,
 )
 
 __all__ = [
@@ -42,13 +47,18 @@ __all__ = [
     "ManualQualityReport",
     "PromptCase",
     "PromptManifest",
+    "ReconstructionBatch",
+    "ReconstructionEvaluation",
+    "ReconstructionMetricIdentity",
     "ReconstructionObservation",
     "ReconstructionQualityReport",
     "ScheduledEvaluation",
+    "evaluate_reconstruction_batches",
     "frechet_inception_distance",
     "inception_score",
     "scheduled_evaluations",
     "summarize_manual_quality",
     "summarize_reconstruction_quality",
     "write_evaluation_artifact",
+    "write_reconstruction_evaluation",
 ]
