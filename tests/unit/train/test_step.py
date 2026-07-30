@@ -255,6 +255,46 @@ def test_failed_optimizer_attempt_is_counted_and_cannot_continue() -> None:
         step.finish_update()
 
 
+def test_nonfinite_loss_aborts_attempt_and_clears_gradients() -> None:
+    parameter = nn.Parameter(torch.tensor(0.0))
+    optimizer = _SgdAdapter([parameter])
+    step = SingleGpuStep(
+        nn.ParameterList([parameter]),
+        optimizer,
+        accumulation_steps=2,
+        state=SingleGpuUpdateState.initial(),
+    )
+    step.backward((parameter - 1.0).square().reshape(1))
+
+    with pytest.raises(FloatingPointError, match="nonfinite"):
+        step.backward((parameter * torch.tensor(float("nan"))).reshape(1))
+
+    assert step.state == SingleGpuUpdateState(1, 0, 0)
+    assert parameter.grad is None
+    with pytest.raises(RuntimeError, match="cannot continue"):
+        step.finish_update()
+
+
+def test_external_abort_is_idempotent_and_clears_pending_gradients() -> None:
+    parameter = nn.Parameter(torch.tensor(0.0))
+    optimizer = _SgdAdapter([parameter])
+    step = SingleGpuStep(
+        nn.ParameterList([parameter]),
+        optimizer,
+        accumulation_steps=2,
+        state=SingleGpuUpdateState.initial(),
+    )
+    step.backward((parameter - 1.0).square().reshape(1))
+
+    step.abort()
+    step.abort()
+
+    assert step.state == SingleGpuUpdateState(1, 0, 0)
+    assert parameter.grad is None
+    with pytest.raises(RuntimeError, match="cannot continue"):
+        step.finish_update()
+
+
 def test_update_state_rejects_inconsistent_counters() -> None:
     with pytest.raises(ValueError, match="inconsistent"):
         SingleGpuUpdateState(attempted_updates=0, successful_updates=1, effective_samples=0)

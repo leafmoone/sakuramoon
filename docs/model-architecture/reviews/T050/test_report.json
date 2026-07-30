@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "task_id": "T050",
+  "targeted_cpu": {
+    "command": "uv run --frozen pytest -q tests/unit/train/test_step.py tests/unit/train/test_loop.py tests/unit/train/test_preflight_failures.py",
+    "passed": 23,
+    "failed": 0,
+    "warnings": 3,
+    "duration_seconds": 4.01
+  },
+  "full_cpu_suite": {
+    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+    "status": "passed",
+    "passed": 395,
+    "failed": 0,
+    "warnings": 24,
+    "duration_seconds": 32.25
+  },
+  "ruff": "passed",
+  "strict_pyright": "passed",
+  "traceability": {
+    "passed": true,
+    "requirements": 221,
+    "production_modules": 72,
+    "runtime_config_keys": 234
+  },
+  "real_single_gpu_full_chain_smoke": "pending:production_config_blocked",
+  "formal_single_gpu_canary": "blocked:no_long_run",
+  "ddp_nccl_four_gpu": "blocked:four_gpu_and_scope",
+  "independent_package_review": "pending:agent_launch_failure_continue_without_agents"
+}

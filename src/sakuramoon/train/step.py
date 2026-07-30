@@ -97,7 +97,7 @@ class SingleGpuUpdateResult:
     state: SingleGpuUpdateState
 
 
-class _StepOptimizer(Protocol):
+class StepOptimizer(Protocol):
     def step(self) -> None: ...
 
     def zero_grad(self, *, set_to_none: bool) -> None: ...
@@ -109,7 +109,7 @@ class SingleGpuStep:
     def __init__(
         self,
         module: nn.Module,
-        optimizer: _StepOptimizer,
+        optimizer: StepOptimizer,
         *,
         accumulation_steps: int,
         state: SingleGpuUpdateState,
@@ -153,9 +153,16 @@ class SingleGpuStep:
             raise ValueError("per_sample_loss must retain a gradient graph")
         if self._device is not None and per_sample_loss.device != self._device:
             raise ValueError("all accumulated losses must share one device")
+        if not bool(torch.isfinite(per_sample_loss).all().item()):
+            self._abort_pending_update()
+            raise FloatingPointError("per-sample loss is nonfinite")
 
         loss_sum = per_sample_loss.sum()
-        loss_sum.backward()  # pyright: ignore[reportUnknownMemberType]
+        try:
+            loss_sum.backward()  # pyright: ignore[reportUnknownMemberType]
+        except Exception:
+            self._abort_pending_update()
+            raise
         self._loss_sum = (
             loss_sum.detach()
             if self._loss_sum is None
@@ -164,6 +171,21 @@ class SingleGpuStep:
         self._device = per_sample_loss.device
         self._microbatches += 1
         self._samples += per_sample_loss.numel()
+
+    def _abort_pending_update(self) -> None:
+        if self._failed:
+            return
+        self._state = replace(
+            self._state,
+            attempted_updates=self._state.attempted_updates + 1,
+        )
+        self._failed = True
+        self.optimizer.zero_grad(set_to_none=True)
+
+    def abort(self) -> None:
+        """Poison an interrupted update and discard every pending gradient."""
+
+        self._abort_pending_update()
 
     def finish_update(self) -> SingleGpuUpdateResult:
         if self._failed:
@@ -189,6 +211,7 @@ class SingleGpuStep:
             self.optimizer.zero_grad(set_to_none=True)
         except Exception:
             self._failed = True
+            self.optimizer.zero_grad(set_to_none=True)
             raise
 
         result = SingleGpuUpdateResult(
@@ -214,6 +237,7 @@ __all__ = [
     "SingleGpuStep",
     "SingleGpuUpdateResult",
     "SingleGpuUpdateState",
+    "StepOptimizer",
     "TrainableComposite",
     "TrainableCompositeInputs",
 ]
