@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -20,6 +21,15 @@ class BucketError(ValueError):
 class BucketShape:
     height: int
     width: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.height) is not int
+            or type(self.width) is not int
+            or self.height <= 0
+            or self.width <= 0
+        ):
+            raise BucketError("bucket dimensions must be positive integers")
 
     @property
     def area(self) -> int:
@@ -43,6 +53,53 @@ class BucketAssignment:
 @dataclass(frozen=True)
 class BucketRejection:
     reason: RejectionReason
+
+
+@dataclass(frozen=True)
+class SourceDimensions:
+    width: int
+    height: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.width) is not int
+            or type(self.height) is not int
+            or self.width <= 0
+            or self.height <= 0
+        ):
+            raise BucketError("source dimensions must be positive integers")
+
+
+@dataclass(frozen=True)
+class BucketSampleCount:
+    height: int
+    width: int
+    samples: int
+
+
+@dataclass(frozen=True)
+class BucketScanReport:
+    expected_samples: int
+    total_samples: int
+    assigned_samples: int
+    no_upscale_rejections: int
+    retention_rejections: int
+    bucket_counts: tuple[BucketSampleCount, ...]
+
+    def __post_init__(self) -> None:
+        rejection_total = self.no_upscale_rejections + self.retention_rejections
+        if (
+            type(self.expected_samples) is not int
+            or self.expected_samples <= 0
+            or self.total_samples != self.expected_samples
+            or self.assigned_samples < 0
+            or self.no_upscale_rejections < 0
+            or self.retention_rejections < 0
+            or self.assigned_samples + rejection_total != self.total_samples
+            or sum(item.samples for item in self.bucket_counts)
+            != self.assigned_samples
+        ):
+            raise BucketError("bucket scan report counts are inconsistent")
 
 
 def _nearest_quantum_ratio(area: int, short: int, quantum: int) -> int:
@@ -167,4 +224,56 @@ def assign_bucket(
         resized_width=resized_width,
         resized_height=resized_height,
         crop_retention=retention,
+    )
+
+
+def scan_bucket_assignments(
+    dimensions: Iterable[SourceDimensions],
+    buckets: tuple[BucketShape, ...],
+    *,
+    min_crop_retention: float,
+    expected_samples: int,
+) -> BucketScanReport:
+    """Stream a complete manifest dimension scan without retaining sample rows."""
+
+    if type(expected_samples) is not int or expected_samples <= 0:
+        raise BucketError("expected sample count must be a positive integer")
+    if len(set(buckets)) != len(buckets):
+        raise BucketError("bucket scan shapes must be unique")
+    ordered_buckets = tuple(
+        sorted(buckets, key=lambda shape: (shape.aspect_log2, shape.height, shape.width))
+    )
+    counts = {shape: 0 for shape in ordered_buckets}
+    total = 0
+    no_upscale = 0
+    retention = 0
+    for item in dimensions:
+        total += 1
+        if total > expected_samples:
+            raise BucketError("bucket scan exceeds the expected sample count")
+        result = assign_bucket(
+            item.width,
+            item.height,
+            buckets,
+            min_crop_retention=min_crop_retention,
+        )
+        if isinstance(result, BucketAssignment):
+            counts[result.bucket] += 1
+        elif result.reason == "no_upscale":
+            no_upscale += 1
+        else:
+            retention += 1
+    if total != expected_samples:
+        raise BucketError("bucket scan does not match the expected sample count")
+    bucket_counts = tuple(
+        BucketSampleCount(shape.height, shape.width, counts[shape])
+        for shape in ordered_buckets
+    )
+    return BucketScanReport(
+        expected_samples=expected_samples,
+        total_samples=total,
+        assigned_samples=sum(counts.values()),
+        no_upscale_rejections=no_upscale,
+        retention_rejections=retention,
+        bucket_counts=bucket_counts,
     )

@@ -7,10 +7,14 @@ from sakuramoon.data.buckets import (
     BucketAssignment,
     BucketError,
     BucketRejection,
+    BucketSampleCount,
+    BucketScanReport,
     BucketShape,
+    SourceDimensions,
     assign_bucket,
     generate_base_buckets,
     scale_buckets,
+    scan_bucket_assignments,
 )
 
 
@@ -141,3 +145,67 @@ def test_assignment_rejects_invalid_dimensions(width: int, height: int) -> None:
             (BucketShape(512, 512),),
             min_crop_retention=0.8,
         )
+
+
+def test_streaming_bucket_scan_counts_assignments_and_rejections() -> None:
+    square = BucketShape(height=512, width=512)
+    wide = BucketShape(height=256, width=1024)
+    dimensions = (
+        SourceDimensions(640, 512),
+        SourceDimensions(500, 500),
+        SourceDimensions(2000, 300),
+        SourceDimensions(512, 512),
+    )
+
+    report = scan_bucket_assignments(
+        (item for item in dimensions),
+        (square, wide),
+        min_crop_retention=0.8,
+        expected_samples=4,
+    )
+
+    assert report == BucketScanReport(
+        expected_samples=4,
+        total_samples=4,
+        assigned_samples=2,
+        no_upscale_rejections=1,
+        retention_rejections=1,
+        bucket_counts=(
+            BucketSampleCount(height=512, width=512, samples=2),
+            BucketSampleCount(height=256, width=1024, samples=0),
+        ),
+    )
+    assert tuple(
+        (item.height, item.width, item.samples) for item in report.bucket_counts
+    ) == ((512, 512, 2), (256, 1024, 0))
+
+
+def test_bucket_scan_requires_exact_manifest_count_and_unique_shapes() -> None:
+    shape = BucketShape(512, 512)
+    with pytest.raises(BucketError, match="does not match"):
+        scan_bucket_assignments(
+            (SourceDimensions(512, 512),),
+            (shape,),
+            min_crop_retention=0.8,
+            expected_samples=2,
+        )
+    with pytest.raises(BucketError, match="exceeds"):
+        scan_bucket_assignments(
+            (SourceDimensions(512, 512), SourceDimensions(512, 512)),
+            (shape,),
+            min_crop_retention=0.8,
+            expected_samples=1,
+        )
+    with pytest.raises(BucketError, match="unique"):
+        scan_bucket_assignments(
+            (SourceDimensions(512, 512),),
+            (shape, shape),
+            min_crop_retention=0.8,
+            expected_samples=1,
+        )
+
+
+@pytest.mark.parametrize("height,width", [(0, 1), (1, -1), (True, 1)])
+def test_bucket_shape_rejects_invalid_dimensions(height: int, width: int) -> None:
+    with pytest.raises(BucketError, match="bucket dimensions"):
+        BucketShape(height, width)

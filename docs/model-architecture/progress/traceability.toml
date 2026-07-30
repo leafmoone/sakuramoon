@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 51
+registry_revision = 52
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -1592,7 +1592,18 @@ implementation_commit_ref = "task:D013"
 implementation_paths = [
     "src/sakuramoon/data/buckets.py",
     "src/sakuramoon/data/image_ops.py",
+    "tests/unit/data/test_buckets.py",
+    "tests/unit/data/test_image_ops.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D013.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D013/task.md",
+    "docs/model-architecture/reviews/D013/implementation_report.md",
+    "docs/model-architecture/reviews/D013/test_report.json",
+    "docs/model-architecture/reviews/D013/timing.json",
+    "docs/model-architecture/reviews/D013/ai_review.md",
+    "docs/model-architecture/reviews/D013/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -1643,7 +1654,18 @@ implementation_commit_ref = "task:D013"
 implementation_paths = [
     "src/sakuramoon/data/buckets.py",
     "src/sakuramoon/data/image_ops.py",
+    "tests/unit/data/test_buckets.py",
+    "tests/unit/data/test_image_ops.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D013.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D013/task.md",
+    "docs/model-architecture/reviews/D013/implementation_report.md",
+    "docs/model-architecture/reviews/D013/test_report.json",
+    "docs/model-architecture/reviews/D013/timing.json",
+    "docs/model-architecture/reviews/D013/ai_review.md",
+    "docs/model-architecture/reviews/D013/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -4496,7 +4518,17 @@ superseded_by = ""
 implementation_commit_ref = "task:D013"
 implementation_paths = [
     "src/sakuramoon/data/buckets.py",
+    "tests/unit/data/test_buckets.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D013.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D013/task.md",
+    "docs/model-architecture/reviews/D013/implementation_report.md",
+    "docs/model-architecture/reviews/D013/test_report.json",
+    "docs/model-architecture/reviews/D013/timing.json",
+    "docs/model-architecture/reviews/D013/ai_review.md",
+    "docs/model-architecture/reviews/D013/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -4553,6 +4585,7 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/progress/tasks/D013.md",
     "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D013/task.md",
     "docs/model-architecture/reviews/D013/implementation_report.md",
     "docs/model-architecture/reviews/D013/test_report.json",
     "docs/model-architecture/reviews/D013/timing.json",

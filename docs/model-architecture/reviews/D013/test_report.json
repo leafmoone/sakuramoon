@@ -4,23 +4,33 @@
   "hardware": "CPU",
   "targeted": {
     "command": "uv run --frozen pytest -q tests/unit/data/test_buckets.py tests/unit/data/test_image_ops.py",
-    "passed": 27,
+    "passed": 37,
     "failed": 0,
-    "duration_seconds": 0.39
+    "duration_seconds": 2.22
   },
   "full_cpu_suite": {
     "command": "uv run --frozen pytest -q tests/unit tests/contracts",
-    "passed": 360,
+    "passed": 499,
     "failed": 0,
     "warnings": 24,
-    "duration_seconds": 31.68
+    "duration_seconds": 36.33
   },
   "ruff": true,
   "pyright_errors": 0,
   "full_metadata_scan_run": false,
   "decoded_100k_scan_run": false,
   "gpu_used": false,
-  "package_review_status": "initial_finding_remediated_final_package_rereview_pending",
+  "scan_report_code": {
+    "manifest_sample_count_bound": true,
+    "assigned_and_rejection_counts": true,
+    "per_bucket_counts": true,
+    "exact_100k_observations": true,
+    "inclusive_mismatch_threshold": 0.001,
+    "diagnostic_hard_failure": true,
+    "bounded_counter_state": true,
+    "canonical_no_clobber_fsync_publication": true
+  },
+  "package_review_status": "scan_report_expansion_independent_review_pending",
   "invalid_retention_thresholds_rejected": [
     "NaN",
     "positive infinity",
@@ -34,6 +44,7 @@
     "full metadata assignment scan",
     "100k decoded dimension check",
     "production retention and rejection distributions",
-    "CPU throughput and Mage-VAE round trip"
+    "CPU throughput and Mage-VAE round trip",
+    "fresh independent AI/model and Infra/performance review"
   ]
 }

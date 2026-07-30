@@ -1,14 +1,34 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterator
+from pathlib import Path
+
 import pytest
 from PIL import Image
 
-from sakuramoon.data.buckets import BucketAssignment, BucketShape
+from sakuramoon.data.buckets import (
+    BucketAssignment,
+    BucketShape,
+    SourceDimensions,
+    scan_bucket_assignments,
+)
 from sakuramoon.data.image_ops import (
+    DECODE_DIMENSION_SCAN_SAMPLES,
+    DecodedDimensionObservation,
+    DimensionMismatchError,
     ImageRejected,
+    ImageScanError,
+    ImageScanReport,
+    ImageScanReportExistsError,
+    canonical_image_scan_report_bytes,
     normalize_image,
+    observe_decoded_dimensions,
     prepare_image,
     resize_and_crop,
+    scan_decoded_dimensions,
+    write_image_scan_report,
 )
 
 
@@ -118,3 +138,87 @@ def test_prepare_image_exposes_retention_rejection() -> None:
         )
 
     assert captured.value.reason == "retention"
+
+
+def test_decode_dimension_observation_uses_post_exif_size() -> None:
+    image = Image.new("RGB", (640, 512))
+    image.getexif()[274] = 6
+
+    observation = observe_decoded_dimensions(
+        image,
+        declared_width=512,
+        declared_height=640,
+    )
+
+    assert observation.matches is True
+    assert (observation.decoded_width, observation.decoded_height) == (512, 640)
+
+
+def _dimension_observations(
+    mismatch_count: int,
+    *,
+    total: int = DECODE_DIMENSION_SCAN_SAMPLES,
+) -> Iterator[DecodedDimensionObservation]:
+    for index in range(total):
+        yield DecodedDimensionObservation(
+            declared_width=512,
+            declared_height=512,
+            decoded_width=513 if index < mismatch_count else 512,
+            decoded_height=512,
+        )
+
+
+def test_dimension_scan_accepts_exact_point_one_percent_boundary() -> None:
+    report = scan_decoded_dimensions(_dimension_observations(100))
+
+    assert report.total_samples == DECODE_DIMENSION_SCAN_SAMPLES
+    assert report.mismatch_samples == 100
+    assert report.mismatch_rate == 0.001
+    assert report.accepted is True
+
+
+def test_dimension_scan_hard_fails_above_threshold_with_report() -> None:
+    with pytest.raises(DimensionMismatchError, match="0.1 percent") as captured:
+        scan_decoded_dimensions(_dimension_observations(101))
+
+    assert captured.value.report.mismatch_samples == 101
+    assert captured.value.report.accepted is False
+
+
+def test_dimension_scan_requires_exact_100k_observations() -> None:
+    with pytest.raises(ImageScanError, match="exactly 100,000"):
+        scan_decoded_dimensions(
+            _dimension_observations(0, total=DECODE_DIMENSION_SCAN_SAMPLES - 1)
+        )
+    with pytest.raises(ImageScanError, match="exceeds 100,000"):
+        scan_decoded_dimensions(
+            _dimension_observations(0, total=DECODE_DIMENSION_SCAN_SAMPLES + 1)
+        )
+
+
+def test_image_scan_report_is_canonical_fsynced_and_no_clobber(
+    tmp_path: Path,
+) -> None:
+    bucket_report = scan_bucket_assignments(
+        (SourceDimensions(512, 512), SourceDimensions(500, 500)),
+        (BucketShape(512, 512),),
+        min_crop_retention=0.8,
+        expected_samples=2,
+    )
+    dimension_report = scan_decoded_dimensions(_dimension_observations(0))
+    report = ImageScanReport(bucket_report, dimension_report)
+    payload = canonical_image_scan_report_bytes(report)
+    destination = tmp_path / "image-scan.json"
+
+    digest = write_image_scan_report(report, destination)
+
+    assert destination.read_bytes() == payload
+    assert digest == hashlib.sha256(payload).hexdigest()
+    document = json.loads(payload)
+    assert document["schema_version"] == 1
+    assert document["bucket_scan"]["assigned_samples"] == 1
+    assert document["bucket_scan"]["no_upscale_rejections"] == 1
+    assert document["dimension_scan"]["accepted"] is True
+    with pytest.raises(ImageScanReportExistsError, match="already exists"):
+        write_image_scan_report(report, destination)
+    assert destination.read_bytes() == payload
