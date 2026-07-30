@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 48
+registry_revision = 49
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -528,6 +528,7 @@ owner_tasks = [
     "T042",
     "T043",
     "T050",
+    "T053",
     "T054",
     "S000",
     "S001",
@@ -535,6 +536,7 @@ owner_tasks = [
     "S003",
 ]
 config_keys = [
+    "benchmark.*",
     "optimizer.*",
     "scheduler.*",
     "gradient.*",
@@ -5275,6 +5277,7 @@ evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
+    "benchmark.*",
     "optimizer.*",
     "scheduler.*",
     "gradient.*",
@@ -9437,7 +9440,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-067"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -9450,8 +9453,20 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T053"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/telemetry/profiler.py",
+    "src/sakuramoon/telemetry/timers.py",
+    "src/sakuramoon/train/benchmark.py",
+    "src/sakuramoon/train/step.py",
+    "src/sakuramoon/cli/benchmark.py",
+    "tests/unit/config/test_benchmark_config.py",
+    "tests/unit/telemetry/test_profiler.py",
+    "docs/model-architecture/progress/tasks/T053.md",
+    "docs/model-architecture/reviews/T053/test_report.json",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -9493,7 +9508,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-068"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -9506,8 +9521,20 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T053"
+implementation_paths = [
+    "src/sakuramoon/telemetry/profiler.py",
+    "src/sakuramoon/telemetry/timers.py",
+    "src/sakuramoon/train/benchmark.py",
+    "src/sakuramoon/train/step.py",
+    "src/sakuramoon/cli/benchmark.py",
+    "tests/unit/telemetry/test_profiler.py",
+    "tests/unit/train/test_benchmark_adapter.py",
+    "tests/gpu/telemetry/test_benchmark_harness.py",
+    "docs/model-architecture/progress/tasks/T053.md",
+    "docs/model-architecture/reviews/T053/test_report.json",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

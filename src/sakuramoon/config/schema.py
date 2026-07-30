@@ -483,7 +483,9 @@ class KernelsConfig(StrictModel):
 
 
 class CompileConfig(StrictModel):
-    regional_enabled: bool
+    # The current CPU/1GPU milestone cannot satisfy the locked DDP gate.
+    # A later config revision may widen this only with 4GPU benchmark evidence.
+    regional_enabled: Literal[False]
     minimum_end_to_end_gain_percent: Annotated[ExactFloat, Field(ge=3.0)]
     automatic_enable: Literal[False]
 
@@ -493,6 +495,35 @@ class ProfilingConfig(StrictModel):
     schedule_updates: PositiveInt
     record_shapes: bool
     profile_memory: bool
+
+
+class BenchmarkConfig(StrictModel):
+    kind: Literal["candidate", "final"]
+    warmup_updates: PositiveInt
+    measured_updates: PositiveInt
+    starting_successful_update: NonNegativeInt
+    profile_trace_updates: PositiveInt
+    same_workload_required: Literal[True]
+    nsight_compute_hotspot_only: Literal[True]
+
+    @model_validator(mode="after")
+    def validate_measurement_window(self) -> BenchmarkConfig:
+        if self.warmup_updates != 100:
+            raise ValueError("benchmark requires exactly 100 warmup updates")
+        if self.kind == "candidate" and self.measured_updates != 500:
+            raise ValueError("candidate benchmark requires exactly 500 measured updates")
+        if self.kind == "final" and self.measured_updates < 1000:
+            raise ValueError("final benchmark requires at least 1,000 measured updates")
+        if self.profile_trace_updates > self.measured_updates:
+            raise ValueError("profile trace window exceeds measured updates")
+        first_measured = self.starting_successful_update + self.warmup_updates + 1
+        last_measured = first_measured + self.measured_updates - 1
+        first_checkpoint = ((first_measured + 999) // 1000) * 1000
+        if first_checkpoint > last_measured:
+            raise ValueError(
+                "benchmark measured window must include the fixed 1,000-update checkpoint cadence"
+            )
+        return self
 
 
 class FailureConfig(StrictModel):
@@ -600,6 +631,7 @@ class RuntimeConfig(StrictModel):
     kernels: KernelsConfig
     compile: CompileConfig
     profiling: ProfilingConfig
+    benchmark: BenchmarkConfig
     failure: FailureConfig
     logging: LoggingConfig
     wandb: WandbConfig

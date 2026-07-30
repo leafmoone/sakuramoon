@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -12,6 +14,16 @@ from sakuramoon.conditioning.style_resampler import StyleResampler
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import PackedDiT
 from sakuramoon.optim.clip import ClipResult, clip_grad_norm_fp32
+from sakuramoon.telemetry.timers import PhaseTimer
+
+
+@contextmanager
+def _record_phase(timer: PhaseTimer | None, phase: str) -> Generator[None]:
+    if timer is None:
+        yield
+        return
+    with timer.record(phase):
+        yield
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +199,9 @@ class SingleGpuStep:
 
         self._abort_pending_update()
 
-    def finish_update(self) -> SingleGpuUpdateResult:
+    def finish_update(
+        self, *, phase_timer: PhaseTimer | None = None
+    ) -> SingleGpuUpdateResult:
         if self._failed:
             raise RuntimeError("failed update state cannot continue")
         if self._microbatches != self.accumulation_steps or self._loss_sum is None:
@@ -202,16 +216,20 @@ class SingleGpuStep:
             parameter for parameter in self.module.parameters() if parameter.requires_grad
         )
         try:
-            gradient_scale = 1.0 / self._samples
-            for parameter in parameters:
-                if parameter.grad is not None:
-                    parameter.grad.mul_(gradient_scale)
-            clip = clip_grad_norm_fp32(parameters, max_norm=1.0)
-            self.optimizer.step()
-            self.optimizer.zero_grad(set_to_none=True)
+            with _record_phase(phase_timer, "clip"):
+                gradient_scale = 1.0 / self._samples
+                for parameter in parameters:
+                    if parameter.grad is not None:
+                        parameter.grad.mul_(gradient_scale)
+                clip = clip_grad_norm_fp32(parameters, max_norm=1.0)
+            with _record_phase(phase_timer, "optimizer"):
+                self.optimizer.step()
+            with _record_phase(phase_timer, "zero_grad"):
+                self.optimizer.zero_grad(set_to_none=True)
         except Exception:
             self._failed = True
-            self.optimizer.zero_grad(set_to_none=True)
+            with _record_phase(phase_timer, "zero_grad"):
+                self.optimizer.zero_grad(set_to_none=True)
             raise
 
         result = SingleGpuUpdateResult(

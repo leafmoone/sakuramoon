@@ -77,5 +77,16 @@ class PhaseTimer:
     def pending_cuda_pairs(self) -> int:
         return len(self._pending)
 
+    @property
+    def recorded_phases(self) -> frozenset[str]:
+        return frozenset((*self._seconds, *(item.phase for item in self._pending)))
+
+    def recorded_count(self, phase: str) -> int:
+        if phase not in TIMING_PHASES:
+            raise ValueError(f"unknown timing phase: {phase}")
+        return len(self._seconds.get(phase, ())) + sum(
+            item.phase == phase for item in self._pending
+        )
+
 
 __all__ = ["PhaseTimer"]

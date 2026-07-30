@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "task_id": "T053",
+  "targeted_cpu": {
+    "command": "uv run --frozen pytest -q tests/unit/telemetry/test_profiler.py tests/unit/telemetry/test_timers_nvtx.py tests/unit/config/test_benchmark_config.py tests/unit/train/test_benchmark_adapter.py tests/unit/train/test_step.py",
+    "status": "passed",
+    "passed": 49,
+    "failed": 0
+  },
+  "config_manifest_regression": {
+    "command": "uv run --frozen pytest -q tests/unit/config tests/contracts/config tests/unit/data/test_manifest_cli.py tests/unit/train/test_benchmark_adapter.py tests/unit/telemetry/test_profiler.py",
+    "status": "passed",
+    "passed": 96,
+    "failed": 0,
+    "warnings": 4
+  },
+  "targeted_single_gpu": {
+    "command": "uv run --frozen pytest -q tests/gpu/telemetry/test_benchmark_harness.py -s",
+    "status": "passed",
+    "passed": 2,
+    "failed": 0,
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "cuda": "12.8",
+    "torch": "2.10.0+cu128",
+    "scope": "two 100+500 measured-window cases: synthetic matmul mechanics and real BF16 forward/backward/optimizer updates with trace plus temporary-file checkpoint cadence/path accounting"
+  },
+  "nsight_systems_collector": {
+    "status": "passed",
+    "version": "2025.1.1.110-251135451612v0",
+    "scope": "short /bin/true collector smoke; expected .nsys-rep extension, streaming SHA, fsync and no-clobber publication; smoke artifact cannot enter a formal benchmark trace index"
+  },
+  "nsight_compute_collector": {
+    "status": "blocked",
+    "version": "2025.1.1.0",
+    "reason": "ERR_NVGPUCTRPERM on a real 128x128 CUDA matmul; no report was generated or claimed"
+  },
+  "ruff": "passed",
+  "strict_pyright": "passed",
+  "full_cpu_suite": "passed:503,warnings:24,seconds:136.22,command=uv run --frozen pytest -q",
+  "traceability": "passed:requirements=221,source_nodes=221,archive_files=16,production_modules=86,runtime_config_keys=247",
+  "production_perf_baseline_after": "pending:no_production_benchmark_or_optimization_claim",
+  "real_16_20_24_layer_benchmark": "blocked:production_config_and_no_long_run",
+  "four_gpu_ddp_nccl": "blocked:current_cpu_single_gpu_scope",
+  "nvml": "warning:driver_library_version_mismatch;torch_cuda_execution_passed"
+}

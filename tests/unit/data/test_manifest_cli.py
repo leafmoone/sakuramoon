@@ -59,6 +59,7 @@ SYNTHETIC_VALUES: dict[str, object] = {
     "stage.accumulation": 1,
     "stage.planned_updates": 10,
     "profiling.schedule_updates": 10,
+    "benchmark.profile_trace_updates": 5,
     "logging.flush_every_updates": 1,
     "wandb.entity": "synthetic-entity",
     "evaluation.fid.every_successful_updates": 10,

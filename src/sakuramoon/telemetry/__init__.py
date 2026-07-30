@@ -9,6 +9,21 @@ from sakuramoon.telemetry.metrics import (
     TrainingMetric,
 )
 from sakuramoon.telemetry.nvtx import nvtx_range
+from sakuramoon.telemetry.profiler import (
+    BenchmarkIdentity,
+    BenchmarkObservation,
+    BenchmarkPlan,
+    BenchmarkReport,
+    BenchmarkSample,
+    BenchmarkStepAdapter,
+    CapturedTrace,
+    PytorchTracePlan,
+    StepPayload,
+    TraceMetrics,
+    canonical_workload_artifact_bytes,
+    run_benchmark,
+    summarize_benchmark,
+)
 from sakuramoon.telemetry.timers import PhaseTimer
 from sakuramoon.telemetry.wandb_sink import (
     AsyncWandbSink,
@@ -21,11 +36,24 @@ __all__ = [
     "DETAILED_TIMING_PHASES",
     "DROPOUT_KEYS",
     "AsyncWandbSink",
+    "BenchmarkIdentity",
+    "BenchmarkObservation",
+    "BenchmarkPlan",
+    "BenchmarkReport",
+    "BenchmarkSample",
+    "BenchmarkStepAdapter",
+    "CapturedTrace",
     "DurableJsonlSink",
     "MetricsPublisher",
     "PhaseTimer",
+    "PytorchTracePlan",
     "RemoteRun",
+    "StepPayload",
+    "TraceMetrics",
     "TrainingMetric",
+    "canonical_workload_artifact_bytes",
     "nvtx_range",
     "replay_retry_queue",
+    "run_benchmark",
+    "summarize_benchmark",
 ]

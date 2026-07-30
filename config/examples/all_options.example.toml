@@ -280,6 +280,15 @@ schedule_updates = "BENCHMARK_REQUIRED" # integer > 0
 record_shapes = true
 profile_memory = true
 
+[benchmark]
+kind = "candidate"
+warmup_updates = 100 # fixed candidate/final warmup
+measured_updates = 500 # candidate fixed; final config must use >= 1000
+starting_successful_update = 899 # measured window starts at update 1000
+profile_trace_updates = "BENCHMARK_REQUIRED" # integer in measured window
+same_workload_required = true # fixed
+nsight_compute_hotspot_only = true # fixed
+
 [failure]
 stop_on_nonfinite = true # fixed
 stop_on_oom = true # fixed
