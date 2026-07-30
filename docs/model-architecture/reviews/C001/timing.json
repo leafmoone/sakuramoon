@@ -6,5 +6,13 @@
   "ended_at_utc": "2026-07-29T14:57:48Z",
   "duration_seconds": 1627,
   "hardware_level": "CPU",
-  "gpu_seconds": 0
+  "gpu_seconds": 0,
+  "foundation_review_remediation": {
+    "measurement_scope": "first tracked evidence edit through final CPU validation",
+    "started_at_utc": "2026-07-30T17:55:17Z",
+    "ended_at_utc": "2026-07-30T17:56:32Z",
+    "duration_seconds": 75,
+    "hardware_level": "CPU",
+    "gpu_seconds": 0
+  }
 }

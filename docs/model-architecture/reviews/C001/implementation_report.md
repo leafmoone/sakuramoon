@@ -7,11 +7,12 @@ C001 implements strict runtime configuration mechanics only. It does not create 
 ## Implementation
 
 - Defined frozen, exact-type Pydantic v2 tables with `extra="forbid"` for the current Foundation runtime surface. All present training-semantic fields are required; no semantic field has a code default. TOML float fields reject integer syntax and all non-finite values. S000 owns the later target-machine stage budget extension.
-- Locked approved architecture/protocol values and cross-table invariants, including caption ordering, token buckets, model dimensions, x-pred/CFG/sampling, optimizer, stage topology, selected-stage enablement, and H1/H2 disablement. FID/IS acceptance sample counts remain required TOML values; 50,000 is only the current example and is benchmark-revisable. Model revisions require immutable 40-character lowercase hexadecimal commits, and the VAE repo boundary is the official `microsoft/Mage-Flow` upstream.
+- Locked approved architecture/protocol values and cross-table invariants, including caption ordering, token buckets, model dimensions, x-pred/CFG/sampling, optimizer, stage topology, selected-stage enablement, and H1/H2 disablement. FID/IS acceptance sample counts remain required TOML values; 50,000 is only the current example and is benchmark-revisable. The remote dataset revision requires an immutable 40-character lowercase hexadecimal commit and its repo is fixed by the data contract.
 - Implemented deterministic `extends` resolution relative to the including file. Tables merge recursively; scalars and arrays replace atomically. Traversal, symlink components, cycles, duplicate includes, and table/scalar conflicts hard-fail.
 - Recorded SHA-256 for every input and produced deterministic redacted resolved TOML plus an exact SHA-256. The writer checks lexical ancestors before creating directories and atomically replaces only a non-symlink destination.
 - Configuration retains only `MODELSCOPE_API_TOKEN`/W&B-style environment-variable identifiers. The loader unconditionally validates named variables without reading `.env`; transient resolution returns Pydantic `SecretStr`, and safe validation errors omit input values. The public API has no switch that can bypass this check.
-- Boundary-aware redaction masks credential fields while preserving non-secret provenance values such as `tokenizer_sha256` in resolved configuration and hashes.
+- Boundary-aware redaction masks credential fields while preserving non-secret fixed local paths and dataset provenance in resolved configuration and hashes.
+- Qwen and VAE configuration contains only fixed local paths and required loading semantics. It does not contain model repo, revision, tokenizer SHA, manifest, capability, or asset identity fields.
 
 ## Undecided dropout handling
 
@@ -31,6 +32,6 @@ Only `all_condition=0.10` is encoded as a fixed numeric value. The six component
 - Resolved serialization is deterministic and excludes credential values. No `.env`, asset, dataset, cache, checkpoint, reference repository, or GPU was accessed.
 - No performance baseline/after placeholders were created because C001 is not a performance task.
 
-## Remaining review
+## Review result
 
-Independent Foundation AI/Infra review is pending. The review-remediated C001 suite, Ruff, and strict Pyright pass; the main agent owns the final post-remediation full repository suite and live D001 checker. The D001-owned fixture compatibility update is included so the isolated checker tests see C001's module and configuration inventory on a clean checkout.
+The independent Foundation review found that the schema implementation was correct but this report and the canonical task still described withdrawn model identity fields. Those evidence-only claims were removed without restoring any withdrawn schema field. Direct independent re-review startup did not return a valid task name; per the user's instruction, the main agent completed remediation acceptance without representing it as an independent re-review.

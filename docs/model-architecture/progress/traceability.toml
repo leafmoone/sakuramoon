@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 36
+registry_revision = 37
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -1016,11 +1016,27 @@ alias_of = ""
 superseded_by = ""
 implementation_commit_ref = "task:C001"
 implementation_paths = [
+    "src/sakuramoon/__init__.py",
+    "src/sakuramoon/config/__init__.py",
     "src/sakuramoon/config/schema.py",
     "src/sakuramoon/config/load.py",
     "src/sakuramoon/config/redact.py",
     "src/sakuramoon/config/resolve.py",
+    "tests/unit/config/conftest.py",
+    "tests/unit/config/test_load.py",
+    "tests/unit/config/test_resolve_redact.py",
+    "tests/unit/config/test_schema.py",
+    "tests/contracts/config/test_runtime_contract.py",
     "config/examples/all_options.example.toml",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/C001.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/C001/implementation_report.md",
+    "docs/model-architecture/reviews/C001/test_report.json",
+    "docs/model-architecture/reviews/C001/timing.json",
+    "docs/model-architecture/reviews/C001/artifacts.json",
+    "docs/model-architecture/reviews/C001/ai_review.md",
+    "docs/model-architecture/reviews/C001/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
