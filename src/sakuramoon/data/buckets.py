@@ -127,6 +127,12 @@ def assign_bucket(
         or source_height <= 0
     ):
         raise BucketError("source dimensions must be positive integers")
+    if (
+        type(min_crop_retention) is not float
+        or not math.isfinite(min_crop_retention)
+        or not 0.0 <= min_crop_retention <= 1.0
+    ):
+        raise BucketError("minimum crop retention must be a finite float in [0, 1]")
     if not buckets:
         raise BucketError("at least one bucket is required")
     eligible = tuple(

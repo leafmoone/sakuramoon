@@ -118,6 +118,20 @@ def test_retention_threshold_is_inclusive() -> None:
     assert result.crop_retention == 0.8
 
 
+@pytest.mark.parametrize(
+    "threshold",
+    [float("nan"), float("inf"), float("-inf"), -0.1, 1.1, 1, True],
+)
+def test_assignment_rejects_invalid_retention_threshold(threshold: object) -> None:
+    with pytest.raises(BucketError, match="finite float"):
+        assign_bucket(
+            640,
+            512,
+            (BucketShape(512, 512),),
+            min_crop_retention=threshold,  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.parametrize("width,height", [(0, 10), (10, -1), (True, 10)])
 def test_assignment_rejects_invalid_dimensions(width: int, height: int) -> None:
     with pytest.raises(BucketError, match="positive integers"):

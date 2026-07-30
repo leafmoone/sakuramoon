@@ -3,14 +3,37 @@
   "task_id": "D013",
   "hardware": "CPU",
   "targeted": {
-    "command": "uv run pytest -q tests/unit/data/test_buckets.py tests/unit/data/test_image_ops.py",
-    "passed": 20,
-    "failed": 0
+    "command": "uv run --frozen pytest -q tests/unit/data/test_buckets.py tests/unit/data/test_image_ops.py",
+    "passed": 27,
+    "failed": 0,
+    "duration_seconds": 0.39
+  },
+  "full_cpu_suite": {
+    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+    "passed": 360,
+    "failed": 0,
+    "warnings": 24,
+    "duration_seconds": 31.68
   },
   "ruff": true,
   "pyright_errors": 0,
   "full_metadata_scan_run": false,
   "decoded_100k_scan_run": false,
   "gpu_used": false,
-  "package_review_status": "pending_D010_D015_completion"
+  "package_review_status": "initial_finding_remediated_final_package_rereview_pending",
+  "invalid_retention_thresholds_rejected": [
+    "NaN",
+    "positive infinity",
+    "negative infinity",
+    "below zero",
+    "above one",
+    "integer",
+    "boolean"
+  ],
+  "pending": [
+    "full metadata assignment scan",
+    "100k decoded dimension check",
+    "production retention and rejection distributions",
+    "CPU throughput and Mage-VAE round trip"
+  ]
 }

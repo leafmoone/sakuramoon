@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 41
+registry_revision = 42
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -505,6 +505,7 @@ artifacts = [
     "docs/model-architecture/reviews/D010/**",
     "docs/model-architecture/reviews/D011/**",
     "docs/model-architecture/reviews/D012/**",
+    "docs/model-architecture/reviews/D013/**",
     "artifacts/data/**",
 ]
 hardware = "1GPU"
@@ -4464,7 +4465,17 @@ implementation_commit_ref = "task:D013"
 implementation_paths = [
     "src/sakuramoon/data/buckets.py",
     "src/sakuramoon/data/image_ops.py",
+    "tests/unit/data/test_buckets.py",
+    "tests/unit/data/test_image_ops.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D013.md",
+    "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/D013/implementation_report.md",
+    "docs/model-architecture/reviews/D013/test_report.json",
+    "docs/model-architecture/reviews/D013/timing.json",
+    "docs/model-architecture/reviews/D013/ai_review.md",
+    "docs/model-architecture/reviews/D013/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -4489,6 +4500,8 @@ benchmarks = [
     "benchmarks/stage/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/DATA/**",
+    "docs/model-architecture/reviews/D013/**",
     "artifacts/stages/**",
 ]
 not_applicable_fields = [
