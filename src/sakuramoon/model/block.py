@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from sakuramoon.conditioning.global_condition import BlockModulation
-from sakuramoon.model.attention import DenseGQAAttention, dense_attention_mask
+from sakuramoon.model.attention import DenseGQAAttention
 from sakuramoon.model.mlp import SwiGLU
 from sakuramoon.model.norm import RMSNorm
 
@@ -89,6 +89,7 @@ class DiTBlock(nn.Module):
         self,
         tokens: torch.Tensor,
         token_mask: torch.Tensor,
+        attention_mask: torch.Tensor,
         coordinates: torch.Tensor,
         modulation: BlockModulation,
         *,
@@ -111,7 +112,7 @@ class DiTBlock(nn.Module):
         )
         attention_output = self.attention(
             attention_input,
-            dense_attention_mask(token_mask),
+            attention_mask,
             coordinates,
         )
         attention_gate = modulation.attention_gate.to(tokens.dtype).unsqueeze(1)

@@ -61,6 +61,7 @@ def test_valid_synthetic_fixture_is_strict_and_frozen(
 
     assert config.caption.dropout.all_condition == 0.1
     assert config.caption.condition_buckets[-1] == 512
+    assert config.model.packing.modality_init_std == 0.02
     with pytest.raises(ValidationError, match="frozen"):
         config.run.seed = 5
 

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "task_id": "M032",
+  "unit_tests_passed": 5,
+  "targeted_tests_passed": 55,
+  "ruff_passed": true,
+  "pyright_passed": true,
+  "cpu_parameter_counts": {
+    "16": 1239766144,
+    "20": 1543936128,
+    "24": 1848106112
+  },
+  "gpu_tested": true,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "depth": 24,
+  "output_shape": [1, 128, 2, 2],
+  "first_output_zero": true,
+  "head_updated_first_step": true,
+  "second_output_nonzero": true,
+  "second_step_trunk_gradient_nonzero": true,
+  "second_step_condition_projection_gradients_nonzero": true,
+  "forward_ms": [475.154, 49.383],
+  "backward_ms": [151.789, 64.454],
+  "peak_allocated_mib": 7328.8,
+  "peak_reserved_mib": 7688.0,
+  "packed_production_backend": "pending:K001",
+  "package_review_status": "pending"
+}

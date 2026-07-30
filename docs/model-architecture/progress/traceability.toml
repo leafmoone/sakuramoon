@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 25
+registry_revision = 26
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -390,7 +390,7 @@ modules = [
 reference_modules = []
 tests = [
     "tests/unit/conditioning/test_global_condition.py",
-    "tests/unit/model/test_output_head.py",
+    "tests/unit/model/test_dit.py",
 ]
 benchmarks = [
     "benchmarks/model/**",
@@ -3392,7 +3392,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C06-002"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "dit"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3404,8 +3404,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M032"
+implementation_paths = [
+    "src/sakuramoon/model/dit.py",
+    "src/sakuramoon/model/growth.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3815,7 +3819,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C07-005"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "conditioning"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3827,8 +3831,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M032"
+implementation_paths = [
+    "src/sakuramoon/model/dit.py",
+    "src/sakuramoon/model/output_head.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3844,7 +3852,7 @@ modules = [
 reference_modules = []
 tests = [
     "tests/unit/conditioning/test_global_condition.py",
-    "tests/unit/model/test_output_head.py",
+    "tests/unit/model/test_dit.py",
 ]
 benchmarks = [
     "benchmarks/model/**",
@@ -3889,7 +3897,7 @@ modules = [
 reference_modules = []
 tests = [
     "tests/unit/conditioning/test_global_condition.py",
-    "tests/unit/model/test_output_head.py",
+    "tests/unit/model/test_dit.py",
 ]
 benchmarks = [
     "benchmarks/model/**",

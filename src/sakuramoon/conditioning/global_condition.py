@@ -66,6 +66,7 @@ class GlobalConditioner(nn.Module):
         hidden_dim: int,
         model_dim: int,
         slot_count: int,
+        active_slot_ids: tuple[int, ...],
         modulation_chunks: int,
         final_modulation_size: int,
     ) -> None:
@@ -77,6 +78,9 @@ class GlobalConditioner(nn.Module):
             or hidden_dim != 1024
             or model_dim <= 0
             or slot_count <= 0
+            or not active_slot_ids
+            or len(set(active_slot_ids)) != len(active_slot_ids)
+            or any(slot_id < 0 or slot_id >= slot_count for slot_id in active_slot_ids)
             or modulation_chunks != 6
             or final_modulation_size != 2 * model_dim
         ):
@@ -87,6 +91,7 @@ class GlobalConditioner(nn.Module):
         self.hidden_dim = hidden_dim
         self.model_dim = model_dim
         self.slot_count = slot_count
+        self.active_slot_ids = active_slot_ids
         self.modulation_chunks = modulation_chunks
         input_dim = timestep_dim + size_dim + aspect_dim
         self.condition_mlp = nn.Sequential(
@@ -98,13 +103,19 @@ class GlobalConditioner(nn.Module):
         self.shared_block_projection = nn.Linear(
             hidden_dim, modulation_size, bias=False
         )
-        self.block_bias = nn.Parameter(torch.zeros(slot_count, modulation_size))
+        self.block_biases = nn.ParameterDict(
+            {
+                f"slot_{slot_id:02d}": nn.Parameter(torch.zeros(modulation_size))
+                for slot_id in active_slot_ids
+            }
+        )
         self.final_activation = nn.SiLU()
         self.final_projection = nn.Linear(
             hidden_dim, final_modulation_size, bias=True
         )
         nn.init.zeros_(self.shared_block_projection.weight)
-        nn.init.zeros_(self.block_bias)
+        for bias in self.block_biases.values():
+            nn.init.zeros_(bias)
         nn.init.zeros_(self.final_projection.weight)
         nn.init.zeros_(self.final_projection.bias)
 
@@ -113,7 +124,7 @@ class GlobalConditioner(nn.Module):
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
-        slot_ids: torch.Tensor,
+        slot_ids: tuple[int, ...],
     ) -> GlobalConditionOutput:
         if (
             timestep.ndim != 1
@@ -126,14 +137,8 @@ class GlobalConditioner(nn.Module):
             raise ValueError("timestep, size_scale, and aspect must be matching FP32 vectors")
         if bool(((timestep < 0.0) | (timestep > 1.0)).any().item()):
             raise ValueError("timestep must be in [0,1]")
-        if slot_ids.ndim != 1 or slot_ids.dtype != torch.long:
-            raise ValueError("slot_ids must be a 1D torch.long tensor")
-        if slot_ids.numel() == 0 or bool(
-            ((slot_ids < 0) | (slot_ids >= self.slot_count)).any().item()
-        ):
-            raise ValueError("slot_ids are empty or outside the stable slot table")
-        if slot_ids.device != timestep.device:
-            raise ValueError("slot_ids and condition tensors must share a device")
+        if not slot_ids or any(slot_id not in self.active_slot_ids for slot_id in slot_ids):
+            raise ValueError("slot_ids are empty or not present in this topology")
 
         device_type = timestep.device.type
         with torch.autocast(device_type=device_type, enabled=False):
@@ -147,10 +152,13 @@ class GlobalConditioner(nn.Module):
             )
             condition_hidden = self.condition_mlp(embedded)
             shared = self.shared_block_projection(condition_hidden)
-            per_block = shared[:, None] + self.block_bias[slot_ids][None]
+            selected_biases = torch.stack(
+                tuple(self.block_biases[f"slot_{slot_id:02d}"] for slot_id in slot_ids)
+            )
+            per_block = shared[:, None] + selected_biases[None]
             chunks = per_block.view(
                 timestep.shape[0],
-                slot_ids.numel(),
+                len(slot_ids),
                 self.modulation_chunks,
                 self.model_dim,
             ).unbind(dim=2)

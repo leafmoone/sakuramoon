@@ -17,6 +17,7 @@ def _module() -> GlobalConditioner:
         hidden_dim=1024,
         model_dim=32,
         slot_count=24,
+        active_slot_ids=tuple(range(24)),
         modulation_chunks=6,
         final_modulation_size=64,
     )
@@ -36,7 +37,7 @@ def test_modulation_paths_start_zero_and_are_independent() -> None:
         torch.tensor([0.0, 1.0], dtype=torch.float32),
         torch.tensor([0.0, 0.5], dtype=torch.float32),
         torch.tensor([0.0, -1.0], dtype=torch.float32),
-        torch.tensor([0, 3, 7], dtype=torch.long),
+        (0, 3, 7),
     )
 
     assert output.condition_hidden.shape == (2, 1024)
@@ -68,7 +69,7 @@ def test_final_path_applies_silu_and_does_not_reuse_block_projection() -> None:
         torch.tensor([0.5], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
-        torch.tensor([0], dtype=torch.long),
+        (0,),
     )
     expected = torch.nn.functional.silu(output.condition_hidden).sum(dim=-1)
 
@@ -82,7 +83,7 @@ def test_zero_initialized_outputs_receive_gradients() -> None:
         torch.tensor([0.25], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
-        torch.tensor([2, 5], dtype=torch.long),
+        (2, 5),
     )
     loss = (
         output.block.attention_gate.sum()
@@ -93,7 +94,7 @@ def test_zero_initialized_outputs_receive_gradients() -> None:
     loss.backward()
 
     assert module.shared_block_projection.weight.grad is not None
-    assert module.block_bias.grad is not None
+    assert module.block_biases["slot_02"].grad is not None
     assert module.final_projection.weight.grad is not None
     assert torch.isfinite(module.shared_block_projection.weight.grad).all()
 
@@ -104,7 +105,7 @@ def test_active_slot_selection_removes_only_the_slot_axis() -> None:
         torch.tensor([0.25], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
-        torch.tensor([2, 5], dtype=torch.long),
+        (2, 5),
     )
 
     selected = output.block.for_active_index(1)
@@ -125,12 +126,12 @@ def test_rejects_invalid_timestep_and_slot() -> None:
             torch.tensor([1.1], dtype=torch.float32),
             torch.tensor([0.0], dtype=torch.float32),
             torch.tensor([0.0], dtype=torch.float32),
-            torch.tensor([0], dtype=torch.long),
+            (0,),
         )
     with pytest.raises(ValueError, match="slot"):
         module(
             torch.tensor([0.5], dtype=torch.float32),
             torch.tensor([0.0], dtype=torch.float32),
             torch.tensor([0.0], dtype=torch.float32),
-            torch.tensor([24], dtype=torch.long),
+            (24,),
         )

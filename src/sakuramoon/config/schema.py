@@ -280,6 +280,7 @@ class PackingModelConfig(StrictModel):
     style_tokens: Literal[4]
     remove_text_padding: Literal[True]
     cross_sample_attention: Literal[False]
+    modality_init_std: FixedPointZeroTwo
 
     @model_validator(mode="after")
     def validate_order(self) -> PackingModelConfig:

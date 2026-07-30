@@ -132,6 +132,7 @@ order = ["text", "style", "image"] # fixed
 style_tokens = 4 # fixed
 remove_text_padding = true # fixed
 cross_sample_attention = false # fixed
+modality_init_std = 0.02 # fixed
 
 [model.rope]
 head_dim = 128 # fixed

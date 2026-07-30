@@ -164,6 +164,7 @@ def test_block_uses_raw_condition_gates_and_clears_padding() -> None:
     output = module(
         tokens,
         token_mask,
+        dense_attention_mask(token_mask),
         coordinates,
         modulation,
         attention_growth=1.0,
@@ -194,6 +195,7 @@ def test_zero_condition_gates_make_block_identity_with_finite_gradients() -> Non
     output = module(
         tokens,
         token_mask,
+        dense_attention_mask(token_mask),
         coordinates,
         modulation,
         attention_growth=1.0,
@@ -216,6 +218,7 @@ def test_zero_growth_makes_nonzero_condition_gates_an_identity() -> None:
     output = module(
         tokens,
         token_mask,
+        dense_attention_mask(token_mask),
         coordinates,
         modulation,
         attention_growth=0.0,
