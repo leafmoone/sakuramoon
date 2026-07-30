@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 28
+registry_revision = 29
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -3411,8 +3411,12 @@ alias_of = ""
 superseded_by = ""
 implementation_commit_ref = "task:M032"
 implementation_paths = [
+    "src/sakuramoon/model/__init__.py",
+    "src/sakuramoon/model/block.py",
     "src/sakuramoon/model/dit.py",
     "src/sakuramoon/model/growth.py",
+    "tests/unit/model/test_dit.py",
+    "tests/gpu/model/test_packed_dit.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -3845,6 +3849,8 @@ implementation_commit_ref = "task:M032"
 implementation_paths = [
     "src/sakuramoon/model/dit.py",
     "src/sakuramoon/model/output_head.py",
+    "tests/unit/model/test_dit.py",
+    "tests/gpu/model/test_packed_dit.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""

@@ -58,15 +58,58 @@ class FinalOutputHead(nn.Module):
             raise ValueError("image token count must equal the latent image shape")
         normalized = self.norm(image_hidden)
         conditioned = (
-            (1.0 + final_scale.to(normalized.dtype).unsqueeze(1)) * normalized
-            + final_shift.to(normalized.dtype).unsqueeze(1)
-        )
+            1.0 + final_scale.to(normalized.dtype).unsqueeze(1)
+        ) * normalized + final_shift.to(normalized.dtype).unsqueeze(1)
         prediction = self.projection(conditioned.float())
         return prediction.transpose(1, 2).reshape(
             batch,
             self.out_channels,
             height,
             width,
+        )
+
+    def forward_packed(
+        self,
+        image_hidden: torch.Tensor,
+        image_sample_indices: torch.Tensor,
+        final_scale: torch.Tensor,
+        final_shift: torch.Tensor,
+        image_shapes: tuple[tuple[int, int], ...],
+    ) -> tuple[torch.Tensor, ...]:
+        """Project concatenated image spans and restore each sample grid."""
+
+        if image_hidden.ndim != 2 or image_hidden.shape[-1] != self.hidden_size:
+            raise ValueError("packed image_hidden must have shape [I,hidden_size]")
+        batch = len(image_shapes)
+        if batch == 0:
+            raise ValueError("image_shapes must contain at least one sample")
+        if final_scale.shape != (batch, self.hidden_size) or final_shift.shape != (
+            batch,
+            self.hidden_size,
+        ):
+            raise ValueError("final scale and shift must have shape [B,hidden_size]")
+        if (
+            image_sample_indices.shape != image_hidden.shape[:1]
+            or image_sample_indices.dtype != torch.int64
+            or image_sample_indices.device != image_hidden.device
+        ):
+            raise ValueError(
+                "image_sample_indices must be int64 [I] on the image device"
+            )
+        image_lengths = tuple(height * width for height, width in image_shapes)
+        if any(height <= 0 or width <= 0 for height, width in image_shapes):
+            raise ValueError("image grid dimensions must be positive")
+        if sum(image_lengths) != image_hidden.shape[0]:
+            raise ValueError("packed image token count must equal all image grid areas")
+
+        normalized = self.norm(image_hidden)
+        scale = final_scale.index_select(0, image_sample_indices).to(normalized.dtype)
+        shift = final_shift.index_select(0, image_sample_indices).to(normalized.dtype)
+        prediction = self.projection(((1.0 + scale) * normalized + shift).float())
+        samples = prediction.split(image_lengths)
+        return tuple(
+            sample.transpose(0, 1).reshape(self.out_channels, height, width)
+            for sample, (height, width) in zip(samples, image_shapes, strict=True)
         )
 
 
