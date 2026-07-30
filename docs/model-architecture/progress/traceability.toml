@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 31
+registry_revision = 32
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -5053,7 +5053,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C12-002"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -5065,8 +5065,14 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T041"
+implementation_paths = [
+    "src/sakuramoon/train/__init__.py",
+    "src/sakuramoon/train/step.py",
+    "tests/unit/train/test_step.py",
+    "tests/gpu/train/test_single_gpu_step.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

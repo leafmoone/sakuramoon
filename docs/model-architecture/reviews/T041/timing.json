@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "task_id": "T041",
+  "duration_seconds": null,
+  "timing_status": "implementation_start_not_recorded",
+  "ended_at_utc": "2026-07-30T11:11:14Z",
+  "cpu_unit_suite_seconds": 4.15,
+  "full_cpu_unit_regression_seconds": 26.86,
+  "gpu_torchao_test_seconds": 7.51
+}
