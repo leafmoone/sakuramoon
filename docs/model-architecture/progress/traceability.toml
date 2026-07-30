@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 32
+registry_revision = 33
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -5345,7 +5345,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C12-007"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -5357,8 +5357,19 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T042"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/__init__.py",
+    "src/sakuramoon/checkpoint/artifact.py",
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/rng.py",
+    "src/sakuramoon/checkpoint/save.py",
+    "src/sakuramoon/checkpoint/schema.py",
+    "tests/unit/checkpoint/test_checkpoint.py",
+    "tests/gpu/checkpoint/test_raw_checkpoint.py",
+    "tests/gpu/checkpoint/test_production_checkpoint.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -8588,7 +8599,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-057"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -8601,8 +8612,19 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T042"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/__init__.py",
+    "src/sakuramoon/checkpoint/artifact.py",
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/rng.py",
+    "src/sakuramoon/checkpoint/save.py",
+    "src/sakuramoon/checkpoint/schema.py",
+    "tests/unit/checkpoint/test_checkpoint.py",
+    "tests/gpu/checkpoint/test_raw_checkpoint.py",
+    "tests/gpu/checkpoint/test_production_checkpoint.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -8643,7 +8665,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-058"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -8656,8 +8678,15 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T042"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/rng.py",
+    "src/sakuramoon/checkpoint/save.py",
+    "src/sakuramoon/checkpoint/schema.py",
+    "tests/gpu/checkpoint/test_raw_checkpoint.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

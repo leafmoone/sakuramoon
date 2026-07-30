@@ -46,6 +46,19 @@ class TextConditioner(nn.Module):
         self.adapter_size = adapter_size
         self.groups = groups
         self.group_size = adapter_size // groups
+        self._artifact_config: dict[str, object] = {
+            "adapter_size": adapter_size,
+            "attention_heads": attention_heads,
+            "groups": groups,
+            "input_size": input_size,
+            "layer_scale_init": layer_scale_init,
+            "linear_dtype": str(linear_dtype).removeprefix("torch."),
+            "mix_gate_init": mix_gate_init,
+            "norm_eps": norm_eps,
+            "output_size": output_size,
+            "projection_bias": projection_bias,
+            "sensitive_dtype": str(sensitive_dtype).removeprefix("torch."),
+        }
         self.layer_norms = nn.ModuleList(FP32RMSNorm(input_size, norm_eps) for _ in range(7))
         self.shared_projection = nn.Linear(
             input_size,
@@ -124,6 +137,9 @@ class TextConditioner(nn.Module):
         tokens = self.output_projection(self.output_norm(tokens))
         tokens = tokens * main_mask.unsqueeze(-1)
         return TextConditioningOutput(tokens=tokens, mask=main_mask, layer_weights=weights)
+
+    def artifact_config(self) -> dict[str, object]:
+        return dict(self._artifact_config)
 
 
 __all__ = ["TextConditioner", "TextConditioningOutput"]

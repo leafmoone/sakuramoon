@@ -82,6 +82,39 @@ class DenseDiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.active_slot_ids = slots
+        self._artifact_config: dict[str, object] = {
+            "active_slot_ids": list(slots),
+            "aspect_dim": aspect_dim,
+            "attention_backend": "dense_sdpa",
+            "attention_dropout": attention_dropout,
+            "condition_hidden_size": condition_hidden_size,
+            "depth": depth,
+            "final_modulation_size": final_modulation_size,
+            "head_dim": head_dim,
+            "hidden_size": hidden_size,
+            "input_channels": input_channels,
+            "intermediate_size": intermediate_size,
+            "kv_heads": kv_heads,
+            "linear_dtype": str(linear_dtype).removeprefix("torch."),
+            "mlp_dropout": mlp_dropout,
+            "modality_init_std": modality_init_std,
+            "modulation_chunks": modulation_chunks,
+            "norm_eps": norm_eps,
+            "out_channels": out_channels,
+            "output_bias_zero_init": output_bias_zero_init,
+            "output_weight_zero_init": output_weight_zero_init,
+            "projection_bias": projection_bias,
+            "q_heads": q_heads,
+            "rope_nope_dim": rope_nope_dim,
+            "rope_position_scale": rope_position_scale,
+            "rope_theta": rope_theta,
+            "rope_x_dim": rope_x_dim,
+            "rope_y_dim": rope_y_dim,
+            "sensitive_dtype": str(sensitive_dtype).removeprefix("torch."),
+            "size_dim": size_dim,
+            "stable_slot_count": stable_slot_count,
+            "timestep_dim": timestep_dim,
+        }
         self.input_projection = nn.Linear(
             input_channels,
             hidden_size,
@@ -277,6 +310,9 @@ class DenseDiT(nn.Module):
             "stable_slot_count": 24,
         }
 
+    def artifact_config(self) -> dict[str, object]:
+        return dict(self._artifact_config)
+
 
 class PackedDiT(nn.Module):
     """Production DiT that keeps T024 sequences flat through every block."""
@@ -325,6 +361,39 @@ class PackedDiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.active_slot_ids = slots
+        self._artifact_config: dict[str, object] = {
+            "active_slot_ids": list(slots),
+            "aspect_dim": aspect_dim,
+            "attention_backend": "fa4_varlen",
+            "attention_dropout": attention_dropout,
+            "condition_hidden_size": condition_hidden_size,
+            "depth": depth,
+            "final_modulation_size": final_modulation_size,
+            "head_dim": head_dim,
+            "hidden_size": hidden_size,
+            "input_channels": input_channels,
+            "intermediate_size": intermediate_size,
+            "kv_heads": kv_heads,
+            "linear_dtype": str(linear_dtype).removeprefix("torch."),
+            "mlp_dropout": mlp_dropout,
+            "modality_init_std": modality_init_std,
+            "modulation_chunks": modulation_chunks,
+            "norm_eps": norm_eps,
+            "out_channels": out_channels,
+            "output_bias_zero_init": output_bias_zero_init,
+            "output_weight_zero_init": output_weight_zero_init,
+            "projection_bias": projection_bias,
+            "q_heads": q_heads,
+            "rope_nope_dim": rope_nope_dim,
+            "rope_position_scale": rope_position_scale,
+            "rope_theta": rope_theta,
+            "rope_x_dim": rope_x_dim,
+            "rope_y_dim": rope_y_dim,
+            "sensitive_dtype": str(sensitive_dtype).removeprefix("torch."),
+            "size_dim": size_dim,
+            "stable_slot_count": stable_slot_count,
+            "timestep_dim": timestep_dim,
+        }
         self.input_projection = nn.Linear(
             input_channels,
             hidden_size,
@@ -565,6 +634,9 @@ class PackedDiT(nn.Module):
             "stable_slot_count": 24,
             "attention_backend": "fa4_varlen",
         }
+
+    def artifact_config(self) -> dict[str, object]:
+        return dict(self._artifact_config)
 
 
 __all__ = ["DenseDiT", "DenseDiTFeatures", "PackedDiT", "PackedDiTFeatures"]

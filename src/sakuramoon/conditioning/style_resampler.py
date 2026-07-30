@@ -68,6 +68,19 @@ class StyleResampler(nn.Module):
             raise ValueError("sensitive style parameters must use float32")
         self.input_size = input_size
         self.query_count = query_count
+        self._artifact_config: dict[str, object] = {
+            "attention_heads": attention_heads,
+            "hidden_size": hidden_size,
+            "init_std": init_std,
+            "input_size": input_size,
+            "intermediate_size": intermediate_size,
+            "linear_dtype": str(linear_dtype).removeprefix("torch."),
+            "norm_eps": norm_eps,
+            "output_size": output_size,
+            "projection_bias": projection_bias,
+            "query_count": query_count,
+            "sensitive_dtype": str(sensitive_dtype).removeprefix("torch."),
+        }
         self.shared_norm = FP32RMSNorm(input_size, norm_eps)
         self.layer_embedding = nn.Parameter(
             torch.empty(7, input_size, dtype=sensitive_dtype)
@@ -168,6 +181,9 @@ class StyleResampler(nn.Module):
 
         mask = torch.ones(batch, self.query_count, dtype=torch.bool, device=qwen_states.device)
         return StyleConditioningOutput(tokens=tokens, mask=mask)
+
+    def artifact_config(self) -> dict[str, object]:
+        return dict(self._artifact_config)
 
 
 __all__ = ["StyleConditioningOutput", "StyleResampler"]
