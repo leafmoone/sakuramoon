@@ -226,6 +226,15 @@ sakuramoon/
 
 ## 8. Phase 1：资产、数据、Caption 与图像管线
 
+### A001：最小组件本地资产边界修复
+
+- **状态：** 原 manifest/hash/capability/TOCTOU 方案保持撤销；本任务只修复现行固定本地路径检查的组件耦合。
+- **实现路径：** `src/sakuramoon/assets/__init__.py`、Qwen/Mage-VAE loader 与组件级 unit 合同。
+- **动作：** Qwen 与 Mage-VAE 各自只检查自身加载必需文件；显式全模型 preflight 可复用聚合检查。缺失时硬失败，禁止下载、联网替换和 fallback。
+- **验证：** 仅准备 Qwen 文件时 Qwen 边界通过；仅准备 VAE 文件时 VAE 边界通过；两个真实 loader 都不得被无关组件缺失阻塞。
+- **非目标：** 不恢复本地模型 manifest、bytes/SHA-256、repo/revision/license、capability、TOCTOU 或 hostile-local-environment 层，不重新成为数据或 encoder 主线的依赖阻塞。
+- **GPU：** 无；真实 Qwen/VAE forward 与质量证据继续归 `T021`/`T020`。
+
 ### A002：本地资产边界简化（已撤销原方案）
 
 - **状态：** A001 与 A002 原 manifest/hash/capability 和大型 AST scanner 方案已撤销；A002 只记录本次最小化，不再阻塞单卡主线。

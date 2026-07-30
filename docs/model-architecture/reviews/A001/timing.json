@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "task_id": "A001",
+  "phase": "foundation_component_boundary_remediation",
+  "measurement_scope": "first tracked remediation edit through final validation",
+  "started_at_utc": "2026-07-30T18:01:53Z",
+  "ended_at_utc": "2026-07-30T18:07:21Z",
+  "duration_seconds": 328,
+  "hardware_level": "CPU",
+  "gpu_seconds": 0
+}

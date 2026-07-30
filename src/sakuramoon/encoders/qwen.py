@@ -16,7 +16,7 @@ from transformers import (
 )
 from transformers.models.qwen3_5.modeling_qwen3_5 import is_fast_path_available
 
-from sakuramoon.assets import require_local_models
+from sakuramoon.assets import require_local_qwen
 
 HIDDEN_STATE_BLOCKS = (2, 4, 8, 12, 16, 20, 24)
 _HIDDEN_STATE_INDEX_BY_BLOCK = {
@@ -111,11 +111,7 @@ def load_local_qwen(repository_root: Path, device: torch.device) -> QwenRuntime:
 
     if device.type != "cuda":
         raise ValueError("the production Qwen encoder requires a CUDA device")
-    paths = require_local_models(repository_root)
-    model_path = paths.qwen
-    for name in ("config.json", "tokenizer.json", "model.safetensors"):
-        if not (model_path / name).is_file():
-            raise FileNotFoundError(f"required local Qwen file is missing: {model_path / name}")
+    model_path = require_local_qwen(repository_root)
     if not is_fast_path_available:
         raise RuntimeError("Qwen3.5 fast linear-attention kernels are unavailable")
 

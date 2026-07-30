@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 37
+registry_revision = 38
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -704,6 +704,7 @@ not_applicable_reason = "The environment lock has no runtime configuration, prod
 [[profiles]]
 name = "local_model_execution_boundary"
 owner_tasks = [
+    "A001",
     "A002",
 ]
 config_keys = [
@@ -721,6 +722,8 @@ tests = [
 ]
 benchmarks = []
 artifacts = [
+    "docs/model-architecture/progress/tasks/A001.md",
+    "docs/model-architecture/reviews/A001/**",
     "docs/model-architecture/progress/tasks/A002.md",
 ]
 hardware = "CPU"
@@ -11476,23 +11479,28 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = "task:A002"
+implementation_commit_ref = "task:A001"
 implementation_paths = [
-    "AGENTS.md",
-    "docs/model-architecture/current/confirmed-decisions.md",
-    "docs/model-architecture/current/open-items.md",
+    ".gitignore",
     "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
     "docs/model-architecture/progress/asset-policy.md",
     "docs/model-architecture/progress/traceability.toml",
     "src/sakuramoon/assets/__init__.py",
+    "src/sakuramoon/encoders/mage_vae.py",
+    "src/sakuramoon/encoders/qwen.py",
     "src/sakuramoon/config/schema.py",
     "config/examples/all_options.example.toml",
     "tests/unit/assets/test_local_models.py",
-    "tests/unit/config/conftest.py",
-    "tests/unit/config/test_resolve_redact.py",
-    "tests/unit/config/test_schema.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/progress/tasks/A001.md",
     "docs/model-architecture/progress/tasks/A002.md",
     "docs/model-architecture/progress/time-log.jsonl",
+    "docs/model-architecture/reviews/A001/implementation_report.md",
+    "docs/model-architecture/reviews/A001/test_report.json",
+    "docs/model-architecture/reviews/A001/timing.json",
+    "docs/model-architecture/reviews/A001/artifacts.json",
+    "docs/model-architecture/reviews/A001/ai_review.md",
+    "docs/model-architecture/reviews/A001/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -11513,6 +11521,8 @@ tests = [
 ]
 benchmarks = []
 artifacts = [
+    "docs/model-architecture/progress/tasks/A001.md",
+    "docs/model-architecture/reviews/A001/**",
     "docs/model-architecture/progress/tasks/A002.md",
 ]
 not_applicable_fields = [

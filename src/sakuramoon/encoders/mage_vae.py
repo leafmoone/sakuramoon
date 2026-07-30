@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from safetensors.torch import load_file  # pyright: ignore[reportUnknownVariableType]
 from torch import nn
 
-from sakuramoon.assets import require_local_models
+from sakuramoon.assets import require_local_vae
 
 
 def _silu(tensor: torch.Tensor) -> torch.Tensor:
@@ -560,7 +560,7 @@ class FrozenMageVAE(nn.Module):
 def load_local_mage_vae(repository_root: Path, device: torch.device) -> FrozenMageVAE:
     if device.type != "cuda":
         raise ValueError("the production Mage-VAE requires a CUDA device")
-    model_path = require_local_models(repository_root).vae
+    model_path = require_local_vae(repository_root)
     checkpoint = model_path / "diffusion_pytorch_model.safetensors"
     model = MageVAE(checkpoint).to(device=device, dtype=torch.bfloat16)
     return FrozenMageVAE(model)

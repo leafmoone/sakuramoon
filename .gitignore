@@ -23,7 +23,7 @@ __pycache__/
 /cache/
 /reference/
 
-# Model weights and local databases must be represented by manifests, not blobs.
+# Model weights and local databases remain local and must never be tracked.
 *.safetensors
 *.ckpt
 *.pt

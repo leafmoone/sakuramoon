@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "task_id": "A001",
+  "hardware_level": "CPU",
+  "gpu_seconds": 0,
+  "targeted": {
+    "command": "uv run --frozen pytest -q tests/unit/assets/test_local_models.py",
+    "passed": 8,
+    "failed": 0,
+    "duration_seconds": 12.39,
+    "contracts": [
+      "Qwen-only files satisfy the Qwen component boundary",
+      "VAE-only files satisfy the Mage-VAE component boundary",
+      "the Qwen loader reaches its kernel preflight without VAE files",
+      "the VAE loader reaches model construction without Qwen files",
+      "component failures name only their own missing files",
+      "the explicit aggregate check still requires both components"
+    ]
+  },
+  "full_cpu": {
+    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
+    "passed": 348,
+    "failed": 0,
+    "warnings": 24,
+    "duration_seconds": 30.13,
+    "scope": "CPU tests only; tests/gpu excluded"
+  },
+  "ruff": {
+    "command": "uv run --frozen ruff check src/sakuramoon/assets/__init__.py src/sakuramoon/encoders/mage_vae.py src/sakuramoon/encoders/qwen.py tests/unit/assets/test_local_models.py",
+    "ok": true
+  },
+  "pyright": {
+    "command": "uv run --frozen pyright src/sakuramoon/assets/__init__.py src/sakuramoon/encoders/mage_vae.py src/sakuramoon/encoders/qwen.py tests/unit/assets/test_local_models.py",
+    "mode": "strict",
+    "errors": 0,
+    "warnings": 0
+  },
+  "traceability": {
+    "command": "uv run --frozen python tools/verify_traceability.py --format json",
+    "ok": true,
+    "requirements": 221,
+    "source_nodes": 221,
+    "production_modules": 67,
+    "runtime_config_keys": 234,
+    "archive_files": 16
+  },
+  "notes": [
+    "The first full CPU run passed 344 non-traceability tests and exposed four checker failures because A001 was absent from roadmap ownership after the heavy-scope withdrawal.",
+    "A minimal non-blocking A001 roadmap entry restored atomic task ownership without restoring the withdrawn asset system; the final full CPU run passed all 348 tests."
+  ],
+  "performance_artifacts_created": false
+}
