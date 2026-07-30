@@ -165,3 +165,16 @@ These remain failure verdicts until the original independent reviewers rereview 
 - Results: 328 passed / 1 skipped boundary contracts (24.22/24.82 seconds pytest/wall), 526 passed / 1 skipped full tests (47.33/47.81 seconds), 28 sources/0 scanner violations (20.67 seconds), Ruff PASS (0.11 seconds), strict Pyright 0 errors/0 warnings (3.70 seconds), and traceability PASS (0.92 seconds). Shared compatibility passed 329/329 contracts and 36 sources/0 violations (30.97 seconds).
 - The scanner did not regress relative to the reviewed R8 clean 21.729-second result or the eighth-remediation shared 31.595-second result. This remains preflight/static evidence only and does not close D010 remote streaming or any model/GPU gate.
 - No `.env`, model, database, dataset/cache, or `reference/` payload was read. No network access, model/data download, GPU work, or performance artifact was performed. Status remains pending independent rereview and main-agent acceptance.
+
+## Tenth remediation: sensitive-callable derivation and linear attribute evaluation
+
+- Attribute evaluation now treats every `_sensitive_callable` uniformly. A literal `__call__` suffix preserves the complete fact and only extends the canonical call chain; every other member immediately emits `sensitive_callable_attribute_forbidden` and returns `ambiguous-sensitive.*`, which is itself classified as sensitive. Arbitrary descriptor chains therefore cannot launder the fact.
+- Exact negative contracts cover `getattr` and `builtins.getattr` through `__getattribute__`, `vars` and `__import__` through `__self__`, model loaders through `__func__`/`__getattribute__`, plus descriptor, partial, operator and container paths. Existing Git-helper, verified asset/root and D010 network/fixture contracts remain adjacent coverage.
+- `_eval(Attribute)` evaluates its base once and derives the place from that fact or a pure syntactic fallback. `_place(Attribute/Subscript)` follows the same rule. This removes the previous mutual re-evaluation recursion without a depth budget. Instrumented N20/N40/N80 chains used 26/46/86 `_eval` calls and approximately 0.00076/0.00107/0.00191 seconds; the tracked N20/N40 contract enforces a linear call-count bound and `<2s` per scan.
+
+## Tenth-remediation clean validation and remaining gates
+
+- The isolated source candidate used exact base `70c6b52d016f543532bf5a0ba44c838e6dc67e82` and overlaid only the A002 tool and contract paths; D001, D010 and evidence changes were excluded.
+- Results: 340 passed / 1 skipped boundary contracts (22.32/22.89 seconds pytest/wall), 538 passed / 1 skipped full tests (42.13/42.73 seconds), 28 sources/0 scanner violations (18.49 seconds), Ruff PASS (0.29 seconds), strict Pyright 0 errors/0 warnings (4.52 seconds), and traceability PASS (1.14 seconds). Shared compatibility passed 341/341 contracts and 36 sources/0 violations (28.04 seconds).
+- Clean and shared scanner times improved from the ninth-remediation 20.67/30.97-second results. This remains preflight/static evidence only and does not close D010 remote streaming or any model/GPU gate.
+- No `.env`, model, database, dataset/cache, or `reference/` payload was read. No network access, model/data download, GPU work, or performance artifact was performed. Status remains pending independent rereview and main-agent acceptance.

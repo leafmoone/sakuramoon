@@ -4,7 +4,7 @@
 
 A002 已将用户确认的两条资产执行边界写入现行决定、仓库规则、路线图与资产策略，并通过合同测试建立机器保护。实现没有读取或执行 `reference/` 内容、没有读取 `.env`、没有下载/哈希/加载模型、没有使用 GPU，也没有创建性能占位。
 
-首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17`、`70981e19510c5a6c7d7889d6042b5e8a55887931`、`9081104ba0a87ce72efbeac3125f975b7e3fb71d`、`cadd87391ef07ed7edb2932e8e2b339b268838ff` 后的独立 AI/Infra 审查提出 changes required；提交 `477d0a76027dec67dd42c8824108238415d6728f` 的 Infra 复审又发现反射 callable 与 module namespace 两个根因。现已完成 `review_remediation.md` 所列第九轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
+首轮、第二轮、第三轮以及提交 `bcf792ef2968f8fb901bc65b1c289c7b8aa57f17`、`70981e19510c5a6c7d7889d6042b5e8a55887931`、`9081104ba0a87ce72efbeac3125f975b7e3fb71d`、`cadd87391ef07ed7edb2932e8e2b339b268838ff`、`477d0a76027dec67dd42c8824108238415d6728f` 后的审查提出 changes required；提交 `70c6b52d016f543532bf5a0ba44c838e6dc67e82` 的 AI/Infra 复审收敛到 sensitive callable descriptor 派生与 attribute-chain 指数复杂度。现已完成 `review_remediation.md` 所列第十轮修复、D010 冻结标准库 HTTPS 接口兼容和 A002-only 隔离验证；状态仍是等待独立 reviewer 复审，而不是已通过。
 
 ## 实现摘要
 
@@ -111,3 +111,17 @@ A002 已将用户确认的两条资产执行边界写入现行决定、仓库规
 - 结果：328 passed / 1 skipped boundary contracts（24.22 秒 pytest、24.82 秒 wall）、526 passed / 1 skipped full tests（47.33/47.81 秒）、28 Python sources/0 violations（20.67 秒）、Ruff PASS（0.11 秒）、strict Pyright 0 errors/0 warnings（3.70 秒）、traceability 221 requirements/source nodes PASS（0.92 秒）。唯一 skip 是 clean tree 不存在共享 D010 source；tracked fixture digest 与 zero-violation pin path 已通过。
 - Shared compatibility：D010 equality 随 329/329 boundary contracts 通过，scanner 36 Python sources/0 violations（30.97 秒）。Clean scanner 低于受审 R8 的 21.729 秒，shared scanner 低于第八轮 31.595 秒，未观察到 R9 性能回退。
 - 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有联网、模型/数据下载、GPU 工作或性能 artifact。状态保持第九轮修复完成、等待独立 AI/Infra 复审。
+
+## 第十轮修复摘要
+
+- Sensitive callable 的 attribute 派生使用单一规则：`.__call__` 通过 `dataclasses.replace` 保留完整 fact 与 bound call state，任何其他属性立即诊断并返回仍具 sensitive 分类的 `ambiguous-sensitive.*`。该规则同时覆盖 reflection、dynamic import、model loader、process/network 等所有 `_sensitive_callable`，不枚举 descriptor 后缀。
+- `ambiguous-sensitive.*` 本身纳入 `_sensitive_callable`，所以一次非法派生后的后续任意 attribute chain 不能再次洗掉分类；最终调用稳定报告 ambiguous-sensitive。
+- `_eval(Attribute)` 先对 base 单次求值，再用 evaluated callable/object place 或纯语法 fallback 构造位置；`_place(Attribute/Subscript)` 采用相同方式，移除递归中的二次 `_eval`。N20/N40/N80 为 26/46/86 次 `_eval` 与约 0.00076/0.00107/0.00191 秒，证明增长线性。
+- 新合同覆盖 builtin `__self__`、model-loader `__func__`/`__getattribute__`、descriptor、partial/operator/container 与 N20/N40；原有 Git/D010/capability、TOCTOU、fixed-point 和 frozen fixture/pin 邻接保持通过。
+
+## 第十轮验证结论
+
+- 隔离候选使用 base `70c6b52d016f543532bf5a0ba44c838e6dc67e82`，只叠加 `tools/asset_execution_boundary.py` 与 `tests/contracts/assets/test_asset_execution_boundary.py`；并行 D001/D010 与全部 A002 evidence edits 均排除。
+- 结果：340 passed / 1 skipped boundary contracts（22.32 秒 pytest、22.89 秒 wall）、538 passed / 1 skipped full tests（42.13/42.73 秒）、28 Python sources/0 violations（18.49 秒）、Ruff PASS（0.29 秒）、strict Pyright 0 errors/0 warnings（4.52 秒）、traceability 221 requirements/source nodes PASS（1.14 秒）。唯一 skip 是 clean tree 不存在共享 D010 source；tracked fixture digest 与 zero-violation pin path 已通过。
+- Shared compatibility：D010 equality 随 341/341 boundary contracts 通过，scanner 36 Python sources/0 violations（28.04 秒）。Clean/shared scanner 都优于第九轮，未观察到性能回退。
+- 本轮没有读取 `.env`、模型、数据库、dataset/cache 或 `reference/` payload，没有联网、模型/数据下载、GPU 工作或性能 artifact。状态保持第十轮修复完成、等待独立 AI/Infra 复审。

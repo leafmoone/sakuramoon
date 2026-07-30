@@ -4,7 +4,10 @@ import ast
 import base64
 import hashlib
 import zlib
+from collections.abc import Callable
 from pathlib import Path
+from time import perf_counter
+from typing import cast
 
 import pytest
 
@@ -1866,6 +1869,118 @@ getattr.__call__.__call__(reporter, "run")("payload")
 '''
 
     assert scan_source(source, "src/sakuramoon/report.py") == ()
+
+
+def test_repeated_call_chain_analysis_is_linear_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def measure(depth: int) -> tuple[int, float]:
+        source = (
+            "from transformers import AutoModel\n"
+            "loader = AutoModel.from_pretrained"
+            + ".__call__" * depth
+            + '\nloader("remote/model", local_files_only=True)\n'
+        )
+        analyzer_type = vars(boundary)["_Analyzer"]
+        original = cast(
+            Callable[[object, ast.AST | None, object], object],
+            vars(analyzer_type)["_eval"],
+        )
+        eval_calls = 0
+
+        def counted(
+            analyzer: object,
+            node: ast.AST | None,
+            env: object,
+        ) -> object:
+            nonlocal eval_calls
+            eval_calls += 1
+            return original(analyzer, node, env)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(analyzer_type, "_eval", counted)
+            started = perf_counter()
+            codes = _codes(source)
+            elapsed = perf_counter() - started
+        assert "unverified_model_source" in codes
+        return eval_calls, elapsed
+
+    calls_20, elapsed_20 = measure(20)
+    calls_40, elapsed_40 = measure(40)
+
+    assert calls_40 <= calls_20 + 40
+    assert elapsed_20 < 2.0
+    assert elapsed_40 < 2.0
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '''
+from transformers import AutoModel
+loader = getattr.__self__.getattr(AutoModel, "from_pretrained")
+loader("remote/model")
+''',
+        '''
+runner = vars.__self__.eval
+runner("payload")
+''',
+        '''
+loader = __import__.__self__.__import__
+loader("reference.JLT")
+''',
+        '''
+from transformers import AutoModel
+loader = AutoModel.from_pretrained.__func__
+loader("remote/model")
+''',
+        '''
+from transformers import AutoModel
+loader = AutoModel.from_pretrained.__getattribute__("__func__")
+loader("remote/model")
+''',
+        '''
+loader = getattr.__getattribute__("__call__")
+loader(target, attribute)
+''',
+        '''
+import builtins
+loader = builtins.getattr.__getattribute__("__call__")
+loader(target, attribute)
+''',
+        '''
+descriptor = getattr.__get__
+loader = descriptor(None, object)
+loader(target, attribute)
+''',
+    ],
+)
+def test_sensitive_callable_cannot_derive_noncall_attributes(source: str) -> None:
+    codes = _codes(source)
+    assert "sensitive_callable_attribute_forbidden" in codes
+    assert "ambiguous_sensitive_callable" in codes
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "resolver = partial(getattr.__self__.getattr, AutoModel)",
+        'resolver = operator.call(getattr.__getattribute__, "__call__")',
+        "resolver = [AutoModel.from_pretrained.__func__][0]",
+    ],
+)
+def test_sensitive_callable_derivation_fails_before_higher_order_adaptation(
+    body: str,
+) -> None:
+    source = f'''
+import operator
+from functools import partial
+from transformers import AutoModel
+{body}
+resolver("from_pretrained")
+'''
+
+    assert "sensitive_callable_attribute_forbidden" in _codes(source)
 
 
 @pytest.mark.parametrize("adapter", ["partial", "partialmethod"])

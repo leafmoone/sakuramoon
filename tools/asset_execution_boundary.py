@@ -495,7 +495,8 @@ def _sensitive_callable(value: _Callable | None) -> bool:
         return False
     name = _canonical_callable_name(value.name)
     return (
-        _reflection_callable_name(name)
+        name == "ambiguous-sensitive.*"
+        or _reflection_callable_name(name)
         or (
             name.endswith(".from_pretrained")
             and name.startswith(_MODEL_LOADER_PREFIXES)
@@ -833,24 +834,44 @@ class _Analyzer:
             BoundaryViolation(self.path, getattr(node, "lineno", 1), code, detail)
         )
 
+    @classmethod
+    def _syntactic_place(cls, node: ast.AST) -> str | None:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            base = cls._syntactic_place(node.value)
+            return f"{base}.{node.attr}" if base else None
+        if isinstance(node, ast.Subscript):
+            base = cls._syntactic_place(node.value)
+            if base is None:
+                return None
+            if isinstance(node.slice, ast.Slice):
+                return f"{base}[:]"
+            key = _literal(node.slice)
+            return (
+                f"{base}[{key!r}]"
+                if isinstance(key, (str, bool))
+                else f"{base}[*]"
+            )
+        return None
+
+    def _evaluated_place(self, node: ast.AST, fact: _Fact) -> str | None:
+        if fact.callable is not None:
+            return fact.callable.name
+        if fact.object_place is not None:
+            return fact.object_place
+        return self._syntactic_place(node)
+
     def _place(self, node: ast.AST, env: _Environment) -> str | None:
         if isinstance(node, ast.Name):
             return node.id
         if isinstance(node, ast.Attribute):
             base_fact = self._eval(node.value, env)
-            base = (
-                base_fact.callable.name
-                if base_fact.callable is not None
-                else base_fact.object_place or self._place(node.value, env)
-            )
+            base = self._evaluated_place(node.value, base_fact)
             return f"{base}.{node.attr}" if base else None
         if isinstance(node, ast.Subscript):
             base_fact = self._eval(node.value, env)
-            base = (
-                base_fact.callable.name
-                if base_fact.callable is not None
-                else base_fact.object_place or self._place(node.value, env)
-            )
+            base = self._evaluated_place(node.value, base_fact)
             if base is None:
                 return None
             if isinstance(node.slice, ast.Slice):
@@ -858,18 +879,6 @@ class _Analyzer:
             key = _literal(node.slice)
             return f"{base}[{key!r}]" if isinstance(key, (str, bool)) else f"{base}[*]"
         return None
-
-    def _attribute_chain(
-        self, node: ast.Attribute
-    ) -> tuple[str, tuple[str, ...]] | None:
-        parts: list[str] = []
-        current: ast.AST = node
-        while isinstance(current, ast.Attribute):
-            parts.append(current.attr)
-            current = current.value
-        if not isinstance(current, ast.Name):
-            return None
-        return current.id, tuple(reversed(parts))
 
     def _eval(self, node: ast.AST | None, env: _Environment) -> _Fact:
         if node is None:
@@ -918,7 +927,9 @@ class _Analyzer:
                     sensitive_callable_maybe=True,
                     capability_class=True,
                 )
-            place = self._place(node, env)
+            base = self._eval(node.value, env)
+            base_place = self._evaluated_place(node.value, base)
+            place = f"{base_place}.{node.attr}" if base_place else None
             if (
                 self.path.startswith("src/sakuramoon/")
                 and place == "sys.modules"
@@ -935,16 +946,30 @@ class _Analyzer:
                 )
             if place is not None and place in env.values:
                 return env.values[place]
-            chain = self._attribute_chain(node)
-            if chain is not None:
-                root, attributes = chain
-                root_fact = env.get(root)
-                if root_fact.config_path is not None:
-                    return _Fact(
-                        taints=root_fact.taints,
-                        config_path=(*root_fact.config_path, *attributes),
+            if base.config_path is not None:
+                return _Fact(
+                    taints=base.taints,
+                    config_path=(*base.config_path, node.attr),
+                )
+            if base.callable is not None and _sensitive_callable(base.callable):
+                if node.attr == "__call__":
+                    return replace(
+                        base,
+                        callable=replace(
+                            base.callable,
+                            name=f"{base.callable.name}.__call__",
+                        ),
                     )
-            base = self._eval(node.value, env)
+                self.add(
+                    node,
+                    "sensitive_callable_attribute_forbidden",
+                    "attributes may not be derived from an execution-sensitive callable",
+                )
+                return replace(
+                    base,
+                    callable=_Callable("ambiguous-sensitive.*"),
+                    sensitive_callable_maybe=True,
+                )
             if (
                 self.path.startswith("src/sakuramoon/")
                 and node.attr == "from_pretrained"
