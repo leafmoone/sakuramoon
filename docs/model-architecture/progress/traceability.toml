@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 14
+registry_revision = 15
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -210,7 +210,7 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/image.py",
-    "src/sakuramoon/encoders/vae.py",
+    "src/sakuramoon/encoders/mage_vae.py",
     "src/sakuramoon/eval/vae_reconstruction.py",
 ]
 reference_modules = []
@@ -1320,7 +1320,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C02-001"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "vae"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1332,8 +1332,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T020"
+implementation_paths = [
+    "src/sakuramoon/encoders/mage_vae.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1345,7 +1348,7 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/image.py",
-    "src/sakuramoon/encoders/vae.py",
+    "src/sakuramoon/encoders/mage_vae.py",
     "src/sakuramoon/eval/vae_reconstruction.py",
 ]
 reference_modules = []
@@ -1393,7 +1396,7 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/image.py",
-    "src/sakuramoon/encoders/vae.py",
+    "src/sakuramoon/encoders/mage_vae.py",
     "src/sakuramoon/eval/vae_reconstruction.py",
 ]
 reference_modules = []
@@ -1440,7 +1443,7 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/image.py",
-    "src/sakuramoon/encoders/vae.py",
+    "src/sakuramoon/encoders/mage_vae.py",
     "src/sakuramoon/eval/vae_reconstruction.py",
 ]
 reference_modules = []
@@ -1487,7 +1490,7 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/image.py",
-    "src/sakuramoon/encoders/vae.py",
+    "src/sakuramoon/encoders/mage_vae.py",
     "src/sakuramoon/eval/vae_reconstruction.py",
 ]
 reference_modules = []
@@ -1534,7 +1537,7 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/image.py",
-    "src/sakuramoon/encoders/vae.py",
+    "src/sakuramoon/encoders/mage_vae.py",
     "src/sakuramoon/eval/vae_reconstruction.py",
 ]
 reference_modules = []
@@ -1581,7 +1584,7 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/image.py",
-    "src/sakuramoon/encoders/vae.py",
+    "src/sakuramoon/encoders/mage_vae.py",
     "src/sakuramoon/eval/vae_reconstruction.py",
 ]
 reference_modules = []
@@ -1628,7 +1631,7 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/image.py",
-    "src/sakuramoon/encoders/vae.py",
+    "src/sakuramoon/encoders/mage_vae.py",
     "src/sakuramoon/eval/vae_reconstruction.py",
 ]
 reference_modules = []
