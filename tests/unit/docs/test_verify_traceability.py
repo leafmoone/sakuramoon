@@ -43,6 +43,11 @@ def repo_copy(tmp_path: Path) -> Path:
         root / "src/sakuramoon",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
+    shutil.copytree(
+        ROOT / "tests",
+        root / "tests",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     shutil.copytree(ROOT / "config", root / "config")
     for relative in (
         "SHA256SUMS",
