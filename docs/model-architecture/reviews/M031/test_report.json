@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "task_id": "M031",
+  "model_unit_tests_passed": 9,
+  "targeted_tests_passed": 20,
+  "ruff_passed": true,
+  "pyright_passed": true,
+  "gpu_tested": true,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.10.0+cu128",
+  "dtype": "bfloat16",
+  "shape": [1, 1540, 2560],
+  "query_heads": 20,
+  "key_value_heads": 5,
+  "parameters": 76027136,
+  "hot_inference_forward_ms": [4.526, 4.412, 4.407, 4.400, 4.363],
+  "training_forward_ms": 5.661,
+  "backward_ms": 49.029,
+  "sgd_update_ms": 13.717,
+  "peak_allocated_mib": 1166.4,
+  "peak_reserved_mib": 1444.0,
+  "sdpa_events": [
+    "aten::scaled_dot_product_attention",
+    "aten::_scaled_dot_product_attention_math"
+  ],
+  "finite_output_loss_gradients": true,
+  "parameter_updated": true,
+  "production_attention_gate": "pending:K001",
+  "package_review_status": "pending"
+}

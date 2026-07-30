@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 24
+registry_revision = 25
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -3341,7 +3341,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C06-001"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "dit"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3353,8 +3353,14 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M031"
+implementation_paths = [
+    "src/sakuramoon/model/norm.py",
+    "src/sakuramoon/model/mlp.py",
+    "src/sakuramoon/model/attention.py",
+    "src/sakuramoon/model/block.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3431,7 +3437,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C06-003"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "dit"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3443,8 +3449,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M031"
+implementation_paths = [
+    "src/sakuramoon/model/attention.py",
+    "src/sakuramoon/model/block.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3476,7 +3486,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C06-004"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "dit"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3488,8 +3498,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M031"
+implementation_paths = [
+    "src/sakuramoon/model/attention.py",
+    "src/sakuramoon/model/mlp.py",
+    "src/sakuramoon/model/block.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3521,7 +3536,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C06-005"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "dit"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3533,8 +3548,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M031"
+implementation_paths = [
+    "src/sakuramoon/model/norm.py",
+    "src/sakuramoon/model/attention.py",
+    "src/sakuramoon/model/block.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
