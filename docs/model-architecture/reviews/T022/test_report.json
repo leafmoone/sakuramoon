@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "task_id": "T022",
+  "cpu_unit_passed": 3,
+  "gpu_tested": true,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "bf16_output_shape": [2, 32, 2560],
+  "forward_ms": [2.582, 2.382, 2.254],
+  "backward_ms": [2.662, 2.401, 2.306],
+  "peak_memory_mib": 114.8,
+  "finite_outputs_and_gradients": true,
+  "qwen_input_gradient": false,
+  "package_review_status": "pending"
+}
