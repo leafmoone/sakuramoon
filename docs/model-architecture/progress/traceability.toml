@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 18
+registry_revision = 19
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -282,7 +282,7 @@ modules = [
     "src/sakuramoon/conditioning/norm.py",
     "src/sakuramoon/conditioning/bidirectional.py",
     "src/sakuramoon/conditioning/text_mixer.py",
-    "src/sakuramoon/conditioning/style.py",
+    "src/sakuramoon/conditioning/style_resampler.py",
 ]
 reference_modules = []
 tests = [
@@ -2579,7 +2579,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C04-007"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "text_style"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2592,8 +2592,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T023"
+implementation_paths = [
+    "src/sakuramoon/conditioning/norm.py",
+    "src/sakuramoon/conditioning/style_resampler.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2625,7 +2629,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C04-008"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "text_style"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2638,8 +2642,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T023"
+implementation_paths = [
+    "src/sakuramoon/conditioning/style_resampler.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
