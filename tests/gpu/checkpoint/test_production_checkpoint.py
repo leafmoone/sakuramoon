@@ -117,7 +117,9 @@ def test_full_s0_composite_raw_save_and_restore(tmp_path: Path) -> None:
     state = RawCheckpointState(
         trainer=SingleGpuUpdateState(1, 1, 1),
         data=ShardRunState.empty(),
-        growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0),
+        growth=GrowthCheckpointState(
+            BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
+        ),
     )
     representative = next(
         spec for spec in optimizer.audit.specs if spec.parameter.numel() <= 1024

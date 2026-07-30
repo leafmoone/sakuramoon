@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "task_id": "T043",
+  "duration_seconds": null,
+  "timing_status": "implementation_start_not_recorded",
+  "ended_at_utc": "2026-07-30T17:28:34Z",
+  "gpu_targeted_suite_seconds": 32.37,
+  "formal_ramp_seconds": null
+}

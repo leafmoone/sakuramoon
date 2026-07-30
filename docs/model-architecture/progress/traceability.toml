@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 33
+registry_revision = 34
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -756,6 +756,16 @@ not_applicable_reason = "Reference code is excluded by repository policy and dir
 id = "DECISION-DROPOUT-VALUES"
 kind = "user_decision"
 description = "All dropout probabilities except all_condition=0.10 remain explicitly undecided."
+
+[[blockers]]
+id = "FOUR-GPU-AVAILABLE"
+kind = "hardware"
+description = "Formal DDP, NCCL and growth-stage evidence requires 4x RTX 5090 and cannot be closed by one-GPU results."
+
+[[blockers]]
+id = "NO-LONG-RUN"
+kind = "execution_scope"
+description = "The current task explicitly excludes formal 1,000-5,000 update growth ramps and other training long runs."
 
 [inventory]
 module_root = "src/sakuramoon"
@@ -4227,7 +4237,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C10-001"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4239,8 +4249,19 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T043"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/train/stage.py",
+    "src/sakuramoon/cli/transition.py",
+    "tests/unit/checkpoint/test_checkpoint.py",
+    "tests/unit/train/test_stage.py",
+    "tests/unit/cli/test_transition.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -4274,7 +4295,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C10-002"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4286,8 +4307,19 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T043"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/train/stage.py",
+    "src/sakuramoon/cli/transition.py",
+    "tests/unit/checkpoint/test_checkpoint.py",
+    "tests/unit/train/test_stage.py",
+    "tests/unit/cli/test_transition.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -4422,7 +4454,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C10-005"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4434,8 +4466,15 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T043"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/train/stage.py",
+    "src/sakuramoon/cli/transition.py",
+    "tests/unit/train/test_stage.py",
+    "tests/unit/cli/test_transition.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -4469,7 +4508,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C10-006"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4481,8 +4520,17 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T043"
+implementation_paths = [
+    "src/sakuramoon/model/growth.py",
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/train/stage.py",
+    "tests/unit/model/test_growth.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -4516,7 +4564,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C10-007"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4528,8 +4576,19 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T043"
+implementation_paths = [
+    "src/sakuramoon/model/growth.py",
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/train/stage.py",
+    "tests/unit/checkpoint/test_checkpoint.py",
+    "tests/unit/model/test_growth.py",
+    "tests/unit/train/test_stage.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -5357,7 +5416,7 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = "task:T042"
+implementation_commit_ref = "task:T043"
 implementation_paths = [
     "src/sakuramoon/checkpoint/__init__.py",
     "src/sakuramoon/checkpoint/artifact.py",
@@ -5365,9 +5424,12 @@ implementation_paths = [
     "src/sakuramoon/checkpoint/rng.py",
     "src/sakuramoon/checkpoint/save.py",
     "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/train/stage.py",
     "tests/unit/checkpoint/test_checkpoint.py",
     "tests/gpu/checkpoint/test_raw_checkpoint.py",
     "tests/gpu/checkpoint/test_production_checkpoint.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -8612,7 +8674,7 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = "task:T042"
+implementation_commit_ref = "task:T043"
 implementation_paths = [
     "src/sakuramoon/checkpoint/__init__.py",
     "src/sakuramoon/checkpoint/artifact.py",
@@ -8620,9 +8682,12 @@ implementation_paths = [
     "src/sakuramoon/checkpoint/rng.py",
     "src/sakuramoon/checkpoint/save.py",
     "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/train/stage.py",
     "tests/unit/checkpoint/test_checkpoint.py",
     "tests/gpu/checkpoint/test_raw_checkpoint.py",
     "tests/gpu/checkpoint/test_production_checkpoint.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -8678,13 +8743,17 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = "task:T042"
+implementation_commit_ref = "task:T043"
 implementation_paths = [
     "src/sakuramoon/checkpoint/load.py",
     "src/sakuramoon/checkpoint/rng.py",
     "src/sakuramoon/checkpoint/save.py",
     "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/train/stage.py",
+    "tests/unit/checkpoint/test_checkpoint.py",
     "tests/gpu/checkpoint/test_raw_checkpoint.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -9498,7 +9567,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-073"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -9511,8 +9580,14 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T043"
+implementation_paths = [
+    "src/sakuramoon/model/growth.py",
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -9546,7 +9621,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-074"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -9559,8 +9634,13 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T043"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/artifact.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -9594,7 +9674,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-075"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -9607,8 +9687,20 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T043"
+implementation_paths = [
+    "src/sakuramoon/model/growth.py",
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/train/stage.py",
+    "tests/unit/checkpoint/test_checkpoint.py",
+    "tests/unit/model/test_growth.py",
+    "tests/unit/model/test_dit.py",
+    "tests/unit/train/test_stage.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -9642,7 +9734,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-076"
 kind = "open_item"
-status = "planned"
+status = "blocked"
 profile = "curriculum_growth"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -9652,7 +9744,10 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "5cbacd8e735bc3a4bd967bdc099e9f5c9e652d882fa0a3d9700615cc39cc66c1"
 source_occurrence = 0
-blocked_by = []
+blocked_by = [
+    "FOUR-GPU-AVAILABLE",
+    "NO-LONG-RUN",
+]
 alias_of = ""
 superseded_by = ""
 implementation_commit_ref = ""

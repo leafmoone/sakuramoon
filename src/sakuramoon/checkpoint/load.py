@@ -142,6 +142,23 @@ def read_checkpoint_manifest(path: Path) -> CheckpointManifest:
     return manifest
 
 
+def read_raw_checkpoint_state(
+    checkpoint: Path,
+) -> tuple[CheckpointManifest, RawCheckpointState]:
+    manifest = read_checkpoint_manifest(checkpoint)
+    if manifest.kind is not CheckpointKind.RAW:
+        raise CheckpointError("raw checkpoint state accepts raw checkpoints only")
+    train_state = checkpoint / "train_state"
+    state = raw_state_from_dicts(
+        _read_json(train_state / "trainer_state.json", "trainer state"),
+        _read_json(train_state / "data_state.json", "data state"),
+        _read_json(train_state / "growth_state.json", "growth state"),
+    )
+    if manifest.identity.update != state.trainer.successful_updates:
+        raise CheckpointError("checkpoint update differs from trainer successful updates")
+    return manifest, state
+
+
 def _validate_identity(
     manifest: CheckpointManifest,
     expected: CheckpointIdentity,
@@ -695,4 +712,5 @@ __all__ = [
     "load_model_only",
     "load_raw_checkpoint",
     "read_checkpoint_manifest",
+    "read_raw_checkpoint_state",
 ]

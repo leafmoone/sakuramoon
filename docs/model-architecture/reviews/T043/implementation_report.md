@@ -1,0 +1,9 @@
+# T043 implementation report
+
+The stage module encodes the approved S0 through H2 graph and rejects any transition without the unique predecessor, exactly one changed primary axis, an existing source checkpoint, explicit next pass/seed/planned updates and manual approval. A transition clears shard progress but preserves global successful-update counters. It reports readiness and mandatory checkpoint points without finalizing or launching another stage.
+
+Growth uses the fixed two-percent successful-update ramp with a 1,000-5,000 clamp and an exact half-cosine alpha. Raw continuation state persists the canonical stage axes and exact ramp origin/duration, validates stored alpha against successful updates, and lets a fresh midpoint load compute the same next alpha as the uninterrupted path. The CLI reads checksum-verified raw state and rejects caller-relabeled stages before publishing a plan.
+
+Migration validates both optimizer-to-module object identities, source stage/ramp state, full state-dict delta, exact new-slot allowlist, optimizer FQN delta and every preserved policy before applying anything. It clones all old optimizer state first, then copies every common tensor in place, reconstructs TorchAO `OptimState8bit` without dequantization, preserves SR RNG, and leaves every new parameter state uninitialized. Invalid stage, detached optimizer, colliding FQN and incomplete-ramp cases leave target parameters, optimizer state and SR RNG unchanged.
+
+AI/model acceptance covers alpha-zero functional equivalence for both 16-to-20 and 20-to-24, random new tensors, exact old parameter and moment equality, and alpha 0/mid/end fresh restore with next-update schedule continuity. Infra acceptance covers atomic hard-link no-clobber publication, concurrent writers and inode-owned rollback. Artifacts remain T042 raw checkpoints; no retry, topology fallback, long ramp or four-rank claim was introduced.

@@ -54,7 +54,9 @@ def _raw_state(update: int) -> RawCheckpointState:
     return RawCheckpointState(
         trainer=SingleGpuUpdateState(update, update, update * 4),
         data=ShardRunState(("complete.tar",), "active.tar", 2, 9),
-        growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0),
+        growth=GrowthCheckpointState(
+            BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
+        ),
     )
 
 

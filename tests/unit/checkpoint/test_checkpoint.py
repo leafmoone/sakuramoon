@@ -290,7 +290,9 @@ def test_raw_training_state_is_strict_and_round_trips() -> None:
     state = RawCheckpointState(
         trainer=SingleGpuUpdateState(3, 2, 11),
         data=ShardRunState(("a.tar",), "b.tar", 1, 7),
-        growth=GrowthCheckpointState(BASE_SLOT_IDS, 0.25),
+        growth=GrowthCheckpointState(
+            BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
+        ),
     )
     documents = raw_state_to_dict(state)
 
@@ -371,4 +373,15 @@ def test_parent_fsync_failure_rolls_back_published_directory(
 
 def test_growth_state_rejects_noncanonical_range_slots() -> None:
     with pytest.raises(ValueError, match="canonical"):
-        GrowthCheckpointState(tuple(range(16)), 1.0)
+        GrowthCheckpointState(tuple(range(16)), 1.0, "S0", 1, 256, None, None)
+
+
+def test_growth_state_rejects_alpha_that_differs_from_persisted_progress() -> None:
+    with pytest.raises(ValueError, match="differs from persisted ramp progress"):
+        RawCheckpointState(
+            trainer=SingleGpuUpdateState(501, 501, 1),
+            data=ShardRunState.empty(),
+            growth=GrowthCheckpointState(
+                BASE_SLOT_IDS, 0.25, "G1", 4, 256, 1, 1000
+            ),
+        )

@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from sakuramoon.data.state import ShardRunState
-from sakuramoon.model.growth import ACTIVE_SLOT_IDS
+from sakuramoon.model.growth import ACTIVE_SLOT_IDS, half_cosine_growth_alpha
 from sakuramoon.train.step import SingleGpuUpdateState
 
 SCHEMA_VERSION = 1
@@ -56,12 +56,37 @@ class CheckpointIdentity:
 class GrowthCheckpointState:
     active_slot_ids: tuple[int, ...]
     alpha: float
+    stage: str
+    world_size: int
+    resolution: int
+    ramp_start_successful_update: int | None
+    ramp_updates: int | None
 
     def __post_init__(self) -> None:
         if self.active_slot_ids not in ACTIVE_SLOT_IDS.values():
             raise ValueError("growth active_slot_ids must be a canonical 16/20/24 slot set")
         if type(self.alpha) is not float or not 0.0 <= self.alpha <= 1.0:
             raise ValueError("growth alpha must be a float in [0, 1]")
+        if not self.stage or type(self.stage) is not str:
+            raise ValueError("growth stage must be a nonempty string")
+        if type(self.world_size) is not int or self.world_size <= 0:
+            raise ValueError("growth world size must be a positive integer")
+        if type(self.resolution) is not int or self.resolution <= 0:
+            raise ValueError("growth resolution must be a positive integer")
+        has_start = self.ramp_start_successful_update is not None
+        has_updates = self.ramp_updates is not None
+        if has_start != has_updates:
+            raise ValueError("growth ramp origin and duration must both be present or absent")
+        if has_start:
+            if (
+                type(self.ramp_start_successful_update) is not int
+                or self.ramp_start_successful_update < 0
+                or type(self.ramp_updates) is not int
+                or not 1000 <= self.ramp_updates <= 5000
+            ):
+                raise ValueError("growth ramp state is invalid")
+        elif self.alpha != 1.0:
+            raise ValueError("non-growth checkpoint alpha must be complete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +114,17 @@ class RawCheckpointState:
             or type(self.trainer.effective_samples) is not int
         ):
             raise ValueError("checkpoint data state is inconsistent")
+        growth = self.growth
+        if growth.ramp_start_successful_update is not None:
+            if self.trainer.successful_updates < growth.ramp_start_successful_update:
+                raise ValueError("checkpoint update precedes growth ramp origin")
+            assert growth.ramp_updates is not None
+            expected_alpha = half_cosine_growth_alpha(
+                self.trainer.successful_updates - growth.ramp_start_successful_update,
+                growth.ramp_updates,
+            )
+            if growth.alpha != expected_alpha:
+                raise ValueError("checkpoint growth alpha differs from persisted ramp progress")
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,7 +292,12 @@ def raw_state_to_dict(state: RawCheckpointState) -> tuple[dict[str, object], dic
     growth: dict[str, object] = {
         "active_slot_ids": list(state.growth.active_slot_ids),
         "alpha": state.growth.alpha,
+        "ramp_start_successful_update": state.growth.ramp_start_successful_update,
+        "ramp_updates": state.growth.ramp_updates,
+        "resolution": state.growth.resolution,
         "schema_version": SCHEMA_VERSION,
+        "stage": state.growth.stage,
+        "world_size": state.growth.world_size,
     }
     return trainer, data, growth
 
@@ -267,7 +308,20 @@ def raw_state_from_dicts(trainer_value: object, data_value: object, growth_value
     growth = _mapping(growth_value, "growth state")
     _exact_keys(trainer, {"schema_version", "attempted_updates", "successful_updates", "effective_samples"}, "trainer state")
     _exact_keys(data, {"schema_version", "completed", "active", "replayed_shards", "replayed_samples"}, "data state")
-    _exact_keys(growth, {"schema_version", "active_slot_ids", "alpha"}, "growth state")
+    _exact_keys(
+        growth,
+        {
+            "schema_version",
+            "active_slot_ids",
+            "alpha",
+            "stage",
+            "world_size",
+            "resolution",
+            "ramp_start_successful_update",
+            "ramp_updates",
+        },
+        "growth state",
+    )
     if not all(_has_schema_version(document) for document in (trainer, data, growth)):
         raise CheckpointError("checkpoint state schema version is unsupported")
     completed = data["completed"]
@@ -296,6 +350,11 @@ def raw_state_from_dicts(trainer_value: object, data_value: object, growth_value
             growth=GrowthCheckpointState(
                 active_slot_ids=tuple(cast(list[int], slots)),
                 alpha=growth["alpha"],
+                stage=growth["stage"],
+                world_size=growth["world_size"],
+                resolution=growth["resolution"],
+                ramp_start_successful_update=growth["ramp_start_successful_update"],
+                ramp_updates=growth["ramp_updates"],
             ),
         )
     except (TypeError, ValueError):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from sakuramoon.model.dit import DenseDiT, PackedDiT
@@ -134,22 +135,27 @@ def test_old_block_fqns_are_stable_across_depths() -> None:
     assert "conditioner.block_biases.slot_02" in parameters20
 
 
-def test_alpha_zero_new_slots_preserve_old_hidden_function() -> None:
-    model16 = _model(16)
-    model20 = _model(20)
-    source = model16.state_dict()
-    target = model20.state_dict()
+@pytest.mark.parametrize(("source_depth", "target_depth"), [(16, 20), (20, 24)])
+def test_alpha_zero_new_slots_preserve_old_hidden_function(
+    source_depth: int, target_depth: int
+) -> None:
+    source_model = _model(source_depth)
+    target_model = _model(target_depth)
+    source = source_model.state_dict()
+    target = target_model.state_dict()
     with torch.no_grad():
         for name, tensor in source.items():
             if name in target and target[name].shape == tensor.shape:
                 target[name].copy_(tensor)
-    model20.load_state_dict(target)
+    target_model.load_state_dict(target)
     inputs = _inputs()
 
-    features16 = model16.forward_features(*inputs, growth_alpha=1.0)
-    features20 = model20.forward_features(*inputs, growth_alpha=0.0)
+    source_features = source_model.forward_features(*inputs, growth_alpha=1.0)
+    target_features = target_model.forward_features(*inputs, growth_alpha=0.0)
 
-    torch.testing.assert_close(features16.joint_hidden, features20.joint_hidden)
+    torch.testing.assert_close(
+        source_features.joint_hidden, target_features.joint_hidden
+    )
 
 
 def test_output_head_is_zero_initialized_and_image_shaped() -> None:
