@@ -23,11 +23,7 @@ modelscope_token_env = "MODELSCOPE_API_TOKEN"
 wandb_api_key_env = "WANDB_API_KEY"
 
 [assets.qwen]
-repo_id = "spawner/Qwen3_5_2b_claude_heretic_spawner" # fixed
-revision = "REQUIRED_IMMUTABLE_REVISION" # 40 lowercase hexadecimal commit
-local_path = "model/qwen_3.5_2B"
-manifest_sha256 = "REQUIRED_IMMUTABLE_SHA256"
-tokenizer_sha256 = "REQUIRED_IMMUTABLE_SHA256"
+local_path = "model/qwen_3.5_2B" # fixed local-only path; never downloaded
 dtype = "bfloat16" # fixed
 frozen = true # fixed
 layers = 24 # fixed
@@ -36,10 +32,7 @@ use_cache = false # fixed
 visual_path_enabled = false # fixed
 
 [assets.vae]
-repo_id = "microsoft/Mage-Flow" # fixed official upstream
-revision = "REQUIRED_IMMUTABLE_REVISION" # 40 lowercase hexadecimal commit
-local_path = "model/vae"
-manifest_sha256 = "REQUIRED_IMMUTABLE_SHA256"
+local_path = "model/vae" # fixed local-only path; never downloaded
 dtype = "bfloat16" # fixed
 frozen = true # fixed
 latent_channels = 128 # fixed

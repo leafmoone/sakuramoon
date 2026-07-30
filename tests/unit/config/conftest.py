@@ -11,12 +11,6 @@ REPOSITORY_ROOT = Path(__file__).parents[3]
 EXAMPLE_PATH = REPOSITORY_ROOT / "config/examples/all_options.example.toml"
 
 SYNTHETIC_VALUES: dict[str, object] = {
-    "assets.qwen.revision": "a" * 40,
-    "assets.qwen.manifest_sha256": "0" * 64,
-    "assets.qwen.tokenizer_sha256": "1" * 64,
-    "assets.vae.repo_id": "microsoft/Mage-Flow",
-    "assets.vae.revision": "b" * 40,
-    "assets.vae.manifest_sha256": "2" * 64,
     "data.source.revision": "synthetic-immutable-revision",
     "data.manifest.path": "synthetic/train-manifest.jsonl",
     "data.manifest.sha256": "3" * 64,

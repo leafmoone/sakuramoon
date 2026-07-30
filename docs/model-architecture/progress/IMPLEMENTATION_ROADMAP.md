@@ -21,9 +21,9 @@
 | Python | 3.12.3 | 仅支持 Linux/Python 3.12，不做额外兼容 |
 | PyTorch | 2.10.0+cu128；TorchAO 0.16.0；Triton 3.6.0 | import/CUDA 可见性已通过；kernel 仍由 `K001/T021/T040` 验证 |
 | GPU | 当前只可见 1×RTX 5090，32607 MiB | 可完成 S0 和单卡 kernel 测试；S1 以后必须等 4 卡可见 |
-| Qwen | `model/qwen_3.5_2B` 已下载；config 为 24L/2048 hidden | `A001/T021` 只做本地锁定、校验与加载；禁止下载、联网替换或 fallback |
-| VAE | `model/vae` 已下载；MageVAE，128 latent channels、downsample 16、posterior mean | `A001/T020` 只做本地校验/加载、round-trip 和质量验收；禁止下载或 fallback |
-| 元数据 | `db/` 已知文件约 25.16 GB；只做过 stat，未读取数据行 | 不进 Git；`A001/D011` 只提交 schema、来源、hash 与非敏感 aggregate |
+| Qwen | `model/qwen_3.5_2B` 已下载；config 为 24L/2048 hidden | `T021` 从固定路径本地加载并验证；禁止下载、联网替换或 fallback |
+| VAE | `model/vae` 已下载；MageVAE，128 latent channels、downsample 16、posterior mean | `T020` 从固定路径本地加载并完成 round-trip/质量验收；禁止下载或 fallback |
+| 元数据 | `db/` 已准备，本地使用 | 不进 Git；仅在数据任务实际需要时按 schema 读取，不建立资产哈希清单 |
 | 存储 | 工作区为 400 GiB NFSv3，当前约 363 GiB 可用；无 checkpoint 预留 | 达到 300 GiB cache 低限，但不是已验证 NVMe；正式 preflight 继续硬阻塞 |
 | 参考工程 | `reference/` 仅供人工理解/对照，可完全不使用 | 根仓忽略；任何代码、测试、preflight、训练或运行时不得导入、执行或调用其中代码 |
 | 凭据 | `.env` 已写 `MODELSCOPE_API_TOKEN`，权限 600 | `.env` 永不进 Git；resolved config、日志和 W&B 必须脱敏 |
@@ -71,7 +71,7 @@
 2026-07-29 用户批准以下执行协议。它只减少代理调用、重复文档与重复测试，不改变架构、凭据安全、生产训练或真实硬件门槛。
 
 1. 每个任务 ID 仍是独立实现与回滚单元。主代理创建 `progress/tasks/<TASK_ID>.md`，每个 ID 保持独立状态、diff、针对性测试和原子 commit。
-2. 低中风险任务按包复用同一个实现代理：Foundation=`R002,D001,C001,A001`；Data=`D010-D015`；Encoders/Conditioning=`T020-T024`；Dense Model=`M030-M033`；Training Utilities=`T050-T053`。
+2. 低中风险任务按包复用同一个实现代理：Foundation=`R002,D001,C001`；Data=`D010-D015`；Encoders/Conditioning=`T020-T024`；Dense Model=`M030-M033`；Training Utilities=`T050-T053`。原 A001/A002 重型资产边界已撤销，不再占用任务包或阻塞主线。
 3. 低中风险任务从逐任务审查改为包级里程碑审查。审查报告仍逐 ID 分别给出 AI/模型正确性与 Infra/性能结论；问题只修复受影响任务，不重跑无关任务。
 4. `K001`、`T040`、`T041`、`T042`、`T043`、`T054` 和所有正式 stage canary 保持单独实现、独立 AI reviewer、独立 Infra reviewer。
 5. 每任务只跑针对性 unit、contract 和小型真实 GPU 测试；17x8 shape、100k 扫描、1,000-step canary 与完整恢复矩阵在对应里程碑集中运行一次。
@@ -112,7 +112,6 @@ sakuramoon/
 │   └── sources/
 ├── src/sakuramoon/
 │   ├── config/{schema,load,resolve,redact}.py
-│   ├── assets/{manifest,hashes}.py
 │   ├── data/{modelscope,manifest,cache,metadata,validation}.py
 │   ├── data/{caption,serialize,buckets,image_ops,pipeline,collate,state}.py
 │   ├── encoders/{qwen,mage_vae}.py
@@ -127,7 +126,7 @@ sakuramoon/
 │   ├── train/{step,loop,stage,preflight,failures}.py
 │   ├── eval/{vae_reconstruction,prompts,generate,fid_is,quality}.py
 │   ├── telemetry/{metrics,timers,nvtx,wandb_sink,profiler}.py
-│   └── cli/{train,eval,manifest,benchmark,transition,inspect}.py
+│   └── cli/{train,eval,manifest,benchmark,transition}.py
 ├── tests/
 │   ├── unit/
 │   ├── contracts/
@@ -161,7 +160,7 @@ sakuramoon/
 | 表 | 关键内容 |
 |---|---|
 | `run/paths/security` | run/stage/seed、目录、secret env 名称、脱敏规则 |
-| `assets.qwen/assets.vae` | 本地路径、repo、revision、文件/tokenizer hash、dtype、冻结策略 |
+| `assets.qwen/assets.vae` | 固定本地路径、dtype、冻结策略 |
 | `data.source/manifest/cache` | ModelScope dataset、revision、shard hash、LRU、worker、queue、恢复 |
 | `data.validation/image/buckets` | 2,000 验证隔离、EXIF、no-upscale、retention、17 image buckets |
 | `caption/dropout/text_buckets` | 类别顺序、NL 选择、全部 dropout、512 上限和八桶 |
@@ -180,7 +179,7 @@ sakuramoon/
 
 - **对应文档：** `C12-*`、本路线图第 4–5 节。
 - **实现路径：** 根目录 `.gitignore`、`README.md`、`AGENTS.md`、`docs/model-architecture/progress/asset-policy.md`。
-- **动作：** `git init`；确认 `.env/model/db/data/cache/reference/checkpoints/wandb/profiles` 被忽略；记录三个参考仓库 URL/commit/license；大模型和 DB 只进入 asset manifest。
+- **动作：** `git init`；确认 `.env/model/db/data/cache/reference/checkpoints/wandb/profiles` 被忽略；本地模型、DB 和参考工程不进入 Git，也不建立逐文件资产清单。
 - **验证：** `git status` 不出现任何 secret、模型权重、数据、嵌套 `.git` 或训练 artifact；secret scanner 对 tracked files 为零命中。
 - **代理审查：** AI 侧检查文档优先级，Infra 侧检查大文件、凭据和可恢复性。
 - **完成证据：** 初始 commit hash、tracked file manifest、ignore/secret test。
@@ -227,24 +226,12 @@ sakuramoon/
 
 ## 8. Phase 1：资产、数据、Caption 与图像管线
 
-### A001：本地 Qwen/VAE/DB/参考工程资产锁
+### A002：本地资产边界简化（已撤销原方案）
 
-- **对应文档：** `C02`、`C03`、`C11`。
-- **实现路径：** `assets/manifest.toml`、`src/sakuramoon/assets/*`、asset inspection CLI。
-- **动作：** 记录 repo/revision/path/bytes/SHA-256/config 摘要/tokenizer hash；验证 Qwen 24L/2048 与 MageVAE 128ch/downsample16/posterior mean；记录 DB schema；参考代码记录 URL/commit/license，不复制未注明来源代码。
-- **验证：** 任一文件缺失或 hash 不符时在模型加载前失败；模型目录不进入 Git。
-- **完成证据：** asset manifest、hash report、license/source report。
-- **GPU：** 无，模型加载留到 `T020/T021`。
-
-### A002：本地模型与参考工程执行硬边界
-
-- **对应文档：** `current/confirmed-decisions.md` 第 0 节、`progress/asset-policy.md`。
-- **实现路径：** `AGENTS.md`、现行/进度文档、`tests/contracts/assets/`、`traceability.toml`。
-- **动作：** 锁定 `model/qwen_3.5_2B` 与 `model/vae` 为唯一本地 Qwen/Mage-VAE 资产，禁止下载、补下载、联网替换和 fallback；锁定 `reference/` 仅人工理解/对照，禁止所有工程路径导入、执行或调用其中代码。
-- **验证：** 合同测试校验 manifest 的精确本地路径、生产模型加载的 explicit local-only 语义、禁止模型下载 API，并以 AST 阻止 `reference/` 代码的 import、动态 loader、`sys.path` 注入和子进程执行。
-- **边界：** 不读取或执行 `reference/` 内容，不读取 `.env`，不下载或加载模型，不使用 GPU。
-- **完成证据：** A002 task、targeted/full CPU 测试、Ruff/Pyright、traceability checker 与独立 AI/Infra 审查。
-- **GPU：** 无。
+- **状态：** A001 与 A002 原 manifest/hash/capability 和大型 AST scanner 方案已撤销；A002 只记录本次最小化，不再阻塞单卡主线。
+- **保留规则：** Qwen/Mage-VAE 只从 `model/qwen_3.5_2B` 与 `model/vae` 加载；必需文件缺失时失败；禁止下载、联网替换与 fallback；项目代码不 import、执行或调用 `reference/`。
+- **验证归属：** 普通本地路径/加载测试并入 `T020`、`T021` 和训练 preflight，不建立独立资产模块、inspection CLI 或全仓源码扫描器。
+- **数据边界：** D010 的远端 WebDataset revision、bytes/SHA-256 与流式传输完整性继续保留，不属于本地模型资产审计。
 
 ### D010：ModelScope 不可变 dataset manifest
 
@@ -576,9 +563,9 @@ sakuramoon/
 已完成：Notion迁移/MCP移除/.env安全边界
   ↓
 R001 → R002 → D001 → C001
-  ↓                 ↓
-A001 → A002 → D010 → D011 → D012 → D013 → D014 → D015
-  ↓                                  ↓
+                         ↓
+D010 → D011 → D012 → D013 → D014 → D015
+                                      ↓
 T020 + T021 → T022 + T023 → T024
   ↓
 M030 → M031 → M032 → M033 → K001
@@ -588,6 +575,8 @@ T040 → T041 → T042 → T043 → T050 → T051/T052/T053 → T054
 C002/S000 → S001 → S002 → G1 → S2 → G2 → S3
   ↓
 可选 H1 → H2
+
+A001/A002：原重型资产边界已撤销，不参与上述依赖链。
 ```
 
 允许并行的只有不写同一文件且接口已冻结的任务，例如T020与T021、T022与T023、T051与T052。实现和审查不得并行；上游contract未验证时不得提前写生产优化。

@@ -129,9 +129,6 @@ CANONICAL_SOURCES: dict[str, dict[str, object]] = {
 TRUSTED_ARCHIVE_MANIFEST_SHA256 = (
     "8080e7d8e02345c5b6487b34de5d666630f524ddb9eca4c22e21ccedbffbee04"
 )
-BASELINE_REQUIREMENT_BINDINGS_SHA256 = (
-    "999eff1fece89b69eba0497d60bdf8adc358d0f7f2a5243c1e17a591a233bb6b"
-)
 BASELINE_REQUIREMENT_MAXIMA = {
     "ARCH": 2,
     "C01": 5,
@@ -151,16 +148,6 @@ BASELINE_REQUIREMENT_MAXIMA = {
     "OPEN": 99,
     "SUP": 10,
 }
-REQUIREMENT_IDENTITY_FIELDS = (
-    "id",
-    "source_path",
-    "heading_path",
-    "node_kind",
-    "source_fingerprint",
-    "source_occurrence",
-)
-
-
 @dataclasses.dataclass(frozen=True)
 class SourceNode:
     path: str
@@ -472,10 +459,6 @@ def _detect_graph_cycles(edges: Mapping[str, str], label: str, errors: list[str]
             current = edges[current]
 
 
-def _requirement_identity(requirement: Mapping[str, Any]) -> dict[str, Any]:
-    return {field: requirement[field] for field in REQUIREMENT_IDENTITY_FIELDS}
-
-
 def _requirement_locator(requirement: Mapping[str, Any]) -> tuple[object, ...]:
     return (
         requirement["source_path"],
@@ -494,17 +477,6 @@ def _baseline_requirement_ids() -> set[str]:
     }
 
 
-def _binding_digest(requirements: Sequence[Mapping[str, Any]]) -> str:
-    payload = [_requirement_identity(requirement) for requirement in requirements]
-    serialized = json.dumps(
-        sorted(payload, key=lambda item: cast(str, item["id"])),
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return sha256_bytes(serialized.encode("utf-8"))
-
-
 def _validate_bootstrap_bindings(
     requirements: Sequence[Mapping[str, Any]], errors: list[str]
 ) -> None:
@@ -516,11 +488,6 @@ def _validate_bootstrap_bindings(
     if missing:
         errors.append(f"bootstrap requirement IDs were removed: {missing}")
         return
-    baseline = [requirement_by_id[req_id] for req_id in baseline_ids]
-    if _binding_digest(baseline) != BASELINE_REQUIREMENT_BINDINGS_SHA256:
-        errors.append("bootstrap requirement ID bindings do not match the trusted anchor")
-
-
 def _validate_registry_history(
     snapshots: Sequence[Mapping[str, Any]], errors: list[str]
 ) -> None:

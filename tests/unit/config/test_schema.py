@@ -144,17 +144,16 @@ def test_acceptance_sample_count_is_required(
 
 
 @pytest.mark.parametrize(
-    ("table", "field", "value"),
+    ("table", "value"),
     [
-        ("qwen", "revision", "main"),
-        ("vae", "repo_id", "third-party/converted-vae"),
-        ("vae", "revision", "latest"),
+        ("qwen", "model/another-qwen"),
+        ("vae", "model/another-vae"),
     ],
 )
-def test_runtime_model_identity_rejects_mutable_or_third_party_values(
-    valid_payload: dict[str, Any], table: str, field: str, value: str
+def test_runtime_model_paths_are_fixed_local_directories(
+    valid_payload: dict[str, Any], table: str, value: str
 ) -> None:
-    valid_payload["assets"][table][field] = value
+    valid_payload["assets"][table]["local_path"] = value
 
     with pytest.raises(ValidationError):
         RuntimeConfig.model_validate(valid_payload)

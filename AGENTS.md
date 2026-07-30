@@ -25,10 +25,10 @@
 
 - 不读取、输出、记录、上传或提交 `.env` 的内容。只允许在代码和文档中记录环境变量名，例如 `MODELSCOPE_API_TOKEN`。
 - `.env`、私钥、模型权重、DB、dataset/cache、参考嵌套仓库、checkpoint、W&B、profile、trace 和训练 artifact 永不进入 Git。
-- 大模型和 DB 只以 manifest/schema 边界进入仓库：来源、不可变 revision、文件路径、bytes、SHA-256、许可证、访问限制和必要的非敏感摘要。
-- Qwen TE 与 Mage-VAE 已分别准备在 `model/qwen_3.5_2B/` 和 `model/vae/`；仓库代码只允许对这两个锁定本地资产做校验和本地加载。禁止自动下载、缺失补下载、联网替换或任何 fallback；本地资产缺失或漂移必须硬失败。
+- Qwen TE 与 Mage-VAE 已分别准备在 `model/qwen_3.5_2B/` 和 `model/vae/`。代码只检查固定目录和加载所需文件是否存在，然后直接从本地加载；不维护资产 manifest，不计算或核对 bytes/SHA-256，不建立 capability、TOCTOU 或防伪造层。
+- 禁止自动下载、缺失补下载、联网替换或任何模型 fallback；固定本地目录或加载所需文件缺失时硬失败。`db/` 和其他用户已准备的本地数据不做资产身份审计。
 - `reference/` 仅供人工理解与对照，可以完全不使用；生产代码、测试、preflight、训练和运行时绝对不得 import、执行或调用其中任何代码。该目录继续保持根仓忽略，不作为 submodule 或 vendor 代码提交。
-- 资产规则和当前参考仓库记录以 `docs/model-architecture/progress/asset-policy.md` 为准。
+- 最小资产规则以 `docs/model-architecture/progress/asset-policy.md` 为准。
 
 ## 执行协议
 

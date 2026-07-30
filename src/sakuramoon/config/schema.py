@@ -95,11 +95,7 @@ class SecurityConfig(StrictModel):
 
 
 class QwenAssetConfig(StrictModel):
-    repo_id: Literal["spawner/Qwen3_5_2b_claude_heretic_spawner"]
-    revision: Commit
-    local_path: Annotated[str, StringConstraints(min_length=1)]
-    manifest_sha256: Sha256
-    tokenizer_sha256: Sha256
+    local_path: Literal["model/qwen_3.5_2B"]
     dtype: Literal["bfloat16"]
     frozen: Literal[True]
     layers: Literal[24]
@@ -109,10 +105,7 @@ class QwenAssetConfig(StrictModel):
 
 
 class VaeAssetConfig(StrictModel):
-    repo_id: Literal["microsoft/Mage-Flow"]
-    revision: Commit
-    local_path: Annotated[str, StringConstraints(min_length=1)]
-    manifest_sha256: Sha256
+    local_path: Literal["model/vae"]
     dtype: Literal["bfloat16"]
     frozen: Literal[True]
     latent_channels: Literal[128]

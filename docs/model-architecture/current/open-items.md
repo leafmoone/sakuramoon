@@ -16,7 +16,7 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - **P0：**正式 S0 之前必须关闭。
 - **P1：**可开发 reference，但长期四卡训练前必须关闭。
 - **P2：**不阻塞首版 512。
-- 每项必须附测试、manifest/hash、benchmark、profile、checkpoint ID 或决策记录；“代码已写”不是完成证据。
+- 每项只附与风险相称的直接证据，例如针对性测试、真实运行结果、benchmark、profile、checkpoint ID 或决策记录；不为本地已准备资产强制生成 manifest/hash，“代码已写”本身仍不是完成证据。
 - 每个实现单元分别产出 `ai_review.md` 与 `infra_review.md`；性能变更同时提供同配置 before/after 数据。
 # 1. 仅剩的待用户决定
 ## 1.1 Dropout 数值

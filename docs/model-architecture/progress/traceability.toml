@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 11
+registry_revision = 12
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -10,10 +10,26 @@ new_sha256 = "5ddb1ff9649a62c799650bc912a0275839a374cc859169ecd036b2d0194b6d1d"
 changed_at = "2026-07-30"
 summary = "Lock prepared Qwen/Mage-VAE to local-only validation/loading and prohibit engineering use of reference code."
 
+[[changes]]
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+revision = 3
+previous_sha256 = "5ddb1ff9649a62c799650bc912a0275839a374cc859169ecd036b2d0194b6d1d"
+new_sha256 = "e9f672c1d921116a523260a3dcea93d610eae9ebd5c6bdd99d07084f36b9c9b3"
+changed_at = "2026-07-30"
+summary = "Remove local model manifests, hashes, capabilities, and scanner; retain fixed local paths without download or fallback."
+
+[[changes]]
+source_path = "docs/model-architecture/current/open-items.md"
+revision = 2
+previous_sha256 = "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6"
+new_sha256 = "dc1b939d310366d49f75ac6e061a56daa8809683af8578804174128a1b79aa78"
+changed_at = "2026-07-30"
+summary = "Use risk-proportionate direct evidence instead of universal manifest/hash artifacts."
+
 [[sources]]
 path = "docs/model-architecture/current/confirmed-decisions.md"
 kind = "confirmed"
-revision = 2
+revision = 3
 include_top_headings = [
     "0.",
     "1.",
@@ -34,13 +50,13 @@ include_top_headings = [
 excluded_top_headings = [
     "15.",
 ]
-sha256 = "5ddb1ff9649a62c799650bc912a0275839a374cc859169ecd036b2d0194b6d1d"
+sha256 = "e9f672c1d921116a523260a3dcea93d610eae9ebd5c6bdd99d07084f36b9c9b3"
 initial_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
 
 [[sources]]
 path = "docs/model-architecture/current/open-items.md"
 kind = "open_items"
-revision = 1
+revision = 2
 include_top_headings = [
     "0.",
     "1.",
@@ -57,7 +73,7 @@ include_top_headings = [
 excluded_top_headings = [
     "11.",
 ]
-sha256 = "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6"
+sha256 = "dc1b939d310366d49f75ac6e061a56daa8809683af8578804174128a1b79aa78"
 initial_sha256 = "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6"
 
 [[sources]]
@@ -110,7 +126,6 @@ modules = [
 reference_modules = []
 tests = [
     "tests/unit/docs/**",
-    "tests/contracts/assets/test_asset_boundary.py",
 ]
 benchmarks = []
 artifacts = [
@@ -185,7 +200,6 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[profiles]]
 name = "vae"
 owner_tasks = [
-    "A001",
     "D013",
     "T020",
 ]
@@ -195,15 +209,13 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/assets/**",
-    "src/sakuramoon/cli/inspect.py",
     "src/sakuramoon/data/image.py",
     "src/sakuramoon/encoders/vae.py",
     "src/sakuramoon/eval/vae_reconstruction.py",
 ]
 reference_modules = []
 tests = [
-    "tests/unit/assets/**",
-    "tests/contracts/assets/**",
+    "tests/unit/assets/test_local_models.py",
     "tests/**/vae*",
     "tests/**/image*",
 ]
@@ -211,7 +223,6 @@ benchmarks = [
     "benchmarks/vae/**",
 ]
 artifacts = [
-    "docs/model-architecture/reviews/A001/**",
     "artifacts/vae/**",
 ]
 hardware = "1GPU"
@@ -223,7 +234,6 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[profiles]]
 name = "caption_qwen"
 owner_tasks = [
-    "A001",
     "D014",
     "T021",
 ]
@@ -234,15 +244,13 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/assets/**",
-    "src/sakuramoon/cli/inspect.py",
     "src/sakuramoon/data/caption.py",
     "src/sakuramoon/data/tokenize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
 tests = [
-    "tests/unit/assets/**",
-    "tests/contracts/assets/**",
+    "tests/unit/assets/test_local_models.py",
     "tests/**/caption*",
     "tests/**/qwen*",
 ]
@@ -250,7 +258,6 @@ benchmarks = [
     "benchmarks/qwen/**",
 ]
 artifacts = [
-    "docs/model-architecture/reviews/A001/**",
     "artifacts/qwen/**",
 ]
 hardware = "1GPU"
@@ -460,7 +467,6 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[profiles]]
 name = "data"
 owner_tasks = [
-    "A001",
     "D010",
     "D011",
     "D012",
@@ -473,14 +479,10 @@ config_keys = [
     "paths.cache*",
 ]
 modules = [
-    "src/sakuramoon/assets/**",
-    "src/sakuramoon/cli/inspect.py",
     "src/sakuramoon/data/**",
 ]
 reference_modules = []
 tests = [
-    "tests/unit/assets/**",
-    "tests/contracts/assets/**",
     "tests/**/data*",
     "tests/**/cache*",
 ]
@@ -488,7 +490,6 @@ benchmarks = [
     "benchmarks/data/**",
 ]
 artifacts = [
-    "docs/model-architecture/reviews/A001/**",
     "artifacts/data/**",
 ]
 hardware = "1GPU"
@@ -700,17 +701,16 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/assets/**",
-    "src/sakuramoon/encoders/**",
-    "tools/asset_execution_boundary.py",
+    "src/sakuramoon/config/schema.py",
 ]
 reference_modules = []
 tests = [
-    "tests/contracts/assets/**",
-    "tests/unit/assets/test_inspect.py",
+    "tests/unit/assets/test_local_models.py",
+    "tests/unit/config/**",
 ]
 benchmarks = []
 artifacts = [
-    "docs/model-architecture/reviews/A002/**",
+    "docs/model-architecture/progress/tasks/A002.md",
 ]
 hardware = "CPU"
 not_applicable_fields = [
@@ -727,24 +727,21 @@ owner_tasks = [
 config_keys = []
 modules = [
     "src/sakuramoon/**",
-    "tools/asset_execution_boundary.py",
 ]
 reference_modules = []
-tests = [
-    "tests/contracts/assets/**",
-    "tests/unit/assets/test_inspect.py",
-]
+tests = []
 benchmarks = []
 artifacts = [
-    "docs/model-architecture/reviews/A002/**",
+    "docs/model-architecture/progress/asset-policy.md",
 ]
 hardware = "CPU"
 not_applicable_fields = [
     "config_keys",
     "reference_modules",
+    "tests",
     "benchmarks",
 ]
-not_applicable_reason = "Reference code is forbidden; no runtime config or benchmark can authorize it."
+not_applicable_reason = "Reference code is excluded by repository policy and direct review; no runtime option, generated scanner, test fixture, or benchmark authorizes it."
 
 [[blockers]]
 id = "DECISION-DROPOUT-VALUES"
@@ -804,7 +801,6 @@ modules = [
 reference_modules = []
 tests = [
     "tests/unit/docs/**",
-    "tests/contracts/assets/test_asset_boundary.py",
 ]
 benchmarks = []
 artifacts = [
@@ -863,7 +859,6 @@ modules = [
 reference_modules = []
 tests = [
     "tests/unit/docs/**",
-    "tests/contracts/assets/test_asset_boundary.py",
 ]
 benchmarks = []
 artifacts = [
@@ -1325,7 +1320,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C02-001"
 kind = "requirement"
-status = "implemented"
+status = "planned"
 profile = "vae"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1337,14 +1332,8 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = "task:A001"
-implementation_paths = [
-    "assets/manifest.toml",
-    "src/sakuramoon/assets/manifest.py",
-    "src/sakuramoon/assets/inspect.py",
-    "src/sakuramoon/assets/bindings.py",
-    "src/sakuramoon/cli/inspect.py",
-]
+implementation_commit_ref = ""
+implementation_paths = []
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1355,15 +1344,13 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/assets/**",
-    "src/sakuramoon/cli/inspect.py",
     "src/sakuramoon/data/image.py",
     "src/sakuramoon/encoders/vae.py",
     "src/sakuramoon/eval/vae_reconstruction.py",
 ]
 reference_modules = []
 tests = [
-    "tests/unit/assets/**",
-    "tests/contracts/assets/**",
+    "tests/unit/assets/test_local_models.py",
     "tests/**/vae*",
     "tests/**/image*",
 ]
@@ -1371,7 +1358,6 @@ benchmarks = [
     "benchmarks/vae/**",
 ]
 artifacts = [
-    "docs/model-architecture/reviews/A001/**",
     "artifacts/vae/**",
 ]
 not_applicable_fields = [
@@ -1664,7 +1650,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-001"
 kind = "requirement"
-status = "implemented"
+status = "planned"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1672,19 +1658,13 @@ heading_path = [
     "4.1 固定文本编码器",
 ]
 node_kind = "list_item"
-source_fingerprint = "7f61245466aa0556812713b8d4a923e722ca49e203d95736b3ebefe38e02664d"
+source_fingerprint = "d1658da7e06f5e4524a0538b97717174a7a108291f44fd60c4dd70970c913b53"
 source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = "task:A001"
-implementation_paths = [
-    "assets/manifest.toml",
-    "src/sakuramoon/assets/manifest.py",
-    "src/sakuramoon/assets/inspect.py",
-    "src/sakuramoon/assets/bindings.py",
-    "src/sakuramoon/cli/inspect.py",
-]
+implementation_commit_ref = ""
+implementation_paths = []
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1696,15 +1676,13 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/assets/**",
-    "src/sakuramoon/cli/inspect.py",
     "src/sakuramoon/data/caption.py",
     "src/sakuramoon/data/tokenize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
 tests = [
-    "tests/unit/assets/**",
-    "tests/contracts/assets/**",
+    "tests/unit/assets/test_local_models.py",
     "tests/**/caption*",
     "tests/**/qwen*",
 ]
@@ -1712,7 +1690,6 @@ benchmarks = [
     "benchmarks/qwen/**",
 ]
 artifacts = [
-    "docs/model-architecture/reviews/A001/**",
     "artifacts/qwen/**",
 ]
 not_applicable_fields = [
@@ -5989,7 +5966,7 @@ heading_path = [
     "0. 状态和完成证据",
 ]
 node_kind = "list_item"
-source_fingerprint = "eb088b3a9ce451292246a34a6fc5abfa8571d4878e3503c4854ec5c22503e0ac"
+source_fingerprint = "ed15168ffe1dd038c68c9cdbc44fa2be2cb3023b06adeba4ae9786be4241cb19"
 source_occurrence = 0
 blocked_by = []
 alias_of = ""
@@ -11051,7 +11028,7 @@ heading_path = [
     "0. 判定规则与当前边界",
 ]
 node_kind = "list_item"
-source_fingerprint = "62a7c50225fb4ae5e39f4f5497efdcae47904d4d25fc18035a374fcf3d97baa0"
+source_fingerprint = "95d91d6bbe1b5d9d4fb75921863c87878bc9d76acd757f6169970538db740d39"
 source_occurrence = 0
 blocked_by = []
 alias_of = ""
@@ -11060,25 +11037,19 @@ implementation_commit_ref = "task:A002"
 implementation_paths = [
     "AGENTS.md",
     "docs/model-architecture/current/confirmed-decisions.md",
+    "docs/model-architecture/current/open-items.md",
     "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
     "docs/model-architecture/progress/asset-policy.md",
     "docs/model-architecture/progress/traceability.toml",
-    "tests/contracts/assets/test_asset_execution_boundary.py",
-    "tests/contracts/assets/conftest.py",
     "src/sakuramoon/assets/__init__.py",
-    "src/sakuramoon/assets/inspect.py",
-    "tests/unit/assets/conftest.py",
-    "tests/unit/assets/test_inspect.py",
-    "tools/__init__.py",
-    "tools/asset_execution_boundary.py",
-    "tests/unit/docs/test_verify_traceability.py",
+    "src/sakuramoon/config/schema.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/assets/test_local_models.py",
+    "tests/unit/config/conftest.py",
+    "tests/unit/config/test_resolve_redact.py",
+    "tests/unit/config/test_schema.py",
     "docs/model-architecture/progress/tasks/A002.md",
     "docs/model-architecture/progress/time-log.jsonl",
-    "docs/model-architecture/reviews/A002/implementation_report.md",
-    "docs/model-architecture/reviews/A002/test_report.json",
-    "docs/model-architecture/reviews/A002/review_remediation.md",
-    "docs/model-architecture/reviews/A002/timing.json",
-    "docs/model-architecture/reviews/A002/artifacts.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -11090,17 +11061,16 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/assets/**",
-    "src/sakuramoon/encoders/**",
-    "tools/asset_execution_boundary.py",
+    "src/sakuramoon/config/schema.py",
 ]
 reference_modules = []
 tests = [
-    "tests/contracts/assets/**",
-    "tests/unit/assets/test_inspect.py",
+    "tests/unit/assets/test_local_models.py",
+    "tests/unit/config/**",
 ]
 benchmarks = []
 artifacts = [
-    "docs/model-architecture/reviews/A002/**",
+    "docs/model-architecture/progress/tasks/A002.md",
 ]
 not_applicable_fields = [
     "reference_modules",
@@ -11130,22 +11100,8 @@ implementation_paths = [
     "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
     "docs/model-architecture/progress/asset-policy.md",
     "docs/model-architecture/progress/traceability.toml",
-    "tests/contracts/assets/test_asset_execution_boundary.py",
-    "tests/contracts/assets/conftest.py",
-    "src/sakuramoon/assets/__init__.py",
-    "src/sakuramoon/assets/inspect.py",
-    "tests/unit/assets/conftest.py",
-    "tests/unit/assets/test_inspect.py",
-    "tools/__init__.py",
-    "tools/asset_execution_boundary.py",
-    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/tasks/A002.md",
     "docs/model-architecture/progress/time-log.jsonl",
-    "docs/model-architecture/reviews/A002/implementation_report.md",
-    "docs/model-architecture/reviews/A002/test_report.json",
-    "docs/model-architecture/reviews/A002/review_remediation.md",
-    "docs/model-architecture/reviews/A002/timing.json",
-    "docs/model-architecture/reviews/A002/artifacts.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -11154,20 +11110,17 @@ infra_review = ""
 config_keys = []
 modules = [
     "src/sakuramoon/**",
-    "tools/asset_execution_boundary.py",
 ]
 reference_modules = []
-tests = [
-    "tests/contracts/assets/**",
-    "tests/unit/assets/test_inspect.py",
-]
+tests = []
 benchmarks = []
 artifacts = [
-    "docs/model-architecture/reviews/A002/**",
+    "docs/model-architecture/progress/asset-policy.md",
 ]
 not_applicable_fields = [
     "config_keys",
     "reference_modules",
+    "tests",
     "benchmarks",
 ]
-not_applicable_reason = "Reference code is forbidden; no runtime config or benchmark can authorize it."
+not_applicable_reason = "Reference code is excluded by repository policy and direct review; no runtime option, generated scanner, test fixture, or benchmark authorizes it."

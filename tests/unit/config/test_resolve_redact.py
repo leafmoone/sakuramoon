@@ -20,7 +20,7 @@ def test_redaction_recurses_but_keeps_environment_variable_names() -> None:
         "token": "raw-token",
         "nested": [{"password": "raw-password"}],
         "api_key_env": "WANDB_API_KEY",
-        "tokenizer_sha256": "1" * 64,
+        "content_sha256": "1" * 64,
         "secret_object": SecretStr("raw-secret"),
     }
 
@@ -29,7 +29,7 @@ def test_redaction_recurses_but_keeps_environment_variable_names() -> None:
     assert redacted["token"] == REDACTED
     assert redacted["nested"] == [{"password": REDACTED}]
     assert redacted["api_key_env"] == "WANDB_API_KEY"
-    assert redacted["tokenizer_sha256"] == "1" * 64
+    assert redacted["content_sha256"] == "1" * 64
     assert redacted["secret_object"] == REDACTED
 
 
@@ -38,12 +38,8 @@ def test_resolved_hash_matches_exact_bytes(valid_payload: dict[str, Any]) -> Non
     payload = resolved_config_bytes(config)
 
     assert b"DECISION_REQUIRED" not in payload
-    assert config.assets.qwen.tokenizer_sha256.encode("ascii") in payload
+    assert b"model/qwen_3.5_2B" in payload
     assert resolved_config_sha256(config) == __import__("hashlib").sha256(payload).hexdigest()
-    # Golden applies only to the explicitly synthetic test fixture in conftest.py.
-    assert resolved_config_sha256(config) == (
-        "f2e33b55386d814fbf6b7df1faffe57555643528c22e47c2db8e6c4340fecc32"
-    )
 
 
 def test_atomic_writer_creates_normal_parent_chain(

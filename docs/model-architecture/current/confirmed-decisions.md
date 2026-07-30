@@ -17,7 +17,7 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 3. **待验证：**结构已经决定，但仍需单元测试、canary、目标机 benchmark 或质量验收。
 4. **尚未决定：**只剩除整体条件外的 dropout 数值，见第 13 节与配套清单。Artist 路径与文本长度桶已由后续会话锁定。
 5. 实现配置不得从原组件的候选、推荐、早期记录或历史决定中自动取值。
-6. **本地模型资产硬边界：**Qwen TE 与 Mage-VAE 已分别位于 `model/qwen_3.5_2B/` 和 `model/vae/`。仓库只允许按锁定 manifest 做本地校验与本地加载；禁止自动下载、缺失补下载、联网替换或 fallback，任一本地文件缺失或漂移必须在加载前硬失败。
+6. **本地模型资产边界：**Qwen TE 与 Mage-VAE 已分别位于 `model/qwen_3.5_2B/` 和 `model/vae/`。代码只检查固定目录和加载必需文件是否存在，然后直接本地加载；不维护资产 manifest，不计算或核对本地文件 bytes/SHA-256，不建立 capability、TOCTOU 或防伪造层。禁止自动下载、缺失补下载、联网替换或 fallback，必需文件缺失时在加载前硬失败。
 7. **参考工程硬边界：**`reference/` 仅供人工理解和对照，可以完全不使用。生产代码、测试、preflight、训练和运行时绝对不得 import、执行或调用其中任何代码；实现必须以本地现行决定与独立实现为准。
 # 1. 项目目标与硬约束
 - 从零训练二次元垂类文生图基础模型，不继承现有 DiT 权重。
@@ -64,7 +64,7 @@ flowchart TB
 来源：<mention-page url="https://app.notion.com/p/3aaae967ecf2816096f0ea37634a2f7e"/>
 # 4. Caption、Qwen 与条件采样
 ## 4.1 固定文本编码器
-- 唯一 checkpoint 为 ModelScope `spawner/Qwen3_5_2b_claude_heretic_spawner`，按仓库、revision、文件 SHA-256 和 tokenizer hash 锁定；不静默替换为官方 Qwen。
+- 唯一 checkpoint 是已准备在 `model/qwen_3.5_2B/` 的本地 Qwen；不对本地文件做 repo/revision/SHA/tokenizer hash 审计，也不静默替换、下载或回退到其他 Qwen。
 - Qwen 冻结、`eval()`、`inference_mode()`、`use_cache=false`，不启用视觉路径；每个样本只做一次在线文本前向。
 - 不调用会插入 thinking 的 chat template，不执行生成；最终 token 序列必须不含 `<think>` 与 `</think>`。
 ## 4.2 固定 framing

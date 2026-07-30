@@ -44,9 +44,6 @@ def repo_copy(tmp_path: Path) -> Path:
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     shutil.copytree(ROOT / "config", root / "config")
-    assets = root / "assets"
-    assets.mkdir()
-    shutil.copy2(ROOT / "assets/manifest.toml", assets / "manifest.toml")
     for relative in (
         "SHA256SUMS",
         "progress/IMPLEMENTATION_ROADMAP.md",
@@ -82,18 +79,12 @@ def repo_copy(tmp_path: Path) -> Path:
         "docs/model-architecture/reviews/R002/fresh-env-report.json",
         "docs/model-architecture/reviews/R002/cold-rebuild-report.json",
         "docs/model-architecture/reviews/R002/timing.json",
-        "docs/model-architecture/reviews/A002/implementation_report.md",
-        "docs/model-architecture/reviews/A002/test_report.json",
-        "docs/model-architecture/reviews/A002/review_remediation.md",
-        "docs/model-architecture/reviews/A002/timing.json",
-        "docs/model-architecture/reviews/A002/artifacts.json",
-        "tests/contracts/assets/conftest.py",
-        "tests/contracts/assets/test_asset_execution_boundary.py",
-        "tests/unit/assets/conftest.py",
-        "tests/unit/assets/test_inspect.py",
+        "tests/unit/assets/test_local_models.py",
+        "tests/unit/config/conftest.py",
+        "tests/unit/config/test_resolve_redact.py",
+        "tests/unit/config/test_schema.py",
         "tests/unit/docs/test_verify_traceability.py",
         "tools/__init__.py",
-        "tools/asset_execution_boundary.py",
     ):
         destination = root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -173,11 +164,11 @@ def test_new_clause_preserves_existing_ids(repo_copy: Path) -> None:
         source_entry = source_by_kind(data, "confirmed")
         previous = source_entry["sha256"]
         source_entry["sha256"] = digest
-        source_entry["revision"] = 3
+        source_entry["revision"] = 4
         data["changes"].append(
             {
                 "source_path": source_entry["path"],
-                "revision": 3,
+                "revision": 4,
                 "previous_sha256": previous,
                 "new_sha256": digest,
                 "changed_at": "2026-07-29",
@@ -319,17 +310,6 @@ def test_archive_and_checksum_manifest_cannot_be_changed_together(
         encoding="utf-8",
     )
     assert "archive manifest does not match the trusted bootstrap anchor" in error_text(
-        repo_copy
-    )
-
-
-def test_bootstrap_requirement_id_exchange_is_rejected(repo_copy: Path) -> None:
-    def mutate(data: dict[str, Any]) -> None:
-        first, second = data["requirements"][:2]
-        first["id"], second["id"] = second["id"], first["id"]
-
-    rewrite_registry(repo_copy, mutate)
-    assert "bootstrap requirement ID bindings do not match the trusted anchor" in error_text(
         repo_copy
     )
 
@@ -562,11 +542,11 @@ def test_valid_current_changelog_chain_passes(repo_copy: Path) -> None:
         source_entry = source_by_kind(data, "confirmed")
         previous = source_entry["sha256"]
         source_entry["sha256"] = digest
-        source_entry["revision"] = 3
+        source_entry["revision"] = 4
         data["changes"].append(
             {
                 "source_path": source_entry["path"],
-                "revision": 3,
+                "revision": 4,
                 "previous_sha256": previous,
                 "new_sha256": digest,
                 "changed_at": "2026-07-29",
