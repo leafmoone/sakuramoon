@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "task_id": "D014",
+  "hardware": "CPU",
+  "targeted": {
+    "command": "uv run pytest -q tests/unit/data/test_caption.py tests/contracts/text_protocol/test_caption_serializer.py",
+    "passed": 31,
+    "failed": 0
+  },
+  "ruff": true,
+  "pyright_errors": 0,
+  "real_tokenizer_boundary_tested": true,
+  "real_prefix_tokens": 34,
+  "real_suffix_tokens": 5,
+  "real_padding_token_id": 248044,
+  "distribution_100k_run": true,
+  "all_condition_dropped": 10090,
+  "all_condition_rate": 0.1009,
+  "gpu_used": false,
+  "package_review_status": "pending_D010_D015_completion"
+}

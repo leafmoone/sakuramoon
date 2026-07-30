@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 21
+registry_revision = 22
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -245,7 +245,7 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -272,6 +272,7 @@ owner_tasks = [
     "T021",
     "T022",
     "T023",
+    "D014",
 ]
 config_keys = [
     "model.text_adapter.*",
@@ -305,6 +306,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[profiles]]
 name = "packing_rope"
 owner_tasks = [
+    "D014",
     "T024",
     "M031",
     "K001",
@@ -1697,7 +1699,7 @@ config_keys = [
 modules = [
     "src/sakuramoon/assets/**",
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -1746,7 +1748,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -1768,7 +1770,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-003"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1781,8 +1783,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/caption.py",
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1794,7 +1800,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -1816,7 +1822,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-004"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1829,8 +1835,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1842,7 +1851,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -1864,7 +1873,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-005"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1877,8 +1886,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1890,7 +1902,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -1912,7 +1924,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-006"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1925,8 +1937,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1938,7 +1953,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -1960,7 +1975,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-007"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -1973,8 +1988,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/caption.py",
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -1986,7 +2005,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -2008,7 +2027,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-008"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2021,8 +2040,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/caption.py",
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2034,7 +2057,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -2056,7 +2079,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-009"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2069,8 +2092,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/caption.py",
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2082,7 +2109,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -2104,7 +2131,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-010"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2117,8 +2144,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/caption.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2130,7 +2160,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -2152,7 +2182,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-011"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2165,8 +2195,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/caption.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2178,7 +2211,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -2200,7 +2233,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-012"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2213,8 +2246,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/caption.py",
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2226,7 +2263,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -2248,7 +2285,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C03-013"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "caption_qwen"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2261,8 +2298,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -2274,7 +2314,7 @@ config_keys = [
 ]
 modules = [
     "src/sakuramoon/data/caption.py",
-    "src/sakuramoon/data/tokenize.py",
+    "src/sakuramoon/data/serialize.py",
     "src/sakuramoon/encoders/qwen.py",
 ]
 reference_modules = []
@@ -2496,7 +2536,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C04-005"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "text_style"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -2509,8 +2549,12 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/caption.py",
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3190,7 +3234,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C05-010"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "packing_rope"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3202,8 +3246,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -3238,7 +3285,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C05-011"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "packing_rope"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -3250,8 +3297,11 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D014"
+implementation_paths = [
+    "src/sakuramoon/data/serialize.py",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

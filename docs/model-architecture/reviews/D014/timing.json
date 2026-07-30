@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "task_id": "D014",
+  "phase": "minimal_caption_serializer_implementation",
+  "agent": "d010_minimal_streaming",
+  "started_at_utc": null,
+  "ended_at_utc": "2026-07-30T05:27:19Z",
+  "duration_seconds": null,
+  "timing_status": "start_not_recorded",
+  "hardware_level": "CPU",
+  "gpu_seconds": 0,
+  "status": "code_complete_probability_decision_and_package_review_pending"
+}
