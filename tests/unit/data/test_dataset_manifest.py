@@ -14,6 +14,7 @@ from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetManifestError,
     DatasetManifestExistsError,
+    DatasetManifestPublicationError,
     DatasetSourceIdentity,
     ManifestAggregates,
     ManifestBuildInventory,
@@ -355,3 +356,26 @@ def test_manifest_publication_fsyncs_file_and_parent_directory(
     assert len(synced_modes) == 2
     assert stat.S_ISREG(synced_modes[0])
     assert stat.S_ISDIR(synced_modes[1])
+
+
+def test_manifest_publication_rolls_back_final_name_when_parent_fsync_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "nested/manifest.json"
+    real_fsync = os.fsync
+    calls = 0
+
+    def fail_parent_fsync(file_descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            raise OSError("injected parent fsync failure")
+        real_fsync(file_descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_parent_fsync)
+    with pytest.raises(DatasetManifestPublicationError, match="could not be written"):
+        write_dataset_manifest(_manifest(), destination)
+
+    assert not destination.exists()
+    assert not tuple(destination.parent.glob(".manifest.json.*.tmp"))

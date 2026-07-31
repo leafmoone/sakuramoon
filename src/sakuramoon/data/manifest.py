@@ -316,6 +316,7 @@ def load_dataset_manifest(
 def write_dataset_manifest(manifest: DatasetManifest, destination: Path) -> str:
     payload = canonical_manifest_bytes(manifest)
     temporary: Path | None = None
+    published = False
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
@@ -330,6 +331,7 @@ def write_dataset_manifest(manifest: DatasetManifest, destination: Path) -> str:
             os.fsync(handle.fileno())
         try:
             os.link(temporary, destination)
+            published = True
         except FileExistsError:
             raise DatasetManifestExistsError(
                 "dataset manifest destination already exists"
@@ -342,11 +344,32 @@ def write_dataset_manifest(manifest: DatasetManifest, destination: Path) -> str:
             os.close(directory_fd)
     except DatasetManifestExistsError:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise
     except OSError:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if published:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                directory_fd = os.open(
+                    destination.parent, os.O_RDONLY | os.O_DIRECTORY
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                pass
         raise DatasetManifestPublicationError(
             "dataset manifest could not be written"
         ) from None

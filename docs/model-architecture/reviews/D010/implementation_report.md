@@ -32,6 +32,14 @@ identical duplicate. The remediated validator requires both exact entry count an
 records. Direct independent re-review startup was unavailable; the main agent completed
 remediation acceptance without claiming an independent final pass.
 
-The subsequent builder expansion is code-complete and self-checked but is not covered by
-that earlier conclusion. Fresh independent AI/model and Infra/performance re-review is
-pending.
+Main-agent review of the subsequent builder expansion found a publication durability
+gap: after `os.link()` exposed the final manifest, failure while unlinking the temporary
+or fsyncing the parent returned an error without removing the final name. The publisher
+now tracks whether the link became visible, removes that final on any later `OSError`,
+and best-effort fsyncs the rollback. A parent-fsync fault contract proves that both the
+final name and unique temporary are absent after failure.
+
+The corrected expansion passed 57 targeted CPU contracts plus Ruff and strict Pyright.
+Two direct attempts to start a fresh independent reviewer failed with
+`agent thread limit reached`; per user direction work continued without agents. This
+is main-agent remediation acceptance, not a fresh independent PASS.

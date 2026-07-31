@@ -1,6 +1,7 @@
 # D010 AI/model correctness review
 
-Status: PENDING independent review of canonical builder expansion.
+Status: canonical builder expansion passed main-agent AI/model review. Fresh
+independent rereview is unavailable after two direct agent-start failures.
 
 The Data package audit found that set equality allowed an identical duplicate remote
 shard entry to pass the immutable inventory contract. Validation now requires the
@@ -12,7 +13,13 @@ streamed byte/SHA verification remain unchanged. Production enumeration is still
 pending and no dataset facts were invented. Direct independent re-review startup was
 unavailable, so this PASS is explicitly main-agent remediation acceptance.
 
-That conclusion predates the canonical build inventory, merge contract, and no-clobber
-CLI publication path. Those additions require fresh independent review before this file
-may record a current PASS. Production enumeration remains pending and must not be
-inferred from synthetic tests.
+The canonical build inventory contributes only explicit release/sample/license/access
+facts; ModelScope listing contributes only path/bytes/SHA. Exact path equality and
+duplicate rejection prevent either source from silently adding or dropping shards.
+Canonical encoding, caller-supplied inventory digest, fixed repo/revision binding and
+strict source equality prevent runtime inference of production dataset facts.
+
+No AI/model correctness blocker remains in the CPU implementation. Production
+enumeration, chosen immutable revision, release/sample inventory and real access remain
+pending and are not inferred from synthetic HTTP tests. This main-agent conclusion does
+not replace a fresh independent review.
