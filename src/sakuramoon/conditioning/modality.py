@@ -25,6 +25,8 @@ class ModalityEmbedding(nn.Module):
     def forward(self, tokens: torch.Tensor, modality: Modality) -> torch.Tensor:
         if tokens.ndim < 2 or tokens.shape[-1] != self.text.numel():
             raise ValueError("tokens must end in the configured hidden size")
+        if modality not in ("text", "style", "image"):
+            raise ValueError("modality must be text, style, or image")
         embedding = getattr(self, modality)
         return tokens + embedding.to(dtype=tokens.dtype, device=tokens.device)
 

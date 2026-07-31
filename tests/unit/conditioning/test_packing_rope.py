@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import math
+from typing import cast
 
+import pytest
 import torch
 
 from sakuramoon.conditioning.modality import ModalityEmbedding
 from sakuramoon.conditioning.packing import (
+    build_validated_cu_seqlens,
     canvas_condition,
     dense_reference_mask,
     pack_sequences,
@@ -48,6 +51,37 @@ def test_pack_order_cu_seqlens_and_sample_isolation() -> None:
     assert not mask[10:, :10].any()
 
 
+@pytest.mark.parametrize("lengths", [(), (0,), (-1,), (True,), (2, 1.5)])
+def test_boundary_factory_rejects_invalid_host_lengths(
+    lengths: tuple[object, ...],
+) -> None:
+    with pytest.raises(ValueError, match="positive integers"):
+        build_validated_cu_seqlens(
+            cast(tuple[int, ...], lengths),
+            device=torch.device("cpu"),
+        )
+
+
+@pytest.mark.parametrize("field", ["style_dtype", "mask_device"])
+def test_pack_rejects_cross_input_dtype_or_device(field: str) -> None:
+    text = torch.zeros(1, 2, 8)
+    mask = torch.ones(1, 2, dtype=torch.bool)
+    style = torch.zeros(1, 4, 8)
+    if field == "style_dtype":
+        style = style.to(torch.float64)
+    else:
+        mask = torch.ones(1, 2, dtype=torch.bool, device="meta")
+
+    with pytest.raises(ValueError, match="share one"):
+        pack_sequences(
+            text,
+            mask,
+            style,
+            (torch.zeros(1, 8),),
+            ((1, 1),),
+        )
+
+
 def test_area_normalized_coordinates_and_text_style_zero_coordinates() -> None:
     square = image_coordinates(2, 2, device=torch.device("cpu"))
     expected = torch.tensor(
@@ -87,6 +121,31 @@ def test_qk_norm_precedes_rope_and_kv_heads_are_not_repeated() -> None:
     torch.testing.assert_close(query_out[..., :32], module.q_norm(query)[..., :32])
     torch.testing.assert_close(key_out[..., :32], module.k_norm(key)[..., :32])
     assert not torch.equal(query_out[1, :, 32:], module.q_norm(query)[1, :, 32:])
+
+
+@pytest.mark.parametrize("invalid", ["key_dtype", "coordinate_dtype", "device"])
+def test_qk_rope_rejects_dtype_or_device_promotion(invalid: str) -> None:
+    module = QKRoPE2D(
+        head_dim=128,
+        nope_dim=32,
+        y_dim=48,
+        x_dim=48,
+        position_scale=16.0,
+        theta=1000.0,
+        norm_eps=1e-6,
+    )
+    query = torch.zeros(2, 4, 128)
+    key = torch.zeros(2, 1, 128)
+    coordinates = torch.zeros(2, 2)
+    if invalid == "key_dtype":
+        key = key.to(torch.bfloat16)
+    elif invalid == "coordinate_dtype":
+        coordinates = coordinates.to(torch.float64)
+    else:
+        coordinates = torch.zeros(2, 2, device="meta")
+
+    with pytest.raises((TypeError, ValueError), match="dtype|float32|device"):
+        module(query, key, coordinates)
 
 
 def test_canvas_condition_uses_only_target_height_and_width() -> None:

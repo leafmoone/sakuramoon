@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from itertools import accumulate
 
 import torch
 
@@ -22,12 +23,47 @@ class SampleSpans:
 
 
 @dataclass(frozen=True)
+class ValidatedCuSeqlens:
+    """Sequence boundaries derived once from validated host-side lengths."""
+
+    tensor: torch.Tensor
+    total_tokens: int
+    max_seqlen: int
+    batch_size: int
+
+
+def build_validated_cu_seqlens(
+    sequence_lengths: tuple[int, ...],
+    *,
+    device: torch.device,
+) -> ValidatedCuSeqlens:
+    if type(sequence_lengths) is not tuple or not sequence_lengths or any(
+        type(length) is not int or length <= 0 for length in sequence_lengths
+    ):
+        raise ValueError("sequence lengths must be a nonempty tuple of positive integers")
+    offsets = (0, *accumulate(sequence_lengths))
+    return ValidatedCuSeqlens(
+        tensor=torch.tensor(offsets, dtype=torch.int32, device=device),
+        total_tokens=offsets[-1],
+        max_seqlen=max(sequence_lengths),
+        batch_size=len(sequence_lengths),
+    )
+
+
+@dataclass(frozen=True)
 class PackedSequences:
     tokens: torch.Tensor
-    cu_seqlens: torch.Tensor
-    max_seqlen: int
+    boundaries: ValidatedCuSeqlens
     spans: tuple[SampleSpans, ...]
     image_shapes: tuple[tuple[int, int], ...]
+
+    @property
+    def cu_seqlens(self) -> torch.Tensor:
+        return self.boundaries.tensor
+
+    @property
+    def max_seqlen(self) -> int:
+        return self.boundaries.max_seqlen
 
 
 def pack_sequences(
@@ -44,6 +80,12 @@ def pack_sequences(
     batch, _, hidden = text_tokens.shape
     if style_tokens.shape != (batch, 4, hidden):
         raise ValueError("style tokens must have shape [B,4,D]")
+    if text_mask.device != text_tokens.device:
+        raise ValueError("text tokens and mask must share one device")
+    if style_tokens.device != text_tokens.device or style_tokens.dtype != text_tokens.dtype:
+        raise ValueError("text and style tokens must share one device and dtype")
+    if not torch.is_floating_point(text_tokens):
+        raise TypeError("packed tokens must use a floating dtype")
     if len(image_tokens) != batch or len(image_shapes) != batch or batch == 0:
         raise ValueError("one image token tensor and image shape are required per sample")
 
@@ -76,11 +118,10 @@ def pack_sequences(
         )
         offsets.append(image_end)
 
-    lengths = [offsets[index + 1] - offsets[index] for index in range(batch)]
+    lengths = tuple(offsets[index + 1] - offsets[index] for index in range(batch))
     return PackedSequences(
         tokens=torch.cat(sequences, dim=0),
-        cu_seqlens=torch.tensor(offsets, dtype=torch.int32, device=text_tokens.device),
-        max_seqlen=max(lengths),
+        boundaries=build_validated_cu_seqlens(lengths, device=text_tokens.device),
         spans=tuple(spans),
         image_shapes=image_shapes,
     )
@@ -91,8 +132,10 @@ def dense_reference_mask(packed: PackedSequences) -> torch.Tensor:
 
     total = packed.tokens.shape[0]
     mask = torch.zeros(total, total, dtype=torch.bool, device=packed.tokens.device)
-    for start, end in zip(packed.cu_seqlens[:-1], packed.cu_seqlens[1:], strict=True):
-        mask[int(start.item()) : int(end.item()), int(start.item()) : int(end.item())] = True
+    for spans in packed.spans:
+        start = spans.text.start
+        end = spans.image.end
+        mask[start:end, start:end] = True
     return mask
 
 
@@ -108,6 +151,8 @@ __all__ = [
     "PackedSequences",
     "SampleSpans",
     "TokenSpan",
+    "ValidatedCuSeqlens",
+    "build_validated_cu_seqlens",
     "canvas_condition",
     "dense_reference_mask",
     "pack_sequences",

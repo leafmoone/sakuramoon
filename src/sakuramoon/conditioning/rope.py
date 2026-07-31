@@ -113,6 +113,16 @@ class QKRoPE2D(nn.Module):
             raise ValueError("query/key token counts and head dimensions must match")
         if coordinates.shape != (query.shape[0], 2):
             raise ValueError("coordinates must have shape [tokens,2]")
+        if query.dtype != key.dtype or query.dtype not in (torch.float32, torch.bfloat16):
+            raise TypeError("query and key must share float32 or bfloat16 dtype")
+        if coordinates.dtype != torch.float32:
+            raise TypeError("coordinates must use float32")
+        if (
+            key.device != query.device
+            or coordinates.device != query.device
+            or self.frequencies.device != query.device
+        ):
+            raise ValueError("query, key, coordinates, and RoPE frequencies must share one device")
         normalized_query = self.q_norm(query)
         normalized_key = self.k_norm(key)
         return self._apply_rope(normalized_query, coordinates), self._apply_rope(

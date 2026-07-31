@@ -14,7 +14,7 @@ from sakuramoon.conditioning.global_condition import (
 from sakuramoon.conditioning.modality import ModalityEmbedding
 from sakuramoon.conditioning.packing import PackedSequences, pack_sequences
 from sakuramoon.conditioning.rope import image_coordinates, packed_coordinates
-from sakuramoon.model.attention import dense_attention_mask, validate_cu_seqlens
+from sakuramoon.model.attention import dense_attention_mask
 from sakuramoon.model.block import DiTBlock, PackedDiTBlock
 from sakuramoon.model.growth import active_slot_ids, slot_growth, slot_name
 from sakuramoon.model.output_head import FinalOutputHead
@@ -519,11 +519,7 @@ class PackedDiT(nn.Module):
             raise ValueError("packed sample count must equal the condition batch")
         coordinates = packed_coordinates(packed)
         sample_indices = self._sample_indices(packed)
-        boundaries = validate_cu_seqlens(
-            packed.cu_seqlens,
-            total_tokens=packed.tokens.shape[0],
-            max_seqlen=packed.max_seqlen,
-        )
+        boundaries = packed.boundaries
         condition = self.conditioner(
             timestep,
             size_scale,

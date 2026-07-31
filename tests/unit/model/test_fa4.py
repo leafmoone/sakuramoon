@@ -7,7 +7,6 @@ from sakuramoon.model.attention import (
     FA4VarlenGQAAttention,
     ValidatedCuSeqlens,
     fa4_varlen_attention,
-    validate_cu_seqlens,
 )
 
 
@@ -76,24 +75,3 @@ def test_fa4_core_rejects_cpu_instead_of_falling_back() -> None:
 
     with pytest.raises(ValueError, match="CUDA"):
         fa4_varlen_attention(query, key, value, boundaries)
-
-
-@pytest.mark.parametrize("max_seqlen", [True, 0, -1])
-def test_fa4_core_rejects_invalid_max_seqlen(max_seqlen: int) -> None:
-    cu_seqlens = torch.tensor([0, 0], dtype=torch.int32)
-
-    with pytest.raises(ValueError, match="positive integer"):
-        validate_cu_seqlens(
-            cu_seqlens,
-            total_tokens=1,
-            max_seqlen=max_seqlen,
-        )
-
-
-def test_cu_seqlens_validation_requires_cuda() -> None:
-    with pytest.raises(ValueError, match="CUDA int32"):
-        validate_cu_seqlens(
-            torch.tensor([0, 2], dtype=torch.int32),
-            total_tokens=2,
-            max_seqlen=2,
-        )

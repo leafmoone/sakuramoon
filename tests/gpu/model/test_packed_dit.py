@@ -6,7 +6,10 @@ import pytest
 import torch
 
 from sakuramoon.conditioning.global_condition import BlockModulation
-from sakuramoon.model.attention import dense_attention_mask, validate_cu_seqlens
+from sakuramoon.model.attention import (
+    build_validated_cu_seqlens,
+    dense_attention_mask,
+)
 from sakuramoon.model.block import DiTBlock, PackedDiTBlock
 from sakuramoon.model.dit import PackedDiT
 
@@ -102,13 +105,9 @@ def test_packed_block_matches_dense_and_isolates_samples() -> None:
     flat_coordinates = torch.cat(
         tuple(coordinates[index, :length] for index, length in enumerate(lengths))
     )
-    cu_seqlens = torch.tensor(
-        [0, lengths[0], sum(lengths)], device="cuda", dtype=torch.int32
-    )
-    boundaries = validate_cu_seqlens(
-        cu_seqlens,
-        total_tokens=sum(lengths),
-        max_seqlen=maximum,
+    boundaries = build_validated_cu_seqlens(
+        lengths,
+        device=torch.device("cuda"),
     )
     sample_indices = torch.repeat_interleave(
         torch.arange(2, device="cuda"),

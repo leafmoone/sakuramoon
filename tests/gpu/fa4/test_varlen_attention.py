@@ -11,9 +11,9 @@ from sakuramoon.model.attention import (
     DenseGQAAttention,
     FA4VarlenGQAAttention,
     ValidatedCuSeqlens,
+    build_validated_cu_seqlens,
     dense_attention_mask,
     fa4_varlen_attention,
-    validate_cu_seqlens,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -106,12 +106,10 @@ def _dense_production_attention() -> DenseGQAAttention:
 def _validated_boundaries(
     offsets: tuple[int, ...],
 ) -> ValidatedCuSeqlens:
-    cu_seqlens = torch.tensor(offsets, device="cuda", dtype=torch.int32)
     lengths = tuple(end - start for start, end in pairwise(offsets))
-    return validate_cu_seqlens(
-        cu_seqlens,
-        total_tokens=offsets[-1],
-        max_seqlen=max(lengths),
+    return build_validated_cu_seqlens(
+        lengths,
+        device=torch.device("cuda"),
     )
 
 
@@ -243,28 +241,14 @@ def test_full_fa4_attention_forward_backward_and_update() -> None:
     assert not torch.equal(weight_before, module.q_proj.weight)
 
 
-@pytest.mark.parametrize(
-    ("offsets", "total_tokens", "max_seqlen", "message"),
-    [
-        ((1, 4), 4, 3, "start at zero"),
-        ((0, 3), 4, 3, "end at total_tokens"),
-        ((0, 3, 2, 4), 4, 3, "strictly increasing"),
-        ((0, 2, 2, 4), 4, 2, "strictly increasing"),
-        ((0, 2, 4), 4, 3, "longest sequence"),
-    ],
-)
-def test_cu_seqlens_validation_rejects_malformed_boundaries(
-    offsets: tuple[int, ...],
-    total_tokens: int,
-    max_seqlen: int,
-    message: str,
+@pytest.mark.parametrize("lengths", [(), (0,), (-1,), (True,)])
+def test_boundary_factory_rejects_invalid_host_lengths(
+    lengths: tuple[int, ...],
 ) -> None:
-    cu_seqlens = torch.tensor(offsets, device="cuda", dtype=torch.int32)
-    with pytest.raises(ValueError, match=message):
-        validate_cu_seqlens(
-            cu_seqlens,
-            total_tokens=total_tokens,
-            max_seqlen=max_seqlen,
+    with pytest.raises(ValueError, match="positive integers"):
+        build_validated_cu_seqlens(
+            lengths,
+            device=torch.device("cuda"),
         )
 
 

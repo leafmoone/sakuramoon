@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 67
+registry_revision = 68
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -3082,6 +3082,8 @@ implementation_paths = [
     "src/sakuramoon/conditioning/modality.py",
     "src/sakuramoon/conditioning/packing.py",
     "src/sakuramoon/conditioning/rope.py",
+    "tests/unit/conditioning/test_packing_rope.py",
+    "tests/gpu/conditioning/test_packing_rope.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -3134,6 +3136,8 @@ implementation_commit_ref = "task:T024"
 implementation_paths = [
     "src/sakuramoon/conditioning/modality.py",
     "src/sakuramoon/conditioning/packing.py",
+    "tests/unit/conditioning/test_packing_rope.py",
+    "tests/gpu/conditioning/test_packing_rope.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -3184,7 +3188,10 @@ alias_of = ""
 superseded_by = ""
 implementation_commit_ref = "task:K001"
 implementation_paths = [
+    "src/sakuramoon/conditioning/packing.py",
     "src/sakuramoon/model/attention.py",
+    "tests/unit/conditioning/test_packing_rope.py",
+    "tests/gpu/conditioning/test_packing_rope.py",
     "tests/unit/model/test_fa4.py",
     "tests/gpu/fa4/test_varlen_attention.py",
     "docs/model-architecture/progress/traceability.toml",
@@ -3238,6 +3245,8 @@ superseded_by = ""
 implementation_commit_ref = "task:T024"
 implementation_paths = [
     "src/sakuramoon/conditioning/rope.py",
+    "tests/unit/conditioning/test_packing_rope.py",
+    "tests/gpu/conditioning/test_packing_rope.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -3289,6 +3298,8 @@ superseded_by = ""
 implementation_commit_ref = "task:T024"
 implementation_paths = [
     "src/sakuramoon/conditioning/rope.py",
+    "tests/unit/conditioning/test_packing_rope.py",
+    "tests/gpu/conditioning/test_packing_rope.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -3340,6 +3351,8 @@ superseded_by = ""
 implementation_commit_ref = "task:T024"
 implementation_paths = [
     "src/sakuramoon/conditioning/rope.py",
+    "tests/unit/conditioning/test_packing_rope.py",
+    "tests/gpu/conditioning/test_packing_rope.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -3392,6 +3405,8 @@ implementation_commit_ref = "task:T024"
 implementation_paths = [
     "src/sakuramoon/conditioning/norm.py",
     "src/sakuramoon/conditioning/rope.py",
+    "tests/unit/conditioning/test_packing_rope.py",
+    "tests/gpu/conditioning/test_packing_rope.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -3443,6 +3458,13 @@ superseded_by = ""
 implementation_commit_ref = "task:T024"
 implementation_paths = [
     "src/sakuramoon/conditioning/packing.py",
+    "src/sakuramoon/model/attention.py",
+    "src/sakuramoon/model/dit.py",
+    "tests/unit/conditioning/test_packing_rope.py",
+    "tests/unit/model/test_fa4.py",
+    "tests/gpu/conditioning/test_packing_rope.py",
+    "tests/gpu/fa4/test_varlen_attention.py",
+    "tests/gpu/model/test_packed_dit.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""

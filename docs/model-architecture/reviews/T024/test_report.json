@@ -1,9 +1,23 @@
 {
   "schema_version": 1,
   "task_id": "T024",
-  "cpu_unit_passed": 5,
+  "cpu_unit_passed": 18,
+  "cpu_targeted": {
+    "command": "uv run --frozen pytest -q tests/unit/conditioning/test_packing_rope.py tests/unit/model/test_fa4.py",
+    "passed": 18,
+    "failed": 0,
+    "duration_seconds": 1.87
+  },
+  "cpu_package_regression": {
+    "conditioning_passed": 34,
+    "conditioning_duration_seconds": 3.75,
+    "model_passed": 23,
+    "model_duration_seconds": 5.25,
+    "failed": 0
+  },
   "gpu_tested": true,
   "gpu": "NVIDIA GeForce RTX 5090",
+  "gpu_driver": "580.105.08",
   "packed_shape": [2113, 2560],
   "cu_seqlens": [0, 1060, 2113],
   "query_heads": 20,
@@ -13,5 +27,35 @@
   "rope_backward_ms": [1.324, 1.145, 1.119],
   "peak_memory_mib": 192.7,
   "finite_outputs_and_gradients": true,
-  "package_review_status": "pending"
+  "strict_dtype_device_contracts": true,
+  "boundary_handle_derived_from_host_lengths": true,
+  "production_boundary_d2h_sync_removed": true,
+  "targeted_real_gpu": {
+    "packing_rope": {
+      "passed": 1,
+      "failed": 0,
+      "duration_seconds": 2.57
+    },
+    "fa4_dense_alignment": {
+      "passed": 1,
+      "failed": 0,
+      "duration_seconds": 13.77
+    },
+    "packed_dit_block_alignment": {
+      "passed": 1,
+      "failed": 0,
+      "duration_seconds": 8.42
+    }
+  },
+  "traceability": {
+    "command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py",
+    "passed": 40,
+    "failed": 0,
+    "duration_seconds": 19.49,
+    "direct_verifier_passed": true
+  },
+  "all_17_shape_matrix_status": "retained_existing_evidence_not_rerun_per_task",
+  "package_review_status": "encoders_conditioning_review_pending",
+  "multi_gpu_ddp_nccl_status": "not_run_pending_or_blocked",
+  "training_long_run_status": "not_run"
 }

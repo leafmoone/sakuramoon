@@ -3,74 +3,21 @@
 from __future__ import annotations
 
 import importlib
-from dataclasses import dataclass
-from itertools import pairwise
 from typing import Protocol, cast
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from sakuramoon.conditioning.packing import (
+    ValidatedCuSeqlens,
+    build_validated_cu_seqlens,
+)
 from sakuramoon.conditioning.rope import QKRoPE2D
 
 FA4_QUERY_HEADS = 20
 FA4_KV_HEADS = 5
 FA4_HEAD_DIM = 128
-
-
-@dataclass(frozen=True, slots=True)
-class ValidatedCuSeqlens:
-    """CUDA sequence boundaries validated once at the packed-batch boundary."""
-
-    tensor: torch.Tensor
-    total_tokens: int
-    max_seqlen: int
-    batch_size: int
-
-
-def validate_cu_seqlens(
-    cu_seqlens: torch.Tensor,
-    *,
-    total_tokens: int,
-    max_seqlen: int,
-) -> ValidatedCuSeqlens:
-    """Validate FA4 boundaries once before sharing them across DiT blocks."""
-
-    if isinstance(total_tokens, bool) or total_tokens <= 0:
-        raise ValueError("total_tokens must be a positive integer")
-    if isinstance(max_seqlen, bool) or max_seqlen <= 0:
-        raise ValueError("max_seqlen must be a positive integer")
-    if (
-        cu_seqlens.ndim != 1
-        or cu_seqlens.numel() < 2
-        or cu_seqlens.dtype != torch.int32
-        or not cu_seqlens.is_cuda
-    ):
-        raise ValueError("cu_seqlens must be CUDA int32 with shape [batch+1]")
-    if not cu_seqlens.is_contiguous():
-        raise ValueError("cu_seqlens must be contiguous")
-
-    # This is the only D2H synchronization. The returned handle is reused by every
-    # block in the model.
-    boundaries = cast(
-        list[int],
-        cu_seqlens.detach().to(device="cpu", dtype=torch.int64).tolist(),  # pyright: ignore[reportUnknownMemberType]
-    )
-    if boundaries[0] != 0:
-        raise ValueError("cu_seqlens must start at zero")
-    if boundaries[-1] != total_tokens:
-        raise ValueError("cu_seqlens must end at total_tokens")
-    lengths = [end - start for start, end in pairwise(boundaries)]
-    if any(length <= 0 for length in lengths):
-        raise ValueError("cu_seqlens boundaries must be strictly increasing")
-    if max(lengths) != max_seqlen:
-        raise ValueError("max_seqlen must equal the longest sequence")
-    return ValidatedCuSeqlens(
-        tensor=cu_seqlens,
-        total_tokens=total_tokens,
-        max_seqlen=max_seqlen,
-        batch_size=len(lengths),
-    )
 
 
 class _FA4VarlenCallable(Protocol):
@@ -403,7 +350,7 @@ __all__ = [
     "DenseGQAAttention",
     "FA4VarlenGQAAttention",
     "ValidatedCuSeqlens",
+    "build_validated_cu_seqlens",
     "dense_attention_mask",
     "fa4_varlen_attention",
-    "validate_cu_seqlens",
 ]
