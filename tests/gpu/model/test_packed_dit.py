@@ -168,7 +168,7 @@ def test_full_packed_dit_three_stage_gradient_startup() -> None:
     )
     text_tokens = torch.randn(2, 3, 2560, device="cuda", dtype=torch.bfloat16)
     text_mask = torch.tensor(
-        [[True, False, True], [True, False, False]],
+        [[True, True, False], [True, False, False]],
         device="cuda",
     )
     style_tokens = torch.randn(2, 4, 2560, device="cuda", dtype=torch.bfloat16)
@@ -182,6 +182,7 @@ def test_full_packed_dit_three_stage_gradient_startup() -> None:
             latents,
             text_tokens,
             text_mask,
+            (2, 1),
             style_tokens,
             timestep,
             size_scale,

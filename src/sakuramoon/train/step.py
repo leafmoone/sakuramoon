@@ -31,6 +31,7 @@ class TrainableCompositeInputs:
     qwen_states: torch.Tensor
     main_token_indices: torch.Tensor
     main_mask: torch.Tensor
+    main_token_lengths: tuple[int, ...]
     artist_token_indices: torch.Tensor
     artist_mask: torch.Tensor
     use_null_style: torch.Tensor
@@ -74,6 +75,7 @@ class TrainableComposite(nn.Module):
             inputs.latents,
             text.tokens,
             text.mask,
+            inputs.main_token_lengths,
             style.tokens,
             inputs.timestep,
             inputs.size_scale,

@@ -252,6 +252,51 @@ def test_boundary_factory_rejects_invalid_host_lengths(
         )
 
 
+def _forge_boundaries(
+    tensor: torch.Tensor,
+    *,
+    sequence_lengths: tuple[int, ...] = (2,),
+    total_tokens: int = 2,
+    max_seqlen: int = 2,
+    batch_size: int = 1,
+) -> ValidatedCuSeqlens:
+    boundaries = object.__new__(ValidatedCuSeqlens)
+    object.__setattr__(boundaries, "tensor", tensor)
+    object.__setattr__(boundaries, "sequence_lengths", sequence_lengths)
+    object.__setattr__(boundaries, "total_tokens", total_tokens)
+    object.__setattr__(boundaries, "max_seqlen", max_seqlen)
+    object.__setattr__(boundaries, "batch_size", batch_size)
+    return boundaries
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["dtype", "shape", "contiguous", "host_metadata"],
+)
+def test_forged_boundary_handle_fails_before_native_kernel(case: str) -> None:
+    if case == "dtype":
+        boundaries = _forge_boundaries(torch.tensor([0.0, 2.0], device="cuda"))
+    elif case == "shape":
+        boundaries = _forge_boundaries(
+            torch.tensor([0], dtype=torch.int32, device="cuda")
+        )
+    elif case == "contiguous":
+        boundaries = _forge_boundaries(
+            torch.tensor([0, 99, 2], dtype=torch.int32, device="cuda")[::2]
+        )
+    else:
+        boundaries = _forge_boundaries(
+            torch.tensor([0, 2], dtype=torch.int32, device="cuda"),
+            sequence_lengths=(1, 1),
+        )
+
+    query = torch.zeros(2, 20, 128, dtype=torch.bfloat16, device="cuda")
+    key = torch.zeros(2, 5, 128, dtype=torch.bfloat16, device="cuda")
+    value = torch.zeros_like(key)
+    with pytest.raises(ValueError, match="inconsistent static metadata"):
+        fa4_varlen_attention(query, key, value, boundaries)
+
+
 def _pack_valid_tokens(padded: torch.Tensor, lengths: tuple[int, ...]) -> torch.Tensor:
     return torch.cat(
         [row[:length] for row, length in zip(padded, lengths, strict=True)]

@@ -55,7 +55,39 @@
     "direct_verifier_passed": true
   },
   "all_17_shape_matrix_status": "retained_existing_evidence_not_rerun_per_task",
-  "package_review_status": "encoders_conditioning_review_pending",
+  "package_review_status": "encoders_conditioning_changes_required_remediation_pending_rereview",
+  "review_remediation": {
+    "host_validated_text_lengths": true,
+    "cuda_boolean_text_indexing_removed": true,
+    "boundary_constructor_accepts_host_lengths_only": true,
+    "fa4_static_boundary_metadata_checks": [
+      "host_length_consistency",
+      "dtype_int32",
+      "rank_1",
+      "batch_plus_one_shape",
+      "contiguous"
+    ],
+    "targeted_cpu": {
+      "command": "uv run --frozen pytest -q tests/unit/conditioning/test_packing_rope.py tests/unit/model/test_fa4.py",
+      "passed": 24,
+      "failed": 0
+    },
+    "expanded_cpu_contracts": {
+      "passed": 52,
+      "failed": 0
+    },
+    "targeted_real_gpu": {
+      "packing_and_forged_boundaries_passed": 5,
+      "fa4_dense_alignment_passed": 1,
+      "packed_dit_three_stage_passed": 1,
+      "failed": 0
+    },
+    "production_static_scan": {
+      "cuda_boolean_text_indexing": 0,
+      "boundary_tolist": 0,
+      "boundary_item": 0
+    }
+  },
   "multi_gpu_ddp_nccl_status": "not_run_pending_or_blocked",
   "training_long_run_status": "not_run"
 }

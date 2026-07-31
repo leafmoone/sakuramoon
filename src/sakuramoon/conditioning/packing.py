@@ -22,14 +22,38 @@ class SampleSpans:
     image: TokenSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ValidatedCuSeqlens:
     """Sequence boundaries derived once from validated host-side lengths."""
 
     tensor: torch.Tensor
+    sequence_lengths: tuple[int, ...]
     total_tokens: int
     max_seqlen: int
     batch_size: int
+
+    def __init__(
+        self,
+        sequence_lengths: tuple[int, ...],
+        *,
+        device: torch.device,
+    ) -> None:
+        if type(sequence_lengths) is not tuple or not sequence_lengths or any(
+            type(length) is not int or length <= 0 for length in sequence_lengths
+        ):
+            raise ValueError(
+                "sequence lengths must be a nonempty tuple of positive integers"
+            )
+        offsets = (0, *accumulate(sequence_lengths))
+        object.__setattr__(
+            self,
+            "tensor",
+            torch.tensor(offsets, dtype=torch.int32, device=device),
+        )
+        object.__setattr__(self, "sequence_lengths", sequence_lengths)
+        object.__setattr__(self, "total_tokens", offsets[-1])
+        object.__setattr__(self, "max_seqlen", max(sequence_lengths))
+        object.__setattr__(self, "batch_size", len(sequence_lengths))
 
 
 def build_validated_cu_seqlens(
@@ -37,17 +61,7 @@ def build_validated_cu_seqlens(
     *,
     device: torch.device,
 ) -> ValidatedCuSeqlens:
-    if type(sequence_lengths) is not tuple or not sequence_lengths or any(
-        type(length) is not int or length <= 0 for length in sequence_lengths
-    ):
-        raise ValueError("sequence lengths must be a nonempty tuple of positive integers")
-    offsets = (0, *accumulate(sequence_lengths))
-    return ValidatedCuSeqlens(
-        tensor=torch.tensor(offsets, dtype=torch.int32, device=device),
-        total_tokens=offsets[-1],
-        max_seqlen=max(sequence_lengths),
-        batch_size=len(sequence_lengths),
-    )
+    return ValidatedCuSeqlens(sequence_lengths, device=device)
 
 
 @dataclass(frozen=True)
@@ -69,6 +83,7 @@ class PackedSequences:
 def pack_sequences(
     text_tokens: torch.Tensor,
     text_mask: torch.Tensor,
+    text_lengths: tuple[int, ...],
     style_tokens: torch.Tensor,
     image_tokens: tuple[torch.Tensor, ...],
     image_shapes: tuple[tuple[int, int], ...],
@@ -80,6 +95,17 @@ def pack_sequences(
     batch, _, hidden = text_tokens.shape
     if style_tokens.shape != (batch, 4, hidden):
         raise ValueError("style tokens must have shape [B,4,D]")
+    if (
+        type(text_lengths) is not tuple
+        or len(text_lengths) != batch
+        or any(
+            type(length) is not int
+            or length <= 0
+            or length > text_tokens.shape[1]
+            for length in text_lengths
+        )
+    ):
+        raise ValueError("text_lengths must contain one valid host length per sample")
     if text_mask.device != text_tokens.device:
         raise ValueError("text tokens and mask must share one device")
     if style_tokens.device != text_tokens.device or style_tokens.dtype != text_tokens.dtype:
@@ -88,6 +114,23 @@ def pack_sequences(
         raise TypeError("packed tokens must use a floating dtype")
     if len(image_tokens) != batch or len(image_shapes) != batch or batch == 0:
         raise ValueError("one image token tensor and image shape are required per sample")
+
+    length_tensor = torch.tensor(
+        text_lengths,
+        dtype=torch.int64,
+        device=text_tokens.device,
+    )
+    expected_mask = (
+        torch.arange(text_tokens.shape[1], device=text_tokens.device)[None]
+        < length_tensor[:, None]
+    )
+    mask_matches_lengths = (text_mask == expected_mask).all()
+    if text_tokens.is_cuda:
+        torch._assert_async(  # pyright: ignore[reportPrivateUsage,reportPrivateImportUsage]
+            mask_matches_lengths
+        )
+    elif not bool(mask_matches_lengths):
+        raise ValueError("text_mask must be a contiguous prefix matching text_lengths")
 
     sequences: list[torch.Tensor] = []
     spans: list[SampleSpans] = []
@@ -102,7 +145,7 @@ def pack_sequences(
         if image.device != text_tokens.device or image.dtype != text_tokens.dtype:
             raise ValueError("all packed tokens must share device and dtype")
 
-        text = text_tokens[sample, text_mask[sample]]
+        text = text_tokens[sample, : text_lengths[sample]]
         style = style_tokens[sample]
         start = offsets[-1]
         text_end = start + text.shape[0]

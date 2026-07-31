@@ -448,6 +448,7 @@ class PackedDiT(nn.Module):
         latents: tuple[torch.Tensor, ...],
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
+        text_lengths: tuple[int, ...],
         style_tokens: torch.Tensor,
     ) -> PackedSequences:
         batch = text_tokens.shape[0] if text_tokens.ndim == 3 else -1
@@ -486,6 +487,7 @@ class PackedDiT(nn.Module):
         return pack_sequences(
             self.modality(text_tokens, "text"),
             text_mask,
+            text_lengths,
             self.modality(style_tokens, "style"),
             tuple(image_tokens),
             tuple(image_shapes),
@@ -601,6 +603,7 @@ class PackedDiT(nn.Module):
         latents: tuple[torch.Tensor, ...],
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
+        text_lengths: tuple[int, ...],
         style_tokens: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
@@ -612,6 +615,7 @@ class PackedDiT(nn.Module):
             latents,
             text_tokens,
             text_mask,
+            text_lengths,
             style_tokens,
         )
         return self.forward_packed(

@@ -15,7 +15,7 @@ def test_cuda_packing_boundaries_and_rope_preserve_locked_types() -> None:
     device = torch.device("cuda", 0)
     text = torch.randn(2, 3, 2560, dtype=torch.bfloat16, device=device)
     text_mask = torch.tensor(
-        [[True, False, True], [True, False, False]],
+        [[True, True, False], [True, False, False]],
         dtype=torch.bool,
         device=device,
     )
@@ -25,7 +25,14 @@ def test_cuda_packing_boundaries_and_rope_preserve_locked_types() -> None:
         torch.randn(2, 2560, dtype=torch.bfloat16, device=device),
     )
 
-    packed = pack_sequences(text, text_mask, style, images, ((2, 2), (1, 2)))
+    packed = pack_sequences(
+        text,
+        text_mask,
+        (2, 1),
+        style,
+        images,
+        ((2, 2), (1, 2)),
+    )
     coordinates = packed_coordinates(packed)
     rope = QKRoPE2D(
         head_dim=128,

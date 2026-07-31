@@ -70,8 +70,17 @@ def test_fa4_core_rejects_cpu_instead_of_falling_back() -> None:
     query = torch.zeros(2, 20, 128, dtype=torch.bfloat16)
     key = torch.zeros(2, 5, 128, dtype=torch.bfloat16)
     value = torch.zeros(2, 5, 128, dtype=torch.bfloat16)
-    cu_seqlens = torch.tensor([0, 2], dtype=torch.int32)
-    boundaries = ValidatedCuSeqlens(cu_seqlens, 2, 2, 1)
+    boundaries = ValidatedCuSeqlens((2,), device=torch.device("cpu"))
 
     with pytest.raises(ValueError, match="CUDA"):
         fa4_varlen_attention(query, key, value, boundaries)
+
+
+def test_boundary_handle_rejects_the_old_arbitrary_tensor_constructor() -> None:
+    with pytest.raises(TypeError):
+        ValidatedCuSeqlens(
+            torch.tensor([99.0]),
+            2,  # pyright: ignore[reportCallIssue]
+            2,
+            1,
+        )

@@ -60,6 +60,17 @@ def fa4_varlen_attention(
         raise ValueError("query, key, and value must share one CUDA device")
     if boundaries.total_tokens != total_tokens:
         raise ValueError("validated boundaries do not match the token count")
+    if (
+        boundaries.batch_size <= 0
+        or len(boundaries.sequence_lengths) != boundaries.batch_size
+        or sum(boundaries.sequence_lengths) != boundaries.total_tokens
+        or max(boundaries.sequence_lengths) != boundaries.max_seqlen
+        or boundaries.tensor.ndim != 1
+        or boundaries.tensor.shape != (boundaries.batch_size + 1,)
+        or boundaries.tensor.dtype != torch.int32
+        or not boundaries.tensor.is_contiguous()
+    ):
+        raise ValueError("validated boundaries contain inconsistent static metadata")
     if boundaries.tensor.device != query.device:
         raise ValueError("cu_seqlens and query must share one CUDA device")
     if not all(tensor.is_contiguous() for tensor in (query, key, value)):

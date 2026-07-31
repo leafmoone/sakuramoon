@@ -14,3 +14,13 @@ its `.to(cpu).tolist()` path were removed, as were scalar boundary reads in the 
 reference helper. Targeted CUDA packing/RoPE, FA4 dense alignment, and PackedDiT block
 alignment passed on driver 580.105.08. Encoders/Conditioning package review is pending;
 the 17-shape milestone matrix was not rerun.
+
+Independent review then showed that the dataclass could still be directly forged and
+that CUDA boolean text indexing required a data-dependent output shape. The boundary
+constructor now accepts only validated host lengths and creates its own int32 tensor;
+FA4 also checks host-length consistency, dtype, rank, shape, batch length, and
+contiguity before native-kernel import. Collate and the trainable composite now carry
+host text lengths, and packing verifies a fixed-shape prefix mask before using static
+slices. Four adversarial forged handles failed before the kernel, while real FA4 and
+PackedDiT short GPU tests passed. No 17-shape, multi-GPU, or long-run evidence was
+rerun; package rereview is pending.

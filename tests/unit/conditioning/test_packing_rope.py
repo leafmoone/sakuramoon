@@ -18,10 +18,17 @@ from sakuramoon.conditioning.rope import QKRoPE2D, image_coordinates, packed_coo
 
 def _packed():
     text = torch.arange(2 * 3 * 8, dtype=torch.float32).reshape(2, 3, 8)
-    text_mask = torch.tensor([[True, False, True], [True, False, False]])
+    text_mask = torch.tensor([[True, True, False], [True, False, False]])
     style = torch.full((2, 4, 8), -2.0)
     images = (torch.full((4, 8), 3.0), torch.full((2, 8), 4.0))
-    return pack_sequences(text, text_mask, style, images, ((2, 2), (1, 2)))
+    return pack_sequences(
+        text,
+        text_mask,
+        (2, 1),
+        style,
+        images,
+        ((2, 2), (1, 2)),
+    )
 
 
 def test_modality_embeddings_are_separate() -> None:
@@ -76,7 +83,33 @@ def test_pack_rejects_cross_input_dtype_or_device(field: str) -> None:
         pack_sequences(
             text,
             mask,
+            (2,),
             style,
+            (torch.zeros(1, 8),),
+            ((1, 1),),
+        )
+
+
+def test_pack_rejects_mask_that_disagrees_with_host_lengths() -> None:
+    with pytest.raises(ValueError, match="contiguous prefix"):
+        pack_sequences(
+            torch.zeros(1, 3, 8),
+            torch.tensor([[True, False, True]]),
+            (2,),
+            torch.zeros(1, 4, 8),
+            (torch.zeros(1, 8),),
+            ((1, 1),),
+        )
+
+
+@pytest.mark.parametrize("lengths", [(), (0,), (4,), (True,)])
+def test_pack_rejects_invalid_text_lengths(lengths: tuple[int, ...]) -> None:
+    with pytest.raises(ValueError, match="text_lengths"):
+        pack_sequences(
+            torch.zeros(1, 3, 8),
+            torch.tensor([[True, True, False]]),
+            lengths,
+            torch.zeros(1, 4, 8),
             (torch.zeros(1, 8),),
             ((1, 1),),
         )

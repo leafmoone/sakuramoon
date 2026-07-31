@@ -60,6 +60,7 @@ def test_collate_pads_eot_and_preserves_structured_metadata() -> None:
     assert batch.main_token_indices.shape == (2, 3)
     assert batch.main_token_indices[1, 2] == -1
     assert not batch.main_mask[1, 2]
+    assert batch.main_token_lengths == (3, 2)
     assert batch.artist_token_indices.shape == (2, 0)
     assert batch.active_style_sample_indices.numel() == 0
     assert torch.equal(batch.sample_ids, torch.tensor([1, 2]))

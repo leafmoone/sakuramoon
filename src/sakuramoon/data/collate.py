@@ -29,6 +29,7 @@ class TrainingBatch:
     attention_mask: torch.Tensor
     main_token_indices: torch.Tensor
     main_mask: torch.Tensor
+    main_token_lengths: tuple[int, ...]
     artist_token_indices: torch.Tensor
     artist_mask: torch.Tensor
     active_style_sample_indices: torch.Tensor
@@ -160,6 +161,9 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     main_indices, main_mask = _index_tensor(
         tuple(sample.caption.main_token_indices for sample in samples)
     )
+    main_token_lengths = tuple(
+        len(sample.caption.main_token_indices) for sample in samples
+    )
     artist_indices, artist_mask = _index_tensor(
         tuple(sample.caption.artist_token_indices for sample in samples)
     )
@@ -169,6 +173,7 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         attention_mask=attention_mask,
         main_token_indices=main_indices,
         main_mask=main_mask,
+        main_token_lengths=main_token_lengths,
         artist_token_indices=artist_indices,
         artist_mask=artist_mask,
         active_style_sample_indices=active_style_sample_indices,
