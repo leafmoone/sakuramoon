@@ -51,6 +51,63 @@ def test_missing_dropout_and_all_condition_share_learned_null_tokens() -> None:
     assert output.mask.all()
 
 
+def test_mixed_batch_projects_only_active_samples() -> None:
+    module = _resampler()
+    states = torch.randn(3, 4, 7, 16)
+    projected_batch_sizes: list[int] = []
+
+    def record_projected_batch(
+        _module: torch.nn.Module,
+        inputs: tuple[torch.Tensor, ...],
+    ) -> None:
+        projected_batch_sizes.append(inputs[0].shape[0])
+
+    handle = module.input_projection.register_forward_pre_hook(record_projected_batch)
+    try:
+        output = module(
+            states,
+            torch.tensor([[2, 999], [999, 999], [1, 999]]),
+            torch.tensor(
+                [[True, False], [True, True], [True, False]],
+                dtype=torch.bool,
+            ),
+            torch.tensor([False, True, True]),
+        )
+    finally:
+        handle.remove()
+
+    assert projected_batch_sizes == [1]
+    expected_null = module.null_tokens.to(output.tokens.dtype)
+    torch.testing.assert_close(output.tokens[1], expected_null)
+    torch.testing.assert_close(output.tokens[2], expected_null)
+
+
+def test_inactive_large_index_does_not_reach_gather() -> None:
+    module = _resampler()
+    states = torch.randn(1, 4, 7, 16)
+    mask = torch.tensor([[True, False]])
+
+    baseline = module(
+        states,
+        torch.tensor([[2, -1]]),
+        mask,
+        torch.tensor([False]),
+    )
+    with_large_inactive_index = module(
+        states,
+        torch.tensor([[2, 10000]]),
+        mask,
+        torch.tensor([False]),
+    )
+
+    torch.testing.assert_close(
+        with_large_inactive_index.tokens,
+        baseline.tokens,
+        atol=0,
+        rtol=0,
+    )
+
+
 def test_style_gathers_only_artist_span_and_detaches_qwen() -> None:
     module = _resampler()
     states = torch.randn(1, 4, 7, 16, requires_grad=True)

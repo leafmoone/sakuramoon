@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 65
+registry_revision = 66
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -2927,6 +2927,8 @@ implementation_commit_ref = "task:T023"
 implementation_paths = [
     "src/sakuramoon/conditioning/norm.py",
     "src/sakuramoon/conditioning/style_resampler.py",
+    "tests/unit/conditioning/test_style_resampler.py",
+    "tests/gpu/conditioning/test_style_resampler.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -2976,6 +2978,8 @@ superseded_by = ""
 implementation_commit_ref = "task:T023"
 implementation_paths = [
     "src/sakuramoon/conditioning/style_resampler.py",
+    "tests/unit/conditioning/test_style_resampler.py",
+    "tests/gpu/conditioning/test_style_resampler.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""

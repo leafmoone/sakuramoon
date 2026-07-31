@@ -140,7 +140,10 @@ class StyleResampler(nn.Module):
             raise ValueError("Artist metadata batch shape differs from Qwen states")
         if use_null.dtype != torch.bool:
             raise TypeError("use_null must be boolean")
-        active_indices = artist_token_indices[artist_mask]
+        active_samples = artist_mask.any(dim=1) & ~use_null
+        active_artist_indices = artist_token_indices[active_samples]
+        active_artist_mask = artist_mask[active_samples]
+        active_indices = active_artist_indices[active_artist_mask]
         if active_indices.numel() and (
             active_indices.min() < 0 or active_indices.max() >= qwen_states.shape[1]
         ):
@@ -152,18 +155,19 @@ class StyleResampler(nn.Module):
             .expand(batch, -1, -1)
             .clone()
         )
-        active_samples = artist_mask.any(dim=1) & ~use_null
         if active_samples.any():
-            safe_indices = artist_token_indices.clamp(min=0)
+            safe_indices = active_artist_indices.masked_fill(~active_artist_mask, 0)
             gather_index = safe_indices[:, :, None, None].expand(-1, -1, 7, self.input_size)
-            selected = torch.gather(qwen_states.detach(), dim=1, index=gather_index)
+            selected = torch.gather(
+                qwen_states.detach()[active_samples], dim=1, index=gather_index
+            )
             selected = self.shared_norm(selected) + self.layer_embedding.to(
                 selected.dtype
             )[None, None]
             memory = self.input_projection(selected).flatten(1, 2)
-            memory_mask = artist_mask[:, :, None].expand(-1, -1, 7).flatten(1, 2)
-            memory = memory[active_samples]
-            memory_mask = memory_mask[active_samples]
+            memory_mask = (
+                active_artist_mask[:, :, None].expand(-1, -1, 7).flatten(1, 2)
+            )
             queries = (
                 self.queries.to(memory.dtype)
                 .unsqueeze(0)

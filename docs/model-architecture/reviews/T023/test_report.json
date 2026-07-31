@@ -1,9 +1,16 @@
 {
   "schema_version": 1,
   "task_id": "T023",
-  "cpu_unit_passed": 4,
+  "cpu_unit_passed": 6,
+  "cpu_targeted": {
+    "command": "uv run --frozen pytest -q tests/unit/conditioning/test_style_resampler.py",
+    "passed": 6,
+    "failed": 0,
+    "duration_seconds": 2.77
+  },
   "gpu_tested": true,
   "gpu": "NVIDIA GeForce RTX 5090",
+  "gpu_driver": "580.105.08",
   "bf16_output_shape": [3, 4, 2560],
   "forward_ms": [1.924, 1.638, 1.511],
   "backward_ms": [1.861, 1.555, 1.508],
@@ -11,5 +18,31 @@
   "finite_outputs_and_gradients": true,
   "qwen_input_gradient": false,
   "null_token_paths_equal": true,
-  "package_review_status": "pending"
+  "mixed_batch_projection_active_samples_only": true,
+  "inactive_large_indices_do_not_reach_gather": true,
+  "targeted_real_gpu": {
+    "command": "uv run --frozen pytest -q tests/gpu/conditioning/test_style_resampler.py",
+    "passed": 1,
+    "failed": 0,
+    "duration_seconds": 3.49,
+    "output_shape": [3, 4, 2560],
+    "projected_active_samples": 2,
+    "finite_outputs_and_gradients": true
+  },
+  "composite_regression": {
+    "train_step_passed": 12,
+    "checkpoint_contract_passed": 23,
+    "failed": 0
+  },
+  "traceability": {
+    "command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py",
+    "passed": 40,
+    "failed": 0,
+    "duration_seconds": 21.11,
+    "direct_verifier_passed": true
+  },
+  "production_composite_constructor_status": "pending_T050_resolved_config_binding",
+  "package_review_status": "encoders_conditioning_review_pending_after_T020_T024_freeze",
+  "multi_gpu_ddp_nccl_status": "not_run_pending_or_blocked",
+  "training_long_run_status": "not_run"
 }
