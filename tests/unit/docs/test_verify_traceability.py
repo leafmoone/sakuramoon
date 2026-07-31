@@ -275,11 +275,12 @@ def test_new_clause_preserves_existing_ids(repo_copy: Path) -> None:
         source_entry = source_by_kind(data, "confirmed")
         previous = source_entry["sha256"]
         source_entry["sha256"] = digest
-        source_entry["revision"] = 4
+        source_entry["revision"] += 1
+        data["registry_revision"] += 1
         data["changes"].append(
             {
                 "source_path": source_entry["path"],
-                "revision": 4,
+                "revision": source_entry["revision"],
                 "previous_sha256": previous,
                 "new_sha256": digest,
                 "changed_at": "2026-07-29",
@@ -323,13 +324,95 @@ def test_deleting_one_requirement_mapping_dimension_is_rejected(repo_copy: Path)
     assert "config_keys is empty without explicit not-applicable" in error_text(repo_copy)
 
 
-def test_fingerprint_drift_is_rejected(repo_copy: Path) -> None:
+def test_historical_fingerprint_rewrite_is_rejected(repo_copy: Path) -> None:
     def mutate(data: dict[str, Any]) -> None:
         data["requirements"][0]["source_fingerprint"] = "0" * 64
 
     rewrite_registry(repo_copy, mutate)
     errors = error_text(repo_copy)
-    assert "source node missing or fingerprint drifted" in errors
+    assert "trusted locator anchor" in errors
+
+
+def test_normative_wording_change_preserves_historical_fingerprint(
+    repo_copy: Path,
+) -> None:
+    source = repo_copy / "docs/model-architecture/current/confirmed-decisions.md"
+    old_text = "**待验证：**结构已经决定，但仍需单元测试、canary、目标机 benchmark 或质量验收。"
+    new_text = "**待验证：**结构已经锁定，仍须用单元测试、canary、目标机 benchmark 或质量验收关闭。"
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(old_text, new_text, 1),
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    before = load_registry(repo_copy)
+    historical_fingerprint = next(
+        item["source_fingerprint"]
+        for item in before["requirements"]
+        if item["id"] == "DOC-003"
+    )
+
+    def mutate(data: dict[str, Any]) -> None:
+        source_entry = source_by_kind(data, "confirmed")
+        previous = source_entry["sha256"]
+        source_entry["sha256"] = digest
+        source_entry["revision"] += 1
+        data["registry_revision"] += 1
+        data["changes"].append(
+            {
+                "source_path": source_entry["path"],
+                "revision": source_entry["revision"],
+                "previous_sha256": previous,
+                "new_sha256": digest,
+                "changed_at": "2026-07-31",
+                "summary": "Reword one requirement without changing its identity.",
+            }
+        )
+
+    rewrite_registry(repo_copy, mutate)
+    after = load_registry(repo_copy)
+    assert next(
+        item["source_fingerprint"]
+        for item in after["requirements"]
+        if item["id"] == "DOC-003"
+    ) == historical_fingerprint
+    report = vt.verify(repo_copy)
+    assert report.ok, report.errors
+
+
+def test_heading_drift_is_rejected_with_a_valid_source_changelog(
+    repo_copy: Path,
+) -> None:
+    source = repo_copy / "docs/model-architecture/current/confirmed-decisions.md"
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "# 0. 判定规则与当前边界",
+            "# 0. 当前判定规则与边界",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    def mutate(data: dict[str, Any]) -> None:
+        source_entry = source_by_kind(data, "confirmed")
+        previous = source_entry["sha256"]
+        source_entry["sha256"] = digest
+        source_entry["revision"] += 1
+        data["registry_revision"] += 1
+        data["changes"].append(
+            {
+                "source_path": source_entry["path"],
+                "revision": source_entry["revision"],
+                "previous_sha256": previous,
+                "new_sha256": digest,
+                "changed_at": "2026-07-31",
+                "summary": "Move requirements to a different heading identity.",
+            }
+        )
+
+    rewrite_registry(repo_copy, mutate)
+    errors = error_text(repo_copy)
+    assert "source structural slot is missing" in errors
     assert "unregistered normative node" in errors
 
 
@@ -455,6 +538,27 @@ def test_requirement_id_history_rejects_exchange_and_reuse() -> None:
     assert any("registry_revision must increment by exactly one" in error for error in errors)
 
 
+def test_forward_history_rejects_identity_rewrite_and_id_reorder() -> None:
+    baseline = load_registry(ROOT)
+    rewritten = copy.deepcopy(baseline)
+    rewritten["registry_revision"] += 1
+    rewritten["requirements"][0]["source_fingerprint"] = "0" * 64
+
+    errors: list[str] = []
+    vt._validate_registry_history([baseline, rewritten], errors)
+    assert any("historical requirement identity was rewritten" in error for error in errors)
+
+    reordered = copy.deepcopy(baseline)
+    reordered["registry_revision"] += 1
+    reordered["requirements"][0], reordered["requirements"][1] = (
+        reordered["requirements"][1],
+        reordered["requirements"][0],
+    )
+    errors = []
+    vt._validate_registry_history([baseline, reordered], errors)
+    assert any("stable requirement IDs were reordered" in error for error in errors)
+
+
 def test_bootstrap_binding_anchor_rejects_exchange_without_history() -> None:
     exchanged = copy.deepcopy(load_registry(ROOT))
     first, second = exchanged["requirements"][:2]
@@ -531,8 +635,10 @@ def test_one_gpu_evidence_cannot_close_four_gpu_requirement(repo_copy: Path) -> 
     assert "verified requirement lacks evidence artifacts" in errors
 
 
-def test_verified_requirement_requires_real_independent_evidence(repo_copy: Path) -> None:
-    review_dir = repo_copy / "docs/model-architecture/reviews/D001"
+def test_verified_package_requirement_requires_real_package_evidence(
+    repo_copy: Path,
+) -> None:
+    review_dir = repo_copy / "docs/model-architecture/reviews/FOUNDATION"
     review_dir.mkdir(parents=True, exist_ok=True)
     ai_review = review_dir / "ai_review.md"
     infra_review = review_dir / "infra_review.md"
@@ -550,14 +656,60 @@ def test_verified_requirement_requires_real_independent_evidence(repo_copy: Path
                 "evidence_artifacts": [
                     "docs/model-architecture/reviews/D001/ai_review.md"
                 ],
-                "ai_review": "docs/model-architecture/reviews/D001/ai_review.md",
-                "infra_review": "docs/model-architecture/reviews/D001/infra_review.md",
+                "ai_review": "docs/model-architecture/reviews/FOUNDATION/ai_review.md",
+                "infra_review": "docs/model-architecture/reviews/FOUNDATION/infra_review.md",
             }
         )
 
     rewrite_registry(repo_copy, mutate)
     report = vt.verify(repo_copy)
     assert report.ok, report.errors
+
+    rewrite_registry(
+        repo_copy,
+        lambda data: next(
+            item for item in data["requirements"] if item["id"] == "DOC-001"
+        ).update({"implementation_commit_ref": "a" * 40}),
+    )
+    report = vt.verify(repo_copy)
+    assert report.ok, report.errors
+
+
+def test_high_risk_requirement_rejects_package_scoped_reviews(repo_copy: Path) -> None:
+    review_dir = repo_copy / "docs/model-architecture/reviews/TRAINING_UTILITIES"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    ai_review = review_dir / "ai_review.md"
+    infra_review = review_dir / "infra_review.md"
+    ai_review.write_text("Package AI review passed.\n", encoding="utf-8")
+    infra_review.write_text("Package Infra review passed.\n", encoding="utf-8")
+    artifact = repo_copy / "artifacts/test.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("{}\n", encoding="utf-8")
+
+    def mutate(data: dict[str, Any]) -> None:
+        requirement = next(item for item in data["requirements"] if item["id"] == "C01-001")
+        requirement.update(
+            {
+                "status": "verified",
+                "implementation_commit_ref": "task:T050",
+                "implementation_paths": [REGISTRY.as_posix()],
+                "evidence_hardware": "4GPU",
+                "evidence_artifacts": ["artifacts/test.json"],
+                "ai_review": "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md",
+                "infra_review": "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md",
+            }
+        )
+
+    rewrite_registry(repo_copy, mutate)
+    assert "task T050 review scope must be" in error_text(repo_copy)
+
+    rewrite_registry(
+        repo_copy,
+        lambda data: next(
+            item for item in data["requirements"] if item["id"] == "C01-001"
+        ).update({"implementation_commit_ref": "a" * 40}),
+    )
+    assert "commit-SHA review scope must match" in error_text(repo_copy)
 
 
 @pytest.mark.parametrize(
@@ -656,11 +808,12 @@ def test_valid_current_changelog_chain_passes(repo_copy: Path) -> None:
         source_entry = source_by_kind(data, "confirmed")
         previous = source_entry["sha256"]
         source_entry["sha256"] = digest
-        source_entry["revision"] = 4
+        source_entry["revision"] += 1
+        data["registry_revision"] += 1
         data["changes"].append(
             {
                 "source_path": source_entry["path"],
-                "revision": 4,
+                "revision": source_entry["revision"],
                 "previous_sha256": previous,
                 "new_sha256": digest,
                 "changed_at": "2026-07-29",

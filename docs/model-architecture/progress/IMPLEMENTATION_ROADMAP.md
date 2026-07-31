@@ -54,33 +54,34 @@
 
 ### 3.2 机器可检查的追踪
 
-`D001` 建立 `docs/model-architecture/progress/traceability.toml`，每项包含：
+`D001` 建立 `docs/model-architecture/progress/traceability.toml`。既有完整记录为兼容历史继续保留；向前执行只维护稳定 requirement ID、状态、实现路径和测试映射：
 
-- `requirement_id` 与精确文档标题/章节。
+- `requirement_id` 与稳定 source/heading/node-kind 归属；既有 fingerprint 作为历史身份锚点，不随普通措辞更新。
 - `status = planned|implemented|verified|blocked|superseded`。
 - 配置键列表。
 - 生产模块和 reference 模块列表。
 - 测试、benchmark 和 artifact 路径。
-- 实现 commit、审查 commit、AI review、Infra review。
+- 既有实现 commit、证据和 review 不删除；新审查按任务包或高风险任务规则引用。
 - 目标硬件等级：CPU、1GPU、4GPU。
 
-`tools/verify_traceability.py` 必须双向检查：所有现行 requirement 都有实现/验证映射，所有关键模块和配置键也能反向找到文档依据。映射缺失时 preflight 失败。
+`tools/verify_traceability.py` 必须双向检查：所有现行 requirement 都有实现/验证映射，所有关键模块和配置键也能反向找到文档依据。检查器先匹配既有 fingerprint，再只允许在相同 source/heading/node-kind 内按顺序吸收措辞漂移；条款增删、heading/source 迁移、历史 ID/fingerprint 改写仍失败。
 
 ## 4. 风险分级、里程碑审查和 Git 协议
 
 2026-07-29 用户批准以下执行协议。它只减少代理调用、重复文档与重复测试，不改变架构、凭据安全、生产训练或真实硬件门槛。
 
 1. 每个任务 ID 仍是独立实现与回滚单元。主代理创建 `progress/tasks/<TASK_ID>.md`，每个 ID 保持独立状态、diff、针对性测试和原子 commit。
-2. 低中风险任务按包复用同一个实现代理：Foundation=`R002,D001,C001`；Data=`D010-D015`；Encoders/Conditioning=`T020-T024`；Dense Model=`M030-M033`；Training Utilities=`T050-T053`。原 A001/A002 重型资产边界已撤销，不再占用任务包或阻塞主线。
+2. 低中风险任务按包复用同一个实现代理：Foundation=`R002,D001,C001,A001`；Data=`D010-D015`；Encoders/Conditioning=`T020-T024`；Dense Model=`M030-M033`；Training Utilities=`T051-T053`。A001 只保留已完成的最小本地资产边界；A002 重型审计保持撤销。
+   包级证据目录依次固定为 `reviews/FOUNDATION/`、`reviews/DATA/`、`reviews/ENCODERS/`、`reviews/DENSE/` 和 `reviews/TRAINING_UTILITIES/`。
 3. 低中风险任务从逐任务审查改为包级里程碑审查。审查报告仍逐 ID 分别给出 AI/模型正确性与 Infra/性能结论；问题只修复受影响任务，不重跑无关任务。
-4. `K001`、`T040`、`T041`、`T042`、`T043`、`T054` 和所有正式 stage canary 保持单独实现、独立 AI reviewer、独立 Infra reviewer。
+4. `K001`、optimizer `T040`、DDP `T041`、checkpoint `T042`、growth/transition `T043`、训练 step `T050`、故障注入 `T054` 和所有正式 stage canary 保持单独实现、独立 AI reviewer、独立 Infra reviewer。
 5. 每任务只跑针对性 unit、contract 和小型真实 GPU 测试；17x8 shape、100k 扫描、1,000-step canary 与完整恢复矩阵在对应里程碑集中运行一次。
 6. metadata 扫描、下载校验、VAE 统计和 GPU canary 可在后台运行；仅当依赖已满足、接口已冻结、不写同一文件且不争用同一 GPU/NVMe 时并行，结果返回前不得关闭依赖项。
-7. 普通任务只保留 task、实现摘要、测试结果、耗时和 commit。共同环境、资产和 benchmark 由任务包共享引用；`perf_baseline/after` 只为实际性能任务生成，不写 N/A 占位。
+7. 新任务只维护稳定 ID、状态、实现路径、针对性测试和原子 commit。普通 CPU 任务不创建独立 `timing.json`；共同环境、资产和 benchmark 由任务包共享引用，`perf_baseline/after` 只为真实性能任务生成。
 8. 生产 FA4 和完整 canary 前允许显式 dense SDPA reference 的 1-10 step 真实垂直 engineering smoke；不得把该结果作为 S0 放行证据。
 9. 当前优先单卡相关任务。所有多卡实现、DDP/NCCL 验证和正式多卡 stage 暂不执行并保持 blocked/pending；单卡结果不得替代四卡证据。
 
-每个任务的开发耗时写入 `progress/time-log.jsonl`；训练运行期 phase timing 另写 artifact/W&B，不与开发耗时混用。实现和审查代理不得创建 commit，最终验证与每 ID 原子 commit 由主代理完成。
+开发耗时仅在需要比较资源或性能工作时写入 `progress/time-log.jsonl`；训练运行期 phase timing 另写 artifact/W&B。Git 跟踪的 task 与 test/timing/review JSON 由原子 commit 发布，不增加运行时事务 publisher。checkpoint、dataset manifest、validation exclusion、shard/cache 保留完整原子发布；可再生 image/metric scan 报告采用同目录临时文件、文件 `fsync` 与 `os.replace`。实现和审查代理不得创建 commit，最终验证与每 ID 原子 commit 由主代理完成。
 
 ## 5. 目标仓库和模块边界
 
@@ -202,6 +203,15 @@ sakuramoon/
 - **动作：** 为现行条款分配稳定 ID；显式标出历史取代项；建立 requirement→config→module→test→benchmark→artifact 映射。
 - **验证：** 故意删除一条映射时检查器必须失败；archive 文件 checksum 不变；current 文档允许演进并写 changelog。
 - **完成证据：** traceability report、文档 link check、两类 review。
+- **GPU：** 无。
+
+### G001：向前简化治理证据
+
+- **依赖：** D015 原子提交完成；治理期间是唯一写任务。
+- **实现路径：** `AGENTS.md`、现行审查条款、路线图、`traceability.toml`、trace verifier 与对应 contract tests。
+- **动作：** 冻结既有 requirement ID/fingerprint/evidence/commit；新任务只维护稳定 ID、状态、实现路径和测试；落实包级/高风险审查边界与三类发布策略。
+- **验证：** 纯措辞更新不改历史 fingerprint 仍通过；条款增删、heading/source 迁移、ID/fingerprint 改写仍失败；历史 evidence fixture 原样保留。
+- **完成证据：** task 状态、针对性 test report 和原子 commit；不创建独立 timing 或逐任务 review 文件。
 - **GPU：** 无。
 
 ### C001：严格 TOML schema、合并和脱敏
@@ -573,8 +583,8 @@ sakuramoon/
   ↓
 R001 → R002 → D001 → C001
                          ↓
-D010 → D011 → D012 → D013 → D014 → D015
-                                      ↓
+D010 → D011 → D012 → D013 → D014 → D015 → G001
+                                              ↓
 T020 + T021 → T022 + T023 → T024
   ↓
 M030 → M031 → M032 → M033 → K001
@@ -585,7 +595,7 @@ C002/S000 → S001 → S002 → G1 → S2 → G2 → S3
   ↓
 可选 H1 → H2
 
-A001/A002：原重型资产边界已撤销，不参与上述依赖链。
+A001：只保留已完成的最小本地资产边界；A002 重型审计保持撤销，不参与上述依赖链。
 ```
 
 允许并行的只有不写同一文件且接口已冻结的任务，例如T020与T021、T022与T023、T051与T052。实现和审查不得并行；上游contract未验证时不得提前写生产优化。

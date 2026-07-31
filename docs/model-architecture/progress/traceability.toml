@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 62
+registry_revision = 63
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -26,10 +26,26 @@ new_sha256 = "dc1b939d310366d49f75ac6e061a56daa8809683af8578804174128a1b79aa78"
 changed_at = "2026-07-30"
 summary = "Use risk-proportionate direct evidence instead of universal manifest/hash artifacts."
 
+[[changes]]
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+revision = 4
+previous_sha256 = "e9f672c1d921116a523260a3dcea93d610eae9ebd5c6bdd99d07084f36b9c9b3"
+new_sha256 = "12d95d33686ad07fbf83833c9b57770ef8e078eb55d830e9afcde97944ceed44"
+changed_at = "2026-07-31"
+summary = "Adopt package reviews, retained independent high-risk reviews, and risk-proportionate timing evidence."
+
+[[changes]]
+source_path = "docs/model-architecture/current/open-items.md"
+revision = 3
+previous_sha256 = "dc1b939d310366d49f75ac6e061a56daa8809683af8578804174128a1b79aa78"
+new_sha256 = "125172c8bd1e3031e2866389f01871582ee200c46b5930f00361e1dcecc05438"
+changed_at = "2026-07-31"
+summary = "Align open evidence requirements with package reviews and ordinary CPU timing simplification."
+
 [[sources]]
 path = "docs/model-architecture/current/confirmed-decisions.md"
 kind = "confirmed"
-revision = 3
+revision = 4
 include_top_headings = [
     "0.",
     "1.",
@@ -50,13 +66,13 @@ include_top_headings = [
 excluded_top_headings = [
     "15.",
 ]
-sha256 = "e9f672c1d921116a523260a3dcea93d610eae9ebd5c6bdd99d07084f36b9c9b3"
+sha256 = "12d95d33686ad07fbf83833c9b57770ef8e078eb55d830e9afcde97944ceed44"
 initial_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
 
 [[sources]]
 path = "docs/model-architecture/current/open-items.md"
 kind = "open_items"
-revision = 2
+revision = 3
 include_top_headings = [
     "0.",
     "1.",
@@ -73,7 +89,7 @@ include_top_headings = [
 excluded_top_headings = [
     "11.",
 ]
-sha256 = "dc1b939d310366d49f75ac6e061a56daa8809683af8578804174128a1b79aa78"
+sha256 = "125172c8bd1e3031e2866389f01871582ee200c46b5930f00361e1dcecc05438"
 initial_sha256 = "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6"
 
 [[sources]]
@@ -92,6 +108,7 @@ name = "governance"
 owner_tasks = [
     "D001",
     "C001",
+    "G001",
 ]
 config_keys = []
 modules = [
@@ -104,6 +121,7 @@ tests = [
 benchmarks = []
 artifacts = [
     "docs/model-architecture/reviews/D001/**",
+    "docs/model-architecture/reviews/G001/**",
 ]
 hardware = "CPU"
 not_applicable_fields = [
@@ -118,6 +136,7 @@ name = "repository_boundary"
 owner_tasks = [
     "R001",
     "D001",
+    "G001",
 ]
 config_keys = []
 modules = [
@@ -131,6 +150,7 @@ benchmarks = []
 artifacts = [
     "docs/model-architecture/reviews/R001/**",
     "docs/model-architecture/reviews/D001/**",
+    "docs/model-architecture/reviews/G001/**",
 ]
 hardware = "CPU"
 not_applicable_fields = [

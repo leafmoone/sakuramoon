@@ -167,7 +167,7 @@ Describe the image by detailing the color, shape, size, texture, quantity, text,
 - full raw checkpoint 每 1,000 successful updates 或 6 小时先到者保存；stage finalize、增长关键点和 pre-decay 强制保存。模型目录删除续训 sidecar 后仍须可独立推理。
 - 数据供给必须≥12 samples/s 且 ready-queue wait\<2%；完整四卡 20/24层 512 训练必须≥6 samples/s。低于 4 停止，4–6 只允许优化，不得长期生产。
 - 每卡峰值显存≤27.2 GB，并满足目标 local/global batch；不得 OOM、host swap、nonfinite 自动续跑或任一 rank 状态分叉。
-- 每个实现单元与每个 stage 都必须分别通过 AI/模型开发者和 Infra/性能开发者 review，并交付 correctness、timing、profile 与 before/after 性能证据。
+- 低中风险实现按里程碑包统一完成 AI/模型正确性与 Infra/性能审查；kernel、optimizer、DDP、checkpoint、growth/transition、训练 step、故障注入和正式 stage canary 保持逐任务独立双审。证据按风险提供，普通 CPU 任务不要求独立 timing artifact，before/after 只用于真实性能变更。
 来源：<mention-page url="https://app.notion.com/p/3abae967ecf281ebadadd176e1b492db"/>
 # 13. 尚未决定的接口
 1. **Dropout 数值：**除 `all_condition=0.10` 外，general、artist、character、copyright、nsfw、candidate_source 和五个 NL key 的概率。

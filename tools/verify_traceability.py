@@ -135,6 +135,33 @@ TRUSTED_REQUIREMENT_BINDING_SHA256S = frozenset(
         "626d7348cff00d6a89282bebf274b3c8e25ed36e1fd662ceed7020ebdd9470f2",
     }
 )
+FORWARD_IDENTITY_LOCK_REVISION = 62
+FORWARD_IDENTITY_FIELDS = (
+    "source_path",
+    "heading_path",
+    "node_kind",
+    "source_fingerprint",
+    "source_occurrence",
+)
+PACKAGE_REVIEW_TASKS = {
+    "R002": "FOUNDATION",
+    "D001": "FOUNDATION",
+    "C001": "FOUNDATION",
+    "A001": "FOUNDATION",
+    **{f"D{serial:03d}": "DATA" for serial in range(10, 16)},
+    **{f"T{serial:03d}": "ENCODERS" for serial in range(20, 25)},
+    **{f"M{serial:03d}": "DENSE" for serial in range(30, 34)},
+    **{f"T{serial:03d}": "TRAINING_UTILITIES" for serial in range(51, 54)},
+}
+INDEPENDENT_REVIEW_TASKS = {
+    "K001",
+    "T040",
+    "T041",
+    "T042",
+    "T043",
+    "T050",
+    "T054",
+}
 BASELINE_REQUIREMENT_MAXIMA = {
     "ARCH": 2,
     "C01": 5,
@@ -557,6 +584,25 @@ def _validate_registry_history(
                 errors.append(
                     f"registry history snapshot {snapshot_index}: stable requirement IDs were removed: {missing}"
                 )
+            if previous["registry_revision"] >= FORWARD_IDENTITY_LOCK_REVISION:
+                previous_ids = list(previous_by_id)
+                retained_ids = [
+                    req_id for req_id in current_by_id if req_id in previous_by_id
+                ]
+                if retained_ids != previous_ids:
+                    errors.append(
+                        f"registry history snapshot {snapshot_index}: stable requirement IDs were reordered"
+                    )
+                for req_id in set(previous_by_id) & set(current_by_id):
+                    changed_fields = [
+                        field
+                        for field in FORWARD_IDENTITY_FIELDS
+                        if previous_by_id[req_id][field] != current_by_id[req_id][field]
+                    ]
+                    if changed_fields:
+                        errors.append(
+                            f"{req_id}: historical requirement identity was rewritten: {changed_fields}"
+                        )
             if snapshot["registry_revision"] != previous["registry_revision"] + 1:
                 errors.append(
                     f"registry history snapshot {snapshot_index}: registry_revision must increment by exactly one"
@@ -699,6 +745,17 @@ def _iter_config_leaves(prefix: str, value: object) -> Iterable[str]:
 
 def _matches_any(value: str, patterns: Iterable[str]) -> bool:
     return any(fnmatch.fnmatchcase(value, pattern) for pattern in patterns)
+
+
+def _required_review_paths(task_id: str) -> tuple[str, str] | None:
+    package = PACKAGE_REVIEW_TASKS.get(task_id)
+    if package is not None:
+        root = f"docs/model-architecture/reviews/{package}"
+        return (f"{root}/ai_review.md", f"{root}/infra_review.md")
+    if task_id in INDEPENDENT_REVIEW_TASKS or task_id.startswith("S"):
+        root = f"docs/model-architecture/reviews/{task_id}"
+        return (f"{root}/ai_review.md", f"{root}/infra_review.md")
+    return None
 
 
 def _validate_mapping_dimensions(
@@ -972,6 +1029,8 @@ def verify(root: Path, registry_path: Path = REGISTRY_PATH) -> VerificationRepor
 
     requirement_by_id: dict[str, Mapping[str, Any]] = {}
     registry_locators: dict[tuple[str, tuple[str, ...], str, int], str] = {}
+    exact_requirement_matches: set[str] = set()
+    exact_source_matches: set[tuple[str, tuple[str, ...], str, int]] = set()
     alias_edges: dict[str, str] = {}
     superseded_edges: dict[str, str] = {}
     for index, requirement in enumerate(requirements):
@@ -1021,6 +1080,9 @@ def verify(root: Path, registry_path: Path = REGISTRY_PATH) -> VerificationRepor
             errors.append(
                 f"{req_id}: node_kind {requirement['node_kind']} does not match {actual_node.kind}"
             )
+        elif actual_node:
+            exact_requirement_matches.add(req_id)
+            exact_source_matches.add(locator)
         if locator in registry_locators:
             errors.append(
                 f"duplicate primary source mapping: {req_id} and {registry_locators[locator]}"
@@ -1048,6 +1110,7 @@ def verify(root: Path, registry_path: Path = REGISTRY_PATH) -> VerificationRepor
                 superseded_edges[req_id] = requirement["superseded_by"]
         elif requirement["superseded_by"]:
             errors.append(f"{req_id}: only superseded requirements may set superseded_by")
+        implementation_task: str | None = None
         if requirement["status"] in {"implemented", "verified"}:
             if not requirement["implementation_commit_ref"]:
                 errors.append(f"{req_id}: implemented requirement lacks commit reference")
@@ -1056,6 +1119,7 @@ def verify(root: Path, registry_path: Path = REGISTRY_PATH) -> VerificationRepor
                 task_match = re.fullmatch(r"task:([A-Z][0-9]{3})", commit_ref)
                 profile = profile_by_name.get(requirement["profile"])
                 if task_match:
+                    implementation_task = task_match.group(1)
                     if profile and task_match.group(1) not in profile["owner_tasks"]:
                         errors.append(f"{req_id}: task commit reference is not an owner task")
                 elif not re.fullmatch(r"[0-9a-f]{40}", commit_ref):
@@ -1084,6 +1148,30 @@ def verify(root: Path, registry_path: Path = REGISTRY_PATH) -> VerificationRepor
                     errors.append(f"{req_id}: review evidence does not exist: {review}")
             if requirement["ai_review"] == requirement["infra_review"]:
                 errors.append(f"{req_id}: AI and Infra reviews must be independent files")
+            if implementation_task is not None:
+                required_reviews = _required_review_paths(implementation_task)
+                actual_reviews = (
+                    requirement["ai_review"],
+                    requirement["infra_review"],
+                )
+                if required_reviews is not None and actual_reviews != required_reviews:
+                    errors.append(
+                        f"{req_id}: task {implementation_task} review scope must be {required_reviews}"
+                    )
+            elif profile is not None:
+                allowed_reviews = {
+                    paths
+                    for owner_task in profile["owner_tasks"]
+                    if (paths := _required_review_paths(owner_task)) is not None
+                }
+                actual_reviews = (
+                    requirement["ai_review"],
+                    requirement["infra_review"],
+                )
+                if allowed_reviews and actual_reviews not in allowed_reviews:
+                    errors.append(
+                        f"{req_id}: commit-SHA review scope must match one declared owner task policy"
+                    )
             if not requirement["evidence_artifacts"]:
                 errors.append(f"{req_id}: verified requirement lacks evidence artifacts")
             for artifact in requirement["evidence_artifacts"]:
@@ -1119,14 +1207,35 @@ def verify(root: Path, registry_path: Path = REGISTRY_PATH) -> VerificationRepor
             if target_requirement and target_requirement["status"] in {"alias", "superseded"}:
                 errors.append(f"{origin}: {label} target is not a terminal requirement")
 
+    unmatched_source: dict[
+        tuple[str, tuple[str, ...], str], list[SourceNode]
+    ] = defaultdict(list)
     for locator, node in actual_nodes.items():
-        if locator not in registry_locators:
+        if locator not in exact_source_matches:
+            unmatched_source[(node.path, node.heading_path, node.kind)].append(node)
+    unmatched_registry: dict[
+        tuple[str, tuple[str, ...], str], list[Mapping[str, Any]]
+    ] = defaultdict(list)
+    for requirement in requirements:
+        if requirement["id"] not in exact_requirement_matches:
+            key = (
+                requirement["source_path"],
+                tuple(requirement["heading_path"]),
+                requirement["node_kind"],
+            )
+            unmatched_registry[key].append(requirement)
+    for key in unmatched_source.keys() | unmatched_registry.keys():
+        source_nodes = unmatched_source[key]
+        registry_nodes = unmatched_registry[key]
+        matched_count = min(len(source_nodes), len(registry_nodes))
+        for node in source_nodes[matched_count:]:
             errors.append(
                 f"unregistered normative node: {node.path} :: {' > '.join(node.heading_path)} :: {node.text[:100]}"
             )
-    for locator, req_id in registry_locators.items():
-        if locator not in actual_nodes:
-            errors.append(f"{req_id}: source node missing or fingerprint drifted")
+        for requirement in registry_nodes[matched_count:]:
+            errors.append(
+                f"{requirement['id']}: source structural slot is missing under its historical source/heading/node-kind"
+            )
 
     history = _load_registry_history(root, registry_path, data, errors)
     if history:
@@ -1223,7 +1332,7 @@ def _profile(
 
 def _bootstrap_profiles() -> list[dict[str, Any]]:
     return [
-        _profile("governance", ["D001"], config_keys=[], modules=["tools/verify_traceability.py"], tests=["tests/unit/docs/**"], artifacts=["docs/model-architecture/reviews/D001/**"], hardware="CPU"),
+        _profile("governance", ["D001", "G001"], config_keys=[], modules=["tools/verify_traceability.py"], tests=["tests/unit/docs/**"], artifacts=["docs/model-architecture/reviews/D001/**", "docs/model-architecture/reviews/G001/**"], hardware="CPU"),
         _profile("constraints", ["S000", "T050"], config_keys=["stage.*", "failure.*"], modules=["src/sakuramoon/train/**", "src/sakuramoon/cli/**"], tests=["tests/**"], benchmarks=["benchmarks/**"], artifacts=["artifacts/**"], hardware="4GPU"),
         _profile("architecture", ["M032"], config_keys=["model.*"], modules=["src/sakuramoon/model/**"], tests=["tests/unit/model/**"], benchmarks=["benchmarks/model/**"], artifacts=["artifacts/model/**"], hardware="1GPU"),
         _profile("vae", ["A001", "D013", "T020"], config_keys=["assets.vae.*", "data.image.*"], modules=["src/sakuramoon/assets/**", "src/sakuramoon/data/image.py", "src/sakuramoon/encoders/vae.py", "src/sakuramoon/eval/vae_reconstruction.py"], tests=["tests/**/vae*", "tests/**/image*"], benchmarks=["benchmarks/vae/**"], artifacts=["artifacts/vae/**"], hardware="1GPU"),

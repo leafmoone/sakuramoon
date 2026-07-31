@@ -10,8 +10,8 @@
 4. 不调用或恢复 Notion MCP；本地 `docs/model-architecture/` 是唯一文档入口。
 5. 任务包内可复用同一个实现代理，但必须按依赖顺序逐个关闭任务 ID；每个 ID 保持独立 task、diff、测试、状态和原子 commit，不得把多个 ID 合并提交。
 6. `traceability.toml` 只允许首次 bootstrap；后续新增、移动或修改条款必须保留既有 ID，只为新条款分配从未使用的新 ID。不得按行号、顺序或当前文本重新编号。
-7. 每个实现任务的允许路径必须包含 `docs/model-architecture/progress/traceability.toml`。同一原子 commit 内更新受影响 requirement 的逐条映射、状态与证据；提交自身使用 `task:<TASK_ID>`，后续提交可使用完整 40 位 commit SHA。
-8. 修改 `current/` 时必须递增 source 与 registry revision、追加连续 SHA-256 changelog 并更新受影响 fingerprint；不得缩小 canonical source 或 heading scope。archive 仍保持只读。
+7. 每个实现任务的允许路径必须包含 `docs/model-architecture/progress/traceability.toml`。新任务只维护受影响 requirement 的稳定 ID、状态、实现路径和测试映射；既有 fingerprint、证据文件和 commit 引用不得删除或回写。提交自身可使用 `task:<TASK_ID>`，后续提交可使用完整 40 位 commit SHA。
+8. 修改 `current/` 时必须递增 source 与 registry revision，并追加连续 SHA-256 changelog。既有 fingerprint 是历史身份锚点，普通措辞修改不得重写；新增条款才分配从未使用的新 ID 和新 fingerprint。不得缩小 canonical source 或 heading scope，archive 仍保持只读。
 
 ## 配置与环境
 
@@ -37,19 +37,22 @@
 - 预期启动子代理却误路由到 `exec` 或任何其他工具时，该次操作视为从未启动。主代理必须立即纠正工具目标并重新直接调用 `collaboration.spawn_agent`，直到收到任务名；不得因为一次错误路由停止子代理启动、当前任务或整个目标。
 - `collaboration.spawn_agent` 本身返回真实错误时，主代理应显示原始错误，直接用 `collaboration.list_agents` 检查槽位与现有代理状态，然后继续直接重试可用槽位。等待启动返回或代理回执必须有界并持续显示状态，禁止静默卡死；不得输出 `ready`、`spawn`、`no-op` 等占位信息。
 - 在依赖已满足、接口已冻结、写路径与 GPU/NVMe 资源不冲突时，尽量保持并发槽位满载；子代理完成后立即将释放槽位复用于可安全推进的后续工作。依赖未满足时只允许只读预审，不得提前实现或关闭任务。
-- 低中风险任务按里程碑包执行：Foundation=`R002,D001,C001,A001`；Data=`D010-D015`；Encoders/Conditioning=`T020-T024`；Dense Model=`M030-M033`；Training Utilities=`T050-T053`。
+- 低中风险任务按里程碑包执行：Foundation=`R002,D001,C001,A001`；Data=`D010-D015`；Encoders/Conditioning=`T020-T024`；Dense Model=`M030-M033`；Training Utilities=`T051-T053`。
+- 包级审查证据目录固定为 `reviews/FOUNDATION/`、`reviews/DATA/`、`reviews/ENCODERS/`、`reviews/DENSE/` 与 `reviews/TRAINING_UTILITIES/`；包内任务共享文件但必须逐 ID 给出结论。
 - 低中风险任务包复用一个实现代理；包结束后由独立审查代理逐 ID 给出 AI/模型正确性与 Infra/性能结论。问题只交回受影响任务，不重跑无关任务。
-- `K001`、`T040`、`T041`、`T042`、`T043`、`T054` 和所有正式 stage canary 保持单独实现、独立 AI reviewer、独立 Infra reviewer。
+- `K001`、optimizer `T040`、DDP `T041`、checkpoint `T042`、growth/transition `T043`、训练 step `T050`、故障注入 `T054` 和所有正式 stage canary 保持单独实现、独立 AI reviewer、独立 Infra reviewer。
 - 当前优先完成 CPU/单卡范围。所有多卡实现、DDP/NCCL 验证与正式多卡 stage 暂不执行，并保持显式 blocked/pending；单卡证据不得关闭四卡门槛。
 - 允许并行执行依赖已满足、接口已冻结、不会写同一文件且不争用同一 GPU/NVMe 的任务。后台结果返回前，不得关闭依赖该结果的任务或里程碑。
 - 每任务运行针对性 unit/contract/小型真实 GPU 测试；17x8 shape、100k 扫描、1,000-step canary 和完整恢复矩阵只在对应里程碑集中运行一次。
 - 生产 FA4 和正式 canary 前允许显式配置 dense SDPA reference，执行真实 data/Qwen/VAE/DiT/loss/checkpoint 的 1-10 step engineering smoke；该证据不得作为 S0 放行。
+- Git 跟踪的 task、test/timing/review JSON 由原子 commit 发布，不实现运行时事务 publisher。普通 CPU 任务不再创建独立 `timing.json`。
+- checkpoint、dataset manifest、validation exclusion 和 shard/cache 状态继续使用完整原子发布协议。image/metric scan 等可再生单文件报告使用同目录临时文件、文件 `fsync` 和 `os.replace`。
 
 ## 验证与证据
 
 - 仅 import、shape 检查或 mock 不能替代任务要求的真实数据、Qwen、VAE、kernel、forward/backward/update 或质量验证。
 - 当前 1GPU 结果不能外推为 4GPU 结论。要求四卡的项目在真实 4xRTX 5090 可用前必须保持阻塞，不得缩减 world size 关闭门槛。
-- 每个任务分别维护 task、实现摘要、针对性测试结果、耗时和 commit；共同环境、资产、benchmark 与里程碑证据由任务包共享引用，不重复复制。
+- 新任务分别维护稳定任务 ID、状态、实现路径、针对性测试和原子 commit；共同环境、资产、benchmark 与里程碑证据由任务包共享引用，不重复复制。开发耗时只在确有用途时写中央 `progress/time-log.jsonl`，普通 CPU 任务不创建独立 timing artifact。
 - `perf_baseline.json`/`perf_after.json` 只为真正的性能任务生成，普通任务不得创建 N/A 占位文件。
 - 实现代理先从 AI/模型正确性与 Infra/性能两方面自检；低中风险任务在包级审查，审查问题交回原实现代理修复并由原审查代理复审。
 - 主代理在每个任务实现验收后运行最终验证并创建一个原子 commit。实现和审查代理不得创建 commit。

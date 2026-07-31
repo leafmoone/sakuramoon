@@ -2,7 +2,7 @@
 
 SakuraMoon 是一个从零训练二次元文生图基础模型的本地工程。实现按
 [`IMPLEMENTATION_ROADMAP.md`](docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md)
-中的任务依赖顺序推进；任务通过实现、独立审查和最终验证后，才可形成单独的原子提交。
+中的任务依赖顺序推进；每个任务经针对性验证后形成单独原子提交，低中风险任务在包末统一审查，高风险任务保持独立双审。
 
 ## 规范来源
 
