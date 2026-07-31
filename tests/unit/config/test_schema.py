@@ -105,6 +105,34 @@ def test_caption_dropout_values_are_exactly_locked(
 
 
 @pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("objective", "prediction_type"), "v"),
+        (("objective", "loss"), "velocity_mse"),
+        (("objective", "target_velocity"), "clean-noise"),
+        (("objective", "endpoint_weighting"), "none"),
+        (("timestep", "p_mean"), -0.7),
+        (("timestep", "p_std"), 0.9),
+        (("timestep", "noise_scale"), 0.9),
+        (("timestep", "t_eps"), 0.1),
+        (("cfg", "scale"), 3.0),
+    ],
+)
+def test_strict_jlt_objective_identity_is_exactly_locked(
+    valid_payload: dict[str, Any], path: tuple[str, ...], value: object
+) -> None:
+    current = valid_payload
+    for component in path[:-1]:
+        child = current[component]
+        assert isinstance(child, dict)
+        current = cast(dict[str, Any], child)
+    current[path[-1]] = value
+
+    with pytest.raises(ValidationError):
+        RuntimeConfig.model_validate(valid_payload)
+
+
+@pytest.mark.parametrize(
     ("mutation", "expected"),
     INVALID_MUTATIONS,
 )

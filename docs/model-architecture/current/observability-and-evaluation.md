@@ -5,7 +5,7 @@
 ## 训练指标
 
 - 默认使用 Weights & Biases；所有指标同时先写本地持久化 JSONL，再异步上传，网络异常不得改变训练和 checkpoint 语义。
-- 每个 successful optimizer update 至少记录 高噪区域和低噪区域的loss以及总loss、pre-clip grad norm、post-clip grad norm、clip fraction、learning rate、timestep 分布、有效 batch、image/text tokens、samples/s、显存和 non-finite 计数。
+- 每个 successful optimizer update 至少记录高噪区域、低噪区域和总 loss；high noise 固定为 `t<0.5`，low noise 固定为 `t>=0.5`。分桶只用于观测聚合，总 loss 始终由完整 batch 的严格 JLT loss 计算。另记录 pre-clip grad norm、post-clip grad norm、clip fraction、learning rate、timestep 分布、有效 batch、image/text tokens、samples/s、显存和 non-finite 计数。
 - 按数据、Qwen、VAE、条件聚合、DiT forward、loss、backward、DDP、clip、optimizer、checkpoint 和 evaluation 分段记录 wall-time。GPU 区间使用 CUDA events，常驻计时不得逐段强制同步。
 - 任务开发耗时与训练运行耗时分开记录。实现/审查任务写入 `docs/model-architecture/progress/time-log.jsonl`，训练性能写入运行 artifact 与 W&B。
 
@@ -21,4 +21,3 @@
 ## 配置要求
 
 运行配置至少包含 `[logging]`、`[wandb]`、`[timing]`、`[profiling]`、`[evaluation]`、`[evaluation.fid]` 和 `[evaluation.is]`。W&B key 与 ModelScope token只允许写环境变量名，不允许进入 resolved config、日志或 artifact。
-

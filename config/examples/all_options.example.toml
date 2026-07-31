@@ -177,6 +177,9 @@ bias_zero_init = true # fixed
 
 [objective]
 prediction_type = "x" # fixed
+loss = "jlt_x_prediction_velocity_mse" # fixed
+target_velocity = "x_to_v(clean,state,t,t_eps)" # fixed
+endpoint_weighting = "inverse_square_clamped" # fixed
 interpolation = "z_t=t*x+(1-t)*epsilon" # fixed
 velocity_loss_dtype = "float32" # fixed
 reduction = "per_sample_then_global_sample_mean" # fixed

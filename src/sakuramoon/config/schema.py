@@ -348,6 +348,9 @@ class ModelConfig(StrictModel):
 
 class ObjectiveConfig(StrictModel):
     prediction_type: Literal["x"]
+    loss: Literal["jlt_x_prediction_velocity_mse"]
+    target_velocity: Literal["x_to_v(clean,state,t,t_eps)"]
+    endpoint_weighting: Literal["inverse_square_clamped"]
     interpolation: Literal["z_t=t*x+(1-t)*epsilon"]
     velocity_loss_dtype: Literal["float32"]
     reduction: Literal["per_sample_then_global_sample_mean"]

@@ -33,7 +33,6 @@ def test_bf16_flow_loss_backward_update_cfg_and_heun_on_cuda() -> None:
         prediction,
         state,
         clean,
-        noise,
         timestep,
         t_eps=0.05,
     )

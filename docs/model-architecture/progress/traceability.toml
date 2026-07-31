@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 73
+registry_revision = 74
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -58,10 +58,34 @@ new_sha256 = "7ed5dcd34f365436b6a961c615c311e0fe3728bd2ef3b4972ca82d53c08dabde"
 changed_at = "2026-07-31"
 summary = "Close the caption probability decisions while retaining the production distribution dry run."
 
+[[changes]]
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+revision = 6
+previous_sha256 = "ef81bc9b21a6770e4140a0b47f7508a0c136f734f27ef5d462fd302cd7928521"
+new_sha256 = "9005ac51058b25c9ec1234bd4787ddfe7b2b9b31d5a28c85c53461d9704f023c"
+changed_at = "2026-07-31"
+summary = "Correct strict JLT target conversion, endpoint weighting, and objective compatibility policy."
+
+[[changes]]
+source_path = "docs/model-architecture/current/open-items.md"
+revision = 5
+previous_sha256 = "7ed5dcd34f365436b6a961c615c311e0fe3728bd2ef3b4972ca82d53c08dabde"
+new_sha256 = "5016165fa9b58e4945bd573f3dfb082228d06087c69b54982734707f36c77cae"
+changed_at = "2026-07-31"
+summary = "Close strict JLT objective validation while leaving sampling profiles to M034."
+
+[[changes]]
+source_path = "docs/model-architecture/current/observability-and-evaluation.md"
+revision = 2
+previous_sha256 = "9a8b4fd39c5e5bf76a343f1b02e3507abddc27e98e34946a0fd0f1e98be64201"
+new_sha256 = "d26bebf67d7197aec5590e710b5386ab2f31ccee1f4f1efdbd7d00c6011a4657"
+changed_at = "2026-07-31"
+summary = "Define high- and low-noise loss observation buckets at t=0.5 without changing total loss."
+
 [[sources]]
 path = "docs/model-architecture/current/confirmed-decisions.md"
 kind = "confirmed"
-revision = 5
+revision = 6
 include_top_headings = [
     "0.",
     "1.",
@@ -82,13 +106,13 @@ include_top_headings = [
 excluded_top_headings = [
     "15.",
 ]
-sha256 = "ef81bc9b21a6770e4140a0b47f7508a0c136f734f27ef5d462fd302cd7928521"
+sha256 = "9005ac51058b25c9ec1234bd4787ddfe7b2b9b31d5a28c85c53461d9704f023c"
 initial_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
 
 [[sources]]
 path = "docs/model-architecture/current/open-items.md"
 kind = "open_items"
-revision = 4
+revision = 5
 include_top_headings = [
     "0.",
     "1.",
@@ -105,18 +129,18 @@ include_top_headings = [
 excluded_top_headings = [
     "11.",
 ]
-sha256 = "7ed5dcd34f365436b6a961c615c311e0fe3728bd2ef3b4972ca82d53c08dabde"
+sha256 = "5016165fa9b58e4945bd573f3dfb082228d06087c69b54982734707f36c77cae"
 initial_sha256 = "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6"
 
 [[sources]]
 path = "docs/model-architecture/current/observability-and-evaluation.md"
 kind = "observability"
-revision = 1
+revision = 2
 include_top_headings = [
     "可观测性与评估补充决定",
 ]
 excluded_top_headings = []
-sha256 = "9a8b4fd39c5e5bf76a343f1b02e3507abddc27e98e34946a0fd0f1e98be64201"
+sha256 = "d26bebf67d7197aec5590e710b5386ab2f31ccee1f4f1efdbd7d00c6011a4657"
 initial_sha256 = "9a8b4fd39c5e5bf76a343f1b02e3507abddc27e98e34946a0fd0f1e98be64201"
 
 [[profiles]]
@@ -4408,9 +4432,14 @@ superseded_by = ""
 implementation_commit_ref = "task:M033"
 implementation_paths = [
     "src/sakuramoon/objective/flow.py",
+    "src/sakuramoon/config/schema.py",
+    "config/examples/all_options.example.toml",
     "tests/unit/objective/test_flow.py",
     "tests/gpu/objective/test_flow_sampling.py",
+    "tests/unit/config/test_schema.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/M033.md",
+    "docs/model-architecture/reviews/M033/remediation_test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -4433,6 +4462,7 @@ benchmarks = [
     "benchmarks/sampling/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/M033/remediation_test_report.json",
     "artifacts/objective/**",
 ]
 not_applicable_fields = [
@@ -8672,8 +8702,8 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-048"
 kind = "open_item"
-status = "planned"
-profile = "dit"
+status = "implemented"
+profile = "objective"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
     "4. P0：模型 reference 与正确性",
@@ -8685,30 +8715,41 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:M033"
+implementation_paths = [
+    "src/sakuramoon/objective/flow.py",
+    "src/sakuramoon/config/schema.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/objective/test_flow.py",
+    "tests/gpu/objective/test_flow_sampling.py",
+    "tests/unit/config/test_schema.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/M033.md",
+    "docs/model-architecture/reviews/M033/remediation_test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "model.dit.*",
-    "kernels.*",
+    "objective.*",
+    "timestep.*",
+    "cfg.*",
 ]
 modules = [
-    "src/sakuramoon/model/**",
+    "src/sakuramoon/objective/**",
 ]
 reference_modules = []
 tests = [
-    "tests/unit/model/**",
-    "tests/integration/model/**",
+    "tests/**/objective*",
+    "tests/unit/config/test_schema.py",
 ]
 benchmarks = [
-    "benchmarks/model/**",
+    "benchmarks/sampling/**",
 ]
 artifacts = [
-    "artifacts/model/**",
-    "artifacts/kernels/**",
+    "docs/model-architecture/reviews/M033/remediation_test_report.json",
+    "artifacts/objective/**",
 ]
 not_applicable_fields = [
     "reference_modules",
@@ -11490,9 +11531,12 @@ superseded_by = ""
 implementation_commit_ref = "task:T051"
 implementation_paths = [
     "src/sakuramoon/telemetry/metrics.py",
+    "src/sakuramoon/objective/flow.py",
     "tests/unit/telemetry/test_metrics.py",
+    "tests/unit/objective/test_flow.py",
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/reviews/T051/test_report.json",
+    "docs/model-architecture/reviews/M033/remediation_test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -11506,11 +11550,13 @@ config_keys = [
     "evaluation.*",
 ]
 modules = [
+    "src/sakuramoon/objective/**",
     "src/sakuramoon/telemetry/**",
     "src/sakuramoon/eval/**",
 ]
 reference_modules = []
 tests = [
+    "tests/**/objective*",
     "tests/**/telemetry*",
     "tests/**/eval*",
 ]
@@ -11518,6 +11564,7 @@ benchmarks = [
     "benchmarks/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/M033/remediation_test_report.json",
     "artifacts/metrics/**",
     "artifacts/evaluation/**",
     "artifacts/profiles/**",
