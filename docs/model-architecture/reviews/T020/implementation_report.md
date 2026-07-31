@@ -25,3 +25,12 @@ Injected failure proves an old report survives and the temporary file is cleaned
 replacement fails. Tests inject a synthetic metric engine only to exercise plumbing;
 no production quality result is claimed. Encoders/Conditioning package review remains
 pending until T020-T024 are frozen.
+
+The upstream remediation is deliberately separate from the R001 historical reference
+snapshot. `mage_upstream_lock.json` fixes Microsoft Mage commit
+`8c94a0ac905167f40b05b09332b78752b7f9fbef`, Git tree
+`73288529688298fc2934707d6b8bb39071810dc1`, the exact Mage-VAE source digest, and the
+MIT license digest. `upstream_algorithm_matrix.md` statically maps the governed source
+to SakuraMoon's checkpoint prefixes, posterior mean, zero-timestep encode/decode,
+attention padding, and latent geometry. This adds no runtime dependency, download,
+fallback, local-weight manifest, or `reference/` import/execution path.

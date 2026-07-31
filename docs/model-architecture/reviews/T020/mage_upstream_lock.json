@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "task_id": "T020",
+  "provenance_kind": "upstream_implementation_source",
+  "repository": {
+    "name": "Microsoft Mage",
+    "url": "https://github.com/microsoft/Mage.git",
+    "commit": "8c94a0ac905167f40b05b09332b78752b7f9fbef",
+    "git_tree": "73288529688298fc2934707d6b8bb39071810dc1"
+  },
+  "source": {
+    "path": "mage_flow/models/modules/mage_vae.py",
+    "sha256": "64f4d7041003e416bc2f4fac5bbf8aabf2e7c798ad106682c34332ba347b0ef9"
+  },
+  "license": {
+    "spdx_id": "MIT",
+    "copyright": "Copyright (c) 2026 Microsoft",
+    "path": "LICENSE",
+    "sha256": "275b4dd619de4e16a017b10d0beec72abbbbf14ee8a2fc68f8bdb398e821f623"
+  },
+  "governance": {
+    "immutable_commit_required": true,
+    "runtime_dependency": false,
+    "reference_repository": false,
+    "local_model_identity": false,
+    "local_model_file_hashing": false,
+    "automatic_download": false
+  },
+  "contracts": {
+    "checkpoint_key_mapping": {
+      "upstream_lines": "559-595",
+      "local_lines": "454-479"
+    },
+    "posterior_mean_zero_timestep_encode": {
+      "upstream_lines": "597-623",
+      "local_lines": "487-504"
+    },
+    "zero_timestep_decode": {
+      "upstream_lines": "625-633",
+      "local_lines": "506-520"
+    },
+    "replicate_padded_patch_attention": {
+      "upstream_lines": "303-335",
+      "local_lines": "276-313"
+    },
+    "latent_shape_without_patch_packing": {
+      "upstream_lines": "1-10,535-542",
+      "local_lines": "441-445,487-520"
+    }
+  }
+}

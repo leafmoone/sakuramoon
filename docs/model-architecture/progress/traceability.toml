@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 88
+registry_revision = 89
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -1634,6 +1634,9 @@ implementation_paths = [
     "docs/model-architecture/reviews/T020/timing.json",
     "docs/model-architecture/reviews/T020/ai_review.md",
     "docs/model-architecture/reviews/T020/infra_review.md",
+    "docs/model-architecture/reviews/T020/mage_upstream_lock.json",
+    "docs/model-architecture/reviews/T020/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/T020/upstream_provenance_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -1695,6 +1698,9 @@ implementation_paths = [
     "docs/model-architecture/reviews/T020/timing.json",
     "docs/model-architecture/reviews/T020/ai_review.md",
     "docs/model-architecture/reviews/T020/infra_review.md",
+    "docs/model-architecture/reviews/T020/mage_upstream_lock.json",
+    "docs/model-architecture/reviews/T020/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/T020/upstream_provenance_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -1755,6 +1761,9 @@ implementation_paths = [
     "docs/model-architecture/reviews/T020/timing.json",
     "docs/model-architecture/reviews/T020/ai_review.md",
     "docs/model-architecture/reviews/T020/infra_review.md",
+    "docs/model-architecture/reviews/T020/mage_upstream_lock.json",
+    "docs/model-architecture/reviews/T020/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/T020/upstream_provenance_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
