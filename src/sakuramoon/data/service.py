@@ -417,9 +417,8 @@ class DataSupplyService:
             if self._started or self._closed:
                 raise DataServiceError("data service lifecycle is invalid")
             self.store.path.parent.mkdir(parents=True, exist_ok=True)
-            ownership_path = self.store.path.with_suffix(
-                f"{self.store.path.suffix}.service.lock"
-            )
+            self.cache.root.mkdir(parents=True, exist_ok=True)
+            ownership_path = self.cache.root / ".sakuramoon-data-service.lock"
             ownership: BinaryIO | None = None
             try:
                 ownership = ownership_path.open("a+b")
@@ -428,7 +427,7 @@ class DataSupplyService:
                 if ownership is not None:
                     ownership.close()
                 raise DataServiceError(
-                    "another data service owns the persistent mainset"
+                    "another data service owns the shared cache"
                 ) from None
             self._ownership_handle = ownership
             self.store.cleanup_residue()
@@ -746,29 +745,44 @@ class DataServiceServer:
         *,
         ready_callback: Callable[[], None] | None = None,
     ) -> None:
-        if self.socket_path.exists() or self.socket_path.is_symlink():
-            if self.socket_path.is_symlink() or not stat.S_ISSOCK(
-                self.socket_path.stat().st_mode
-            ):
-                raise DataServiceError("data service socket path already exists")
-            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            try:
-                probe.settimeout(0.1)
-                probe.connect(str(self.socket_path))
-            except OSError:
-                self.socket_path.unlink(missing_ok=True)
-            else:
-                raise DataServiceError("another data service owns the socket")
-            finally:
-                probe.close()
-        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener: socket.socket | None = None
+        bound_inode: int | None = None
         try:
+            # Acquire cache/mainset ownership before touching the shared socket.
+            # A losing process must never unlink or replace the winning endpoint.
+            self.service.start()
+            if self.socket_path.exists() or self.socket_path.is_symlink():
+                if self.socket_path.is_symlink() or not stat.S_ISSOCK(
+                    self.socket_path.stat().st_mode
+                ):
+                    raise DataServiceError("data service socket path already exists")
+                stale_inode = self.socket_path.stat().st_ino
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    probe.settimeout(0.1)
+                    probe.connect(str(self.socket_path))
+                except OSError:
+                    try:
+                        current_inode = self.socket_path.stat().st_ino
+                    except OSError:
+                        current_inode = None
+                    if current_inode == stale_inode:
+                        self.socket_path.unlink(missing_ok=True)
+                    elif current_inode is not None:
+                        raise DataServiceError(
+                            "another data service owns the socket"
+                        ) from None
+                else:
+                    raise DataServiceError("another data service owns the socket")
+                finally:
+                    probe.close()
+            self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             listener.bind(str(self.socket_path))
+            bound_inode = self.socket_path.stat().st_ino
             os.chmod(self.socket_path, 0o600)
             listener.listen(self.service.limits.ack_channel_capacity)
             listener.settimeout(0.2)
-            self.service.start()
             if ready_callback is not None:
                 ready_callback()
             while not stop_event.is_set():
@@ -795,12 +809,19 @@ class DataServiceServer:
                         )
                     connection.sendall(_response(response))
         finally:
-            listener.close()
+            if listener is not None:
+                listener.close()
             self.service.close()
-            try:
-                self.socket_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            if bound_inode is not None:
+                try:
+                    current = self.socket_path.stat()
+                    if (
+                        current.st_ino == bound_inode
+                        and stat.S_ISSOCK(current.st_mode)
+                    ):
+                        self.socket_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 __all__ = [

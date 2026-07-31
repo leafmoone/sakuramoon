@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import queue
 import subprocess
 import sys
 import threading
@@ -22,6 +24,7 @@ from sakuramoon.data.modelscope import ModelScopeDatasetTransport
 from sakuramoon.data.service import (
     DataServiceError,
     DataServiceLimits,
+    DataServiceServer,
     DataServiceStateCommittedError,
     DataSupplyService,
 )
@@ -399,6 +402,68 @@ def test_mainset_has_one_process_owner(tmp_path: Path) -> None:
     finally:
         second.close()
         first.close()
+
+
+def test_mainset_lock_is_bound_to_shared_cache_not_mainset_path(
+    tmp_path: Path,
+) -> None:
+    manifest, bodies = _manifest(2)
+    first = _service(
+        tmp_path, manifest, _SlowTransport(bodies), mainset_name="first.json"
+    )
+    second = _service(
+        tmp_path, manifest, _SlowTransport(bodies), mainset_name="second.json"
+    )
+    first.start()
+    try:
+        with pytest.raises(DataServiceError, match="another data service"):
+            second.start()
+    finally:
+        second.close()
+        first.close()
+
+
+def test_concurrent_servers_leave_winner_socket_connected(tmp_path: Path) -> None:
+    manifest, bodies = _manifest(2)
+    first = _service(
+        tmp_path, manifest, _SlowTransport(bodies), mainset_name="first.json"
+    )
+    second = _service(
+        tmp_path, manifest, _SlowTransport(bodies), mainset_name="second.json"
+    )
+    socket_path = (
+        Path(__file__).parents[3] / f".d024-ownership-{os.getpid()}.sock"
+    ).absolute()
+    socket_path.unlink(missing_ok=True)
+    stop = threading.Event()
+    barrier = threading.Barrier(2)
+    ready: queue.Queue[str] = queue.Queue()
+    errors: list[BaseException] = []
+
+    def run(service: DataSupplyService) -> None:
+        try:
+            barrier.wait(timeout=5.0)
+            DataServiceServer(
+                service, socket_path, request_timeout_seconds=5.0
+            ).serve(stop, ready_callback=lambda: ready.put("ready"))
+        except BaseException as exc:  # noqa: BLE001 - assert the losing owner
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=run, args=(first,)),
+        threading.Thread(target=run, args=(second,)),
+    ]
+    for thread in threads:
+        thread.start()
+    assert ready.get(timeout=5.0) == "ready"
+    assert socket_path.exists()
+    stop.set()
+    for thread in threads:
+        thread.join(timeout=5.0)
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(errors) == 1
+    assert isinstance(errors[0], DataServiceError)
+    assert not socket_path.exists()
 
 
 def test_service_start_removes_only_manifest_owned_partial(tmp_path: Path) -> None:
