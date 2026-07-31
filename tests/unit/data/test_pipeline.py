@@ -26,6 +26,7 @@ from sakuramoon.data.manifest import (
     DatasetSourceIdentity,
     ShardRecord,
 )
+from sakuramoon.data.metadata import MetadataFieldMapping
 from sakuramoon.data.modelscope import FetchedShard
 from sakuramoon.data.pipeline import (
     PipelineSampleError,
@@ -39,6 +40,8 @@ from sakuramoon.data.state import (
     ShardStateStore,
     SingleProcessShardCoordinator,
 )
+
+_MISSING_RELEASE = object()
 
 
 class _Tokenizer:
@@ -54,6 +57,31 @@ class _Tokenizer:
 def _probabilities() -> CaptionDropoutProbabilities:
     nl = NlDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0)
     return CaptionDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, nl)
+
+
+def _metadata_fields() -> MetadataFieldMapping:
+    return MetadataFieldMapping(
+        id_field="id",
+        width_field="width",
+        height_field="height",
+        caption_available_field="caption_available",
+    )
+
+
+def _identity_metadata(
+    raw: Mapping[str, object],
+) -> Mapping[str, object]:
+    return raw
+
+
+def _shard_record(path: Path, *, release: str = "trusted-release") -> ShardRecord:
+    return ShardRecord(
+        path=path.name,
+        release=release,
+        bytes=path.stat().st_size,
+        sha256="1" * 64,
+        samples=2,
+    )
 
 
 def _empty_fields(raw: Mapping[str, object]) -> CaptionFields:
@@ -79,26 +107,31 @@ def _jpeg() -> bytes:
 
 def _jpeg_size(width: int, height: int) -> bytes:
     output = io.BytesIO()
-    Image.new("RGB", (width, height), color=(10, 20, 30)).save(
-        output, format="JPEG"
-    )
+    Image.new("RGB", (width, height), color=(10, 20, 30)).save(output, format="JPEG")
     return output.getvalue()
 
 
-def _write_tar(path: Path, records: tuple[tuple[int, bytes], ...] | None = None) -> None:
+def _write_tar(
+    path: Path,
+    records: tuple[tuple[int, bytes], ...] | None = None,
+    *,
+    metadata_fields: MetadataFieldMapping | None = None,
+    raw_release: object = "r1",
+) -> None:
     if records is None:
         records = ((1, _jpeg()), (2, b"not-an-image"))
+    fields = metadata_fields or _metadata_fields()
     with tarfile.open(path, "w") as archive:
         for sample_id, image in records:
-            metadata = json.dumps(
-                {
-                    "id": sample_id,
-                    "release": "r1",
-                    "width": 640,
-                    "height": 512,
-                    "caption_available": False,
-                }
-            ).encode()
+            document: dict[str, object] = {
+                fields.id_field: sample_id,
+                fields.width_field: 640,
+                fields.height_field: 512,
+                fields.caption_available_field: False,
+            }
+            if raw_release is not _MISSING_RELEASE:
+                document["release"] = raw_release
+            metadata = json.dumps(document).encode()
             for extension, payload in (("json", metadata), ("jpg", image)):
                 info = tarfile.TarInfo(f"{sample_id:06d}.{extension}")
                 info.size = len(payload)
@@ -119,6 +152,9 @@ def test_real_webdataset_iteration_excludes_validation_before_decode(
 
     pipeline = WebDatasetPipeline(
         shard_paths=(shard,),
+        shard_records=(_shard_record(shard),),
+        metadata_adapter=_identity_metadata,
+        metadata_fields=_metadata_fields(),
         validation_ids=frozenset({2}),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
@@ -136,10 +172,130 @@ def test_real_webdataset_iteration_excludes_validation_before_decode(
 
     assert len(samples) == 1
     assert samples[0].sample_id == 1
+    assert samples[0].release == "trusted-release"
     assert samples[0].image.shape == (3, 512, 512)
     assert samples[0].image.dtype == torch.uint8
     assert samples[0].audit.source_width == 640
     assert parser_calls == 1
+
+
+def test_manifest_release_is_trusted_when_raw_release_is_missing_and_fields_are_aliased(
+    tmp_path: Path,
+) -> None:
+    shard = tmp_path / "samples.tar"
+    fields = MetadataFieldMapping(
+        id_field="sample_id",
+        width_field="image_width",
+        height_field="image_height",
+        caption_available_field="has_caption",
+    )
+    _write_tar(
+        shard,
+        ((1, _jpeg()),),
+        raw_release=_MISSING_RELEASE,
+    )
+
+    def adapter(raw: Mapping[str, object]) -> Mapping[str, object]:
+        return {
+            "sample_id": raw["id"],
+            "image_width": raw["width"],
+            "image_height": raw["height"],
+            "has_caption": raw["caption_available"],
+        }
+
+    def parser(raw: Mapping[str, object]) -> CaptionFields:
+        assert "id" in raw
+        assert "sample_id" not in raw
+        return _empty_fields(raw)
+
+    pipeline = WebDatasetPipeline(
+        shard_paths=(shard,),
+        shard_records=(_shard_record(shard, release="manifest-release"),),
+        metadata_adapter=adapter,
+        metadata_fields=fields,
+        validation_ids=frozenset(),
+        buckets=(BucketShape(512, 512),),
+        min_crop_retention=0.8,
+        probabilities=_probabilities(),
+        tokenizer=_Tokenizer(),
+        framing=FramingContract(34, 5, 0),
+        caption_fields_parser=parser,
+        rejection_observer=_ignore_rejection,
+        base_seed=9,
+        stage="S0",
+        pass_index=0,
+    )
+
+    sample = next(iter(pipeline))
+
+    assert sample.release == "manifest-release"
+
+
+def test_pipeline_rejects_unknown_sample_url_and_mismatched_shard_record(
+    tmp_path: Path,
+) -> None:
+    shard = tmp_path / "samples.tar"
+    _write_tar(shard, ((1, _jpeg()),))
+    record = _shard_record(shard)
+    pipeline = WebDatasetPipeline(
+        shard_paths=(shard,),
+        shard_records=(record,),
+        metadata_adapter=_identity_metadata,
+        metadata_fields=_metadata_fields(),
+        validation_ids=frozenset(),
+        buckets=(BucketShape(512, 512),),
+        min_crop_retention=0.8,
+        probabilities=_probabilities(),
+        tokenizer=_Tokenizer(),
+        framing=FramingContract(34, 5, 0),
+        caption_fields_parser=_empty_fields,
+        rejection_observer=_ignore_rejection,
+        base_seed=9,
+        stage="S0",
+        pass_index=0,
+    )
+    raw_sample = {
+        "__url__": str(tmp_path / "unknown.tar"),
+        "json": json.dumps(
+            {
+                "id": 1,
+                "width": 640,
+                "height": 512,
+                "caption_available": False,
+            }
+        ).encode(),
+    }
+
+    with pytest.raises(PipelineSampleError, match="trusted shard records"):
+        pipeline._process(  # pyright: ignore[reportPrivateUsage]
+            raw_sample, {str(shard): record}
+        )
+
+    wrong_record = ShardRecord(
+        path="other.tar",
+        release="trusted-release",
+        bytes=shard.stat().st_size,
+        sha256="2" * 64,
+        samples=1,
+    )
+    with pytest.raises(PipelineSampleError, match="manifest shard path"):
+        WebDatasetPipeline(
+            shard_paths=(shard,),
+            shard_records=(wrong_record,),
+            metadata_adapter=_identity_metadata,
+            metadata_fields=_metadata_fields(),
+            validation_ids=frozenset(),
+            buckets=(BucketShape(512, 512),),
+            min_crop_retention=0.8,
+            probabilities=_probabilities(),
+            tokenizer=_Tokenizer(),
+            framing=FramingContract(34, 5, 0),
+            caption_fields_parser=_empty_fields,
+            rejection_observer=_ignore_rejection,
+            base_seed=9,
+            stage="S0",
+            pass_index=0,
+        )
 
 
 @pytest.mark.parametrize(
@@ -161,6 +317,9 @@ def test_image_rejection_skips_sample_and_continues_real_tar_iteration(
     rejections: list[str] = []
     pipeline = WebDatasetPipeline(
         shard_paths=(shard,),
+        shard_records=(_shard_record(shard),),
+        metadata_adapter=_identity_metadata,
+        metadata_fields=_metadata_fields(),
         validation_ids=frozenset(),
         buckets=(bucket,),
         min_crop_retention=0.8,
@@ -237,6 +396,9 @@ def test_durable_loader_consumes_and_completes_each_shard_once(tmp_path: Path) -
     )
     pipeline = WebDatasetPipeline(
         shard_paths=(paths[0],),
+        shard_records=(shards[0],),
+        metadata_adapter=_identity_metadata,
+        metadata_fields=_metadata_fields(),
         validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
@@ -265,6 +427,7 @@ def test_durable_loader_consumes_and_completes_each_shard_once(tmp_path: Path) -
     consumed = sorted(int(batch.sample_ids[0].item()) for batch in batches)
 
     assert consumed == [1, 2, 3]
+    assert tuple(batch.releases for batch in batches) == (("r",), ("r",), ("r",))
     assert coordinator.state.completed == tuple(sorted(shard.path for shard in shards))
     assert coordinator.state.active is None
 
@@ -296,6 +459,9 @@ def test_durable_loader_rejects_multi_worker_state_mismatch(tmp_path: Path) -> N
     )
     pipeline = WebDatasetPipeline(
         shard_paths=(shard,),
+        shard_records=(manifest.shards[0],),
+        metadata_adapter=_identity_metadata,
+        metadata_fields=_metadata_fields(),
         validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
@@ -329,6 +495,9 @@ def test_worker_loader_cannot_bypass_durable_lease(tmp_path: Path) -> None:
     _write_tar(shard, ((1, _jpeg()),))
     pipeline = WebDatasetPipeline(
         shard_paths=(shard,),
+        shard_records=(_shard_record(shard),),
+        metadata_adapter=_identity_metadata,
+        metadata_fields=_metadata_fields(),
         validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
@@ -357,6 +526,17 @@ def test_pipeline_rejects_nonlocal_or_relative_shard_paths(
     with pytest.raises(PipelineSampleError, match="local"):
         WebDatasetPipeline(
             shard_paths=shard_paths,  # pyright: ignore[reportArgumentType]
+            shard_records=(
+                ShardRecord(
+                    path="data.tar",
+                    release="r",
+                    bytes=1,
+                    sha256="1" * 64,
+                    samples=1,
+                ),
+            ),
+            metadata_adapter=_identity_metadata,
+            metadata_fields=_metadata_fields(),
             validation_ids=frozenset(),
             buckets=(BucketShape(512, 512),),
             min_crop_retention=0.8,

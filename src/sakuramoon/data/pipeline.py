@@ -23,8 +23,12 @@ from sakuramoon.data.caption import (
     build_caption_plan,
 )
 from sakuramoon.data.image_ops import ImageRejected, prepare_image
-from sakuramoon.data.manifest import DatasetManifest
-from sakuramoon.data.metadata import MetadataRecord, parse_metadata
+from sakuramoon.data.manifest import DatasetManifest, ShardRecord
+from sakuramoon.data.metadata import (
+    MetadataFieldMapping,
+    MetadataRecord,
+    parse_shard_metadata,
+)
 from sakuramoon.data.serialize import (
     FramingContract,
     SerializedCaption,
@@ -34,6 +38,7 @@ from sakuramoon.data.serialize import (
 from sakuramoon.data.state import ShardRunState, SingleProcessShardCoordinator
 
 CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
+MetadataAdapter = Callable[[Mapping[str, object]], Mapping[str, object]]
 RejectionObserver = Callable[[RejectionReason], None]
 _IMAGE_KEYS = ("jpg", "jpeg", "png", "webp")
 
@@ -91,6 +96,32 @@ def _validate_local_shard_paths(shard_paths: tuple[Path, ...]) -> None:
             )
 
 
+def _validate_shard_records(
+    shard_paths: tuple[Path, ...], shard_records: tuple[ShardRecord, ...]
+) -> None:
+    if (
+        type(shard_records) is not tuple
+        or len(shard_records) != len(shard_paths)
+        or any(
+            not isinstance(record, ShardRecord)  # pyright: ignore[reportUnnecessaryIsInstance]
+            for record in shard_records
+        )
+        or len({record.path for record in shard_records}) != len(shard_records)
+    ):
+        raise PipelineSampleError(
+            "pipeline requires one unique manifest record per local shard"
+        )
+    for path, record in zip(shard_paths, shard_records, strict=True):
+        record_parts = Path(record.path).parts
+        if (
+            len(path.parts) < len(record_parts)
+            or path.parts[-len(record_parts) :] != record_parts
+        ):
+            raise PipelineSampleError(
+                "local shard path must end with its manifest shard path"
+            )
+
+
 def _domain_seed(
     base_seed: int,
     stage: str,
@@ -120,9 +151,7 @@ def rng_identity(
         stage=stage,
         pass_index=pass_index,
         sample_id=sample_id,
-        caption_seed=_domain_seed(
-            base_seed, stage, pass_index, sample_id, "caption"
-        ),
+        caption_seed=_domain_seed(base_seed, stage, pass_index, sample_id, "caption"),
         crop_seed=_domain_seed(base_seed, stage, pass_index, sample_id, "crop"),
     )
 
@@ -149,7 +178,9 @@ def local_shard_order(
 def _metadata(sample: Mapping[str, object]) -> Mapping[str, object]:
     payload = sample.get("json")
     if not isinstance(payload, bytes):
-        raise PipelineSampleError("WebDataset sample must contain one JSON byte payload")
+        raise PipelineSampleError(
+            "WebDataset sample must contain one JSON byte payload"
+        )
     try:
         document = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -188,6 +219,9 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self,
         *,
         shard_paths: tuple[Path, ...],
+        shard_records: tuple[ShardRecord, ...],
+        metadata_adapter: MetadataAdapter,
+        metadata_fields: MetadataFieldMapping,
         validation_ids: frozenset[int],
         buckets: tuple[BucketShape, ...],
         min_crop_retention: float,
@@ -202,6 +236,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
     ) -> None:
         super().__init__()
         _validate_local_shard_paths(shard_paths)
+        _validate_shard_records(shard_paths, shard_records)
         if (
             type(validation_ids) is not frozenset
             or any(type(item) is not int or item <= 0 for item in validation_ids)
@@ -221,6 +256,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
                 framing, FramingContract
             )
+            or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+                metadata_fields, MetadataFieldMapping
+            )
+            or not callable(metadata_adapter)
             or not callable(caption_fields_parser)
             or not callable(rejection_observer)
             or type(base_seed) is not int
@@ -233,6 +272,9 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         ):
             raise PipelineSampleError("pipeline construction fields are invalid")
         self.shard_paths = shard_paths
+        self.shard_records = shard_records
+        self.metadata_adapter = metadata_adapter
+        self.metadata_fields = metadata_fields
         self.validation_ids = validation_ids
         self.buckets = buckets
         self.min_crop_retention = min_crop_retention
@@ -246,9 +288,29 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.pass_index = pass_index
         self._lease_managed = False
 
-    def _process(self, sample: Mapping[str, object]) -> PipelineSample | None:
+    def _process(
+        self,
+        sample: Mapping[str, object],
+        records_by_url: Mapping[str, ShardRecord],
+    ) -> PipelineSample | None:
         raw_metadata = _metadata(sample)
-        metadata: MetadataRecord = parse_metadata(raw_metadata)
+        sample_url = sample.get("__url__")
+        if not isinstance(sample_url, str) or sample_url not in records_by_url:
+            raise PipelineSampleError(
+                "WebDataset sample source is absent from trusted shard records"
+            )
+        adapted_metadata = cast(object, self.metadata_adapter(raw_metadata))
+        if not isinstance(adapted_metadata, Mapping):
+            raise PipelineSampleError("metadata adapter returned an invalid value")
+        adapter_mapping = cast(Mapping[object, object], adapted_metadata)
+        if not all(isinstance(key, str) for key in adapter_mapping):
+            raise PipelineSampleError("metadata adapter keys must be strings")
+        mapped_metadata = cast(Mapping[str, object], adapter_mapping)
+        metadata: MetadataRecord = parse_shard_metadata(
+            mapped_metadata,
+            shard=records_by_url[sample_url],
+            fields=self.metadata_fields,
+        )
         if metadata.id in self.validation_ids:
             return None
         identity = rng_identity(
@@ -257,7 +319,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             pass_index=self.pass_index,
             sample_id=metadata.id,
         )
-        fields = cast(object, self.caption_fields_parser(metadata.raw))
+        fields = cast(object, self.caption_fields_parser(raw_metadata))
         if not isinstance(fields, CaptionFields):
             raise PipelineSampleError("caption field parser returned an invalid value")
         plan = build_caption_plan(
@@ -298,9 +360,15 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             padding_token_id=self.framing.padding_token_id,
         )
 
-    def _iter_paths(self, shard_paths: tuple[Path, ...]) -> Iterator[PipelineSample]:
+    def _iter_paths(
+        self,
+        shard_paths: tuple[Path, ...],
+        shard_records: tuple[ShardRecord, ...],
+    ) -> Iterator[PipelineSample]:
         _validate_local_shard_paths(shard_paths)
+        _validate_shard_records(shard_paths, shard_records)
         urls = [str(path) for path in shard_paths]
+        records_by_url = dict(zip(urls, shard_records, strict=True))
         factory = cast(
             Callable[..., Iterable[dict[str, Any]]],
             wds.WebDataset,  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
@@ -311,17 +379,24 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             empty_check=True,
         )
         for raw_sample in dataset:
-            processed = self._process(cast(Mapping[str, object], raw_sample))
+            processed = self._process(
+                cast(Mapping[str, object], raw_sample), records_by_url
+            )
             if processed is not None:
                 yield processed
 
     def _with_local_shards(
-        self, shard_paths: tuple[Path, ...]
+        self,
+        shard_paths: tuple[Path, ...],
+        shard_records: tuple[ShardRecord, ...],
     ) -> WebDatasetPipeline:
         """Clone the validated processing contract onto prepared local shards."""
 
         pipeline = WebDatasetPipeline(
             shard_paths=shard_paths,
+            shard_records=shard_records,
+            metadata_adapter=self.metadata_adapter,
+            metadata_fields=self.metadata_fields,
             validation_ids=self.validation_ids,
             buckets=self.buckets,
             min_crop_retention=self.min_crop_retention,
@@ -363,19 +438,21 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                     continue
                 if cached.fetched.relative_path != shard_path:
                     raise PipelineSampleError("cache returned a different leased shard")
-                yield from self._iter_paths((cached.fetched.path,))
+                record = coordinator.store.manifest.shard(shard_path)
+                yield from self._iter_paths((cached.fetched.path,), (record,))
 
     def __iter__(self) -> Iterator[PipelineSample]:
         if get_worker_info() is not None and not self._lease_managed:
             raise PipelineSampleError(
                 "worker iteration requires the durable shard lease entry point"
             )
-        yield from self._iter_paths(self.shard_paths)
+        yield from self._iter_paths(self.shard_paths, self.shard_records)
 
 
 __all__ = [
     "CaptionFieldsParser",
     "ImageAudit",
+    "MetadataAdapter",
     "PipelineSample",
     "PipelineSampleError",
     "RejectionObserver",

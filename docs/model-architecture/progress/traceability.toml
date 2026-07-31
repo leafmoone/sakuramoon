@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 85
+registry_revision = 86
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -586,6 +586,7 @@ owner_tasks = [
     "D013",
     "D014",
     "D015",
+    "D021",
     "T054",
 ]
 config_keys = [
@@ -611,6 +612,7 @@ artifacts = [
     "docs/model-architecture/reviews/D013/**",
     "docs/model-architecture/reviews/D014/**",
     "docs/model-architecture/reviews/D015/**",
+    "docs/model-architecture/reviews/D021/**",
     "artifacts/data/**",
 ]
 hardware = "1GPU"
@@ -5265,6 +5267,14 @@ implementation_paths = [
     "docs/model-architecture/reviews/D010/ai_review.md",
     "docs/model-architecture/reviews/D010/infra_review.md",
     "docs/model-architecture/reviews/D010/rollback_test_report.json",
+    "src/sakuramoon/data/pipeline.py",
+    "src/sakuramoon/data/collate.py",
+    "tests/unit/data/test_pipeline.py",
+    "tests/fault_injection/test_data_failures.py",
+    "tests/gpu/data/test_pipeline_encoders.py",
+    "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
+    "docs/model-architecture/progress/tasks/D021.md",
+    "docs/model-architecture/reviews/D021/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -5372,6 +5382,10 @@ implementation_paths = [
     "docs/model-architecture/reviews/D015/timing.json",
     "docs/model-architecture/reviews/D015/ai_review.md",
     "docs/model-architecture/reviews/D015/infra_review.md",
+    "tests/fault_injection/test_data_failures.py",
+    "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
+    "docs/model-architecture/progress/tasks/D021.md",
+    "docs/model-architecture/reviews/D021/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -5626,6 +5640,14 @@ implementation_paths = [
     "docs/model-architecture/reviews/D011/timing.json",
     "docs/model-architecture/reviews/D011/ai_review.md",
     "docs/model-architecture/reviews/D011/infra_review.md",
+    "src/sakuramoon/data/pipeline.py",
+    "src/sakuramoon/data/collate.py",
+    "tests/unit/data/test_pipeline.py",
+    "tests/fault_injection/test_data_failures.py",
+    "tests/gpu/data/test_pipeline_encoders.py",
+    "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
+    "docs/model-architecture/progress/tasks/D021.md",
+    "docs/model-architecture/reviews/D021/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []

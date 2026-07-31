@@ -65,7 +65,9 @@ class _Transport:
         self.body = body
         self.error = error
 
-    def download(self, manifest: DatasetManifest, shard: ShardRecord, output: _Writer) -> None:
+    def download(
+        self, manifest: DatasetManifest, shard: ShardRecord, output: _Writer
+    ) -> None:
         del manifest, shard
         if self.error is not None:
             raise self.error
@@ -96,7 +98,9 @@ class _PreparedCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(_CONTENT)
         return CachedShard(
-            FetchedShard(path, shard.path, shard.bytes, shard.sha256, False), (), shard.bytes
+            FetchedShard(path, shard.path, shard.bytes, shard.sha256, False),
+            (),
+            shard.bytes,
         )
 
 
@@ -175,19 +179,18 @@ def test_worker_os_exit_preserves_active_lease_and_restart_counts_exact_replay(
     manifest = _manifest()
     state_path = tmp_path / "run/shards.json"
     cache = cast(ShardCache, _PreparedCache(tmp_path / "cache", manifest))
-    first = SingleProcessShardCoordinator(
-        cache, ShardStateStore(state_path, manifest)
-    )
+    first = SingleProcessShardCoordinator(cache, ShardStateStore(state_path, manifest))
 
     pipeline = object.__new__(WebDatasetPipeline)
 
     def worker_exit(
-        _pipeline: WebDatasetPipeline, paths: tuple[Path, ...]
+        _pipeline: WebDatasetPipeline,
+        paths: tuple[Path, ...],
+        records: tuple[ShardRecord, ...],
     ) -> Iterator[PipelineSample]:
         assert len(paths) == 1
-        loader = DataLoader(
-            _ExitDataset(), batch_size=None, num_workers=1, timeout=3
-        )
+        assert records == manifest.shards
+        loader = DataLoader(_ExitDataset(), batch_size=None, num_workers=1, timeout=3)
         next(iter(loader))
         raise AssertionError("worker exit unexpectedly returned")
         yield  # pragma: no cover
@@ -205,9 +208,12 @@ def test_worker_os_exit_preserves_active_lease_and_restart_counts_exact_replay(
     assert restarted.state.replayed_samples == 17
 
     def complete(
-        _pipeline: WebDatasetPipeline, paths: tuple[Path, ...]
+        _pipeline: WebDatasetPipeline,
+        paths: tuple[Path, ...],
+        records: tuple[ShardRecord, ...],
     ) -> Iterator[PipelineSample]:
         assert len(paths) == 1
+        assert records == manifest.shards
         return
         yield  # pragma: no cover
 

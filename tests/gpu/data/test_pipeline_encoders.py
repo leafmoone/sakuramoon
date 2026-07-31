@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tarfile
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import pytest
 import torch
 from PIL import Image
 
-from sakuramoon.data.buckets import BucketShape
+from sakuramoon.config.schema import DataBucketsConfig
+from sakuramoon.data.buckets import BucketShape, generate_base_buckets
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
     NlCandidates,
     NlDropoutProbabilities,
+    Tag,
 )
 from sakuramoon.data.collate import collate_samples
+from sakuramoon.data.manifest import ShardRecord
+from sakuramoon.data.metadata import MetadataFieldMapping
 from sakuramoon.data.pipeline import WebDatasetPipeline
 from sakuramoon.data.serialize import FramingContract
 from sakuramoon.encoders.mage_vae import load_local_mage_vae
@@ -43,6 +49,85 @@ def _empty_fields(_raw: Mapping[str, object]) -> CaptionFields:
 def _probabilities() -> CaptionDropoutProbabilities:
     nl = NlDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0)
     return CaptionDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, nl)
+
+
+def _identity_metadata(
+    raw: Mapping[str, object],
+) -> Mapping[str, object]:
+    return raw
+
+
+def _nested_mapping(raw: Mapping[str, object], key: str) -> Mapping[str, object]:
+    value = raw.get(key)
+    if not isinstance(value, Mapping):
+        raise TypeError(f"real metadata {key} must be an object")
+    mapping = cast(Mapping[object, object], value)
+    if not all(isinstance(item, str) for item in mapping):
+        raise AssertionError(f"real metadata {key} keys must be strings")
+    return cast(Mapping[str, object], mapping)
+
+
+def _real_metadata_adapter(
+    raw: Mapping[str, object],
+) -> Mapping[str, object]:
+    image = _nested_mapping(raw, "image")
+    captions = _nested_mapping(raw, "captions")
+    multicaptions = _nested_mapping(raw, "multicaptions")
+    caption_available = any(
+        isinstance(value, str) and bool(value.strip())
+        for value in (*captions.values(), *multicaptions.values())
+    )
+    return {
+        "id": raw.get("id"),
+        "width": image.get("width"),
+        "height": image.get("height"),
+        "caption_available": caption_available,
+    }
+
+
+def _real_tags(raw: Mapping[str, object], key: str) -> tuple[Tag, ...]:
+    tags = _nested_mapping(raw, "tags").get(key)
+    if not isinstance(tags, list):
+        raise TypeError(f"real metadata tags.{key} must be a list")
+    tag_items = cast(list[object], tags)
+    if not all(isinstance(item, str) for item in tag_items):
+        raise TypeError(f"real metadata tags.{key} must be strings")
+    return tuple(Tag(text=item, canonical=item) for item in cast(list[str], tag_items))
+
+
+def _real_caption_fields(raw: Mapping[str, object]) -> CaptionFields:
+    nsfw = raw.get("nsfw")
+    if not isinstance(nsfw, str):
+        raise TypeError("real metadata nsfw must be a string")
+    captions = _nested_mapping(raw, "captions")
+    multicaptions = _nested_mapping(raw, "multicaptions")
+    dropout = _nested_mapping(raw, "dropout")
+    candidate_tags = dropout.get("candidate_tags")
+    if not isinstance(candidate_tags, list):
+        raise TypeError("real metadata candidate tags must be a list")
+    candidate_items = cast(list[object], candidate_tags)
+    if not all(isinstance(item, str) for item in candidate_items):
+        raise TypeError("real metadata candidate tags must be strings")
+
+    def optional_text(mapping: Mapping[str, object], key: str) -> str | None:
+        value = mapping.get(key)
+        return value if isinstance(value, str) and value.strip() else None
+
+    return CaptionFields(
+        nsfw=(Tag(nsfw, nsfw),),
+        character=_real_tags(raw, "character"),
+        copyright=_real_tags(raw, "copyright"),
+        general=_real_tags(raw, "general"),
+        artists=_real_tags(raw, "artist"),
+        candidate_tags=frozenset(cast(list[str], candidate_items)),
+        nl=NlCandidates(
+            None,
+            None,
+            optional_text(multicaptions, "vibes"),
+            optional_text(captions, "nl2"),
+            optional_text(captions, "nl3"),
+        ),
+    )
 
 
 def _write_shard(path: Path) -> None:
@@ -74,6 +159,22 @@ def test_real_pipeline_qwen_and_mage_encode_one_batch(tmp_path: Path) -> None:
     rejections: list[str] = []
     pipeline = WebDatasetPipeline(
         shard_paths=(shard,),
+        shard_records=(
+            ShardRecord(
+                path=shard.name,
+                release="synthetic",
+                bytes=shard.stat().st_size,
+                sha256="1" * 64,
+                samples=1,
+            ),
+        ),
+        metadata_adapter=_identity_metadata,
+        metadata_fields=MetadataFieldMapping(
+            id_field="id",
+            width_field="width",
+            height_field="height",
+            caption_available_field="caption_available",
+        ),
         validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
@@ -108,3 +209,75 @@ def test_real_pipeline_qwen_and_mage_encode_one_batch(tmp_path: Path) -> None:
     assert not any(parameter.requires_grad for parameter in qwen.encoder.parameters())
     assert not any(parameter.requires_grad for parameter in vae.parameters())
     assert torch.cuda.max_memory_allocated(device) > 0
+
+
+def test_real_modelscope_shard_pipeline_qwen_and_mage() -> None:
+    shard_value = os.environ.get("SAKURAMOON_REAL_SHARD_PATH")
+    if shard_value is None:
+        pytest.skip("SAKURAMOON_REAL_SHARD_PATH is not set")
+    shard = Path(shard_value)
+    repository_root = Path(__file__).parents[3]
+    device = torch.device("cuda", 0)
+    qwen = load_local_qwen(repository_root, device)
+    vae = load_local_mage_vae(repository_root, device)
+    nl = NlDropoutProbabilities(0.3, 0.3, 0.3, 0.3, 0.3)
+    probabilities = CaptionDropoutProbabilities(0.1, 0.2, 0.1, 0.1, 0.1, 0.3, nl)
+    buckets = generate_base_buckets(
+        DataBucketsConfig(
+            base_area_px=262144,
+            quantum_px=32,
+            min_short_edge_px=256,
+            max_aspect_ratio=4.0,
+            shape_count=17,
+            transpose_closed=True,
+        )
+    )
+    rejections: list[str] = []
+    pipeline = WebDatasetPipeline(
+        shard_paths=(shard,),
+        shard_records=(
+            ShardRecord(
+                path="data/1_2024/shard-000000.tar",
+                release="1_2024",
+                bytes=2146867200,
+                sha256="857a90de9f087e98ebd98244b3d211f8b719133e80e96eebb3c274c1e518cf97",
+                samples=1,
+            ),
+        ),
+        metadata_adapter=_real_metadata_adapter,
+        metadata_fields=MetadataFieldMapping(
+            id_field="id",
+            width_field="width",
+            height_field="height",
+            caption_available_field="caption_available",
+        ),
+        validation_ids=frozenset(),
+        buckets=buckets,
+        min_crop_retention=0.8,
+        probabilities=probabilities,
+        tokenizer=qwen.tokenizer,
+        framing=FramingContract(34, 5, 248044),
+        caption_fields_parser=_real_caption_fields,
+        rejection_observer=rejections.append,
+        base_seed=7,
+        stage="S0",
+        pass_index=0,
+    )
+    sample = next(iter(pipeline))
+    batch = collate_samples((sample,))
+
+    qwen_output = qwen.encoder(
+        batch.input_ids.to(device),
+        batch.attention_mask.to(device),
+    )
+    image = batch.images.to(device=device, dtype=torch.bfloat16).div(127.5).sub(1.0)
+    latent = vae.encode(image)
+
+    assert sample.release == "1_2024"
+    assert sample.sample_id > 0
+    assert sample.audit.source_width > 0 and sample.audit.source_height > 0
+    assert batch.images.shape[0] == 1
+    assert qwen_output.hidden_states.shape[:2] == batch.input_ids.shape
+    assert latent.shape[0:2] == (1, 128)
+    assert torch.isfinite(qwen_output.hidden_states).all()
+    assert torch.isfinite(latent).all()

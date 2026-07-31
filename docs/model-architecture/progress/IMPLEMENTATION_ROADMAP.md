@@ -330,6 +330,15 @@ sakuramoon/
 - **完成边界：** CPU telemetry 代码可完成；100k 生产分布、最终空 body 率和 `all_condition=10%+/-0.5pp` 仍是独立 pending evidence。
 - **GPU：** 无。
 
+### D021：Trusted shard metadata pipeline remediation
+
+- **依赖：** D010 immutable `ShardRecord`、D011 `parse_shard_metadata` 与 D015 local pipeline。
+- **实现路径：** `data/pipeline.py`、`data/collate.py` 与 data/fault/GPU contract tests。
+- **动作：** pipeline 显式接收 local path、`ShardRecord`、无默认 `MetadataFieldMapping` 与显式 nested metadata adapter；按 sample `__url__` 绑定 trusted record，durable 路径只从 coordinator manifest 取 record；sample JSON 不得提供或覆盖 release。
+- **验证：** forged/missing raw release、alias/nested adapter、unknown URL、path-record mismatch、durable batch release；真实 ModelScope shard + 本地 Qwen/Mage + RTX 5090 smoke。
+- **完成边界：** CPU/真实数据本地模型单卡代码完成；Data package rereview pending。正式 immutable manifest 与 production caption-availability mapping 仍 pending；D012/D015 durable two-worker 由 D022/D023 独立修复。
+- **GPU：** CPU + 1GPU engineering smoke；多卡无。
+
 ## 9. Phase 2：冻结编码器与条件分支
 
 ### T020：Mage-VAE wrapper 与重建验收

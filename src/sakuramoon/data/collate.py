@@ -161,7 +161,9 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         length = len(sample.caption.input_ids)
         if length > dense_length:
             raise CollateError("serialized caption exceeds its dense bucket")
-        input_ids[row, :length] = torch.tensor(sample.caption.input_ids, dtype=torch.long)
+        input_ids[row, :length] = torch.tensor(
+            sample.caption.input_ids, dtype=torch.long
+        )
         attention_mask[row, :length] = True
     main_indices, main_mask = _index_tensor(
         tuple(sample.caption.main_token_indices for sample in samples)
@@ -212,11 +214,7 @@ def bucketed_batches(
     batch_size: int,
     drop_last: bool,
 ) -> Iterator[TrainingBatch]:
-    if (
-        type(batch_size) is not int
-        or batch_size <= 0
-        or type(drop_last) is not bool
-    ):
+    if type(batch_size) is not int or batch_size <= 0 or type(drop_last) is not bool:
         raise CollateError("batch_size and drop_last are invalid")
     pending: dict[tuple[int, int, int], list[PipelineSample]] = {}
     for sample in samples:
@@ -322,7 +320,8 @@ def iter_leased_batches(
             if cached.fetched.relative_path != shard_path:
                 raise PipelineSampleError("cache returned a different leased shard")
             shard_pipeline = pipeline._with_local_shards(  # pyright: ignore[reportPrivateUsage]
-                (cached.fetched.path,)
+                (cached.fetched.path,),
+                (coordinator.store.manifest.shard(shard_path),),
             )
             dataset = BucketedBatchDataset(
                 shard_pipeline,

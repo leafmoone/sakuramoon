@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "task_id": "D021",
+  "status": "cpu_and_real_modelscope_local_model_1gpu_passed_package_rereview_pending",
+  "hardware": [
+    "CPU",
+    "1x NVIDIA GeForce RTX 5090"
+  ],
+  "pipeline_collate_metadata_cpu": "passed: 44",
+  "data_fault_injection_cpu": "passed: 4",
+  "gpu_pipeline_suite": "passed: 2",
+  "real_modelscope_qwen_mage_pipeline_gpu": "passed: 1",
+  "gpu_dataset_source": "authenticated ModelScope master snapshot, fully downloaded and SHA-256 verified shard-000000.tar",
+  "downloaded_real_shards": 2,
+  "real_shard_bytes_verified": [
+    2146867200,
+    2147471360
+  ],
+  "real_shard_sha256_verified": [
+    "857a90de9f087e98ebd98244b3d211f8b719133e80e96eebb3c274c1e518cf97",
+    "f05f5d20965441cebedbe6a8f19b739e4f053657bba0537bf0c2868332106a20"
+  ],
+  "trusted_manifest_release": "passed",
+  "missing_or_forged_raw_release": "passed",
+  "explicit_alias_field_mapping": "passed",
+  "unknown_sample_url": "rejected",
+  "path_record_mismatch": "rejected",
+  "durable_batch_release": "passed",
+  "ruff": "passed",
+  "pyright": "passed: 0 errors 0 warnings",
+  "nested_real_metadata_adapter": "passed",
+  "live_modelscope_real_shard": "passed: engineering smoke only; immutable production manifest pending",
+  "data_package_rereview": "pending",
+  "durable_two_worker": "pending: D022 and D023",
+  "production_caption_availability_mapping": "pending",
+  "multi_gpu_ddp_nccl": "not_in_scope"
+}
