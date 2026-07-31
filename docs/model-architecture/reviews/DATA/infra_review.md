@@ -1,70 +1,79 @@
-# Data package Infra/performance review
+# Data package Infra/performance rereview
 
-Reviewer: `/root/roadmap_inventory` (independent package reviewer)
+Reviewer: independent agent `/root/data_package_review`
 
-Scope: `D010-D016` current CPU durability, boundedness, failure behavior, and the
-existing bounded one-GPU engineering evidence. Overall verdict: **CHANGES_REQUIRED**.
+Scope: committed `D010-D023` durability, boundedness, multiprocessing failure behavior,
+and current engineering evidence through HEAD
+`1b4fd87e19a5c1c9e21a502742ba5a38a6ad354`. Uncommitted T024 model changes were
+excluded. Overall verdict: **PASS in the implemented task scope**. Production
+throughput/capacity acceptance remains **PENDING**.
 
 ## Findings
 
-1. **D012 can report state publication failure after making the new state visible.**
-   `src/sakuramoon/data/state.py:121-133` performs `os.replace` before fsyncing the
-   parent directory. If that parent fsync fails, the method raises
-   `ShardStateError` but neither restores the previous state nor removes the new one.
-   A focused fault probe observed `state_visible_after_parent_fsync_failure True` with
-   active shard `r/1.tar`. The existing ENOSPC test at
-   `tests/fault_injection/test_data_failures.py:221-235` fails the first file fsync, so
-   it does not cover the post-replace branch. D012 is **CHANGES_REQUIRED** because a
-   caller cannot distinguish a rejected transition from a visible published state.
+No blocking Infra implementation finding remains after D017 and D022/D023.
 
-2. **D010's failed shard publication rollback is not durably published.**
-   `src/sakuramoon/data/modelscope.py:344-355` replaces the final shard, fsyncs the
-   parent, and unlinks the final file if that fsync fails. It does not fsync the parent
-   after the rollback unlink. A crash may therefore preserve either namespace state,
-   while the API reports failure. Full shard/cache state is explicitly subject to the
-   repository's atomic publication protocol, so D010 is **CHANGES_REQUIRED** with a
-   post-replace parent-fsync fault contract.
+1. D010 shard publication now fsyncs the rollback unlink after a post-replace parent
+   fsync failure. D011 removes a renamed validation bundle on publication failure.
+   D012 preserves or restores an unambiguous state namespace across initial/update
+   publication failure and distinguishes the committed-state cleanup error. D017 uses
+   the repository's regenerable-report replacement protocol.
+2. D018's retention evidence is constant-memory in manifest size. D013 scan state is
+   bounded by the fixed bucket family, D014 serialization by 512 condition tokens,
+   and D020 telemetry by twelve integer counters per batch.
+3. D023 bounds each worker's shard input queue at one command, DataLoader ready work at
+   the exact divisible budget, and completion messages at `worker_count`. The targeted
+   two-worker configuration observed capacities `2/2/2`, prefetch factor one, two
+   distinct worker PIDs, and PID reuse across four shards. A blocked idle worker does
+   not head-of-line block the other because result delivery is unordered and every
+   message carries worker/shard identity.
+4. Parent interruption and worker death never publish shard completion. The parent
+   shuts workers down and leaves every already-prepared shard active for replay. The
+   subsequent coordinator re-prepares all recovered active shards before activating a
+   new one and protects the full active set from eviction on each fetch.
 
-3. **D013 uses the obsolete no-clobber protocol for a regenerable scan report.**
-   `src/sakuramoon/data/image_ops.py:213-270` publishes by hard link and rejects an
-   existing destination. `tests/unit/data/test_image_ops.py:203-228` locks that
-   behavior. Current repository policy requires regenerable image/metric reports to
-   use a same-directory temporary file, file fsync, and `os.replace`. D013 is
-   **CHANGES_REQUIRED**; replacement and parent-fsync failure behavior need direct
-   contracts.
-
-4. **D012/D015's durable path is serial despite the locked two-worker production
-   topology.** `src/sakuramoon/data/collate.py:285-300` hard-fails at any worker count
-   other than one. This is a correct fail-closed response to the current single-active-
-   shard state model, but it is not completion of the initial two-persistent-worker
-   contract in `current/confirmed-decisions.md:151-158`. D012 and D015 remain
-   **CHANGES_REQUIRED** until a bounded durable multi-worker state design and focused
-   resume/failure tests exist. No throughput conclusion may be inferred from the
-   one-worker correctness path.
+The Python 3.12 test run emitted multiprocessing warnings because PyTorch's default
+Linux DataLoader context uses `fork` from a process that already has library threads.
+The real fault and persistence tests completed without a hang, so this is not a current
+failure. It remains part of the required long-lived one-GPU data/consumer engineering
+smoke; the CPU result alone does not establish CUDA-parent or endurance reliability.
 
 ## Per-task verdicts
 
 | Task | Infra/performance verdict | Evidence boundary |
 |---|---|---|
-| D010 | CHANGES_REQUIRED | Streamed file verification is bounded, but rollback after parent-fsync failure is not durable; live network evidence remains pending. |
-| D011 | PASS | CPU selection/bundle publication contracts are bounded; production 11M scan and real bundle publication remain pending. |
-| D012 | CHANGES_REQUIRED | Post-replace state failure is ambiguous and durable two-worker coordination is missing; cold-cache/NVMe failure evidence remains pending. |
-| D013 | CHANGES_REQUIRED | Streaming counters are bounded, but regenerable report publication violates current policy; production scans remain pending. |
-| D014 | PASS | CPU caption/serializer work is bounded and outside the model hot path; production 100k component distribution remains pending evidence, not a throughput pass. |
-| D015 | CHANGES_REQUIRED | Queue/fragments are bounded, but the durable production path cannot run the locked two-worker topology; cold-cache throughput/RSS/ready-wait evidence remains pending. |
-| D016 | PASS | Strict config binding has no material runtime performance risk; it makes no production scan claim. |
+| D010 | PASS | Listing is page-bounded, shard bodies are streamed, retries/timeouts are explicit, credentials are stripped on cross-host redirect, and failed publication rollback is durably fsynced. Live access and network throughput remain pending. |
+| D011 | PASS | Selection/bundle contracts are deterministic and tar writing is one-sample-at-a-time. The in-memory approximately 11M-row scan still requires production memory/time evidence. |
+| D012 | PASS | Explicit watermarks, protected LRU, verified fetch, manifest-bound atomic state, and failure rollback pass. Production 300-500 GiB sizing, concurrent-rank behavior, disk-full, and NVMe evidence remain pending. |
+| D013 | PASS | Assignment/full-scan counters and fixed decode counters are bounded; report construction validates totals. Production decode/resize throughput remains pending. |
+| D014 | PASS | Caption work is bounded by the fixed 512-token contract and adds no model forward, network, or cross-batch cache. Production tokenizer/truncation timing remains pending. |
+| D015 | PASS | Ready work is explicit, bucket fragments are bounded by the finite image/text key space, and no embedding/latent/activation cache exists. Production ready-wait, RSS/pinned memory, and throughput remain pending. |
+| D016 | PASS | Strict startup-only schema binding has no material hot-path cost. |
+| D017 | PASS | Sibling temporary, file fsync, atomic replace, previous-report preservation, and cleanup pass. |
+| D018 | PASS | The 10,001-bin histogram has constant memory and deterministic quantized output. |
+| D019 | PASS | Candidate validation is bounded by the already-materialized set and adds no I/O/model work. |
+| D020 | PASS | Fixed-key boolean/count transfer is bounded and compatible with worker pickle transfer. Production 100k execution cost remains pending. |
+| D021 | PASS | Trusted record lookup and explicit metadata adaptation add bounded per-sample CPU work; the real RTX 5090 smoke remains engineering rather than throughput evidence. |
+| D022 | PASS | Active cardinality is bounded by `worker_count`; state publication and cache protection pass targeted rollback/fault contracts. State cost is per shard, not per sample. |
+| D023 | PASS | Exact persistent-worker topology, capacity-one inputs, bounded ready/completion paths, parent-only mutation, independent completion, worker exit, parent close, and restart replay pass. |
 
-## Validation and boundaries
+## Independent validation
 
-The independent CPU package suite passed 285 tests with 8 warnings in 23.47 seconds
-under `CUDA_VISIBLE_DEVICES=` and `uv run --frozen`. Ruff passed; Pyright reported
-0 errors and 0 warnings. Static success does not discharge the missing post-replace
-fault branches or production topology.
+- CPU/data/config/fault rereview: `315 passed, 20 warnings in 27.43s`.
+- Ruff: passed.
+- Pyright: `0 errors, 0 warnings`.
+- Trace verifier: `222` requirements, `222` source nodes, `0` errors.
 
-No production dataset/network/NVMe sweep, GPU run, long training, DDP, NCCL,
-multi-GPU validation, 1,000-step canary, or formal stage was performed. The existing
-D015 one-GPU Qwen/VAE engineering smoke remains component/pipeline evidence only; it
-does not establish Data throughput, durable multi-worker recovery, four-GPU behavior,
-or any formal stage gate. Required production scans, cold-cache throughput, ready-wait,
-RSS/swap, disk-full, concurrent coordinator, and replay audit evidence remain pending.
-This review did not read `.env` or `reference/` and made no network call.
+The test-local basetemp under `reviews/DATA/` was removed after validation. This review
+made no network or GPU call and did not run a production NVMe sweep, long training,
+DDP/NCCL, multi-GPU validation, 1,000-step canary, or formal stage.
+
+## Remaining performance gates
+
+- Cold-cache continuous two-hour supply at `>=12 samples/s`, ready wait `<2%`, no host
+  swap/unbounded RSS, and no cache-quota violation.
+- Fair 1/2/3-worker, queue-depth, download concurrency, Range worker, and 300-500 GiB
+  watermark sweep before locking the smallest stable production values.
+- Phase timing for cache/tar/JSON/caption/tokenize/decode/EXIF/resize/crop/bucket/H2D,
+  plus real rejection counts, pinned/host memory, and production replay audit.
+- One-GPU consumer integration with the persistent two-worker path; no current CPU or
+  one-GPU result may be extrapolated to four-GPU DDP/NCCL behavior.

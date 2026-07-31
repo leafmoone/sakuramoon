@@ -1,93 +1,84 @@
-# Data package AI/model correctness review
+# Data package AI/model correctness rereview
 
-Reviewer: `/root/roadmap_inventory` (independent package reviewer)
+Reviewer: independent agent `/root/data_package_review`
 
-Scope: `D010-D016` current CPU implementation, contracts, task evidence, and the
-existing bounded one-GPU engineering evidence. Overall verdict: **CHANGES_REQUIRED**.
+Scope: committed `D010-D023` data implementation, current decisions, task pages,
+traceability mappings, per-task evidence, and targeted CPU/one-GPU evidence through
+HEAD `1b4fd87e19a5c1c9e21a502742ba5a38a6ad354`. Uncommitted T024 model changes in the
+shared worktree were excluded. Overall verdict: **PASS in the implemented task scope**.
+The production Data milestone remains **PENDING** on the explicit scans, immutable
+inventory, and performance gates listed below.
 
 ## Findings
 
-1. **D015 bypasses D011's trusted shard metadata contract.**
-   `src/sakuramoon/data/pipeline.py:249-252` parses each sample with
-   `parse_metadata(raw_metadata)`, so `release` is accepted from sample JSON. D011's
-   trusted boundary is `parse_shard_metadata(..., shard=..., fields=...)` at
-   `src/sakuramoon/data/metadata.py:102-136`, which takes `release` only from the
-   immutable D010 `ShardRecord`. The production pipeline can therefore stratify or
-   audit a sample under an untrusted release value. D015 is **CHANGES_REQUIRED**.
+No blocking AI/model correctness finding remains in the D010-D023 implementation.
+The earlier package findings are closed by D017-D023 without changing the governing
+caption, image, validation, or replay semantics:
 
-2. **D012/D015 do not implement the locked initial two-worker durable contract.**
-   `src/sakuramoon/data/collate.py:285-300` rejects every durable invocation whose
-   `worker_count` is not one, and `tests/unit/data/test_pipeline.py:272-324` explicitly
-   preserves that rejection. This conflicts with the initial two persistent workers
-   per GPU in `current/confirmed-decisions.md:151-158` and the D015 contract in
-   `progress/IMPLEMENTATION_ROADMAP.md:305-313`. The earlier 1/2/3-worker mechanics
-   sweep did not use D012 lease state and cannot establish shard-level durable resume.
-   D012 and D015 are **CHANGES_REQUIRED**; production durable multi-worker use remains
-   blocked rather than silently reduced to one worker.
-
-3. **D013 cannot produce the required retention percentiles.**
-   `src/sakuramoon/data/buckets.py:252-301` retains assigned counts and rejection
-   counts only; each accepted `crop_retention` value is discarded. The complete scan
-   requirement at `current/open-items.md:40-45` requires retention quantiles as well
-   as eligible/rejection/bucket counts. D013 is **CHANGES_REQUIRED** until a bounded,
-   deterministic quantile/report contract and golden test exist.
-
-4. **D014 does not validate candidate deletion IDs.**
-   `CaptionFields.candidate_tags` is an unchecked `frozenset[str]` at
-   `src/sakuramoon/data/caption.py:66-74`; deletion is exact string membership at
-   `caption.py:183-189`. A focused probe accepted `" character:alice "` and did not
-   delete the canonical `character:alice` tag. The existing boundary test at
-   `tests/unit/data/test_caption.py:187-190` validates `Tag.canonical`, not candidate
-   IDs. D014 is **CHANGES_REQUIRED**.
-
-5. **D014 discards the component dropout decisions required by its 100k report.**
-   `CaptionPlan` exposes selected content and `all_condition_dropped` only at
-   `src/sakuramoon/data/caption.py:123-132`; the category, Artist, candidate-source,
-   and per-NL hit decisions made at `caption.py:173-201` are not retained. The current
-   contract requires the final empty-body rate and every component hit rate
-   (`current/open-items.md:21-26`). Inferring hits from final content is not equivalent
-   when a source is empty or several dropouts overlap. D014 remains
-   **CHANGES_REQUIRED** until explicit telemetry and the production 100k distribution
-   run exist.
-
-6. **D016 is correct in its config-only scope, but older status text is stale.**
-   `src/sakuramoon/config/schema.py:202-231` and
-   `config/examples/all_options.example.toml:95-110` bind all approved values with no
-   runtime defaults. D016 is **PASS**. It does not satisfy D014's still-pending 100k
-   component-distribution validation. The old undecided-value statements in
-   `progress/tasks/D014.md:3-5,59-62`, `progress/tasks/D015.md:36-38`, and
-   `progress/traceability.toml:948-952` are evidence/status drift and must not be used
-   to reopen or reinterpret the confirmed values.
+1. D021 binds every local shard to one immutable D010 `ShardRecord`, resolves each
+   WebDataset `__url__` through that trusted mapping, and takes `release` only from the
+   record. Explicit field mapping and the nested adapter precede D011 parsing, while
+   the unmodified JSON remains the caption parser input. Validation exclusion occurs
+   before caption planning, tokenization, image decode, and crop. Trusted release is
+   retained in `PipelineSample` and `TrainingBatch`.
+2. D022 schema v3 binds state to the canonical manifest digest and exact positive
+   `worker_count`, bounds sorted unique active shards by that count, and rejects v1/v2
+   and topology drift. Activation is durably published before cache fetch; every fetch
+   protects the complete active set. Completion removes only the named shard, and
+   restart accounts every recovered active shard/sample once per recovery attempt.
+3. D023 launches the exact configured DataLoader worker count and the targeted contract
+   observes two distinct persistent PIDs reused across four shards. Workers receive
+   only a parent-prepared local path and trusted record; no state store or cache enters
+   the worker dataset. The parent completes a shard only after its ordered done marker
+   and normal bounded completion message. Real `os._exit(23)` and parent-generator
+   close leave all prepared shards active, after which restart re-prepares and replays
+   both from shard start.
+4. D017/D018/D019/D020 close the remaining image/caption findings: replace-publication
+   of regenerable image reports, fixed-memory retention P01/P50/P99, strict candidate
+   deletion IDs, and source-independent twelve-key dropout hit telemetry through
+   collate. D016's current confirmed probabilities govern; stale pre-D016 wording in
+   older D014/D015 evidence does not reopen those values.
 
 ## Per-task verdicts
 
 | Task | AI/model verdict | Evidence boundary |
 |---|---|---|
-| D010 | PASS | Canonical builder/transport contracts pass; real immutable manifest and production inventory remain pending evidence. |
-| D011 | PASS | Trusted shard-release parser, selection, and exclusion contracts pass; approximately 11M-ID uniqueness, real 2,000-ID bundle, and zero-leak dry run remain pending. |
-| D012 | CHANGES_REQUIRED | Single-worker state semantics are covered, but the locked durable two-worker contract is absent. |
-| D013 | CHANGES_REQUIRED | Bucket/crop goldens pass; required retention percentiles and production full/100k scans are absent. |
-| D014 | CHANGES_REQUIRED | Serializer goldens pass; candidate IDs and component-hit telemetry are incomplete. |
-| D015 | CHANGES_REQUIRED | Pipeline accepts untrusted sample `release` and lacks the locked durable two-worker path. |
-| D016 | PASS | Fixed strict TOML values are correct; the production 100k distribution run belongs to D014/Data milestone evidence. |
+| D010 | PASS | Fixed source/commit schema, canonical explicit shard facts, exact remote inventory comparison, streamed byte/SHA verification, and redacted credential boundary pass. The immutable production revision/inventory and live enumeration remain pending. |
+| D011 | PASS | Explicit field mapping, trusted shard release, duplicate detection, deterministic exact-2,000 stratification, bundle identity, and exclusion contracts pass. Production field mapping, approximately 11M-ID uniqueness, real bundle, and full zero-leak dry run remain pending. |
+| D012 | PASS | Manifest-bound cache/state and at-least-once semantics pass; D022/D023 supply the later multi-active/two-worker remediation. Production quota, concurrent-rank, and replay audit evidence remain pending. |
+| D013 | PASS | EXIF/RGB, exact 17-shape families, no-upscale, nearest aspect, cover crop, inclusive retention, scan accounting, and hard dimension threshold pass. Full manifest and real 100k decode scans remain pending. |
+| D014 | PASS | Fixed category/separator/framing rules, deterministic dropout/shuffle, whole-boundary truncation, Artist placement, and structured indices pass. D016 supplies the current fixed values; production component/truncation distribution remains pending. |
+| D015 | PASS | Validation-before-processing, one decode/serialization path, deterministic RNG identity, framing-owned padding, homogeneous typed collate, and expected image-rejection behavior pass. D021-D023 close its trusted metadata and durable topology findings. |
+| D016 | PASS | All twelve approved dropout values are required strict TOML floats with no runtime defaults or drift. |
+| D017 | PASS | Canonical image scan report bytes are preserved while publication follows the required sibling-temp, file-fsync, `os.replace` protocol. |
+| D018 | PASS | Accepted-crop P01/P50/P99 use deterministic nearest-rank semantics over a fixed 10,001-bin histogram; all-rejected input reports null. |
+| D019 | PASS | Candidate deletion IDs require an exact immutable set of non-empty trim-stable strings and cannot silently evade canonical matching. |
+| D020 | PASS | All twelve independent hit decisions survive plan, serialization, worker transfer, and batch aggregation with T051-compatible keys. The production 100k run and final empty-body rate remain pending. |
+| D021 | PASS | Trusted `ShardRecord`, explicit mapping/adapter, validation exclusion, caption/image contracts, and batch release propagation pass on CPU plus the recorded real-shard/local-model RTX 5090 smoke. The smoke is not an immutable production manifest claim. |
+| D022 | PASS | Exact schema-v3 topology, bounded active set, persist-before-fetch, full active protection, independent completion, replay accounting, and recovered-active barrier pass. |
+| D023 | PASS | Two persistent workers, parent-only coordination, bounded channels, prepare-before-handoff, normal completion, real worker exit, parent interruption, whole-shard restart replay, and recovery ordering pass. |
 
-## Validation and boundaries
+## Independent validation
 
-The independent CPU package suite passed:
+The rereview CPU suite passed `315` tests in `27.43s` with `20` dependency/fork
+deprecation warnings. It covered all data unit tests, data/text contracts, strict
+dropout config contracts, D010-D012 fault paths, and D023 worker-exit/restart faults.
+Targeted Ruff passed; targeted Pyright reported `0 errors, 0 warnings`. The direct
+trace verifier passed with `222/222` requirements/source nodes and no errors.
 
-```text
-285 passed, 8 warnings in 23.47s
-```
+No network, GPU, production dataset/NVMe scan, long training, DDP, NCCL, multi-GPU,
+1,000-step canary, or formal stage was run by this reviewer. Existing D015/D021
+one-GPU evidence is accepted only for its stated local pipeline/Qwen/Mage engineering
+scope and does not close a throughput, quality, production inventory, or four-GPU gate.
 
-Command scope: `tests/unit/data`, `tests/contracts/data`,
-`tests/contracts/text_protocol`, targeted config contracts, and
-`tests/fault_injection/test_data_failures.py`, run with `CUDA_VISIBLE_DEVICES=` and
-`uv run --frozen`. Ruff passed. Pyright reported 0 errors and 0 warnings. The warnings
-were dependency deprecations and multiprocessing fork warnings, not test failures.
+## Remaining milestone gates
 
-Passing tests do not close the findings above because several tests currently encode
-the incomplete behavior. This review did not read `.env` or `reference/`, use the
-network or GPU, run long training, or exercise DDP, NCCL, multi-GPU, a 1,000-step
-canary, or a formal stage. No upstream four-column algorithm comparison is applicable
-to this Data package: its governing contracts are the current SakuraMoon decisions and
-task specifications, not runtime use of an upstream algorithm implementation.
+- Immutable production manifest and source access evidence; approximately 11M global
+  ID uniqueness; production metadata/caption-availability mapping; exact 2,000-ID
+  validation bundle; complete training zero-leak audit.
+- Full 256/512 bucket scan with production retention/rejection distributions and the
+  real 100,000-image post-EXIF dimension check.
+- Production 100k caption dry run reporting every component hit, final empty-body
+  rate, and `all_condition=10% +/- 0.5pp` acceptance.
+- VAE reconstruction/latent quality evidence belongs to T020 and remains outside this
+  CPU Data package pass.
