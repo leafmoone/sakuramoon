@@ -1,0 +1,53 @@
+{
+  "task_id": "D024",
+  "status": "passed_in_cpu_and_bounded_1gpu_scope",
+  "hardware": {
+    "cpu": "x86_64",
+    "gpu": "1x NVIDIA GeForce RTX 5090"
+  },
+  "results": [
+    {
+      "scope": "service_mainset_fault_and_two_worker_contracts",
+      "result": "passed",
+      "passed": 14
+    },
+    {
+      "scope": "adjacent_config_cache_pipeline_state_and_trace_contracts",
+      "result": "passed",
+      "passed": 158
+    },
+    {
+      "scope": "real_cuda_service_batch_consumer",
+      "result": "passed",
+      "passed": 1
+    },
+    {
+      "scope": "ruff",
+      "result": "passed"
+    },
+    {
+      "scope": "pyright",
+      "result": "passed",
+      "errors": 0,
+      "warnings": 0
+    }
+  ],
+  "covered_contracts": [
+    "full random manifest permutation and exact ordinal persistence",
+    "service-only transport cache state and partial ownership",
+    "bounded concurrent reservations lookahead leases ACKs and worker channels",
+    "persist-before-lease and all-active eviction protection",
+    "normal-exhaustion completion and atomic full-mainset rollover",
+    "worker service client and parent failure preserve active replay",
+    "recovered-active reprepare barrier and exact replay accounting",
+    "trainer lifecycle and checkpoint inputs cannot control data order",
+    "trusted metadata validation exclusion caption image and collate preservation"
+  ],
+  "pending_or_blocked": [
+    "independent DATA package review",
+    "immutable production manifest and live ModelScope access",
+    "two-hour production cold-cache and fully-cached control benchmark",
+    "production NVMe quota RSS swap throughput and ready-wait acceptance",
+    "DDP NCCL multi-GPU long-run 1000-step and formal stage evidence"
+  ]
+}

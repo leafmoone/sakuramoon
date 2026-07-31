@@ -9,7 +9,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from multiprocessing.queues import Queue as MultiprocessingQueue
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
@@ -26,7 +26,13 @@ from sakuramoon.data.pipeline import (
     RngIdentity,
     WebDatasetPipeline,
 )
-from sakuramoon.data.state import SingleProcessShardCoordinator
+from sakuramoon.data.service_protocol import (
+    DataServiceSessionIdentity,
+    ShardLeaseDescriptor,
+)
+
+if TYPE_CHECKING:
+    from sakuramoon.data.state import SingleProcessShardCoordinator
 
 
 class CollateError(ValueError):
@@ -559,7 +565,7 @@ def iter_leased_batches(
                     shard_path=shard_path,
                     local_path=cached.fetched.path,
                     record=coordinator.store.manifest.shard(shard_path),
-                )
+                ),
             )
             queued[shard_path] = worker_id
 
@@ -606,6 +612,126 @@ def iter_leased_batches(
         _shutdown_loader(loader)
 
 
+class DataLeaseClient(Protocol):
+    identity: DataServiceSessionIdentity
+
+    def health(self) -> bool: ...
+
+    def lease(self, worker_id: int) -> ShardLeaseDescriptor | None: ...
+
+    def acknowledge(self, descriptor: ShardLeaseDescriptor) -> None: ...
+
+
+def iter_service_batches(
+    pipeline: WebDatasetPipeline,
+    client: DataLeaseClient,
+    *,
+    batch_size: int,
+    worker_count: int,
+    ready_batches: int,
+    pin_memory: bool,
+    drop_last: bool,
+) -> Iterator[TrainingBatch]:
+    """Drain service-issued leases without owning service/cache/state in trainer."""
+
+    if worker_count != client.identity.worker_count:
+        raise CollateError(
+            "data service worker_count must exactly match the configured topology"
+        )
+    if type(batch_size) is not int or batch_size <= 0 or type(drop_last) is not bool:
+        raise CollateError("batch_size and drop_last are invalid")
+    if client.health():
+        return
+
+    dataset = _PersistentShardDataset(
+        pipeline,
+        batch_size=batch_size,
+        drop_last=drop_last,
+        worker_count=worker_count,
+    )
+    loader = _build_batch_loader(
+        dataset,
+        worker_count=worker_count,
+        ready_batches=ready_batches,
+        pin_memory=pin_memory,
+        in_order=False,
+    )
+    iterator = iter(loader)
+    queued: dict[str, ShardLeaseDescriptor] = {}
+    available_workers = list(range(worker_count))
+    completion_messages: dict[str, _WorkerCompletion] = {}
+    stop_record: ShardRecord | None = None
+
+    def submit_available() -> None:
+        nonlocal stop_record
+        remaining: list[int] = []
+        for worker_id in available_workers:
+            descriptor = client.lease(worker_id)
+            if descriptor is None:
+                remaining.append(worker_id)
+                continue
+            if descriptor.record.path in queued:
+                raise CollateError("data service returned a duplicate active shard")
+            dataset.submit(
+                worker_id,
+                _ShardWork(
+                    shard_path=descriptor.record.path,
+                    local_path=descriptor.local_path,
+                    record=descriptor.record,
+                ),
+            )
+            queued[descriptor.record.path] = descriptor
+            stop_record = descriptor.record
+        available_workers[:] = remaining
+
+    def finish_shard(shard_path: str) -> None:
+        completion = _completion_for(
+            dataset.completion_queue, completion_messages, shard_path
+        )
+        descriptor = queued.get(shard_path)
+        if descriptor is None:
+            raise CollateError("persistent worker completed an unknown service lease")
+        if not completion.normal:
+            raise CollateError(
+                f"persistent worker failed for shard {shard_path}: {completion.error}"
+            )
+        if completion.worker_id != descriptor.worker_id:
+            raise CollateError("persistent worker service identity drifted")
+        client.acknowledge(descriptor)
+        del queued[shard_path]
+        available_workers.append(descriptor.worker_id)
+        submit_available()
+
+    try:
+        submit_available()
+        while queued:
+            item = next(iterator)
+            if isinstance(item, _WorkerBatch):
+                descriptor = queued.get(item.shard_path)
+                if descriptor is None or descriptor.worker_id != item.worker_id:
+                    raise CollateError(
+                        "persistent worker returned an unknown service lease"
+                    )
+                yield item.batch
+            elif isinstance(item, _WorkerDone):
+                descriptor = queued.get(item.shard_path)
+                if descriptor is None or descriptor.worker_id != item.worker_id:
+                    raise CollateError(
+                        "persistent worker done service identity drifted"
+                    )
+                finish_shard(item.shard_path)
+            else:
+                raise CollateError("persistent worker output channel is invalid")
+    finally:
+        if stop_record is not None:
+            for worker_id in range(worker_count):
+                try:
+                    dataset.stop(worker_id, stop_record)
+                except queue.Full:
+                    continue
+        _shutdown_loader(loader)
+
+
 __all__ = [
     "BucketedBatchDataset",
     "CollateError",
@@ -613,4 +739,5 @@ __all__ = [
     "bucketed_batches",
     "collate_samples",
     "iter_leased_batches",
+    "iter_service_batches",
 ]

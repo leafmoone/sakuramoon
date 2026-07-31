@@ -146,7 +146,7 @@ class DataCacheConfig(StrictModel):
     low_watermark_gib: Annotated[int, Field(ge=300, lt=500)]
     high_watermark_gib: Annotated[int, Field(gt=300, le=500)]
     download_concurrency: PositiveInt
-    range_workers: PositiveInt
+    verified_shard_lookahead: PositiveInt
     persistent_workers_per_rank: PositiveInt
     ready_batches_per_rank: PositiveInt
 
@@ -155,6 +155,14 @@ class DataCacheConfig(StrictModel):
         if self.low_watermark_gib >= self.high_watermark_gib:
             raise ValueError("cache low watermark must be below high watermark")
         return self
+
+
+class DataServiceConfig(StrictModel):
+    socket_path: Annotated[str, StringConstraints(min_length=1)]
+    mainset_path: Annotated[str, StringConstraints(min_length=1)]
+    request_timeout_seconds: Annotated[ExactFloat, Field(gt=0.0, le=300.0)]
+    lease_channel_capacity: PositiveInt
+    ack_channel_capacity: PositiveInt
 
 
 class DataTransportConfig(StrictModel):
@@ -194,10 +202,26 @@ class DataConfig(StrictModel):
     source: DataSourceConfig
     manifest: DataManifestConfig
     cache: DataCacheConfig
+    service: DataServiceConfig
     transport: DataTransportConfig
     validation: DataValidationConfig
     image: DataImageConfig
     buckets: DataBucketsConfig
+
+    @model_validator(mode="after")
+    def validate_service_worker_capacities(self) -> DataConfig:
+        workers = self.cache.persistent_workers_per_rank
+        if (
+            self.cache.verified_shard_lookahead < workers
+            or self.service.lease_channel_capacity < workers
+            or self.service.ack_channel_capacity < workers
+            or self.cache.ready_batches_per_rank < workers
+            or self.cache.ready_batches_per_rank % workers
+        ):
+            raise ValueError(
+                "data service and ready channel capacities must cover exact worker topology"
+            )
+        return self
 
 
 class NlDropoutConfig(StrictModel):

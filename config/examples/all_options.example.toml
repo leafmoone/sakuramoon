@@ -51,9 +51,16 @@ sha256 = "REQUIRED_IMMUTABLE_SHA256"
 low_watermark_gib = "BENCHMARK_REQUIRED" # integer, 300 <= low < high
 high_watermark_gib = "BENCHMARK_REQUIRED" # integer, low < high <= 500
 download_concurrency = "BENCHMARK_REQUIRED" # integer > 0
-range_workers = "BENCHMARK_REQUIRED" # integer > 0
+verified_shard_lookahead = "BENCHMARK_REQUIRED" # integer > 0
 persistent_workers_per_rank = "BENCHMARK_REQUIRED" # integer > 0
 ready_batches_per_rank = "BENCHMARK_REQUIRED" # integer > 0
+
+[data.service]
+socket_path = "runs/example/data-service.sock"
+mainset_path = "cache/data-service-mainset.json" # service-owned; independent of trainer run/stage
+request_timeout_seconds = "BENCHMARK_REQUIRED" # TOML float, 0 < value <= 300
+lease_channel_capacity = "BENCHMARK_REQUIRED" # integer > 0
+ack_channel_capacity = "BENCHMARK_REQUIRED" # integer > 0
 
 [data.transport]
 connect_timeout_seconds = "BENCHMARK_REQUIRED" # TOML float, 0 < value <= 300

@@ -51,6 +51,13 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [ ] 达到 LPIPS/SSIM/严重错误/细节损失全部门槛，并保存逐类人工审查结果。
 - [ ] 对 50k–100k 个训练 crop 统计 latent 全局/逐通道 mean/std、P1/P50/P99、绝对最大值与 BF16 安全性。
 - [ ] 验证同一 seed/pass/id 的 crop 完全可复现，crop offset 和源尺寸绝不进入模型输入。
+## 3.3 独立数据供给 service 与 `mainset`
+- [ ] D024 实现独立启动/存活的单机唯一 data service，使 ModelScope 网络、token 解析、`.partial`、bytes/SHA-256、原子发布、cache/LRU/eviction 和 active/completed/replay state 全部只存在于 service；用进程边界与调用栈测试证明 trainer/DataLoader workers 没有这些路径，service 不可用时硬失败且无内联 fallback。
+- [ ] service 为每轮持久化一张 `mainset`：严格绑定 immutable training manifest，包含全部 tar path 且每个恰好一次，记录新的 shuffle identity、精确 ordinal 顺序和逐行状态；验证 trainer、checkpoint、stage/resolution/model growth、worker topology 与 resume 都不能传入或改写 tar order/cursor。
+- [ ] 按 `mainset` 顺序实现有界并发 download/verify/publish、verified lookahead、eviction lease 和本机 IPC；trainer 消费 `A/B` 时 service 准备 `C/D/E...`，所有 download/ready/lease/ACK、worker input/output、ready batch 与 completion channel 均有显式容量，active lease 不 eviction，磁盘预留和 quota 计入 published、in-flight 与 `.partial`。
+- [ ] 验证 normal-exhaustion completion ACK 才逐 tar 完成；worker/service/client/trainer exit、断连或 ACK 丢失保留 active 并从 tar 起点 replay。只有当前 `mainset` 全部 tar 已下载、验证、供给且所有 outstanding lease 完成后，才原子删除旧表并创建下一份全 manifest 随机 `mainset`；崩溃不得丢失旧表或提前供给下一轮。
+- [ ] T044 从 production raw checkpoint schema、manifest 和 resume API 中移除全部 data-service state；checkpoint 仍须完整保存并恢复 model、TorchAO optimizer、scheduler/growth、trainer counters、训练 RNG、optimizer-SR RNG、resolved config 与 identity。fresh-process next-update 正确性使用显式固定输入 batch，禁止要求或伪造 live tar/batch 连续性，并为既有含 data sidecar 的旧 raw schema 提供明确拒绝或受治理迁移合同。
+- [ ] 在真实独立 service、真实多进程 DataLoader 和 1GPU consumer 上完成 cold/warm-cache overlap、worker/service/trainer fault 与人工 checkpoint resume smoke；达到 `>=12 samples/s`、ready wait `<2%`、无 swap/无界 RSS/quota 越界，并证明下载/校验不会让 same-backend fully-cached trainer step p50/p95/p99 超出预登记波动。
 # 4. P0：模型 reference 与正确性
 ## 4.1 文本与 style
 - [ ] 实现结构化 serializer 输出：主文本、Artist辅助segment、`main_token_indices`、`artist_token_indices`、attention mask和condition length；禁止通过token字符串回查span。超限时必须先保留协议边界和Artist segment，再裁NL/低优先级主文本tags。
@@ -82,8 +89,8 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [ ] 验证四 rank 的 model、moments、per-parameter step 与 SR RNG hash 一致，同时训练 RNG 保持 rank-local。
 - [ ] 验证 strict global sample mean 与单卡合并 batch reference 一致，FP32 global clip=1.0。
 ## 5.3 Raw checkpoint
-- [ ] 实现 canonical-FQN sharded Safetensors model、完整 optimizer sidecar、trainer/data/growth/RNG state、checksum、manifest、临时目录和 COMPLETE。
-- [ ] 同 checkpoint 执行 save→fresh process load→next step，与 uninterrupted path 对齐；缺失/损坏任一必需 sidecar 时 resume 在 forward 前失败。
+- [x] T042 历史 schema 已实现 canonical-FQN sharded Safetensors model、完整 optimizer sidecar、trainer/data/growth/RNG state、checksum、manifest、临时目录和 COMPLETE；其中 data state 是已被 D024/T044 取代的旧生产合同，历史实现与证据保留，去除工作由 3.3 的新条款关闭。
+- [x] T042 已在其历史范围完成 save→fresh process load→next step 与缺失/损坏 sidecar 硬失败；D024/T044 仍须按 3.3 使用固定外部 batch 复验训练/优化器恢复，并明确排除 live-data continuity。
 - [ ] 普通 resume 只接受相同 topology；transition 只接受配置列明的唯一前序。模型目录去掉续训 sidecar 后仍能独立推理。
 - [ ] raw、model-only snapshot、PMA 与 release artifact 使用不同 kind/目录；PMA 绝不作为 resume 或 growth 输入。
 # 6. P1：目标机 Benchmark 与显式 Stage 配置
@@ -99,9 +106,9 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [ ] 报告 step p50/p95/p99、GPU active/idle、kernel launch/gap、DDP wait、optimizer、host/pinned RAM 和 checkpoint 摊销开销。
 ## 6.3 Stage overlays 与预算
 - [ ] 生成 base + S0/S1/G1/S2/G2/S3 六份显式 overlays，以及默认禁用的 H1/H2 模板和 resolved-config hash。
-- [ ] benchmark 后填写每 stage 的 valid samples/data passes、DiT FLOPs、successful updates、batch/accumulation、checkpoint slots 和 wall-time 预测。
+- [ ] benchmark 后填写每 stage 的 valid samples/equivalent data passes、DiT FLOPs、successful updates、batch/accumulation、checkpoint slots 和 wall-time 预测；equivalent data passes 只由样本暴露量换算，不对应、重置或选择 service `mainset` 代次。
 - [ ] 实现 drain/finalize、`stage_ready` report 和 transition preflight；训练程序不得自动改变 world size、深度、分辨率、LR 或数据混合。
-- [ ] 验证 transition 后以新的 stage/pass/seed 从完整 manifest 重开，固定验证集保持完全不变。
+- [x] 已取代：transition 不再以新的 stage/pass/seed 重置 tar 顺序；固定验证集保持不变，独立 service 继续当前持久化 `mainset`，该替代合同由 3.3 的 D024 项实现和验证。
 # 7. P1：深度增长、恢复与故障注入
 ## 7.1 两次增长
 - [ ] 实现 final 24-slot stable FQN 和 active slot ids；两次增长分别只允许预定义 new-slot allowlist。
@@ -132,7 +139,7 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [ ] 在组件06把FSDP2正文明确标为被组件12覆盖；在组件09把bitsandbytes/FSDP2迁移说明改为引用组件12。
 - [ ] 把组件04和决策中心残留的“约1B”改为1.85B–1.90B。
 - [ ] 把组件08中PMA可作下一stage初始化的历史表述收窄为只用于评估/发布。
-- [ ] 把组件11的stage data pass待定标记为已由组件10/12解决。
+- [x] 已取代：组件11的 stage data pass 不再作为实现来源；现行 transition 与 data-service `mainset` 以本页 3.3 和现行决定为准，archive 保持只读且不回写。
 - [x] 组件03/05已写入 condition 512、8个长度桶和不因Artist变化重扫的最终决定；目标机只继续验证padding/varlen执行路径。
 - [ ] 原组件页保留论证历史，但所有仍可被误当成配置来源的旧段落必须带“已取代”及现行方案链接。
 # 11. 来源

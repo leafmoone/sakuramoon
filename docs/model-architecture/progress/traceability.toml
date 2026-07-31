@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 92
+registry_revision = 93
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -114,10 +114,26 @@ new_sha256 = "b6ed7cf68d0ee480921d40b9f7a210965b6c2ed1a7ff3b23d7a951d062add1e5"
 changed_at = "2026-07-31"
 summary = "Move the loss observation boundary to t=0.95 while preserving full-batch loss semantics."
 
+[[changes]]
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+revision = 9
+previous_sha256 = "cc633b7a00e0d206898ea6bec90323a524d9138691df4d55149bd2ad3e735f69"
+new_sha256 = "1688fab7bf76cc4e8a41b094b4560f623f0570179cc59d3a846451fa22357cfe"
+changed_at = "2026-07-31"
+summary = "Move tar order and shard state to an independent persistent mainset service and exclude data continuity from checkpoints."
+
+[[changes]]
+source_path = "docs/model-architecture/current/open-items.md"
+revision = 7
+previous_sha256 = "013a0c1a9b7f9d986c4c512be7316bc9bb734c5590386c52e75459a87e10a455"
+new_sha256 = "e9db19d69189886d49738dfd76ec4c12d077a2292d1302a99bf9f5e06f042179"
+changed_at = "2026-07-31"
+summary = "Add D024 mainset service and T044 service-decoupled checkpoint implementation and validation gates."
+
 [[sources]]
 path = "docs/model-architecture/current/confirmed-decisions.md"
 kind = "confirmed"
-revision = 8
+revision = 9
 include_top_headings = [
     "0.",
     "1.",
@@ -138,13 +154,13 @@ include_top_headings = [
 excluded_top_headings = [
     "15.",
 ]
-sha256 = "cc633b7a00e0d206898ea6bec90323a524d9138691df4d55149bd2ad3e735f69"
+sha256 = "1688fab7bf76cc4e8a41b094b4560f623f0570179cc59d3a846451fa22357cfe"
 initial_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
 
 [[sources]]
 path = "docs/model-architecture/current/open-items.md"
 kind = "open_items"
-revision = 6
+revision = 7
 include_top_headings = [
     "0.",
     "1.",
@@ -161,7 +177,7 @@ include_top_headings = [
 excluded_top_headings = [
     "11.",
 ]
-sha256 = "013a0c1a9b7f9d986c4c512be7316bc9bb734c5590386c52e75459a87e10a455"
+sha256 = "e9db19d69189886d49738dfd76ec4c12d077a2292d1302a99bf9f5e06f042179"
 initial_sha256 = "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6"
 
 [[sources]]
@@ -589,6 +605,7 @@ owner_tasks = [
     "D021",
     "D022",
     "D023",
+    "D024",
     "T054",
 ]
 config_keys = [
@@ -633,6 +650,7 @@ owner_tasks = [
     "T041",
     "T042",
     "T043",
+    "T044",
     "T050",
     "T053",
     "T054",
@@ -10300,7 +10318,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-072"
 kind = "open_item"
-status = "planned"
+status = "superseded"
 profile = "training_system"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -10312,7 +10330,7 @@ source_fingerprint = "12dd8d9cefa13ac7d999e416ea554029e952d276e62f570c336842cffb
 source_occurrence = 0
 blocked_by = []
 alias_of = ""
-superseded_by = ""
+superseded_by = "OPEN-101"
 implementation_commit_ref = ""
 implementation_paths = []
 evidence_hardware = ""
@@ -12494,3 +12512,367 @@ not_applicable_fields = [
     "benchmarks",
 ]
 not_applicable_reason = "M034 independently implements fixed solver identities and has no reference-code dependency or performance optimization benchmark."
+
+[[requirements]]
+id = "C10-010"
+kind = "requirement"
+status = "planned"
+profile = "data"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = ["10. 分辨率课程、Bucket 与深度增长"]
+node_kind = "list_item"
+source_fingerprint = "01b15152f8cdc4efb761eabb31530874ce7e62fddbc0ac807b96baafdc227c22"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = ""
+implementation_paths = []
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/**/data*", "tests/**/cache*"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The service-owned data order has no reference-code dependency."
+
+[[requirements]]
+id = "C11-008"
+kind = "requirement"
+status = "implemented"
+profile = "data"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = ["11. 数据、缓存与验证隔离"]
+node_kind = "list_item"
+source_fingerprint = "4f4f1eb4c8464e55c87f41a7850fe518e3e860ba517abf2e43f148e8f36f7d4d"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D024"
+implementation_paths = ["src/sakuramoon/cli/data_service.py", "src/sakuramoon/data/service.py", "src/sakuramoon/data/client.py", "src/sakuramoon/data/__init__.py"]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/unit/data/test_d024_service.py", "tests/fault_injection/test_d024_service_faults.py", "tests/gpu/data/test_d024_service_consumer.py"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The process-isolation requirement has no reference-code dependency."
+
+[[requirements]]
+id = "C11-009"
+kind = "requirement"
+status = "implemented"
+profile = "data"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = ["11. 数据、缓存与验证隔离"]
+node_kind = "list_item"
+source_fingerprint = "7e61f968260abc81af5cdee84d58dec204e34a35a875c44da1ef958eea45de92"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D024"
+implementation_paths = ["src/sakuramoon/data/service.py", "src/sakuramoon/data/service_protocol.py", "src/sakuramoon/cli/data_service.py", "src/sakuramoon/config/schema.py"]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/unit/data/test_d024_service.py", "tests/fault_injection/test_d024_service_faults.py", "tests/unit/config/test_schema.py"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The persistent mainset requirement has no reference-code dependency."
+
+[[requirements]]
+id = "C11-010"
+kind = "requirement"
+status = "implemented"
+profile = "data"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = ["11. 数据、缓存与验证隔离"]
+node_kind = "list_item"
+source_fingerprint = "cc0c8cadbd5375e09b8c3f1a496a1bd3a2e35a8ad0980c351f39ab307448b161"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D024"
+implementation_paths = ["src/sakuramoon/data/service.py", "src/sakuramoon/data/cache.py", "src/sakuramoon/data/client.py", "src/sakuramoon/data/collate.py", "src/sakuramoon/config/schema.py"]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/unit/data/test_cache.py", "tests/unit/data/test_d024_service.py", "tests/unit/data/test_d024_collate.py", "tests/gpu/data/test_d024_service_consumer.py"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The bounded service-supply requirement has no reference-code dependency."
+
+[[requirements]]
+id = "C11-011"
+kind = "requirement"
+status = "implemented"
+profile = "data"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = ["11. 数据、缓存与验证隔离"]
+node_kind = "list_item"
+source_fingerprint = "20ba8c57f8588ffe0836c4455bc523699802d2e03fe7dffd0e4013ef26a591d6"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D024"
+implementation_paths = ["src/sakuramoon/data/service.py", "src/sakuramoon/data/client.py", "src/sakuramoon/data/collate.py"]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/unit/data/test_d024_service.py", "tests/unit/data/test_d024_collate.py", "tests/fault_injection/test_d024_service_faults.py", "tests/gpu/data/test_d024_service_consumer.py"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The lease completion and mainset rollover requirement has no reference-code dependency."
+
+[[requirements]]
+id = "C11-012"
+kind = "requirement"
+status = "implemented"
+profile = "data"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = ["11. 数据、缓存与验证隔离"]
+node_kind = "list_item"
+source_fingerprint = "57fe5902b708703280babfe8b030f00a8c6a970d5a0a4b9ca465e98f1fbae145"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D024"
+implementation_paths = ["src/sakuramoon/data/client.py", "src/sakuramoon/data/service_protocol.py", "src/sakuramoon/data/collate.py", "src/sakuramoon/data/pipeline.py", "src/sakuramoon/data/__init__.py"]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/unit/data/test_d024_service.py", "tests/unit/data/test_d024_collate.py", "tests/gpu/data/test_d024_service_consumer.py"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The trainer/data-service decoupling requirement has no reference-code dependency."
+
+[[requirements]]
+id = "C12-012"
+kind = "requirement"
+status = "planned"
+profile = "training_system"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = ["12. 优化器、并行、Checkpoint 与生产门槛"]
+node_kind = "list_item"
+source_fingerprint = "1a65aa4dba6e2d141aafab15dd9ceb3c19e19bc9c7946f9407267ae8f62f84fc"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = ""
+implementation_paths = []
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["optimizer.*", "scheduler.*", "gradient.*", "distributed.*", "checkpoint.*", "failure.*"]
+modules = ["src/sakuramoon/optim/**", "src/sakuramoon/distributed/**", "src/sakuramoon/checkpoint/**", "src/sakuramoon/train/**"]
+reference_modules = []
+tests = ["tests/**/optim*", "tests/**/distributed*", "tests/**/checkpoint*", "tests/fault_injection/**"]
+benchmarks = ["benchmarks/training/**"]
+artifacts = ["artifacts/training/**", "checkpoints/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The checkpoint-state boundary has no reference-code dependency."
+
+[[requirements]]
+id = "OPEN-100"
+kind = "open_item"
+status = "implemented"
+profile = "data"
+source_path = "docs/model-architecture/current/open-items.md"
+heading_path = ["3. P0：数据、VAE 与输入协议", "3.3 独立数据供给 service 与 `mainset`"]
+node_kind = "list_item"
+source_fingerprint = "151780893ab87d855c67274e1b661d51da4b3fd2f096185553a40d5d58929c2d"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D024"
+implementation_paths = ["src/sakuramoon/cli/data_service.py", "src/sakuramoon/data/service.py", "src/sakuramoon/data/client.py", "src/sakuramoon/data/__init__.py"]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/unit/data/test_d024_service.py", "tests/fault_injection/test_d024_service_faults.py", "tests/gpu/data/test_d024_service_consumer.py"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The service process boundary has no reference-code dependency."
+
+[[requirements]]
+id = "OPEN-101"
+kind = "open_item"
+status = "implemented"
+profile = "data"
+source_path = "docs/model-architecture/current/open-items.md"
+heading_path = ["3. P0：数据、VAE 与输入协议", "3.3 独立数据供给 service 与 `mainset`"]
+node_kind = "list_item"
+source_fingerprint = "e8841198735075e164d7dd18a4c429a1de4c69c58a42184424f282bdfcdf7e8f"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D024"
+implementation_paths = ["src/sakuramoon/data/service.py", "src/sakuramoon/data/service_protocol.py", "src/sakuramoon/cli/data_service.py"]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/unit/data/test_d024_service.py", "tests/fault_injection/test_d024_service_faults.py"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The mainset ordering requirement has no reference-code dependency."
+
+[[requirements]]
+id = "OPEN-102"
+kind = "open_item"
+status = "implemented"
+profile = "data"
+source_path = "docs/model-architecture/current/open-items.md"
+heading_path = ["3. P0：数据、VAE 与输入协议", "3.3 独立数据供给 service 与 `mainset`"]
+node_kind = "list_item"
+source_fingerprint = "1d17c5d9d4d628c29c06e594b46d430788375381bf34e25186c93fb2faddbfc5"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D024"
+implementation_paths = ["src/sakuramoon/data/service.py", "src/sakuramoon/data/cache.py", "src/sakuramoon/data/client.py", "src/sakuramoon/data/collate.py", "src/sakuramoon/config/schema.py"]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/unit/data/test_cache.py", "tests/unit/data/test_d024_service.py", "tests/unit/data/test_d024_collate.py", "tests/gpu/data/test_d024_service_consumer.py"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The bounded supply requirement has no reference-code dependency."
+
+[[requirements]]
+id = "OPEN-103"
+kind = "open_item"
+status = "implemented"
+profile = "data"
+source_path = "docs/model-architecture/current/open-items.md"
+heading_path = ["3. P0：数据、VAE 与输入协议", "3.3 独立数据供给 service 与 `mainset`"]
+node_kind = "list_item"
+source_fingerprint = "13524496682901f1123cbc5516f9be5ac87928102dfa78846ad8999643b60c8c"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D024"
+implementation_paths = ["src/sakuramoon/data/service.py", "src/sakuramoon/data/client.py", "src/sakuramoon/data/collate.py"]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/unit/data/test_d024_service.py", "tests/unit/data/test_d024_collate.py", "tests/fault_injection/test_d024_service_faults.py", "tests/gpu/data/test_d024_service_consumer.py"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The fault and mainset-rollover requirement has no reference-code dependency."
+
+[[requirements]]
+id = "OPEN-104"
+kind = "open_item"
+status = "planned"
+profile = "training_system"
+source_path = "docs/model-architecture/current/open-items.md"
+heading_path = ["3. P0：数据、VAE 与输入协议", "3.3 独立数据供给 service 与 `mainset`"]
+node_kind = "list_item"
+source_fingerprint = "12ea1879e08092db5a6708a824b0ac069a1b25ed08ee61eaf65c19bc573f4e57"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = ""
+implementation_paths = []
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["optimizer.*", "scheduler.*", "gradient.*", "distributed.*", "checkpoint.*", "failure.*"]
+modules = ["src/sakuramoon/optim/**", "src/sakuramoon/distributed/**", "src/sakuramoon/checkpoint/**", "src/sakuramoon/train/**"]
+reference_modules = []
+tests = ["tests/**/optim*", "tests/**/distributed*", "tests/**/checkpoint*", "tests/fault_injection/**"]
+benchmarks = ["benchmarks/training/**"]
+artifacts = ["artifacts/training/**", "checkpoints/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The service-decoupled checkpoint requirement has no reference-code dependency."
+
+[[requirements]]
+id = "OPEN-105"
+kind = "open_item"
+status = "blocked"
+profile = "data"
+source_path = "docs/model-architecture/current/open-items.md"
+heading_path = ["3. P0：数据、VAE 与输入协议", "3.3 独立数据供给 service 与 `mainset`"]
+node_kind = "list_item"
+source_fingerprint = "12a061916d0f957ace5f1bd20175d78695a67f243d975da1c9f556fb272cfc43"
+source_occurrence = 0
+blocked_by = ["NO-LONG-RUN"]
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = ""
+implementation_paths = []
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["data.*", "paths.cache*"]
+modules = ["src/sakuramoon/data/**"]
+reference_modules = []
+tests = ["tests/unit/data/test_cache.py", "tests/unit/data/test_d024_service.py", "tests/unit/data/test_d024_collate.py", "tests/fault_injection/test_d024_service_faults.py", "tests/gpu/data/test_d024_service_consumer.py"]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["artifacts/data/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The production service performance requirement has no reference-code dependency."

@@ -9,7 +9,7 @@ import math
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import webdataset as wds
@@ -35,7 +35,9 @@ from sakuramoon.data.serialize import (
     TokenEncoder,
     serialize_caption,
 )
-from sakuramoon.data.state import ShardRunState, SingleProcessShardCoordinator
+
+if TYPE_CHECKING:
+    from sakuramoon.data.state import ShardRunState, SingleProcessShardCoordinator
 
 CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
 MetadataAdapter = Callable[[Mapping[str, object]], Mapping[str, object]]

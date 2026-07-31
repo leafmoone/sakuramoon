@@ -142,7 +142,8 @@ Describe the image by detailing the color, shape, size, texture, quantity, text,
 - 每次 transition 只改变 world size、深度或分辨率中的一个主轴；达到门槛后只输出 `stage_ready`，由用户手工 finalize 和启动下一阶段。
 - 512 bucket 以 `A0=512^2`、步长 `q=32`、短边下限 256、最大 4:1 和转置闭包生成 17 个近等 image-token shapes；256/768/1024 按比例缩放相同形状集合。
 - bucket 选择顺序固定为：实际尺寸 → 全部 no-upscale eligible buckets → 最近宽高比 → 等比 cover resize → 可复现均匀随机 crop。裁剪保留率低于 0.80 时跳过。
-- 新 stage 使用新的 stage/pass/seed 从完整 manifest 重开；不把 topology 或分辨率变化伪装成旧 data pass 的原位 resume。
+- **已取代的数据规则：**T043 曾要求新 stage 使用新的 stage/pass/seed 从完整 manifest 重开；该历史实现与证据保留，但生产数据顺序不再使用此规则。
+- **数据顺序修订：**上一条“新 stage/pass/seed 从完整 manifest 重开”的数据部分已被独立 data service 决定取代。stage、分辨率、模型深度或 world-size transition 只恢复/迁移训练状态，不重置、重排或选择 tar；service 继续当前持久化 `mainset`，其代次和顺序不受 trainer lifecycle 控制。
 - 两次增长各均匀插入 4 个随机初始化新 slots；旧 slots 不改名、不复制、不删除。旧 optimizer state 按 canonical FQN 保留，新 slots state 为空。
 - growth alpha 固定为半余弦 `0→1`，时长为新深度阶段计划 updates 的 2%，并限制在 1,000–5,000 个成功 optimizer updates；alpha 不参与学习。
 - 预算同时使用有效样本暴露、实际 DiT FLOPs 与 successful updates；具体各 stage 数值待 benchmark 后填入显式 overlay。
@@ -156,6 +157,11 @@ Describe the image by detailing the color, shape, size, texture, quantity, text,
 - 不建立跨 batch 的 text embedding、latent 或 activation cache；当前也不重新对 11M 数据去重。
 - 恢复语义为 shard-level at-least-once：完成 shard 不重读，活跃 shard 从头重放；不序列化预取队列和 shuffle buffer。
 - 训练验证集恰好 2,000 个全局唯一 `id`，按 `release × aspect bucket × caption availability` 分层抽取，独立 validation shard；在进入 shuffle buffer 前排除，训练消费必须为零。
+- **独立 service ownership：**单机唯一 data service 是网络、下载、`.partial`、bytes/SHA-256 校验、原子发布、cache catalog、LRU/eviction、tar 顺序以及 active/completed/replay 状态的唯一 owner。它独立启动、独立存活；trainer 不得启动、停止或以内联实现替代它，DataLoader workers 只读 service 已验证并租约保护的本地 tar。
+- **持久化 `mainset`：**service 每轮从锁定 training manifest 取出全部 tar path，每个恰好一次，生成新的随机排列并把 `mainset_id`、manifest identity、shuffle identity、精确 ordinal 顺序和逐行状态持久化到表。tar 顺序只由 service 决定；trainer、checkpoint、stage、worker topology 和 resume 请求都不得携带或覆盖 tar cursor/order。
+- **并发供给：**service 严格按当前 `mainset` ordinal 下载、完整校验和发布，在 trainer 消费 `A/B` 时以有界并发准备后续 `C/D/E...`，并通过有界本机 IPC 只发已验证 `ShardRecord + absolute local path + lease identity`。trainer 与 DataLoader workers 禁止执行网络、SHA、cache scan、partial cleanup 或 eviction；lookahead、download、verified-ready、lease、ACK、worker input/output、ready batch 和 completion channel 全部有界。
+- **完成、故障与轮换：**只有 DataLoader worker 正常耗尽 tar 且 service 收到匹配 lease 的 completion ACK 后，该行才完成；worker/service/client/trainer 异常、断连、提前终止或 ACK 缺失时保持 active，并在 service 恢复后从 tar 起点 replay。当前 `mainset` 的全部 tar 都已按序下载、验证、供给且所有已发 lease 正常完成后，service 才可原子关闭并删除旧表、创建覆盖完整 manifest 的下一份新随机 `mainset`；仅下载完成但仍有 outstanding lease 时不得删表或向下一轮供给。
+- **训练解耦：**trainer 只消费 service 当前提供的数据，不保存、解释或恢复 `mainset`/shard 位置。训练 checkpoint 恢复、人工暂停续训、模型增长和分辨率切换均不要求数据连续，也不要求恢复前后的下一批来自同一 tar；validation exclusion、trusted metadata mapping、caption/image/collate 合同继续逐样本成立。
 来源：<mention-page url="https://app.notion.com/p/3aaae967ecf281db800cfb1d6545f880"/>
 # 12. 优化器、并行、Checkpoint 与生产门槛
 - S0 使用单卡原生模型；S1 起同机四卡 DDP。冻结 Qwen/VAE 位于 DDP wrapper、optimizer 与 checkpoint 之外，每 rank 各一份。
@@ -164,11 +170,12 @@ Describe the image by detailing the color, shape, size, texture, quantity, text,
 - 大矩阵 parameter/gradient 使用 BF16；RMSNorm、门控、标量、style/null tokens、condition 与小 head 等敏感参数使用 FP32。矩阵 weight decay=0.01，敏感参数不 decay；FP32 global norm clip=1.0。
 - 所有 rank 共享隔离的 optimizer stochastic-round RNG，训练 RNG 各自独立；每步验证 model、moments、per-parameter step 与 SR state 不分叉。
 - WSD scheduler：首次 S0 进行 2,000 个成功 updates warmup，随后跨 stages 保持 2e-5；最终由用户单独启动 cosine decay 至 2e-6。
-- raw checkpoint 使用 canonical-FQN sharded Safetensors model、完整 TorchAO optimizer sidecar、独立 trainer/data/growth/RNG state、checksum、manifest、临时目录与 `COMPLETE` 原子提交。
+- T042 已实现的 raw checkpoint schema 曾使用 canonical-FQN sharded Safetensors model、完整 TorchAO optimizer sidecar和独立 trainer/data/growth/RNG state；其中 data state 及其 resume 绑定已被下方 service-decoupled checkpoint 决定取代。T042 历史 artifact 与证据不回写，D024/T044 未关闭前该旧 schema 不得用于生产 resume。
 - full raw checkpoint 每 1,000 successful updates 或 6 小时先到者保存；stage finalize、增长关键点和 pre-decay 强制保存。模型目录删除续训 sidecar 后仍须可独立推理。
 - 数据供给必须≥12 samples/s 且 ready-queue wait\<2%；完整四卡 20/24层 512 训练必须≥6 samples/s。低于 4 停止，4–6 只允许优化，不得长期生产。
 - 每卡峰值显存≤27.2 GB，并满足目标 local/global batch；不得 OOM、host swap、nonfinite 自动续跑或任一 rank 状态分叉。
 - 低中风险实现按里程碑包统一完成 AI/模型正确性与 Infra/性能审查；kernel、optimizer、DDP、checkpoint、growth/transition、训练 step、故障注入和正式 stage canary 保持逐任务独立双审。证据按风险提供，普通 CPU 任务不要求独立 timing artifact，before/after 只用于真实性能变更。
+- **service-decoupled raw checkpoint：**生产 raw checkpoint 只恢复 model parameters、完整 TorchAO optimizer state、scheduler/growth state、trainer 与 successful-update/sample counters、训练 RNG、optimizer-SR RNG、resolved config 和 checkpoint identity，并继续使用 checksum/manifest/临时目录/`COMPLETE` 原子提交；它明确不包含 `mainset_id`、tar ordinal/cursor、active/completed/replay、cache/lease、prefetch/queue 或其他 data-service state。fresh-process resume 必须先完整恢复上述训练与优化器状态，再连接 service 并消费 service 当前提供的 tar；live-data continuity 和同一 next batch 不属于 resume 正确性合同。
 来源：<mention-page url="https://app.notion.com/p/3abae967ecf281ebadadd176e1b492db"/>
 # 13. 尚未决定的接口
 1. **Dropout 数值已关闭：**`all_condition=0.10`、`general=0.1`、`artist=0.1`、`character=0.2`、`copyright=0.1`、`nsfw=0.1`、`candidate_source=0.3`；`long_names`、`long_no_names`、`short_vibes`、`nl2`、`nl3` 均为 `0.3`。
@@ -181,7 +188,7 @@ Artist 只走 style 分支、在线 segment metadata、无第二次 Qwen/离线 
 - PMA 用于下一 stage 初始化 → **raw checkpoint 负责 resume/transition，PMA 只用于评估/发布**。
 - 旧 5 bucket 草案 → **17 个近等 image-token buckets**。
 - 全部固定长度 dense padding → **Qwen 离散长度桶 + DiT varlen packing，dense 保留为 fallback**。
-- stage 切换 data pass 待定 → **transition 后以新 stage/pass/seed 从完整 manifest 重开**。
+- stage 切换 data pass 待定 / transition 后重开完整 manifest → **独立 service 持久化 `mainset` 连续供给，transition 不控制 tar 顺序或位置**。
 - tags/NL 单换行 → **双换行 ****`\n\n`**。
 - 第三方转换 VAE 候选 → **只用 Microsoft 官方 Mage-VAE**。
 # 15. 变更记录与来源
@@ -192,6 +199,7 @@ Artist 只走 style 分支、在线 segment metadata、无第二次 Qwen/离线 
 - 2026-07-31：用户锁定全部 caption dropout 数值；D016 将其绑定为无默认、不可漂移的严格 TOML schema，100k 生产分布 dry run 仍作为独立验证项。
 - 2026-07-31：用户修正严格 JLT x-pred loss：target 与 prediction 都从 clean/state 经同一 clamped x-to-v 计算，锁定 inverse-square endpoint weighting、最大权重 400，以及 `t=0.5` 的 high/low-noise 观测边界。
 - 2026-07-31：用户将仅用于日志聚合的 high/low-noise 观测边界从 `t=0.5` 修订为 `t=0.95`；严格 JLT loss、clamp 与最大权重 400 不变。
+- 2026-07-31：用户将数据下载/校验/cache/order/state 完全移入独立 service；service 以持久化全 manifest `mainset` 循环随机供给。raw checkpoint 仅恢复模型、优化器和训练状态，不恢复数据位置或连续性。
 - 会话证据：Codex 会话导出附件 `pasted-text.txt`；原组件页保留讨论过程和外部参考。
 ## Notion 原始组件
 - <mention-page url="https://app.notion.com/p/3aaae967ecf281ba8f73fac2f9e4c4f3"/>

@@ -9,14 +9,16 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from sakuramoon.data.cache import CachedShard, ShardCache
 from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetManifestError,
     manifest_sha256,
 )
+
+if TYPE_CHECKING:
+    from sakuramoon.data.cache import CachedShard, ShardCache
 
 
 class ShardStateError(RuntimeError):
@@ -38,7 +40,7 @@ class ShardRunState:
     def __init__(
         self,
         completed: tuple[str, ...],
-        active_shards: tuple[str, ...] = (),
+        active_shards: tuple[str, ...] | str = (),
         worker_count: int = 1,
         replayed_shards: int = 0,
         replayed_samples: int = 0,
@@ -51,6 +53,8 @@ class ShardRunState:
             if active_shards:
                 raise ValueError("active and active_shards cannot both be set")
             active_shards = (active,)
+        elif isinstance(active_shards, str):
+            active_shards = (active_shards,)
         object.__setattr__(self, "completed", completed)
         object.__setattr__(self, "active_shards", active_shards)
         object.__setattr__(self, "worker_count", worker_count)

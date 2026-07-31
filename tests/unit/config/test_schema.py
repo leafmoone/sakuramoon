@@ -82,6 +82,45 @@ def test_valid_synthetic_fixture_is_strict_and_frozen(
         config.run.seed = 5
 
 
+def test_data_service_fields_are_required_and_range_workers_is_rejected(
+    valid_payload: dict[str, Any],
+) -> None:
+    missing_lookahead = copy.deepcopy(valid_payload)
+    missing_lookahead["data"]["cache"].pop("verified_shard_lookahead")
+    with pytest.raises(
+        ValidationError, match=r"(?s)verified_shard_lookahead.*missing"
+    ):
+        RuntimeConfig.model_validate(missing_lookahead)
+
+    missing_service = copy.deepcopy(valid_payload)
+    missing_service["data"].pop("service")
+    with pytest.raises(ValidationError, match=r"(?s)service.*missing"):
+        RuntimeConfig.model_validate(missing_service)
+
+    stale = copy.deepcopy(valid_payload)
+    stale["data"]["cache"]["range_workers"] = 2
+    with pytest.raises(ValidationError, match=r"(?s)range_workers.*extra_forbidden"):
+        RuntimeConfig.model_validate(stale)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("cache", "verified_shard_lookahead", 1),
+        ("cache", "ready_batches_per_rank", 1),
+        ("cache", "ready_batches_per_rank", 3),
+        ("service", "lease_channel_capacity", 1),
+        ("service", "ack_channel_capacity", 1),
+    ],
+)
+def test_data_service_channels_cover_exact_worker_topology(
+    valid_payload: dict[str, Any], section: str, field: str, value: int
+) -> None:
+    valid_payload["data"][section][field] = value
+    with pytest.raises(ValidationError, match="exact worker topology"):
+        RuntimeConfig.model_validate(valid_payload)
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
