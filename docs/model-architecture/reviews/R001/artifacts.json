@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "R001",
-  "generated_at_utc": "2026-07-29T19:30:07Z",
+  "generated_at_utc": "2026-07-31T00:59:14Z",
   "self_hash_policy": "artifacts.json is not self-hashed; each listed digest is resolved against its explicit snapshot_binding",
   "snapshot_bindings": {
     "r001_initial_commit": {
@@ -19,6 +19,10 @@
     "r001_review_evidence_remediation": {
       "commit": "task:R001",
       "digest_source": "worktree content destined for the atomic R001 review-evidence-remediation commit"
+    },
+    "r001_main_acceptance": {
+      "commit": "task:R001",
+      "digest_source": "worktree content destined for the atomic R001 main-acceptance commit"
     }
   },
   "artifacts": [
@@ -105,6 +109,18 @@
       "kind": "traceability_fixture",
       "snapshot_binding": "r001_trace_remediation",
       "sha256": "25ba3cdc7069569dd5f0e23279fe2558ea315c1041ba7f2e7073c9d93132e7d3"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R001/ai_review.md",
+      "kind": "ai_review",
+      "snapshot_binding": "r001_main_acceptance",
+      "sha256": "25f8e32cc7b0471c873caf16181dbbe66d2da7f502f9203644f58723abe12615"
+    },
+    {
+      "path": "docs/model-architecture/reviews/R001/infra_review.md",
+      "kind": "infra_review",
+      "snapshot_binding": "r001_main_acceptance",
+      "sha256": "6a39766e5c972eb5e191af772669e2e6b15be3f49bbe2305dc432c827dc3b8a2"
     }
   ]
 }

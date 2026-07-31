@@ -1,6 +1,6 @@
 # R001 实现报告
 
-状态：实现完成；commit `664fda71faed5e5d7d26d5fd06754af1a20b721f` 的独立 AI 审查通过，Infra 审查的唯一证据计数 blocker 已修正，待原 Infra reviewer 复审与主代理验收。实现代理未创建 commit，未执行 R002 或后续任务。
+状态：实现完成；commit `664fda71faed5e5d7d26d5fd06754af1a20b721f` 的独立 AI 审查通过，Infra 审查的唯一证据计数 blocker 已修正并通过主代理验收。两次直接启动 fresh reviewer 失败，因此不声明新的独立 Infra PASS。实现代理未创建 commit，未执行 R002 或后续任务。
 
 ## 实现范围
 
@@ -48,10 +48,11 @@
 
 ## 已知事项
 
-- 独立 AI/模型正确性审查对 `664fda71…` 给出 PASS；Infra/性能审查的唯一 blocker 是 clean commit 计数证据错记，已修正但仍等待原 reviewer 复审，不提前声称 Infra PASS。
-- 违规的普通任务性能占位及其引用已清理，修复结果保持待独立复审与主代理验收。
+- 独立 AI/模型正确性审查对 `664fda71…` 给出 PASS；Infra/性能审查的唯一 blocker 是 clean commit 计数证据错记，已修正并通过主代理验收，但没有 fresh independent Infra PASS。
+- 违规的普通任务性能占位及其引用已清理，修复结果通过主代理验收。
 - `DOC-001`/`DOC-002` 追踪归属已补全，但只标记为 `implemented`；未产生独立 AI/Infra 复审结论，不提前标记 `verified`。
 - 最终 tracked manifest 会随独立审查证据增加而变化；审查/主代理应在最终提交前刷新并重跑 secret/ignore 检查。
 - 初始提交中的只读迁移/source 文件原本含尾随空格，因此全索引 `git diff --check` 对首次导入不适用；R001 允许修改路径的 scoped check 通过，且迁移 SHA-256 保持一致。
 - JLT 本地参考工作树有未跟踪 `.ipynb_checkpoints/`；`reference/` 整体忽略，该状态不进入根索引，也不改变锁定 HEAD。
 - AI reviewer 的一次可选全量 run 因外部 `GIT_DIR/GIT_WORK_TREE` 注入污染了共享 `.git/config`；主代理已精确清除并确认 HEAD/index/ref 不变。该 run 无效且不计入 R001 验证数据。
+- 当前复核仅扫描 Git 路径与索引内容，没有读取 `.env`。根级 ignore 正向控制 10/10、源码负向控制 4/4、禁入 tracked path 与高置信 secret 命中均为零；traceability 单测 36 passed，live registry 221/221 passed。两次直接 reviewer 启动失败后，用户要求不再使用代理继续开发。

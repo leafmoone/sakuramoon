@@ -1,6 +1,7 @@
 # R001 审查修复记录
 
-状态：修复完成，待独立 AI/模型正确性复审、Infra/性能复审与主代理验收。
+状态：修复完成并通过主代理验收。历史独立 AI PASS 保留；历史独立 Infra
+要求的证据修正已完成，但 fresh independent rereview 不可用。
 
 ## 问题与修复
 
@@ -13,7 +14,8 @@
 
 - AI/模型正确性：确认此修复未引入训练、模型、数据或配置语义变化。
 - Infra/性能：确认普通任务目录不再包含性能证据占位，且 tracked/ignore/secret 边界仍通过。
-- 本记录不将 R001 标记为审查通过；结论等待独立 reviewer 与主代理。
+- 本记录不把主代理验收写成独立 Infra PASS。两次直接启动 fresh reviewer 均因
+  `agent thread limit reached` 失败，用户要求随后不再使用代理继续开发。
 
 ## 修复验证
 

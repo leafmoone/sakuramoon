@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "task_id": "R001",
-  "generated_at_utc": "2026-07-29T19:30:07Z",
+  "generated_at_utc": "2026-07-31T00:59:14Z",
   "status": "passed",
-  "review_status": "ai_pass_infra_evidence_correction_pending_rereview",
+  "review_status": "historical_ai_pass_infra_finding_remediated_main_agent_accepted_fresh_independent_rereview_unavailable",
   "reviewed_commit": "664fda71faed5e5d7d26d5fd06754af1a20b721f",
   "hardware_level": "CPU",
   "gpu_used": false,
@@ -166,6 +166,23 @@
       "pyright": "0 errors, 0 warnings in 3.58s"
     },
     "status": "corrected_pending_original_infra_rereview"
+  },
+  "current_main_acceptance": {
+    "status": "passed",
+    "independent_rereview": "unavailable_after_two_direct_spawn_failures",
+    "ignore_positive_controls": 10,
+    "source_negative_controls": 4,
+    "forbidden_tracked_paths": 0,
+    "high_confidence_index_secret_hits": 0,
+    "tracked_paths_before_review_files": 425,
+    "traceability_tests_passed": 36,
+    "traceability_test_seconds": 14.43,
+    "live_requirements_passed": 221,
+    "full_cpu_tests_passed": 535,
+    "full_cpu_tests_skipped": 5,
+    "full_cpu_seconds": 53.32,
+    "env_file_read": false,
+    "reference_tree_read": false
   },
   "tracked_manifest": {
     "path": "docs/model-architecture/reviews/R001/tracked-files.txt",

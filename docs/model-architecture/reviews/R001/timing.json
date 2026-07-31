@@ -41,5 +41,14 @@
     "gpu_seconds": 0,
     "status": "completed_pending_original_infra_rereview"
   },
+  "main_agent_acceptance": {
+    "started_at_utc": null,
+    "ended_at_utc": "2026-07-31T00:59:14Z",
+    "wall_clock_seconds": null,
+    "timing_status": "review_start_not_recorded",
+    "hardware_level": "CPU",
+    "gpu_seconds": 0,
+    "status": "passed_fresh_independent_rereview_unavailable"
+  },
   "notes": "Development-task timing only; no training runtime was executed. Review remediation removed ordinary-task performance placeholders and their references; trace remediation registered R001 ownership while preserving D001 checker responsibility. Independent review evidence remediation corrected shared-dirty-tree counts to immutable-clean-commit results. Reviewer-reported durations remain separate from implementation timing."
 }

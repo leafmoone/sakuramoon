@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 56
+registry_revision = 57
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -915,6 +915,8 @@ implementation_paths = [
     "docs/model-architecture/reviews/R001/implementation_report.md",
     "docs/model-architecture/reviews/R001/reference_manifest.json",
     "docs/model-architecture/reviews/R001/review_remediation.md",
+    "docs/model-architecture/reviews/R001/ai_review.md",
+    "docs/model-architecture/reviews/R001/infra_review.md",
     "docs/model-architecture/reviews/R001/test_report.json",
     "docs/model-architecture/reviews/R001/timing.json",
     "docs/model-architecture/reviews/R001/artifacts.json",
@@ -973,6 +975,8 @@ implementation_paths = [
     "docs/model-architecture/reviews/R001/implementation_report.md",
     "docs/model-architecture/reviews/R001/reference_manifest.json",
     "docs/model-architecture/reviews/R001/review_remediation.md",
+    "docs/model-architecture/reviews/R001/ai_review.md",
+    "docs/model-architecture/reviews/R001/infra_review.md",
     "docs/model-architecture/reviews/R001/test_report.json",
     "docs/model-architecture/reviews/R001/timing.json",
     "docs/model-architecture/reviews/R001/artifacts.json",
