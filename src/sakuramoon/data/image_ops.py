@@ -174,6 +174,7 @@ def scan_decoded_dimensions(
 
 
 def canonical_image_scan_report_bytes(report: ImageScanReport) -> bytes:
+    retention_quantiles = report.bucket_scan.crop_retention_quantiles
     payload = {
         "bucket_scan": {
             "assigned_samples": report.bucket_scan.assigned_samples,
@@ -187,6 +188,17 @@ def canonical_image_scan_report_bytes(report: ImageScanReport) -> bytes:
             ],
             "expected_samples": report.bucket_scan.expected_samples,
             "no_upscale_rejections": report.bucket_scan.no_upscale_rejections,
+            "crop_retention_quantiles": (
+                None
+                if retention_quantiles is None
+                else {
+                    "histogram_resolution": retention_quantiles.histogram_resolution,
+                    "method": "nearest_rank_fixed_histogram",
+                    "p01": retention_quantiles.p01,
+                    "p50": retention_quantiles.p50,
+                    "p99": retention_quantiles.p99,
+                }
+            ),
             "retention_rejections": report.bucket_scan.retention_rejections,
             "total_samples": report.bucket_scan.total_samples,
         },

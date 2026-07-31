@@ -11,6 +11,8 @@ from sakuramoon.config.schema import DataBucketsConfig
 
 StageEdge = Literal[256, 512, 768, 1024]
 RejectionReason = Literal["no_upscale", "retention"]
+RETENTION_HISTOGRAM_SCALE = 10_000
+RETENTION_HISTOGRAM_BINS = RETENTION_HISTOGRAM_SCALE + 1
 
 
 class BucketError(ValueError):
@@ -89,6 +91,23 @@ class BucketSampleCount:
 
 
 @dataclass(frozen=True)
+class CropRetentionQuantiles:
+    p01: float
+    p50: float
+    p99: float
+    histogram_resolution: float
+
+    def __post_init__(self) -> None:
+        values = (self.p01, self.p50, self.p99, self.histogram_resolution)
+        if (
+            any(type(value) is not float or not math.isfinite(value) for value in values)
+            or not 0.0 <= self.p01 <= self.p50 <= self.p99 <= 1.0
+            or self.histogram_resolution != 1.0 / RETENTION_HISTOGRAM_SCALE
+        ):
+            raise BucketError("crop retention quantiles are invalid")
+
+
+@dataclass(frozen=True)
 class BucketScanReport:
     expected_samples: int
     total_samples: int
@@ -96,6 +115,7 @@ class BucketScanReport:
     no_upscale_rejections: int
     retention_rejections: int
     bucket_counts: tuple[BucketSampleCount, ...]
+    crop_retention_quantiles: CropRetentionQuantiles | None
 
     def __post_init__(self) -> None:
         rejection_total = self.no_upscale_rejections + self.retention_rejections
@@ -120,6 +140,7 @@ class BucketScanReport:
             or self.assigned_samples + rejection_total != self.total_samples
             or sum(item.samples for item in self.bucket_counts)
             != self.assigned_samples
+            or (self.crop_retention_quantiles is None) != (self.assigned_samples == 0)
         ):
             raise BucketError("bucket scan report counts are inconsistent")
 
@@ -266,6 +287,7 @@ def scan_bucket_assignments(
         sorted(buckets, key=lambda shape: (shape.aspect_log2, shape.height, shape.width))
     )
     counts = {shape: 0 for shape in ordered_buckets}
+    retention_histogram = [0] * RETENTION_HISTOGRAM_BINS
     total = 0
     no_upscale = 0
     retention = 0
@@ -281,6 +303,11 @@ def scan_bucket_assignments(
         )
         if isinstance(result, BucketAssignment):
             counts[result.bucket] += 1
+            histogram_index = min(
+                int(result.crop_retention * RETENTION_HISTOGRAM_SCALE),
+                RETENTION_HISTOGRAM_SCALE,
+            )
+            retention_histogram[histogram_index] += 1
         elif result.reason == "no_upscale":
             no_upscale += 1
         else:
@@ -291,11 +318,31 @@ def scan_bucket_assignments(
         BucketSampleCount(shape.height, shape.width, counts[shape])
         for shape in ordered_buckets
     )
+    assigned_samples = sum(counts.values())
+
+    def nearest_rank_quantile(quantile: float) -> float:
+        rank = math.ceil(quantile * assigned_samples)
+        cumulative = 0
+        for index, samples in enumerate(retention_histogram):
+            cumulative += samples
+            if cumulative >= rank:
+                return index / RETENTION_HISTOGRAM_SCALE
+        raise BucketError("crop retention histogram is inconsistent")
+
+    crop_retention_quantiles = None
+    if assigned_samples:
+        crop_retention_quantiles = CropRetentionQuantiles(
+            p01=nearest_rank_quantile(0.01),
+            p50=nearest_rank_quantile(0.50),
+            p99=nearest_rank_quantile(0.99),
+            histogram_resolution=1.0 / RETENTION_HISTOGRAM_SCALE,
+        )
     return BucketScanReport(
         expected_samples=expected_samples,
         total_samples=total,
-        assigned_samples=sum(counts.values()),
+        assigned_samples=assigned_samples,
         no_upscale_rejections=no_upscale,
         retention_rejections=retention,
         bucket_counts=bucket_counts,
+        crop_retention_quantiles=crop_retention_quantiles,
     )

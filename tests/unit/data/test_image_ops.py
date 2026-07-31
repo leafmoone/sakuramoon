@@ -243,6 +243,13 @@ def test_image_scan_report_is_canonical_fsynced_and_atomically_replaced(
     document = json.loads(payload)
     assert document["schema_version"] == 1
     assert document["bucket_scan"]["assigned_samples"] == 1
+    assert document["bucket_scan"]["crop_retention_quantiles"] == {
+        "histogram_resolution": 0.0001,
+        "method": "nearest_rank_fixed_histogram",
+        "p01": 1.0,
+        "p50": 1.0,
+        "p99": 1.0,
+    }
     assert document["bucket_scan"]["no_upscale_rejections"] == 1
     assert document["dimension_scan"]["accepted"] is True
     assert not tuple(tmp_path.glob(".image-scan.json.*.tmp"))

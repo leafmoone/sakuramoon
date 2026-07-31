@@ -10,6 +10,7 @@ from sakuramoon.data.buckets import (
     BucketSampleCount,
     BucketScanReport,
     BucketShape,
+    CropRetentionQuantiles,
     SourceDimensions,
     assign_bucket,
     generate_base_buckets,
@@ -174,6 +175,12 @@ def test_streaming_bucket_scan_counts_assignments_and_rejections() -> None:
             BucketSampleCount(height=512, width=512, samples=2),
             BucketSampleCount(height=256, width=1024, samples=0),
         ),
+        crop_retention_quantiles=CropRetentionQuantiles(
+            p01=0.8,
+            p50=0.8,
+            p99=1.0,
+            histogram_resolution=0.0001,
+        ),
     )
     assert tuple(
         (item.height, item.width, item.samples) for item in report.bucket_counts
@@ -205,6 +212,42 @@ def test_bucket_scan_requires_exact_manifest_count_and_unique_shapes() -> None:
         )
 
 
+def test_bucket_scan_reports_bounded_nearest_rank_retention_quantiles() -> None:
+    shape = BucketShape(100, 100)
+    dimensions = (
+        [SourceDimensions(125, 100)]
+        + [SourceDimensions(120, 100)] * 49
+        + [SourceDimensions(110, 100)] * 49
+        + [SourceDimensions(100, 100)]
+    )
+
+    report = scan_bucket_assignments(
+        iter(dimensions),
+        (shape,),
+        min_crop_retention=0.0,
+        expected_samples=100,
+    )
+
+    assert report.crop_retention_quantiles == CropRetentionQuantiles(
+        p01=0.8,
+        p50=0.8333,
+        p99=0.909,
+        histogram_resolution=0.0001,
+    )
+
+
+def test_bucket_scan_uses_null_quantiles_when_every_sample_is_rejected() -> None:
+    report = scan_bucket_assignments(
+        (SourceDimensions(99, 99),),
+        (BucketShape(100, 100),),
+        min_crop_retention=0.8,
+        expected_samples=1,
+    )
+
+    assert report.assigned_samples == 0
+    assert report.crop_retention_quantiles is None
+
+
 @pytest.mark.parametrize("height,width", [(0, 1), (1, -1), (True, 1)])
 def test_bucket_shape_rejects_invalid_dimensions(height: int, width: int) -> None:
     with pytest.raises(BucketError, match="bucket dimensions"):
@@ -224,4 +267,10 @@ def test_bucket_scan_report_rejects_noncanonical_counts() -> None:
             no_upscale_rejections=0,
             retention_rejections=0,
             bucket_counts=(duplicate, duplicate),
+            crop_retention_quantiles=CropRetentionQuantiles(
+                p01=1.0,
+                p50=1.0,
+                p99=1.0,
+                histogram_resolution=0.0001,
+            ),
         )
