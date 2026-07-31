@@ -5,31 +5,40 @@ import json
 import tarfile
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import pytest
 import torch
 from PIL import Image
+from torch.utils.data import DataLoader
 
 from sakuramoon.data.buckets import BucketShape
+from sakuramoon.data.cache import CachedShard, ShardCache
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
     NlCandidates,
     NlDropoutProbabilities,
 )
-from sakuramoon.data.collate import BucketedBatchDataset, build_batch_loader
+from sakuramoon.data.collate import CollateError, iter_leased_batches
 from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetSourceIdentity,
     ShardRecord,
 )
+from sakuramoon.data.modelscope import FetchedShard
 from sakuramoon.data.pipeline import (
+    PipelineSampleError,
     WebDatasetPipeline,
     local_shard_order,
     rng_identity,
 )
 from sakuramoon.data.serialize import MAIN_SUFFIX, SYSTEM_PREFIX, FramingContract
-from sakuramoon.data.state import ShardRunState
+from sakuramoon.data.state import (
+    ShardRunState,
+    ShardStateStore,
+    SingleProcessShardCoordinator,
+)
 
 
 class _Tokenizer:
@@ -58,6 +67,10 @@ def _empty_fields(raw: Mapping[str, object]) -> CaptionFields:
         candidate_tags=frozenset(),
         nl=NlCandidates(None, None, None, None, None),
     )
+
+
+def _ignore_rejection(_reason: str) -> None:
+    return
 
 
 def _jpeg() -> bytes:
@@ -113,6 +126,7 @@ def test_real_webdataset_iteration_excludes_validation_before_decode(
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         caption_fields_parser=parser,
+        rejection_observer=_ignore_rejection,
         base_seed=9,
         stage="S0",
         pass_index=0,
@@ -144,6 +158,7 @@ def test_image_rejection_skips_sample_and_continues_real_tar_iteration(
 ) -> None:
     shard = tmp_path / "samples.tar"
     _write_tar(shard, ((1, rejected_image), (2, valid_image)))
+    rejections: list[str] = []
     pipeline = WebDatasetPipeline(
         shard_paths=(shard,),
         validation_ids=frozenset(),
@@ -153,6 +168,7 @@ def test_image_rejection_skips_sample_and_continues_real_tar_iteration(
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         caption_fields_parser=_empty_fields,
+        rejection_observer=rejections.append,
         base_seed=9,
         stage="S0",
         pass_index=0,
@@ -161,6 +177,7 @@ def test_image_rejection_skips_sample_and_continues_real_tar_iteration(
     samples = tuple(pipeline)
 
     assert tuple(sample.sample_id for sample in samples) == (2,)
+    assert rejections == ["no_upscale" if bucket.width == 512 else "retention"]
 
 
 def test_rng_identity_changes_by_stage_pass_and_domain() -> None:
@@ -173,17 +190,53 @@ def test_rng_identity_changes_by_stage_pass_and_domain() -> None:
     assert first.caption_seed != first.crop_seed
 
 
-@pytest.mark.parametrize("worker_count", [1, 2, 3])
-def test_persistent_worker_sweep_consumes_each_shard_once(
-    tmp_path: Path, worker_count: int
-) -> None:
+class _PreparedCache:
+    def __init__(self, root: Path, manifest: DatasetManifest) -> None:
+        self.root = root
+        self.manifest = manifest
+
+    def fetch(
+        self, shard_path: str, *, protected_paths: frozenset[str] = frozenset()
+    ) -> CachedShard:
+        del protected_paths
+        shard = self.manifest.shard(shard_path)
+        path = self.root / shard_path
+        return CachedShard(
+            FetchedShard(path, shard.path, shard.bytes, shard.sha256, False),
+            (),
+            sum(item.bytes for item in self.manifest.shards),
+        )
+
+
+def test_durable_loader_consumes_and_completes_each_shard_once(tmp_path: Path) -> None:
     paths: list[Path] = []
     for sample_id in range(1, 4):
         path = tmp_path / f"{sample_id}.tar"
         _write_tar(path, ((sample_id, _jpeg()),))
         paths.append(path)
+    source = DatasetSourceIdentity(
+        repo_id="leafmoone/webdataset_danbooru",
+        revision="a" * 40,
+        license_id="test",
+        access_terms="test",
+    )
+    shards = tuple(
+        ShardRecord(
+            path=path.name,
+            release="r",
+            bytes=path.stat().st_size,
+            sha256=f"{index + 1:064x}",
+            samples=1,
+        )
+        for index, path in enumerate(paths)
+    )
+    manifest = DatasetManifest.from_shards(source, shards)
+    coordinator = SingleProcessShardCoordinator(
+        cast(ShardCache, _PreparedCache(tmp_path, manifest)),
+        ShardStateStore(tmp_path / "run/state.json", manifest),
+    )
     pipeline = WebDatasetPipeline(
-        shard_paths=tuple(paths),
+        shard_paths=(paths[0],),
         validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
@@ -191,26 +244,131 @@ def test_persistent_worker_sweep_consumes_each_shard_once(
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         caption_fields_parser=_empty_fields,
+        rejection_observer=_ignore_rejection,
         base_seed=9,
         stage="S0",
         pass_index=0,
     )
-    batches = BucketedBatchDataset(
-        pipeline,
-        batch_size=1,
-        padding_token_id=248044,
-        drop_last=True,
-    )
-    loader = build_batch_loader(
-        batches,
-        worker_count=worker_count,
-        ready_batches=worker_count,
-        pin_memory=False,
+    batches = tuple(
+        iter_leased_batches(
+            pipeline,
+            coordinator,
+            tuple(shard.path for shard in shards),
+            batch_size=1,
+            worker_count=1,
+            ready_batches=1,
+            pin_memory=False,
+            drop_last=True,
+        )
     )
 
-    consumed = sorted(int(batch.sample_ids[0].item()) for batch in loader)
+    consumed = sorted(int(batch.sample_ids[0].item()) for batch in batches)
 
     assert consumed == [1, 2, 3]
+    assert coordinator.state.completed == tuple(sorted(shard.path for shard in shards))
+    assert coordinator.state.active is None
+
+
+def test_durable_loader_rejects_multi_worker_state_mismatch(tmp_path: Path) -> None:
+    shard = tmp_path / "samples.tar"
+    _write_tar(shard, ((1, _jpeg()),))
+    source = DatasetSourceIdentity(
+        repo_id="leafmoone/webdataset_danbooru",
+        revision="a" * 40,
+        license_id="test",
+        access_terms="test",
+    )
+    manifest = DatasetManifest.from_shards(
+        source,
+        (
+            ShardRecord(
+                path=shard.name,
+                release="r",
+                bytes=shard.stat().st_size,
+                sha256="1" * 64,
+                samples=1,
+            ),
+        ),
+    )
+    coordinator = SingleProcessShardCoordinator(
+        cast(ShardCache, _PreparedCache(tmp_path, manifest)),
+        ShardStateStore(tmp_path / "run/state.json", manifest),
+    )
+    pipeline = WebDatasetPipeline(
+        shard_paths=(shard,),
+        validation_ids=frozenset(),
+        buckets=(BucketShape(512, 512),),
+        min_crop_retention=0.8,
+        probabilities=_probabilities(),
+        tokenizer=_Tokenizer(),
+        framing=FramingContract(34, 5, 0),
+        caption_fields_parser=_empty_fields,
+        rejection_observer=_ignore_rejection,
+        base_seed=9,
+        stage="S0",
+        pass_index=0,
+    )
+
+    with pytest.raises(CollateError, match="exactly one worker"):
+        tuple(
+            iter_leased_batches(
+                pipeline,
+                coordinator,
+                (shard.name,),
+                batch_size=1,
+                worker_count=2,
+                ready_batches=2,
+                pin_memory=False,
+                drop_last=True,
+            )
+        )
+
+
+def test_worker_loader_cannot_bypass_durable_lease(tmp_path: Path) -> None:
+    shard = tmp_path / "samples.tar"
+    _write_tar(shard, ((1, _jpeg()),))
+    pipeline = WebDatasetPipeline(
+        shard_paths=(shard,),
+        validation_ids=frozenset(),
+        buckets=(BucketShape(512, 512),),
+        min_crop_retention=0.8,
+        probabilities=_probabilities(),
+        tokenizer=_Tokenizer(),
+        framing=FramingContract(34, 5, 0),
+        caption_fields_parser=_empty_fields,
+        rejection_observer=_ignore_rejection,
+        base_seed=9,
+        stage="S0",
+        pass_index=0,
+    )
+    loader = DataLoader(pipeline, batch_size=None, num_workers=1)
+
+    with pytest.raises(PipelineSampleError, match="durable shard lease"):
+        next(iter(loader))
+
+
+@pytest.mark.parametrize(
+    "shard_paths",
+    [("https://example.invalid/data.tar",), (Path("relative.tar"),)],
+)
+def test_pipeline_rejects_nonlocal_or_relative_shard_paths(
+    shard_paths: object,
+) -> None:
+    with pytest.raises(PipelineSampleError, match="local"):
+        WebDatasetPipeline(
+            shard_paths=shard_paths,  # pyright: ignore[reportArgumentType]
+            validation_ids=frozenset(),
+            buckets=(BucketShape(512, 512),),
+            min_crop_retention=0.8,
+            probabilities=_probabilities(),
+            tokenizer=_Tokenizer(),
+            framing=FramingContract(34, 5, 0),
+            caption_fields_parser=_empty_fields,
+            rejection_observer=_ignore_rejection,
+            base_seed=9,
+            stage="S0",
+            pass_index=0,
+        )
 
 
 def test_local_shard_order_replays_active_and_skips_completed(tmp_path: Path) -> None:

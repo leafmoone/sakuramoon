@@ -14,3 +14,10 @@ and production rejection metrics remain pending milestone evidence and are not i
 from synthetic tests or the D015 first-kernel smoke. Each finding is remediated in its
 own atomic task commit. Direct independent re-review startup was unavailable; final
 per-task conclusions therefore identify main-agent remediation acceptance.
+
+A later independent D015 follow-up found that the ordinary loader bypassed D012 lease
+state and accepted URL-like paths, truthy boolean settings and an unrelated collate
+padding ID. The public durable one-worker path, local-only guard, strict settings and
+framing-bound padding are now covered. Durable multi-worker state integration and its
+production throughput remain blocked/pending; no performance conclusion is inferred
+from the one-worker correctness path.

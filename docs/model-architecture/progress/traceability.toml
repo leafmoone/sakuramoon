@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 61
+registry_revision = 62
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -3460,6 +3460,7 @@ superseded_by = ""
 implementation_commit_ref = "task:D015"
 implementation_paths = [
     "src/sakuramoon/data/collate.py",
+    "tests/unit/data/test_collate.py",
     "src/sakuramoon/conditioning/packing.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
@@ -5124,6 +5125,8 @@ implementation_paths = [
     "src/sakuramoon/data/pipeline.py",
     "src/sakuramoon/data/collate.py",
     "tests/unit/data/test_pipeline.py",
+    "tests/unit/data/test_collate.py",
+    "tests/gpu/data/test_pipeline_encoders.py",
     "tests/unit/docs/test_verify_traceability.py",
     "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
@@ -5192,6 +5195,8 @@ implementation_paths = [
     "src/sakuramoon/encoders/qwen.py",
     "src/sakuramoon/encoders/mage_vae.py",
     "tests/unit/data/test_pipeline.py",
+    "tests/unit/data/test_collate.py",
+    "tests/gpu/data/test_pipeline_encoders.py",
     "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/progress/tasks/D015.md",
@@ -5250,6 +5255,8 @@ implementation_commit_ref = "task:D015"
 implementation_paths = [
     "src/sakuramoon/data/pipeline.py",
     "src/sakuramoon/data/collate.py",
+    "tests/unit/data/test_pipeline.py",
+    "tests/unit/data/test_collate.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""

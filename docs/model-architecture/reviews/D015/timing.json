@@ -14,5 +14,14 @@
     "duration_seconds": 126,
     "hardware_level": "CPU",
     "gpu_seconds": 0
+  },
+  "independent_followup_remediation": {
+    "started_at_utc": null,
+    "ended_at_utc": "2026-07-31T01:54:13Z",
+    "duration_seconds": null,
+    "timing_status": "review_start_not_recorded",
+    "hardware_level": "1GPU",
+    "gpu_seconds": 16.69,
+    "status": "findings_remediated_independent_rereview_pending_multi_worker_durable_blocked"
   }
 }

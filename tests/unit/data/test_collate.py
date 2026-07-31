@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
 
 from sakuramoon.data.collate import (
     BucketedBatchDataset,
     CollateError,
+    _build_batch_loader,  # pyright: ignore[reportPrivateUsage]
     bucketed_batches,
-    build_batch_loader,
     collate_samples,
 )
 from sakuramoon.data.pipeline import ImageAudit, PipelineSample, RngIdentity
@@ -43,11 +45,12 @@ def _sample(sample_id: int, *, width: int = 8, dense_length: int = 64) -> Pipeli
         caption=caption,
         audit=ImageAudit(8, 8, width, 8, (0, 0, width, 8), 1.0),
         rng=RngIdentity(1, "S0", 0, sample_id, sample_id + 1, sample_id + 2),
+        padding_token_id=248044,
     )
 
 
 def test_collate_pads_eot_and_preserves_structured_metadata() -> None:
-    batch = collate_samples((_sample(1), _sample(2)), padding_token_id=248044)
+    batch = collate_samples((_sample(1), _sample(2)))
 
     assert batch.images.shape == (2, 3, 8, 8)
     assert batch.input_ids.shape == (2, 64)
@@ -68,7 +71,6 @@ def test_bucketed_batches_never_mix_image_or_text_buckets() -> None:
         bucketed_batches(
             samples,
             batch_size=2,
-            padding_token_id=248044,
             drop_last=True,
         )
     )
@@ -82,7 +84,13 @@ def test_bucketed_batches_never_mix_image_or_text_buckets() -> None:
 
 def test_collate_rejects_mixed_bucket() -> None:
     with pytest.raises(CollateError, match="share"):
-        collate_samples((_sample(1), _sample(2, width=16)), padding_token_id=248044)
+        collate_samples((_sample(1), _sample(2, width=16)))
+
+
+def test_collate_binds_padding_to_each_sample_framing() -> None:
+    mismatched = replace(_sample(2), padding_token_id=0)
+    with pytest.raises(CollateError, match="padding token"):
+        collate_samples((_sample(1), mismatched))
 
 
 class _EmptyDataset(torch.utils.data.IterableDataset[PipelineSample]):
@@ -92,17 +100,17 @@ class _EmptyDataset(torch.utils.data.IterableDataset[PipelineSample]):
 
 def test_loader_requires_exact_divisible_ready_batch_budget() -> None:
     dataset = BucketedBatchDataset(
-        _EmptyDataset(), batch_size=2, padding_token_id=248044, drop_last=True
+        _EmptyDataset(), batch_size=2, drop_last=True
     )
     with pytest.raises(CollateError, match="multiple"):
-        build_batch_loader(
+        _build_batch_loader(
             dataset,
             worker_count=2,
             ready_batches=3,
             pin_memory=True,
         )
 
-    loader = build_batch_loader(
+    loader = _build_batch_loader(
         dataset,
         worker_count=2,
         ready_batches=2,
@@ -111,3 +119,15 @@ def test_loader_requires_exact_divisible_ready_batch_budget() -> None:
     assert loader.num_workers == 2
     assert loader.prefetch_factor == 1
     assert loader.persistent_workers is True
+
+
+@pytest.mark.parametrize("drop_last", [0, "false"])
+def test_bucketed_batches_requires_exact_boolean_drop_last(drop_last: object) -> None:
+    with pytest.raises(CollateError, match="drop_last"):
+        tuple(
+            bucketed_batches(
+                (_sample(1),),
+                batch_size=1,
+                drop_last=drop_last,  # pyright: ignore[reportArgumentType]
+            )
+        )

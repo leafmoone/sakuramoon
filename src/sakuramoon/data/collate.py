@@ -8,7 +8,14 @@ from dataclasses import dataclass, replace
 import torch
 from torch.utils.data import DataLoader, IterableDataset
 
-from sakuramoon.data.pipeline import ImageAudit, PipelineSample, RngIdentity
+from sakuramoon.data.pipeline import (
+    ImageAudit,
+    PipelineSample,
+    PipelineSampleError,
+    RngIdentity,
+    WebDatasetPipeline,
+)
+from sakuramoon.data.state import SingleProcessShardCoordinator
 
 
 class CollateError(ValueError):
@@ -63,12 +70,17 @@ def _index_tensor(
     return indices, mask
 
 
-def collate_samples(
-    samples: tuple[PipelineSample, ...], *, padding_token_id: int
-) -> TrainingBatch:
-    if not samples or type(padding_token_id) is not int or padding_token_id < 0:
-        raise CollateError("collate requires samples and a valid padding token")
+def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
+    if not samples:
+        raise CollateError("collate requires samples")
     first = samples[0]
+    padding_token_id = first.padding_token_id
+    if (
+        type(padding_token_id) is not int
+        or padding_token_id < 0
+        or any(sample.padding_token_id != padding_token_id for sample in samples)
+    ):
+        raise CollateError("batch samples must share the framing padding token")
     key = (first.target_height, first.target_width, first.caption.dense_length)
     if any(
         (sample.target_height, sample.target_width, sample.caption.dense_length) != key
@@ -130,22 +142,25 @@ def bucketed_batches(
     samples: Iterable[PipelineSample],
     *,
     batch_size: int,
-    padding_token_id: int,
     drop_last: bool,
 ) -> Iterator[TrainingBatch]:
-    if type(batch_size) is not int or batch_size <= 0:
-        raise CollateError("batch_size must be a positive integer")
+    if (
+        type(batch_size) is not int
+        or batch_size <= 0
+        or type(drop_last) is not bool
+    ):
+        raise CollateError("batch_size and drop_last are invalid")
     pending: dict[tuple[int, int, int], list[PipelineSample]] = {}
     for sample in samples:
         key = (sample.target_height, sample.target_width, sample.caption.dense_length)
         bucket = pending.setdefault(key, [])
         bucket.append(sample)
         if len(bucket) == batch_size:
-            yield collate_samples(tuple(bucket), padding_token_id=padding_token_id)
+            yield collate_samples(tuple(bucket))
             del pending[key]
     if not drop_last:
         for key in sorted(pending):
-            yield collate_samples(tuple(pending[key]), padding_token_id=padding_token_id)
+            yield collate_samples(tuple(pending[key]))
 
 
 class BucketedBatchDataset(IterableDataset[TrainingBatch]):
@@ -154,25 +169,31 @@ class BucketedBatchDataset(IterableDataset[TrainingBatch]):
         samples: IterableDataset[PipelineSample],
         *,
         batch_size: int,
-        padding_token_id: int,
         drop_last: bool,
     ) -> None:
         super().__init__()
+        if (
+            not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+                samples, IterableDataset
+            )
+            or type(batch_size) is not int
+            or batch_size <= 0
+            or type(drop_last) is not bool
+        ):
+            raise CollateError("bucketed batch dataset fields are invalid")
         self.samples = samples
         self.batch_size = batch_size
-        self.padding_token_id = padding_token_id
         self.drop_last = drop_last
 
     def __iter__(self) -> Iterator[TrainingBatch]:
         return bucketed_batches(
             self.samples,
             batch_size=self.batch_size,
-            padding_token_id=self.padding_token_id,
             drop_last=self.drop_last,
         )
 
 
-def build_batch_loader(
+def _build_batch_loader(
     dataset: BucketedBatchDataset,
     *,
     worker_count: int,
@@ -187,6 +208,7 @@ def build_batch_loader(
         or type(ready_batches) is not int
         or ready_batches < worker_count
         or ready_batches % worker_count
+        or type(pin_memory) is not bool
     ):
         raise CollateError(
             "ready_batches must be a positive multiple of persistent worker_count"
@@ -201,11 +223,58 @@ def build_batch_loader(
     )
 
 
+def iter_leased_batches(
+    pipeline: WebDatasetPipeline,
+    coordinator: SingleProcessShardCoordinator,
+    shard_paths: tuple[str, ...],
+    *,
+    batch_size: int,
+    worker_count: int,
+    ready_batches: int,
+    pin_memory: bool,
+    drop_last: bool,
+) -> Iterator[TrainingBatch]:
+    """Drain each durable shard lease before publishing its completion."""
+
+    if worker_count != 1:
+        raise CollateError(
+            "durable shard iteration currently requires exactly one worker"
+        )
+    if (
+        type(shard_paths) is not tuple
+        or not shard_paths
+        or any(type(path) is not str or not path for path in shard_paths)
+        or len(set(shard_paths)) != len(shard_paths)
+    ):
+        raise CollateError("durable shard iteration requires unique shard paths")
+    for shard_path in shard_paths:
+        with coordinator.lease(shard_path) as cached:
+            if cached is None:
+                continue
+            if cached.fetched.relative_path != shard_path:
+                raise PipelineSampleError("cache returned a different leased shard")
+            shard_pipeline = pipeline._with_local_shards(  # pyright: ignore[reportPrivateUsage]
+                (cached.fetched.path,)
+            )
+            dataset = BucketedBatchDataset(
+                shard_pipeline,
+                batch_size=batch_size,
+                drop_last=drop_last,
+            )
+            loader = _build_batch_loader(
+                dataset,
+                worker_count=worker_count,
+                ready_batches=ready_batches,
+                pin_memory=pin_memory,
+            )
+            yield from loader
+
+
 __all__ = [
     "BucketedBatchDataset",
     "CollateError",
     "TrainingBatch",
     "bucketed_batches",
-    "build_batch_loader",
     "collate_samples",
+    "iter_leased_batches",
 ]

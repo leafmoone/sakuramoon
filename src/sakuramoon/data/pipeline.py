@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,9 +14,9 @@ from typing import Any, cast
 import torch
 import webdataset as wds
 from PIL import Image
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, get_worker_info
 
-from sakuramoon.data.buckets import BucketShape
+from sakuramoon.data.buckets import BucketShape, RejectionReason
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
@@ -33,6 +34,7 @@ from sakuramoon.data.serialize import (
 from sakuramoon.data.state import ShardRunState, SingleProcessShardCoordinator
 
 CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
+RejectionObserver = Callable[[RejectionReason], None]
 _IMAGE_KEYS = ("jpg", "jpeg", "png", "webp")
 
 
@@ -70,6 +72,23 @@ class PipelineSample:
     caption: SerializedCaption
     audit: ImageAudit
     rng: RngIdentity
+    padding_token_id: int
+
+
+def _validate_local_shard_paths(shard_paths: tuple[Path, ...]) -> None:
+    if type(shard_paths) is not tuple or not shard_paths:
+        raise PipelineSampleError("pipeline requires local shard paths")
+    if len(set(shard_paths)) != len(shard_paths):
+        raise PipelineSampleError("pipeline shard paths must be unique")
+    for path in shard_paths:
+        if (
+            not isinstance(path, Path)  # pyright: ignore[reportUnnecessaryIsInstance]
+            or not path.is_absolute()
+            or not path.is_file()
+        ):
+            raise PipelineSampleError(
+                "pipeline shard paths must be absolute local regular files"
+            )
 
 
 def _domain_seed(
@@ -176,13 +195,43 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         tokenizer: TokenEncoder,
         framing: FramingContract,
         caption_fields_parser: CaptionFieldsParser,
+        rejection_observer: RejectionObserver,
         base_seed: int,
         stage: str,
         pass_index: int,
     ) -> None:
         super().__init__()
-        if not shard_paths or not buckets:
-            raise PipelineSampleError("pipeline requires shards and image buckets")
+        _validate_local_shard_paths(shard_paths)
+        if (
+            type(validation_ids) is not frozenset
+            or any(type(item) is not int or item <= 0 for item in validation_ids)
+            or type(buckets) is not tuple
+            or not buckets
+            or any(
+                not isinstance(bucket, BucketShape)  # pyright: ignore[reportUnnecessaryIsInstance]
+                for bucket in buckets
+            )
+            or len(set(buckets)) != len(buckets)
+            or type(min_crop_retention) is not float
+            or not math.isfinite(min_crop_retention)
+            or not 0.0 <= min_crop_retention <= 1.0
+            or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+                probabilities, CaptionDropoutProbabilities
+            )
+            or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+                framing, FramingContract
+            )
+            or not callable(caption_fields_parser)
+            or not callable(rejection_observer)
+            or type(base_seed) is not int
+            or base_seed < 0
+            or type(stage) is not str
+            or not stage
+            or stage != stage.strip()
+            or type(pass_index) is not int
+            or pass_index < 0
+        ):
+            raise PipelineSampleError("pipeline construction fields are invalid")
         self.shard_paths = shard_paths
         self.validation_ids = validation_ids
         self.buckets = buckets
@@ -191,9 +240,11 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.tokenizer = tokenizer
         self.framing = framing
         self.caption_fields_parser = caption_fields_parser
+        self.rejection_observer = rejection_observer
         self.base_seed = base_seed
         self.stage = stage
         self.pass_index = pass_index
+        self._lease_managed = False
 
     def _process(self, sample: Mapping[str, object]) -> PipelineSample | None:
         raw_metadata = _metadata(sample)
@@ -206,7 +257,9 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             pass_index=self.pass_index,
             sample_id=metadata.id,
         )
-        fields = self.caption_fields_parser(metadata.raw)
+        fields = cast(object, self.caption_fields_parser(metadata.raw))
+        if not isinstance(fields, CaptionFields):
+            raise PipelineSampleError("caption field parser returned an invalid value")
         plan = build_caption_plan(
             fields, self.probabilities, seed=identity.caption_seed
         )
@@ -220,7 +273,8 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                     min_crop_retention=self.min_crop_retention,
                     crop_seed=identity.crop_seed,
                 )
-        except ImageRejected:
+        except ImageRejected as error:
+            self.rejection_observer(cast(RejectionReason, error.reason))
             return None
         except (OSError, Image.DecompressionBombError):
             raise PipelineSampleError("WebDataset image decode failed") from None
@@ -241,9 +295,11 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 crop_retention=assignment.crop_retention,
             ),
             rng=identity,
+            padding_token_id=self.framing.padding_token_id,
         )
 
     def _iter_paths(self, shard_paths: tuple[Path, ...]) -> Iterator[PipelineSample]:
+        _validate_local_shard_paths(shard_paths)
         urls = [str(path) for path in shard_paths]
         factory = cast(
             Callable[..., Iterable[dict[str, Any]]],
@@ -259,6 +315,28 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             if processed is not None:
                 yield processed
 
+    def _with_local_shards(
+        self, shard_paths: tuple[Path, ...]
+    ) -> WebDatasetPipeline:
+        """Clone the validated processing contract onto prepared local shards."""
+
+        pipeline = WebDatasetPipeline(
+            shard_paths=shard_paths,
+            validation_ids=self.validation_ids,
+            buckets=self.buckets,
+            min_crop_retention=self.min_crop_retention,
+            probabilities=self.probabilities,
+            tokenizer=self.tokenizer,
+            framing=self.framing,
+            caption_fields_parser=self.caption_fields_parser,
+            rejection_observer=self.rejection_observer,
+            base_seed=self.base_seed,
+            stage=self.stage,
+            pass_index=self.pass_index,
+        )
+        pipeline._lease_managed = True
+        return pipeline
+
     def iter_leased_shards(
         self,
         coordinator: SingleProcessShardCoordinator,
@@ -266,7 +344,18 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
     ) -> Iterator[PipelineSample]:
         """Consume cached shards under the durable at-least-once lease boundary."""
 
-        if not shard_paths or any(not path for path in shard_paths):
+        if (
+            type(shard_paths) is not tuple
+            or not shard_paths
+            or any(
+                type(path) is not str
+                or not path
+                or path != path.strip()
+                or Path(path).is_absolute()
+                for path in shard_paths
+            )
+            or len(set(shard_paths)) != len(shard_paths)
+        ):
             raise PipelineSampleError("leased pipeline requires explicit shard paths")
         for shard_path in shard_paths:
             with coordinator.lease(shard_path) as cached:
@@ -277,6 +366,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 yield from self._iter_paths((cached.fetched.path,))
 
     def __iter__(self) -> Iterator[PipelineSample]:
+        if get_worker_info() is not None and not self._lease_managed:
+            raise PipelineSampleError(
+                "worker iteration requires the durable shard lease entry point"
+            )
         yield from self._iter_paths(self.shard_paths)
 
 
@@ -285,6 +378,7 @@ __all__ = [
     "ImageAudit",
     "PipelineSample",
     "PipelineSampleError",
+    "RejectionObserver",
     "RngIdentity",
     "WebDatasetPipeline",
     "local_shard_order",
