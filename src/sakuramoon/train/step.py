@@ -34,6 +34,7 @@ class TrainableCompositeInputs:
     artist_token_indices: torch.Tensor
     artist_mask: torch.Tensor
     use_null_style: torch.Tensor
+    active_style_sample_indices: torch.Tensor
     latents: tuple[torch.Tensor, ...]
     timestep: torch.Tensor
     size_scale: torch.Tensor
@@ -67,6 +68,7 @@ class TrainableComposite(nn.Module):
             inputs.artist_token_indices,
             inputs.artist_mask,
             inputs.use_null_style,
+            inputs.active_style_sample_indices,
         )
         return self.dit(
             inputs.latents,

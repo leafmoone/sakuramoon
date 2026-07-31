@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from sakuramoon.conditioning.style_resampler import StyleResampler
@@ -29,6 +30,7 @@ def test_artist_tokens_produce_four_independent_slots() -> None:
         torch.tensor([[3, 4], [1, -1]]),
         torch.tensor([[True, True], [True, False]]),
         torch.zeros(2, dtype=torch.bool),
+        torch.tensor([0, 1]),
     )
 
     assert output.tokens.shape == (2, 4, 20)
@@ -44,6 +46,7 @@ def test_missing_dropout_and_all_condition_share_learned_null_tokens() -> None:
         torch.tensor([[-1], [2], [1]]),
         torch.tensor([[False], [True], [True]]),
         torch.tensor([False, True, True]),
+        torch.empty(0, dtype=torch.long),
     )
 
     expected = module.null_tokens.unsqueeze(0).expand(3, -1, -1)
@@ -72,6 +75,7 @@ def test_mixed_batch_projects_only_active_samples() -> None:
                 dtype=torch.bool,
             ),
             torch.tensor([False, True, True]),
+            torch.tensor([0]),
         )
     finally:
         handle.remove()
@@ -92,12 +96,14 @@ def test_inactive_large_index_does_not_reach_gather() -> None:
         torch.tensor([[2, -1]]),
         mask,
         torch.tensor([False]),
+        torch.tensor([0]),
     )
     with_large_inactive_index = module(
         states,
         torch.tensor([[2, 10000]]),
         mask,
         torch.tensor([False]),
+        torch.tensor([0]),
     )
 
     torch.testing.assert_close(
@@ -114,16 +120,57 @@ def test_style_gathers_only_artist_span_and_detaches_qwen() -> None:
     indices = torch.tensor([[2]])
     mask = torch.tensor([[True]])
     use_null = torch.tensor([False])
-    baseline = module(states, indices, mask, use_null).tokens
 
     changed = states.detach().clone()
     changed[:, :2] += 1000.0
-    changed_output = module(changed, indices, mask, use_null).tokens
+    active_samples = torch.tensor([0])
+    baseline = module(states, indices, mask, use_null, active_samples).tokens
+
+    changed_output = module(
+        changed, indices, mask, use_null, active_samples
+    ).tokens
     torch.testing.assert_close(baseline, changed_output)
 
     baseline.square().mean().backward()
     assert states.grad is None
     assert module.output_projection.weight.grad is not None
+
+
+@pytest.mark.parametrize(
+    "active_samples",
+    [
+        torch.empty(0, dtype=torch.long),
+        torch.tensor([1]),
+        torch.tensor([0, 0]),
+    ],
+)
+def test_invalid_active_sample_plan_fails(active_samples: torch.Tensor) -> None:
+    module = _resampler()
+
+    with pytest.raises(ValueError, match="sample/index plan"):
+        module(
+            torch.randn(2, 3, 7, 16),
+            torch.tensor([[1], [-1]]),
+            torch.tensor([[True], [False]]),
+            torch.tensor([False, True]),
+            active_samples,
+        )
+
+
+@pytest.mark.parametrize("invalid_index", [-1, 3])
+def test_active_artist_index_outside_qwen_sequence_fails(
+    invalid_index: int,
+) -> None:
+    module = _resampler()
+
+    with pytest.raises(ValueError, match="sample/index plan"):
+        module(
+            torch.randn(1, 3, 7, 16),
+            torch.tensor([[invalid_index]]),
+            torch.tensor([[True]]),
+            torch.tensor([False]),
+            torch.tensor([0]),
+        )
 
 
 def test_autocast_active_and_null_outputs_share_input_dtype() -> None:
@@ -136,6 +183,7 @@ def test_autocast_active_and_null_outputs_share_input_dtype() -> None:
             torch.tensor([[1], [-1]]),
             torch.tensor([[True], [False]]),
             torch.zeros(2, dtype=torch.bool),
+            torch.tensor([0]),
         )
 
     assert output.tokens.dtype == torch.bfloat16

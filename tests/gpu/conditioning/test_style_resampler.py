@@ -42,22 +42,36 @@ def test_production_style_resampler_skips_null_samples_on_one_gpu() -> None:
     ) -> None:
         projected_batch_sizes.append(inputs[0].shape[0])
 
+    artist_token_indices = torch.tensor(
+        [[1, 9999], [9999, 9999], [2, 3]],
+        dtype=torch.long,
+        device=device,
+    )
+    artist_mask = torch.tensor(
+        [[True, False], [True, True], [True, True]],
+        dtype=torch.bool,
+        device=device,
+    )
+    use_null = torch.tensor(
+        [False, True, False], dtype=torch.bool, device=device
+    )
+    active_sample_indices = torch.tensor(
+        [0, 2], dtype=torch.long, device=device
+    )
+
     handle = module.input_projection.register_forward_pre_hook(record_projected_batch)
     try:
-        output = module(
-            states,
-            torch.tensor(
-                [[1, 9999], [9999, 9999], [2, 3]],
-                dtype=torch.long,
-                device=device,
-            ),
-            torch.tensor(
-                [[True, False], [True, True], [True, True]],
-                dtype=torch.bool,
-                device=device,
-            ),
-            torch.tensor([False, True, False], dtype=torch.bool, device=device),
-        )
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            output = module(
+                states,
+                artist_token_indices,
+                artist_mask,
+                use_null,
+                active_sample_indices,
+            )
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
     finally:
         handle.remove()
 

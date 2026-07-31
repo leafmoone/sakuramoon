@@ -31,6 +31,7 @@ class TrainingBatch:
     main_mask: torch.Tensor
     artist_token_indices: torch.Tensor
     artist_mask: torch.Tensor
+    active_style_sample_indices: torch.Tensor
     sample_ids: torch.Tensor
     target_height: int
     target_width: int
@@ -51,6 +52,7 @@ class TrainingBatch:
             main_mask=self.main_mask.pin_memory(),
             artist_token_indices=self.artist_token_indices.pin_memory(),
             artist_mask=self.artist_mask.pin_memory(),
+            active_style_sample_indices=self.active_style_sample_indices.pin_memory(),
             sample_ids=self.sample_ids.pin_memory(),
             use_null_style=self.use_null_style.pin_memory(),
             all_condition_dropped=self.all_condition_dropped.pin_memory(),
@@ -89,6 +91,35 @@ def _validate_main_indices(samples: tuple[PipelineSample, ...]) -> None:
             )
 
 
+def _active_style_sample_indices(samples: tuple[PipelineSample, ...]) -> torch.Tensor:
+    active_samples: list[int] = []
+    for row, sample in enumerate(samples):
+        indices = sample.caption.artist_token_indices
+        mask = sample.caption.artist_mask
+        use_null = sample.caption.use_null_style
+        if (
+            type(use_null) is not bool
+            or len(indices) != len(mask)
+            or any(type(active) is not bool or not active for active in mask)
+            or any(
+                type(index) is not int
+                or index < 0
+                or index >= len(sample.caption.input_ids)
+                for index in indices
+            )
+        ):
+            raise CollateError(
+                "Artist token indices must be active positions in the serialized Qwen input"
+            )
+        if bool(indices) == use_null:
+            raise CollateError(
+                "Artist token presence and null-style routing must be complementary"
+            )
+        if indices:
+            active_samples.append(row)
+    return torch.tensor(active_samples, dtype=torch.long)
+
+
 def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     if not samples:
         raise CollateError("collate requires samples")
@@ -113,6 +144,7 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     ):
         raise CollateError("batch images must be RGB uint8 tensors at the target size")
     _validate_main_indices(samples)
+    active_style_sample_indices = _active_style_sample_indices(samples)
 
     dense_length = first.caption.dense_length
     input_ids = torch.full(
@@ -139,6 +171,7 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         main_mask=main_mask,
         artist_token_indices=artist_indices,
         artist_mask=artist_mask,
+        active_style_sample_indices=active_style_sample_indices,
         sample_ids=torch.tensor(
             tuple(sample.sample_id for sample in samples), dtype=torch.long
         ),

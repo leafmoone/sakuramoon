@@ -128,26 +128,37 @@ class StyleResampler(nn.Module):
         artist_token_indices: torch.Tensor,
         artist_mask: torch.Tensor,
         use_null: torch.Tensor,
+        active_sample_indices: torch.Tensor,
     ) -> StyleConditioningOutput:
         if qwen_states.ndim != 4 or qwen_states.shape[2:] != (7, self.input_size):
             raise ValueError("qwen_states must have shape [B,L,7,input_size]")
-        if artist_token_indices.shape != artist_mask.shape or artist_mask.dtype != torch.bool:
+        if (
+            artist_token_indices.shape != artist_mask.shape
+            or artist_mask.dtype != torch.bool
+        ):
             raise ValueError("Artist indices and mask must have matching [B,A] shapes")
         if artist_token_indices.dtype != torch.long:
             raise TypeError("artist_token_indices must use torch.long")
         batch = qwen_states.shape[0]
-        if artist_token_indices.shape[0] != batch or use_null.shape != (batch,):
+        if (
+            batch <= 0
+            or artist_token_indices.shape[0] != batch
+            or use_null.shape != (batch,)
+        ):
             raise ValueError("Artist metadata batch shape differs from Qwen states")
         if use_null.dtype != torch.bool:
             raise TypeError("use_null must be boolean")
-        active_samples = artist_mask.any(dim=1) & ~use_null
-        active_artist_indices = artist_token_indices[active_samples]
-        active_artist_mask = artist_mask[active_samples]
-        active_indices = active_artist_indices[active_artist_mask]
-        if active_indices.numel() and (
-            active_indices.min() < 0 or active_indices.max() >= qwen_states.shape[1]
+        if (
+            artist_token_indices.device != qwen_states.device
+            or artist_mask.device != qwen_states.device
+            or use_null.device != qwen_states.device
+            or active_sample_indices.device != qwen_states.device
         ):
-            raise ValueError("active Artist token index is outside the Qwen sequence")
+            raise ValueError(
+                "Qwen states and Artist routing tensors must share one device"
+            )
+        if active_sample_indices.ndim != 1 or active_sample_indices.dtype != torch.long:
+            raise ValueError("active_sample_indices must be a one-dimensional long tensor")
 
         tokens = (
             self.null_tokens.to(dtype=qwen_states.dtype, device=qwen_states.device)
@@ -155,11 +166,44 @@ class StyleResampler(nn.Module):
             .expand(batch, -1, -1)
             .clone()
         )
-        if active_samples.any():
+        sample_in_range = (active_sample_indices >= 0) & (
+            active_sample_indices < batch
+        )
+        safe_active_samples = active_sample_indices.clamp(0, batch - 1)
+        expected_active = artist_mask.any(dim=1) & ~use_null
+        planned_active = torch.zeros_like(expected_active).scatter(
+            0,
+            safe_active_samples,
+            True,
+        )
+        plan_matches = (planned_active == expected_active).all() & (
+            expected_active.sum() == active_sample_indices.numel()
+        )
+        active_artist_indices = artist_token_indices.index_select(
+            0, safe_active_samples
+        )
+        active_artist_mask = artist_mask.index_select(0, safe_active_samples)
+        indices_in_range = (~active_artist_mask) | (
+            (active_artist_indices >= 0)
+            & (active_artist_indices < qwen_states.shape[1])
+        )
+        valid_plan = sample_in_range.all() & plan_matches & indices_in_range.all()
+        if qwen_states.is_cuda:
+            torch._assert_async(  # pyright: ignore[reportPrivateUsage,reportPrivateImportUsage]
+                valid_plan
+            )
+        elif not bool(valid_plan):
+            raise ValueError("active Artist sample/index plan is invalid")
+
+        if active_sample_indices.numel():
             safe_indices = active_artist_indices.masked_fill(~active_artist_mask, 0)
-            gather_index = safe_indices[:, :, None, None].expand(-1, -1, 7, self.input_size)
+            gather_index = safe_indices[:, :, None, None].expand(
+                -1, -1, 7, self.input_size
+            )
             selected = torch.gather(
-                qwen_states.detach()[active_samples], dim=1, index=gather_index
+                qwen_states.detach().index_select(0, safe_active_samples),
+                dim=1,
+                index=gather_index,
             )
             selected = self.shared_norm(selected) + self.layer_embedding.to(
                 selected.dtype
@@ -181,9 +225,18 @@ class StyleResampler(nn.Module):
                 need_weights=False,
             )
             style = self.style_mlp(queries + attended)
-            tokens[active_samples] = self.output_projection(style)
+            tokens.index_copy_(
+                0,
+                safe_active_samples,
+                self.output_projection(style),
+            )
 
-        mask = torch.ones(batch, self.query_count, dtype=torch.bool, device=qwen_states.device)
+        mask = torch.ones(
+            batch,
+            self.query_count,
+            dtype=torch.bool,
+            device=qwen_states.device,
+        )
         return StyleConditioningOutput(tokens=tokens, mask=mask)
 
     def artifact_config(self) -> dict[str, object]:

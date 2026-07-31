@@ -12,3 +12,13 @@ forward/backward prove the active projection batch size and null-token gradient 
 All constructor values remain explicit and self-describing in checkpoint metadata.
 Resolved-config construction of the full production composite remains owned by T050;
 this task adds no code defaults. Encoders/Conditioning package review is pending.
+
+The package review then identified dynamic CUDA boolean selection and Python
+`min/max/any` branches as host synchronization points. Collate now validates Artist
+positions and null routing on CPU and emits explicit active sample IDs. The composite
+passes that host-derived plan to `StyleResampler`, which verifies it with fixed-shape
+device predicates and uses static `index_select`/`index_copy` operations. A branch is
+retained only for the host-known plan length so an empty plan skips style compute
+without reading CUDA data. CPU routing/composite contracts and a production-size RTX
+5090 mixed batch under synchronization debug mode `error` passed. Package rereview is
+pending; T050 still owns resolved-config construction.

@@ -61,6 +61,7 @@ def test_collate_pads_eot_and_preserves_structured_metadata() -> None:
     assert batch.main_token_indices[1, 2] == -1
     assert not batch.main_mask[1, 2]
     assert batch.artist_token_indices.shape == (2, 0)
+    assert batch.active_style_sample_indices.numel() == 0
     assert torch.equal(batch.sample_ids, torch.tensor([1, 2]))
 
 
@@ -117,6 +118,55 @@ def test_collate_rejects_invalid_main_index_metadata(
     )
 
     with pytest.raises(CollateError, match="main token indices"):
+        collate_samples((invalid,))
+
+
+def test_collate_builds_active_style_sample_plan_on_cpu() -> None:
+    sample = _sample(1)
+    active = replace(
+        sample,
+        caption=replace(
+            sample.caption,
+            main_token_indices=(0, 1),
+            main_mask=(True, True),
+            artist_token_indices=(2,),
+            artist_mask=(True,),
+            use_null_style=False,
+        ),
+    )
+
+    batch = collate_samples((active, _sample(2)))
+
+    assert batch.active_style_sample_indices.device.type == "cpu"
+    assert torch.equal(batch.active_style_sample_indices, torch.tensor([0]))
+
+
+@pytest.mark.parametrize(
+    ("indices", "mask", "use_null"),
+    [
+        ((3,), (True,), False),
+        ((2,), (False,), False),
+        ((2,), (True,), True),
+        ((), (), False),
+    ],
+)
+def test_collate_rejects_invalid_artist_routing_metadata(
+    indices: tuple[int, ...],
+    mask: tuple[bool, ...],
+    use_null: bool,
+) -> None:
+    sample = _sample(1)
+    invalid = replace(
+        sample,
+        caption=replace(
+            sample.caption,
+            artist_token_indices=indices,
+            artist_mask=mask,
+            use_null_style=use_null,
+        ),
+    )
+
+    with pytest.raises(CollateError, match="Artist token|Artist token presence"):
         collate_samples((invalid,))
 
 
