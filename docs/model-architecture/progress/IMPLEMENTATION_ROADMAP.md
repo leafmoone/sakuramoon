@@ -349,6 +349,16 @@ sakuramoon/
 - **完成证据：** targeted state contracts、邻接 singleton pipeline/fault 回归、ruff、pyright 与 D022 test report；Data 包级复审仍 pending。
 - **GPU：** 无。
 
+### D023：Parent-coordinated persistent two-worker shard pipeline
+
+- **依赖：** D022 schema v3 multi-active state 与 D021 trusted `ShardRecord`/metadata/collate 合同。
+- **实现路径：** `data/pipeline.py`、`data/collate.py`、D023 multiprocessing/fault contracts、task/test evidence 与 trace registry。
+- **动作：** 父进程独占 state/cache coordinator，先激活并 prepare shard，再通过每 worker 容量 1 的输入队列交给精确两个 persistent DataLoader workers；ready output 与 completion channel 显式有界。
+- **完成语义：** worker 正常耗尽且父进程收到 ordered done 与 completion 后才逐 shard complete；worker 异常、`os._exit` 或父迭代器提前关闭均保留 active，restart 从 shard 起点重放。
+- **恢复：** worker topology 必须精确匹配 schema v3；所有 recovered active 全部重新 prepare 后才能激活新 shard；全部 active 继续防 cache eviction。
+- **完成证据：** 两个不同 worker ID/PID 跨多 shard 复用、真实 worker exit、父 close、精确 replay、reprepare barrier、bounded channel、ruff/pyright 与 D023 test report；Data 包级复审仍 pending。
+- **GPU：** 无；production cold-cache throughput/RSS/ready-wait sweep 保持 pending。
+
 ## 9. Phase 2：冻结编码器与条件分支
 
 ### T020：Mage-VAE wrapper 与重建验收

@@ -373,11 +373,13 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             Callable[..., Iterable[dict[str, Any]]],
             wds.WebDataset,  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
         )
-        dataset = factory(
-            urls,
-            shardshuffle=False,
-            empty_check=True,
-        )
+        options: dict[str, object] = {
+            "shardshuffle": False,
+            "empty_check": True,
+        }
+        if self._lease_managed:
+            options["workersplitter"] = None
+        dataset = factory(urls, **options)
         for raw_sample in dataset:
             processed = self._process(
                 cast(Mapping[str, object], raw_sample), records_by_url

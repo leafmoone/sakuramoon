@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "task_id": "D023",
+  "status": "cpu_persistent_two_worker_and_restart_faults_passed_data_package_rereview_pending",
+  "hardware": "CPU",
+  "targeted_persistent_worker_contracts": {
+    "command": "uv run --frozen pytest -q --basetemp=docs/model-architecture/reviews/D023/.pytest-targeted tests/unit/data/test_d023_workers.py tests/fault_injection/test_d023_worker_faults.py",
+    "passed": 5,
+    "failed": 0,
+    "repeated_runs": 2
+  },
+  "persistent_dataloader_workers": {
+    "configured": 2,
+    "observed_worker_ids": [0, 1],
+    "distinct_process_ids": 2,
+    "reused_across_shards": true
+  },
+  "bounded_channels": {
+    "worker_input_per_worker": 1,
+    "worker_input_total": 2,
+    "ready_batches": 2,
+    "prefetch_per_worker": 1,
+    "completion": 2
+  },
+  "parent_only_state_cache_coordinator": "passed",
+  "schema_v3_worker_count_exact_match_no_fallback": "passed",
+  "prepare_before_worker_handoff": "passed",
+  "all_active_cache_protection": "passed",
+  "per_shard_normal_completion": "passed",
+  "real_worker_os_exit_active_preserved": "passed",
+  "parent_iterator_close_active_preserved": "passed",
+  "restart_whole_shard_replay": {
+    "replayed_shards": 2,
+    "replayed_samples": 2,
+    "passed": true
+  },
+  "recovered_active_reprepare_barrier": "passed",
+  "trusted_shard_metadata_validation_caption_collate_contracts": "passed",
+  "adjacent_regression": {
+    "command": "uv run --frozen pytest -q --basetemp=docs/model-architecture/reviews/D023/.pytest-adjacent tests/unit/data/test_cache.py tests/unit/data/test_state.py tests/unit/data/test_pipeline.py tests/unit/data/test_collate.py tests/unit/data/test_d023_workers.py tests/fault_injection/test_data_failures.py tests/fault_injection/test_d023_worker_faults.py",
+    "passed": 65,
+    "failed": 1,
+    "unrelated_failure": "existing T054 download SIGKILL readiness timeout is fixed at 5 seconds while a fresh subprocess import took approximately 7-10 seconds in this environment"
+  },
+  "ruff": "passed",
+  "pyright": "passed: 0 errors 0 warnings",
+  "traceability": {
+    "contract_command": "uv run --frozen pytest -q --basetemp=docs/model-architecture/reviews/D023/.pytest-trace-clean tests/unit/docs/test_verify_traceability.py",
+    "contract_passed": 40,
+    "contract_failed": 0,
+    "contract_duration_seconds": 105.54,
+    "direct_verifier_command": "uv run --frozen python tools/verify_traceability.py --format json",
+    "requirements": 222,
+    "source_nodes": 222,
+    "errors": 0
+  },
+  "d022_state_semantic_changes": "none",
+  "data_package_rereview": "pending",
+  "production_cold_cache_throughput_ready_wait_rss": "pending",
+  "multi_gpu_ddp_nccl": "not_in_scope"
+}

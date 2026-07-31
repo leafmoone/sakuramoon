@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import multiprocessing as mp
+import os
+import queue
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
+from multiprocessing.queues import Queue as MultiprocessingQueue
+from pathlib import Path
+from typing import Any, cast
 
 import torch
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
     CaptionDropoutCounts,
 )
+from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.pipeline import (
     ImageAudit,
     PipelineSample,
@@ -63,6 +70,187 @@ class TrainingBatch:
             use_null_style=self.use_null_style.pin_memory(),
             all_condition_dropped=self.all_condition_dropped.pin_memory(),
         )
+
+
+@dataclass(frozen=True)
+class _ShardWork:
+    """A parent-prepared shard handed to one persistent DataLoader worker."""
+
+    shard_path: str
+    local_path: Path
+    record: ShardRecord
+    stop: bool = False
+
+
+@dataclass(frozen=True)
+class _WorkerBatch:
+    worker_id: int
+    worker_pid: int
+    shard_path: str
+    batch: TrainingBatch
+
+    def pin_memory(self) -> _WorkerBatch:
+        return _WorkerBatch(
+            self.worker_id,
+            self.worker_pid,
+            self.shard_path,
+            self.batch.pin_memory(),
+        )
+
+
+@dataclass(frozen=True)
+class _WorkerDone:
+    worker_id: int
+    worker_pid: int
+    shard_path: str
+
+
+@dataclass(frozen=True)
+class _WorkerCompletion:
+    worker_id: int
+    worker_pid: int
+    shard_path: str
+    normal: bool
+    error: str = ""
+
+
+class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
+    """Command-driven dataset used by exactly the configured worker processes.
+
+    The dataset deliberately receives only immutable, parent-prepared shard
+    records and local paths.  It has no coordinator or cache reference, so a
+    worker cannot publish state or evict a shard.  The parent controls command
+    admission through the bounded input queue.
+    """
+
+    def __init__(
+        self,
+        pipeline: WebDatasetPipeline,
+        *,
+        batch_size: int,
+        drop_last: bool,
+        worker_count: int,
+    ) -> None:
+        super().__init__()
+        if (
+            type(batch_size) is not int
+            or batch_size <= 0
+            or type(drop_last) is not bool
+            or type(worker_count) is not int
+            or worker_count <= 0
+        ):
+            raise CollateError("persistent shard dataset fields are invalid")
+        self.pipeline = pipeline
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.worker_count = worker_count
+        # A command slot per worker prevents unbounded shard prefetch.  The
+        # completion queue has the same bound because each active shard emits
+        # exactly one terminal message.
+        self.input_queues = tuple(
+            cast(MultiprocessingQueue[object], mp.Queue(maxsize=1))
+            for _ in range(worker_count)
+        )
+        self.completion_queue = cast(
+            MultiprocessingQueue[object],
+            mp.Queue(maxsize=worker_count),
+        )
+        self.input_queue_capacity = worker_count
+        self.input_queue_capacity_per_worker = 1
+        self.completion_queue_capacity = worker_count
+
+    def submit(self, worker_id: int, command: _ShardWork) -> None:
+        if (
+            type(worker_id) is not int
+            or not 0 <= worker_id < self.worker_count
+            or command.stop
+        ):
+            raise CollateError("persistent worker submission is invalid")
+        self.input_queues[worker_id].put(command)
+
+    def stop(self, worker_id: int, record: ShardRecord) -> None:
+        if type(worker_id) is not int or not 0 <= worker_id < self.worker_count:
+            raise CollateError("persistent worker stop target is invalid")
+        self.input_queues[worker_id].put_nowait(
+            _ShardWork("", Path("."), record, stop=True)
+        )
+
+    def __iter__(self) -> Iterator[_WorkerBatch | _WorkerDone]:
+        info = get_worker_info()
+        if info is None:
+            raise CollateError("persistent shard dataset requires DataLoader workers")
+        worker_id = info.id
+        worker_pid = os.getpid()
+        while True:
+            command = self.input_queues[worker_id].get()
+            if not isinstance(command, _ShardWork):
+                raise CollateError("persistent worker received an invalid command")
+            if command.stop:
+                return
+            try:
+                shard_pipeline = self.pipeline._with_local_shards(  # pyright: ignore[reportPrivateUsage]
+                    (command.local_path,),
+                    (command.record,),
+                )
+                for batch in bucketed_batches(
+                    shard_pipeline._iter_paths(  # pyright: ignore[reportPrivateUsage]
+                        (command.local_path,), (command.record,)
+                    ),
+                    batch_size=self.batch_size,
+                    drop_last=self.drop_last,
+                ):
+                    yield _WorkerBatch(worker_id, worker_pid, command.shard_path, batch)
+            except BaseException as error:
+                # Never let worker failures publish durable state.  The
+                # completion message is bounded and only carries diagnostics.
+                self.completion_queue.put(
+                    _WorkerCompletion(
+                        worker_id=worker_id,
+                        worker_pid=worker_pid,
+                        shard_path=command.shard_path,
+                        normal=False,
+                        error=f"{type(error).__name__}: {error}",
+                    )
+                )
+                raise
+            self.completion_queue.put(
+                _WorkerCompletion(worker_id, worker_pid, command.shard_path, True)
+            )
+            # This marker is ordered after all batches in this worker's
+            # DataLoader output stream.  The parent waits for both this marker
+            # and the completion-channel message before marking the shard.
+            yield _WorkerDone(worker_id, worker_pid, command.shard_path)
+
+
+def _shutdown_loader(loader: DataLoader[Any]) -> None:
+    """Stop persistent workers deterministically when a lease is interrupted."""
+
+    iterator = getattr(loader, "_iterator", None)
+    shutdown = getattr(iterator, "_shutdown_workers", None)
+    if callable(shutdown):
+        shutdown()
+
+
+def _completion_for(
+    completion_queue: MultiprocessingQueue[object],
+    pending: dict[str, _WorkerCompletion],
+    shard_path: str,
+) -> _WorkerCompletion:
+    message = pending.pop(shard_path, None)
+    while message is None:
+        try:
+            candidate = completion_queue.get(timeout=10.0)
+        except queue.Empty:
+            raise CollateError(
+                f"worker completion missing for shard {shard_path}"
+            ) from None
+        if not isinstance(candidate, _WorkerCompletion):
+            raise CollateError("persistent worker completion channel is invalid")
+        if candidate.shard_path == shard_path:
+            message = candidate
+        else:
+            pending[candidate.shard_path] = candidate
+    return message
 
 
 def _index_tensor(
@@ -259,13 +447,14 @@ class BucketedBatchDataset(IterableDataset[TrainingBatch]):
         )
 
 
-def _build_batch_loader(
-    dataset: BucketedBatchDataset,
+def _build_batch_loader[BatchItem](
+    dataset: IterableDataset[BatchItem],
     *,
     worker_count: int,
     ready_batches: int,
     pin_memory: bool,
-) -> DataLoader[TrainingBatch]:
+    in_order: bool = True,
+) -> DataLoader[BatchItem]:
     """Build persistent workers with an exact divisible prefetch budget."""
 
     if (
@@ -275,6 +464,7 @@ def _build_batch_loader(
         or ready_batches < worker_count
         or ready_batches % worker_count
         or type(pin_memory) is not bool
+        or type(in_order) is not bool
     ):
         raise CollateError(
             "ready_batches must be a positive multiple of persistent worker_count"
@@ -286,6 +476,7 @@ def _build_batch_loader(
         persistent_workers=True,
         prefetch_factor=ready_batches // worker_count,
         pin_memory=pin_memory,
+        in_order=in_order,
     )
 
 
@@ -300,11 +491,19 @@ def iter_leased_batches(
     pin_memory: bool,
     drop_last: bool,
 ) -> Iterator[TrainingBatch]:
-    """Drain each durable shard lease before publishing its completion."""
+    """Drain durable shard leases through the configured persistent workers.
 
-    if worker_count != 1:
+    The coordinator remains exclusively in the parent process.  Workers only
+    consume parent-prepared local files and return batches plus terminal
+    markers.  A shard is completed after its ordered done marker and bounded
+    completion-channel record have both arrived.
+    """
+
+    if worker_count != coordinator.store.worker_count:
         raise CollateError(
-            "durable shard iteration currently requires exactly one worker"
+            "durable shard iteration worker_count must exactly match the state "
+            "worker_count; exactly one worker is only valid when schema v3 "
+            "worker_count is one (no fallback)"
         )
     if (
         type(shard_paths) is not tuple
@@ -313,28 +512,98 @@ def iter_leased_batches(
         or len(set(shard_paths)) != len(shard_paths)
     ):
         raise CollateError("durable shard iteration requires unique shard paths")
-    for shard_path in shard_paths:
-        with coordinator.lease(shard_path) as cached:
+    if type(batch_size) is not int or batch_size <= 0 or type(drop_last) is not bool:
+        raise CollateError("batch_size and drop_last are invalid")
+
+    requested = list(shard_paths)
+    recovered = tuple(coordinator.state.active_shards)
+    if any(path not in requested for path in recovered):
+        raise CollateError(
+            "all recovered active shards must be included for replay before new shards"
+        )
+    ordered_paths = list(dict.fromkeys((*recovered, *requested)))
+    dataset = _PersistentShardDataset(
+        pipeline,
+        batch_size=batch_size,
+        drop_last=drop_last,
+        worker_count=worker_count,
+    )
+    loader = _build_batch_loader(
+        dataset,
+        worker_count=worker_count,
+        ready_batches=ready_batches,
+        pin_memory=pin_memory,
+        in_order=False,
+    )
+    iterator = iter(loader)
+    queued: dict[str, int] = {}
+    available_workers = list(range(worker_count))
+    completion_messages: dict[str, _WorkerCompletion] = {}
+    next_index = 0
+
+    def submit_available() -> None:
+        nonlocal next_index
+        while available_workers and next_index < len(ordered_paths):
+            worker_id = available_workers.pop(0)
+            shard_path = ordered_paths[next_index]
+            next_index += 1
+            cached = coordinator.prepare(shard_path)
             if cached is None:
+                available_workers.append(worker_id)
                 continue
             if cached.fetched.relative_path != shard_path:
                 raise PipelineSampleError("cache returned a different leased shard")
-            shard_pipeline = pipeline._with_local_shards(  # pyright: ignore[reportPrivateUsage]
-                (cached.fetched.path,),
-                (coordinator.store.manifest.shard(shard_path),),
+            dataset.submit(
+                worker_id,
+                _ShardWork(
+                    shard_path=shard_path,
+                    local_path=cached.fetched.path,
+                    record=coordinator.store.manifest.shard(shard_path),
+                )
             )
-            dataset = BucketedBatchDataset(
-                shard_pipeline,
-                batch_size=batch_size,
-                drop_last=drop_last,
+            queued[shard_path] = worker_id
+
+    def finish_shard(shard_path: str) -> None:
+        completion = _completion_for(
+            dataset.completion_queue, completion_messages, shard_path
+        )
+        if not completion.normal:
+            raise CollateError(
+                f"persistent worker failed for shard {shard_path}: {completion.error}"
             )
-            loader = _build_batch_loader(
-                dataset,
-                worker_count=worker_count,
-                ready_batches=ready_batches,
-                pin_memory=pin_memory,
-            )
-            yield from loader
+        if shard_path not in queued:
+            raise CollateError("persistent worker completed an unknown shard")
+        worker_id = queued[shard_path]
+        if completion.worker_id != worker_id:
+            raise CollateError("persistent worker completion identity drifted")
+        coordinator.mark_completed(shard_path)
+        del queued[shard_path]
+        available_workers.append(worker_id)
+        submit_available()
+
+    try:
+        submit_available()
+        while queued:
+            item = next(iterator)
+            if isinstance(item, _WorkerBatch):
+                if queued.get(item.shard_path) != item.worker_id:
+                    raise CollateError("persistent worker returned an unknown shard")
+                yield item.batch
+            elif isinstance(item, _WorkerDone):
+                if queued.get(item.shard_path) != item.worker_id:
+                    raise CollateError("persistent worker done identity drifted")
+                finish_shard(item.shard_path)
+            else:
+                raise CollateError("persistent worker output channel is invalid")
+    finally:
+        # A stop command is best-effort.  _shutdown_workers also handles an
+        # interrupted or failed worker, while active state remains replayable.
+        for worker_id in range(worker_count):
+            try:
+                dataset.stop(worker_id, coordinator.store.manifest.shards[0])
+            except (queue.Full, IndexError):
+                continue
+        _shutdown_loader(loader)
 
 
 __all__ = [

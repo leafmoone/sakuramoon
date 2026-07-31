@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 87
+registry_revision = 88
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -588,6 +588,7 @@ owner_tasks = [
     "D015",
     "D021",
     "D022",
+    "D023",
     "T054",
 ]
 config_keys = [
@@ -615,6 +616,7 @@ artifacts = [
     "docs/model-architecture/reviews/D015/**",
     "docs/model-architecture/reviews/D021/**",
     "docs/model-architecture/reviews/D022/**",
+    "docs/model-architecture/reviews/D023/**",
     "artifacts/data/**",
 ]
 hardware = "1GPU"
@@ -5392,6 +5394,10 @@ implementation_paths = [
     "tests/unit/data/test_state.py",
     "docs/model-architecture/progress/tasks/D022.md",
     "docs/model-architecture/reviews/D022/test_report.json",
+    "tests/unit/data/test_d023_workers.py",
+    "tests/fault_injection/test_d023_worker_faults.py",
+    "docs/model-architecture/progress/tasks/D023.md",
+    "docs/model-architecture/reviews/D023/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -5587,6 +5593,12 @@ implementation_paths = [
     "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
     "docs/model-architecture/progress/tasks/D022.md",
     "docs/model-architecture/reviews/D022/test_report.json",
+    "src/sakuramoon/data/collate.py",
+    "src/sakuramoon/data/pipeline.py",
+    "tests/unit/data/test_d023_workers.py",
+    "tests/fault_injection/test_d023_worker_faults.py",
+    "docs/model-architecture/progress/tasks/D023.md",
+    "docs/model-architecture/reviews/D023/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
