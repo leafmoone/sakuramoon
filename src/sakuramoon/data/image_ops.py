@@ -46,10 +46,6 @@ class DimensionMismatchError(ImageScanError):
         self.report = report
 
 
-class ImageScanReportExistsError(ImageScanError):
-    """The requested image scan report already exists."""
-
-
 @dataclass(frozen=True)
 class ProcessedImage:
     image: Image.Image
@@ -211,15 +207,12 @@ def canonical_image_scan_report_bytes(report: ImageScanReport) -> bytes:
 
 
 def write_image_scan_report(report: ImageScanReport, destination: Path) -> str:
-    """Publish one canonical scan report with no replacement or silent fallback."""
+    """Atomically replace one canonical, regenerable scan report."""
 
     payload = canonical_image_scan_report_bytes(report)
     temporary: Path | None = None
-    published = False
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists() or destination.is_symlink():
-            raise ImageScanReportExistsError("image scan report already exists")
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{destination.name}.",
             suffix=".tmp",
@@ -230,36 +223,11 @@ def write_image_scan_report(report: ImageScanReport, destination: Path) -> str:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        try:
-            os.link(temporary, destination)
-            published = True
-        except FileExistsError:
-            raise ImageScanReportExistsError("image scan report already exists") from None
-        temporary.unlink()
+        os.replace(temporary, destination)
         temporary = None
-        parent_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
     except ImageScanError:
         raise
     except OSError:
-        if published:
-            try:
-                destination.unlink(missing_ok=True)
-            except OSError:
-                pass
-            try:
-                parent_fd = os.open(
-                    destination.parent, os.O_RDONLY | os.O_DIRECTORY
-                )
-                try:
-                    os.fsync(parent_fd)
-                finally:
-                    os.close(parent_fd)
-            except OSError:
-                pass
         raise ImageScanError("image scan report could not be written") from None
     finally:
         if temporary is not None:

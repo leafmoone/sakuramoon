@@ -22,7 +22,6 @@ from sakuramoon.data.image_ops import (
     ImageRejected,
     ImageScanError,
     ImageScanReport,
-    ImageScanReportExistsError,
     canonical_image_scan_report_bytes,
     normalize_image,
     observe_decoded_dimensions,
@@ -200,7 +199,8 @@ def test_dimension_scan_requires_exact_100k_observations() -> None:
         )
 
 
-def test_image_scan_report_is_canonical_fsynced_and_no_clobber(
+def test_image_scan_report_is_canonical_fsynced_and_atomically_replaced(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     bucket_report = scan_bucket_assignments(
@@ -213,9 +213,31 @@ def test_image_scan_report_is_canonical_fsynced_and_no_clobber(
     report = ImageScanReport(bucket_report, dimension_report)
     payload = canonical_image_scan_report_bytes(report)
     destination = tmp_path / "image-scan.json"
+    destination.write_bytes(b"stale report\n")
+    real_fsync = os.fsync
+    real_replace = os.replace
+    fsync_calls = 0
+    replace_calls = 0
+
+    def record_fsync(file_descriptor: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        real_fsync(file_descriptor)
+
+    def record_replace(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        nonlocal replace_calls
+        replace_calls += 1
+        assert Path(source).parent == destination.parent
+        assert Path(target) == destination
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
+    monkeypatch.setattr(os, "replace", record_replace)
 
     digest = write_image_scan_report(report, destination)
 
+    assert fsync_calls == 1
+    assert replace_calls == 1
     assert destination.read_bytes() == payload
     assert digest == hashlib.sha256(payload).hexdigest()
     document = json.loads(payload)
@@ -223,12 +245,10 @@ def test_image_scan_report_is_canonical_fsynced_and_no_clobber(
     assert document["bucket_scan"]["assigned_samples"] == 1
     assert document["bucket_scan"]["no_upscale_rejections"] == 1
     assert document["dimension_scan"]["accepted"] is True
-    with pytest.raises(ImageScanReportExistsError, match="already exists"):
-        write_image_scan_report(report, destination)
-    assert destination.read_bytes() == payload
+    assert not tuple(tmp_path.glob(".image-scan.json.*.tmp"))
 
 
-def test_image_scan_report_rolls_back_final_when_parent_fsync_fails(
+def test_image_scan_report_replace_failure_preserves_previous_report(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -243,19 +263,18 @@ def test_image_scan_report_rolls_back_final_when_parent_fsync_fails(
         scan_decoded_dimensions(_dimension_observations(0)),
     )
     destination = tmp_path / "image-scan.json"
-    real_fsync = os.fsync
-    calls = 0
+    destination.write_bytes(b"previous report\n")
 
-    def fail_parent_fsync(file_descriptor: int) -> None:
-        nonlocal calls
-        calls += 1
-        if calls >= 2:
-            raise OSError("injected parent fsync failure")
-        real_fsync(file_descriptor)
+    def fail_replace(
+        source: str | os.PathLike[str], target: str | os.PathLike[str]
+    ) -> None:
+        assert Path(source).parent == destination.parent
+        assert Path(target) == destination
+        raise OSError("injected replace failure")
 
-    monkeypatch.setattr(os, "fsync", fail_parent_fsync)
+    monkeypatch.setattr(os, "replace", fail_replace)
     with pytest.raises(ImageScanError, match="could not be written"):
         write_image_scan_report(report, destination)
 
-    assert not destination.exists()
+    assert destination.read_bytes() == b"previous report\n"
     assert not tuple(tmp_path.glob(".image-scan.json.*.tmp"))
