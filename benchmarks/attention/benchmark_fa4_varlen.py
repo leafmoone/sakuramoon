@@ -14,12 +14,15 @@ import torch
 import torch.nn.functional as F
 from torch.profiler import ProfilerActivity, profile
 
+from sakuramoon.conditioning.packing import ValidatedCuSeqlens
 from sakuramoon.model.attention import (
+    AcceptedCuSeqlens,
     DenseGQAAttention,
     FA4VarlenGQAAttention,
+    accept_fa4_boundaries,
+    build_validated_cu_seqlens,
     dense_attention_mask,
     fa4_varlen_attention,
-    validate_cu_seqlens,
 )
 
 
@@ -44,6 +47,19 @@ def _p99_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
     return torch.quantile(
         (actual.float() - expected.float()).abs().flatten(), 0.99
     ).item()
+
+
+def _accepted_boundaries(
+    lengths: tuple[int, ...],
+) -> tuple[ValidatedCuSeqlens, AcceptedCuSeqlens]:
+    public = build_validated_cu_seqlens(lengths, device=torch.device("cuda"))
+    accepted = accept_fa4_boundaries(
+        public,
+        total_tokens=sum(lengths),
+        batch_size=len(lengths),
+        device=public.tensor.device,
+    )
+    return public, accepted
 
 
 def _production_fa4_module() -> FA4VarlenGQAAttention:
@@ -140,11 +156,7 @@ def _dense_per_sample_mask_free(
 def _correctness_metrics() -> dict[str, Any]:
     lengths = (113, 197)
     offsets = (0, lengths[0], sum(lengths))
-    boundaries = validate_cu_seqlens(
-        torch.tensor(offsets, device="cuda", dtype=torch.int32),
-        total_tokens=offsets[-1],
-        max_seqlen=max(lengths),
-    )
+    _public_boundaries, boundaries = _accepted_boundaries(lengths)
     query_data = torch.randn(offsets[-1], 20, 128, device="cuda", dtype=torch.bfloat16)
     key_data = torch.randn(offsets[-1], 5, 128, device="cuda", dtype=torch.bfloat16)
     value_data = torch.randn(offsets[-1], 5, 128, device="cuda", dtype=torch.bfloat16)
@@ -213,11 +225,7 @@ def _full_module_correctness_metrics() -> dict[str, Any]:
     lengths = (11, 17)
     offsets = (0, lengths[0], sum(lengths))
     total_tokens = offsets[-1]
-    boundaries = validate_cu_seqlens(
-        torch.tensor(offsets, device="cuda", dtype=torch.int32),
-        total_tokens=total_tokens,
-        max_seqlen=max(lengths),
-    )
+    _public_boundaries, boundaries = _accepted_boundaries(lengths)
     tokens = torch.randn(total_tokens, 2560, device="cuda", dtype=torch.bfloat16)
     coordinates = torch.randn(total_tokens, 2, device="cuda", dtype=torch.float32)
     loss_weight = torch.randn_like(tokens, dtype=torch.float32)
@@ -312,9 +320,18 @@ def _full_module_correctness_metrics() -> dict[str, Any]:
             .max()
             .item(),
             "dense_reference_p99": _p99_error(fa4_parameter, dense_parameter),
+            "derived_p99_tolerance": max(
+                0.002,
+                80.0 * gradient_metrics[name]["dense_gradient_magnitude_p99"],
+            ),
         }
 
     repeat_output_p99 = _p99_error(fa4_output, repeat_output)
+    dense_output_p99 = _p99_error(fa4_output, dense_output)
+    output_tolerance = max(0.002, 8.0 * repeat_output_p99)
+    repeat_loss_abs = abs(fa4_loss.item() - repeat_loss.item())
+    dense_loss_abs = abs(fa4_loss.item() - dense_loss.item())
+    loss_tolerance = max(2e-6, 8.0 * repeat_loss_abs)
     return {
         "lengths": lengths,
         "parameter_names": sorted(fa4_gradients),
@@ -325,17 +342,31 @@ def _full_module_correctness_metrics() -> dict[str, Any]:
             == {name for name, _ in fa4_module.named_parameters()}
         ),
         "output_same_backend_repeat_p99": repeat_output_p99,
-        "output_dense_reference_p99": _p99_error(fa4_output, dense_output),
-        "output_derived_p99_tolerance": max(0.002, 8.0 * repeat_output_p99),
-        "loss_same_backend_repeat_abs": abs(fa4_loss.item() - repeat_loss.item()),
-        "loss_dense_reference_abs": abs(fa4_loss.item() - dense_loss.item()),
+        "output_dense_reference_p99": dense_output_p99,
+        "output_derived_p99_tolerance": output_tolerance,
+        "output_comparison_passed": dense_output_p99 <= output_tolerance,
+        "loss_same_backend_repeat_abs": repeat_loss_abs,
+        "loss_dense_reference_abs": dense_loss_abs,
+        "loss_derived_tolerance": loss_tolerance,
+        "loss_comparison_passed": dense_loss_abs <= loss_tolerance,
         "gradients": gradient_metrics,
+        "all_parameter_gradient_comparisons_passed": all(
+            metrics["dense_reference_p99"] <= metrics["derived_p99_tolerance"]
+            for metrics in gradient_metrics.values()
+        ),
         "update_learning_rate": learning_rate,
         "updates": update_metrics,
+        "all_parameters_updated": all(
+            metrics["fa4_update_max"] > 0.0 for metrics in update_metrics.values()
+        ),
+        "all_parameter_update_comparisons_passed": all(
+            metrics["dense_reference_p99"] <= metrics["derived_p99_tolerance"]
+            for metrics in update_metrics.values()
+        ),
     }
 
 
-def _batched_cuda_event_ms(call: Callable[[], torch.Tensor], repeats: int) -> float:
+def _batched_cuda_event_ms(call: Callable[[], object], repeats: int) -> float:
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     start.record()
@@ -347,7 +378,7 @@ def _batched_cuda_event_ms(call: Callable[[], torch.Tensor], repeats: int) -> fl
 
 
 def _synchronized_wall_ms(
-    call: Callable[[], torch.Tensor], repeats: int
+    call: Callable[[], object], repeats: int
 ) -> list[float]:
     elapsed_ms: list[float] = []
     for _ in range(repeats):
@@ -359,7 +390,7 @@ def _synchronized_wall_ms(
 
 
 def _method_metrics(
-    call: Callable[[], torch.Tensor],
+    call: Callable[[], object],
     *,
     total_tokens: int,
     repeats: int,
@@ -378,15 +409,43 @@ def _method_metrics(
     }
 
 
+def _wall_metrics(call: Callable[[], object], repeats: int) -> dict[str, float]:
+    values = _synchronized_wall_ms(call, repeats)
+    return {
+        "mean_ms": sum(values) / len(values),
+        "p50_ms": _percentile(values, 0.50),
+        "p95_ms": _percentile(values, 0.95),
+        "max_ms": max(values),
+    }
+
+
+def _memory_metrics(call: Callable[[], object]) -> dict[str, float]:
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    baseline_allocated = torch.cuda.memory_allocated()
+    baseline_reserved = torch.cuda.memory_reserved()
+    torch.cuda.reset_peak_memory_stats()
+    result = call()
+    torch.cuda.synchronize()
+    peak_allocated = torch.cuda.max_memory_allocated()
+    peak_reserved = torch.cuda.max_memory_reserved()
+    del result
+    mib = float(1024**2)
+    return {
+        "baseline_allocated_mib": baseline_allocated / mib,
+        "baseline_reserved_mib": baseline_reserved / mib,
+        "peak_allocated_mib": peak_allocated / mib,
+        "peak_reserved_mib": peak_reserved / mib,
+        "peak_allocated_delta_mib": (peak_allocated - baseline_allocated) / mib,
+        "peak_reserved_delta_mib": (peak_reserved - baseline_reserved) / mib,
+    }
+
+
 def _performance_metrics(warmup: int, repeats: int) -> dict[str, Any]:
     lengths = (1028, 1540)
     offsets = (0, lengths[0], sum(lengths))
     total_tokens = offsets[-1]
-    boundaries = validate_cu_seqlens(
-        torch.tensor(offsets, device="cuda", dtype=torch.int32),
-        total_tokens=total_tokens,
-        max_seqlen=max(lengths),
-    )
+    public_boundaries, boundaries = _accepted_boundaries(lengths)
     query = torch.randn(total_tokens, 20, 128, device="cuda", dtype=torch.bfloat16)
     key = torch.randn(total_tokens, 5, 128, device="cuda", dtype=torch.bfloat16)
     value = torch.randn(total_tokens, 5, 128, device="cuda", dtype=torch.bfloat16)
@@ -396,6 +455,34 @@ def _performance_metrics(warmup: int, repeats: int) -> dict[str, Any]:
 
     def dense_call() -> torch.Tensor:
         return _dense_per_sample_mask_free(query, key, value, offsets)
+
+    block_count = 16
+
+    def accepted_hot_multi_block_call() -> torch.Tensor:
+        output = query
+        for _ in range(block_count):
+            output = fa4_varlen_attention(query, key, value, boundaries)
+        return output
+
+    def entry_inclusive_multi_block_call() -> torch.Tensor:
+        accepted = accept_fa4_boundaries(
+            public_boundaries,
+            total_tokens=total_tokens,
+            batch_size=len(lengths),
+            device=query.device,
+        )
+        output = query
+        for _ in range(block_count):
+            output = fa4_varlen_attention(query, key, value, accepted)
+        return output
+
+    def entry_acceptance_call() -> AcceptedCuSeqlens:
+        return accept_fa4_boundaries(
+            public_boundaries,
+            total_tokens=total_tokens,
+            batch_size=len(lengths),
+            device=query.device,
+        )
 
     torch.cuda.synchronize()
     cold_started = time.perf_counter()
@@ -422,13 +509,30 @@ def _performance_metrics(warmup: int, repeats: int) -> dict[str, Any]:
         repeats=repeats,
     )
 
-    profiled_iterations = min(20, repeats)
+    fa4_memory = _memory_metrics(fa4_call)
+    dense_memory = _memory_metrics(dense_call)
+    multi_block_repeats = min(50, repeats)
+    entry_acceptance_wall = _wall_metrics(entry_acceptance_call, multi_block_repeats)
+    accepted_hot_wall = _wall_metrics(
+        accepted_hot_multi_block_call,
+        multi_block_repeats,
+    )
+    entry_inclusive_wall = _wall_metrics(
+        entry_inclusive_multi_block_call,
+        multi_block_repeats,
+    )
+    accepted_hot_cuda_event_ms = _batched_cuda_event_ms(
+        accepted_hot_multi_block_call,
+        multi_block_repeats,
+    )
+
+    profiled_iterations = min(5, multi_block_repeats)
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
         acc_events=True,
     ) as profiler:
         for _ in range(profiled_iterations):
-            fa4_call()
+            entry_inclusive_multi_block_call()
         torch.cuda.synchronize()
 
     profiler_events = profiler.events()
@@ -440,10 +544,28 @@ def _performance_metrics(warmup: int, repeats: int) -> dict[str, Any]:
         if str(event.device_type).endswith("CUDA")
     ]
     cuda_events.sort(key=lambda event: event.time_range.start)
+    copy_events = [event for event in cuda_events if "memcpy" in event.name.lower()]
+    kernel_events = [
+        event for event in cuda_events if "memcpy" not in event.name.lower()
+    ]
+    expected_kernel_events = profiled_iterations * block_count
+    expected_copy_events = profiled_iterations * 2
+    if len(kernel_events) != expected_kernel_events:
+        raise RuntimeError("profiler did not observe one FA4 kernel per block")
+    if len(copy_events) != expected_copy_events:
+        raise RuntimeError("profiler did not observe one entry D2H and one entry H2D")
     gaps_us = [
         max(0.0, current.time_range.start - previous.time_range.end)
         for previous, current in pairwise(cuda_events)
     ]
+    within_forward_kernel_gaps_us: list[float] = []
+    for forward_index in range(profiled_iterations):
+        start = forward_index * block_count
+        block_events = kernel_events[start : start + block_count]
+        within_forward_kernel_gaps_us.extend(
+            max(0.0, current.time_range.start - previous.time_range.end)
+            for previous, current in pairwise(block_events)
+        )
     kernel_names = sorted({event.name for event in cuda_events})
     return {
         "lengths": lengths,
@@ -456,6 +578,28 @@ def _performance_metrics(warmup: int, repeats: int) -> dict[str, Any]:
         "full_true_mask_dense_is_permitted_for_correctness_only": True,
         "fa4": fa4_metrics,
         "dense_sdpa": dense_metrics,
+        "memory": {
+            "fa4": fa4_memory,
+            "dense_sdpa": dense_memory,
+        },
+        "accepted_boundary": {
+            "entry_d2h_checks_per_packed_forward": 1,
+            "per_block_d2h_checks": 0,
+            "block_count": block_count,
+            "measured_packed_forwards": multi_block_repeats,
+            "entry_acceptance_wall": entry_acceptance_wall,
+            "accepted_hot_multi_block_wall": accepted_hot_wall,
+            "entry_inclusive_multi_block_wall": entry_inclusive_wall,
+            "entry_overhead_p50_ms": (
+                entry_inclusive_wall["p50_ms"] - accepted_hot_wall["p50_ms"]
+            ),
+            "accepted_hot_batched_cuda_event_ms_per_forward": (
+                accepted_hot_cuda_event_ms
+            ),
+            "accepted_hot_batched_cuda_event_ms_per_block": (
+                accepted_hot_cuda_event_ms / block_count
+            ),
+        },
         "batched_cuda_event_speedup": (
             dense_metrics["batched_cuda_event_ms_per_call"]
             / fa4_metrics["batched_cuda_event_ms_per_call"]
@@ -465,12 +609,39 @@ def _performance_metrics(warmup: int, repeats: int) -> dict[str, Any]:
             / fa4_metrics["synchronized_wall_ms_mean"]
         ),
         "profiler_iterations": profiled_iterations,
-        "profiler_cuda_kernel_count": len(cuda_events),
-        "profiler_cuda_kernels_per_iteration": len(cuda_events) / profiled_iterations,
+        "profiler_cuda_event_count": len(cuda_events),
+        "profiler_cuda_events_per_packed_forward": (
+            len(cuda_events) / profiled_iterations
+        ),
+        "profiler_non_copy_kernel_count": len(kernel_events),
+        "profiler_non_copy_kernels_per_packed_forward": (
+            len(kernel_events) / profiled_iterations
+        ),
+        "profiler_boundary_copy_event_count": len(copy_events),
+        "profiler_boundary_copy_events_per_packed_forward": (
+            len(copy_events) / profiled_iterations
+        ),
+        "profiler_one_d2h_one_h2d_per_packed_forward": True,
+        "profiler_no_per_block_boundary_copy": True,
         "profiler_kernel_gap_us_p50": _percentile(gaps_us, 0.50),
         "profiler_kernel_gap_us_p95": _percentile(gaps_us, 0.95),
         "profiler_kernel_gap_us_max": max(gaps_us),
+        "profiler_within_forward_kernel_gap_us_p50": _percentile(
+            within_forward_kernel_gaps_us,
+            0.50,
+        ),
+        "profiler_within_forward_kernel_gap_us_p95": _percentile(
+            within_forward_kernel_gaps_us,
+            0.95,
+        ),
+        "profiler_within_forward_kernel_gap_us_max": max(
+            within_forward_kernel_gaps_us
+        ),
         "profiler_kernel_names": kernel_names,
+        "profiler_non_copy_kernel_names": sorted(
+            {event.name for event in kernel_events}
+        ),
+        "profiler_boundary_copy_names": sorted({event.name for event in copy_events}),
     }
 
 
@@ -486,11 +657,14 @@ def main() -> None:
     torch.manual_seed(123)  # pyright: ignore[reportUnknownMemberType]
     performance = _performance_metrics(args.warmup, args.repeats)
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "task_id": "K001",
+        "benchmark_scope": "accepted_boundary_remediation",
         "gpu": torch.cuda.get_device_name(),
         "torch": torch.__version__,
         "flash_attn_4": importlib.metadata.version("flash-attn-4"),
         "nvidia_cutlass_dsl": importlib.metadata.version("nvidia-cutlass-dsl"),
+        "upstream_repository_commit_provenance": "blocked_not_governed",
         "correctness": _correctness_metrics(),
         "full_module_correctness": _full_module_correctness_metrics(),
         "performance": performance,

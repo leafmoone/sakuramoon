@@ -1,88 +1,96 @@
-# K001 independent AI/model correctness review
+# K001 independent AI/model correctness rereview
 
-Verdict: **CHANGES_REQUIRED**
+Reviewer: independent agent `/root/k001_ai_rereview`.
 
-Reviewed HEAD: `c7b2e90a293aaaddb39015d0ab4c86f6b7c9af39`. M037 and the concurrent Data
-worktree changes are outside K001 and were not modified. This review only changes this
-file.
+Scope: the current accepted-boundary K001 remediation and its committed T024
+dependencies at `HEAD=d396029cf0a2f95ab8ccf7d27d1cc9422a960973`. The uncommitted
+roadmap changes in the shared worktree were excluded. This review only writes this
+file; it did not modify implementation, tests, benchmark output, traceability, or
+the historical Infra review. No `.env`, `reference/`, or archived architecture file
+was read or executed.
+
+## Verdict
+
+**PASS for AI/model correctness in the implemented K001 scope, with the fixed
+upstream provenance audit BLOCKED.** No implementation-level finding remains in the
+accepted-boundary remediation. K001 must not claim the governed four-column upstream
+algorithm audit is complete until a fixed FA4 repository commit, tree identity, and
+license evidence are established.
 
 ## Findings
 
-### K001-AI-001 (high): mutable CUDA boundaries bypass the claimed validation
+### K001-AI-BLOCKED-001: no governed fixed FA4 upstream repository commit
 
-`ValidatedCuSeqlens` is a frozen dataclass, but its `tensor` remains mutable in place
-(`src/sakuramoon/conditioning/packing.py:25-56`). The production guard checks host
-metadata plus tensor shape/dtype/contiguity, but never checks that the CUDA values still
-equal the cumulative `sequence_lengths` (`src/sakuramoon/model/attention.py:61-75`).
-The locked FA4 interface likewise validates shape/dtype/contiguity only; its kernel reads
-offset and length directly from `cu_seqlens[batch]` and `cu_seqlens[batch+1]`.
+The runtime is reproducibly pinned to `flash-attn-4==4.0.0b24` and its wheel SHA-256
+(`uv.lock:207-223`), but `docs/model-architecture/reviews/R001/reference_manifest.json`
+contains only HDM, JLT, and krea-2 repository locks (`:6-55`). No FlashAttention
+repository URL/commit/tree/license lock is present. A wheel pin establishes the
+installed artifact, not the requested fixed-commit algorithm provenance, so the FA4
+upstream audit and any claim that this provenance gate is closed remain **BLOCKED**.
+This is a remaining governance scope item, not a failure of the local numerical
+implementation. No network or `reference/` access was used to fill the gap.
 
-A real RTX 5090 call constructed the valid host contract `(2, 2)`, mutated only
-`boundaries.tensor[1]` from `2` to `3`, and then called `fa4_varlen_attention`. The call
-was accepted with host lengths `(2, 2)`, CUDA offsets `[0, 3, 4]`, and stale
-`max_seqlen=2`; the first declared sample's two output tokens changed by a maximum
-absolute `3.046875`. This silently changes cross-sample isolation and can also pass a
-`max_seqlen` smaller than the actual CUDA sequence length to the native kernel.
+## Accepted-boundary correctness
 
-The forged-handle tests do not cover this case: they only corrupt dtype, shape,
-contiguity, or internally inconsistent host metadata
-(`tests/gpu/fa4/test_varlen_attention.py:255-297`). The required remediation is to
-validate CUDA boundary contents against host-derived cumulative offsets once at the
-packed-batch entry, reuse only that accepted handle across blocks, derive token/sample
-indexing from the same host-validated lengths, and add a content-mutation regression
-that hard-fails before the native kernel. It must not add a per-block D2H sync.
+- `accept_fa4_boundaries` performs one host/CUDA content comparison at the
+  PackedDiT entry, then rematerializes private CUDA offsets from the canonical host
+  lengths (`src/sakuramoon/model/attention.py:82-130`). A forged host `(2,2)` with
+  CUDA `[0,3,4]` and post-construction mutation are rejected before native FA4
+  import (`tests/gpu/fa4/test_varlen_attention.py:265-333`).
+- Only the accepted capability reaches the native call; FA4 checks native 20Q/5KV
+  shapes, CUDA BF16, contiguity, and uses `pack_gqa=True`, `causal=False`, and the
+  same accepted offsets (`src/sakuramoon/model/attention.py:174-242`). No K/V head
+  repetition or silent dense fallback is present.
+- `PackedDiT.forward_packed_features` accepts exactly once per packed forward and
+  passes that handle to every active block (`src/sakuramoon/model/dit.py:505-543`).
+  `accepted_sample_indices` expands the same host `sequence_lengths` tuple rather
+  than rereading CUDA offsets (`src/sakuramoon/model/attention.py:133-153`), so
+  sample routing and FA4 share one boundary identity. The 16-block test and
+  instrumentation report one entry D2H and zero per-block D2H
+  (`tests/gpu/model/test_packed_dit.py:172-264`; `reviews/K001/fa4_benchmark.json`).
+- Q/K head-dimension RMSNorm runs before shared-frequency 2D RoPE, and the native
+  attention output is gated and projected only after FA4 (`src/sakuramoon/model/attention.py:483-494`,
+  `src/sakuramoon/conditioning/rope.py:104-130`). The locked `32/48/48`,
+  `position_scale=16`, `theta=1000`, noncausal, native 20Q/5KV contract is preserved.
+- The dense path is an explicit reference. Performance uses separate per-sample
+  SDPA calls with `attn_mask=None`; the all-True mask is limited to numerical
+  correctness (`benchmarks/attention/benchmark_fa4_varlen.py:130-153`). The current
+  benchmark/task/implementation/test artifacts contain no import or description of
+  the removed `validate_cu_seqlens` API. Older historical review records retain that
+  term as the prior finding and were intentionally not rewritten.
 
-### K001-AI-002 (medium): current evidence describes a removed validation path
+## Numerical and performance evidence
 
-The implementation report claims that `validate_cu_seqlens` performs one D2H content
-validation and rejects nonzero starts, wrong terminals, non-increasing boundaries, and
-wrong `max_seqlen` (`docs/model-architecture/reviews/K001/implementation_report.md:5`).
-That function was removed by T024; the current factory creates CUDA offsets from host
-lengths and the runtime only applies the static checks described above. The review task
-repeats the obsolete D2H claim
-(`docs/model-architecture/reviews/K001/task.md:5`), while `test_report.json` still says
-`cu_seqlens_validated_once_before_blocks=true` and `malformed_boundaries_rejected=true`
-(`docs/model-architecture/reviews/K001/test_report.json:32-33`). These claims currently
-overstate the protection that exists and must be corrected with the boundary fix.
+The identical-state FA4-vs-dense module contract compares output, loss, every named
+parameter gradient, and one BF16 SGD update (`tests/gpu/fa4/test_varlen_attention.py:375-479`).
+The current accepted-boundary evidence records all seven gradients and all seven
+updates passing, with every parameter changing (`reviews/K001/test_report.json:49-79`).
+The same test also verifies valid-boundary cross-sample isolation; the targeted
+RTX 5090 run below exercises the forged/mutated negative cases, 17 image buckets,
+native FA4 forward/backward, and full-module comparisons.
 
-The test split is also stale after T024: the current suite is 4 CPU plus 12 GPU tests,
-not the recorded 7 plus 9, although the total remains 16.
+Current evidence reports 20 warmups, 100 measured calls, mask-free dense timing,
+16-block entry-inclusive timing, allocated/reserved memory, and profiler counts of
+16 FA4 kernels plus one D2H and one H2D per packed forward with no per-block boundary
+copy (`reviews/K001/fa4_benchmark.json`; `benchmarks/attention/benchmark_fa4_varlen.py:444-645`).
+The recorded current measurements are FA4/dense CUDA Event `0.216326/0.285460 ms`
+(`1.3196x`) and synchronized wall `0.288413/0.317405 ms` (`1.1005x`); these are
+single-GPU measurements only.
 
-## Correctness matrix
+## Independent verification
 
-The FA4 runtime dependency is the locked `flash-attn-4==4.0.0b24` wheel (SHA-256
-`c1dcf0dfcf37c4496728547dcb3c1e66d7dcaa07cfedef0f26ccc4d74453951f` in
-`uv.lock:208-222`). R001 does not register a separate FlashAttention reference-repository
-commit, so this review makes no fixed-reference-commit equivalence claim and did not
-read or execute `reference/`. The package source below was read statically from that
-locked installed wheel; production/GPU tests execute the normal locked dependency.
-
-| Plan formula/contract | Locked upstream package source | SakuraMoon implementation | Golden/contract test |
-|---|---|---|---|
-| Flat varlen Q `[T,20,128]`, K/V `[T,5,128]`, native GQA | `flash_attn/cute/interface.py:2819-2856` accepts total-token Q/K/V and `(batch+1)` boundaries | `src/sakuramoon/model/attention.py:49-54,90-99` passes native 20Q/5KV and `pack_gqa=True`; no KV repeat | `tests/unit/model/test_fa4.py:31-47`; `tests/gpu/fa4/test_varlen_attention.py:116-182` |
-| Full bidirectional attention within each sample; no cross-sample attention | locked interface exposes `causal=False` at `interface.py:2834`; kernel derives offsets/lengths from CUDA entries at `seqlen_info.py:32-42` | `src/sakuramoon/model/attention.py:94-101` uses the same Q/K boundaries and `causal=False` | Valid-boundary isolation passes at `tests/gpu/fa4/test_varlen_attention.py:184-199`; mutable-boundary negative case is missing and fails review |
-| CUDA BF16 production inputs; no silent dense fallback | locked interface accepts BF16 at `interface.py:403-423` | `src/sakuramoon/model/attention.py:55-88,289-292,334-344` hard-fails wrong dtype/device/import; dense SDPA is a separate module | `tests/unit/model/test_fa4.py:50-76`; real GPU suite below |
-| Q/K FP32-accumulating RMSNorm, then 2D RoPE, then FA4; content gate/output projection after attention | FA4 accepts already projected Q/K/V; it does not own SakuraMoon's normalization/RoPE contract | `src/sakuramoon/conditioning/rope.py:104-130`; call order at `src/sakuramoon/model/attention.py:346-357` | Identical-state full-module output/loss/all-parameter-grad/update comparison at `tests/gpu/fa4/test_varlen_attention.py:311-415` |
-| Dense SDPA is an explicit numerical reference, with noncausal GQA and valid-query masking | N/A: SakuraMoon reference contract | `src/sakuramoon/model/attention.py:190-256`; production module never calls it | Core and full-module dense comparisons at `tests/gpu/fa4/test_varlen_attention.py:116-182,311-415` |
-
-No disagreement was found in native GQA head layout, BF16 Q/K/V, Q/K norm-before-RoPE,
-noncausal attention, content-gate ordering, explicit fallback separation, or the valid
-boundary output/loss/gradient/update comparisons. Those checks do not compensate for
-K001-AI-001.
-
-## Verification
-
-- `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/model/test_fa4.py tests/gpu/fa4/test_varlen_attention.py` -> `16 passed in 17.70s` on one NVIDIA GeForce RTX 5090.
-- `PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/model/test_fa4.py` -> `4 passed in 2.65s`.
-- GPU collection confirms 12 current tests in `tests/gpu/fa4/test_varlen_attention.py`.
-- Targeted real-kernel mutation diagnostic -> call accepted with host lengths `(2,2)`, CUDA offsets `[0,3,4]`, and first-declared-sample max absolute output difference `3.046875`.
-- `PYTHONPATH=src .venv/bin/python tools/verify_traceability.py --format json` -> `ok=true`, 222/222 requirements/source nodes, zero errors.
-- Static review covered the locked wheel interface/signature, varlen sequence-length reads, local attention/packing/RoPE/block/DiT call chain, K001 benchmark and test reports, K001 trace mappings, and the current architecture/roadmap/open-item contracts.
+- `PYTHONPATH=src .venv/bin/python -m pytest -q --basetemp=/tmp/sakuramoon-K001-ai-review tests/unit/model/test_fa4.py tests/gpu/fa4/test_varlen_attention.py`
+  -> **22 passed** in 17.31s on one NVIDIA GeForce RTX 5090 (2 NVML warnings only).
+- Targeted Ruff: clean.
+- Targeted Pyright: `0 errors, 0 warnings`.
+- `tools/verify_traceability.py --format json`: `222/222` requirements/source nodes,
+  zero errors.
 
 ## Remaining blocked scope
 
-This review does not run or close four-GPU integration, DDP, NCCL, T041 equivalence,
-formal stage canaries, 1,000-step canaries, endurance, or training long runs. Existing
-single-GPU numerical and performance evidence remains single-GPU evidence only and
-cannot replace any four-GPU gate. Independent Infra review is still required after the
-affected implementation/evidence is remediated.
+- Governed fixed FA4 upstream repository commit/tree/license provenance and the
+  associated four-column algorithm audit remain blocked; the wheel hash cannot close
+  this item.
+- This rereview does not run or close four-GPU integration, DDP, NCCL, formal stage
+  canaries, 1,000-step canaries, endurance, or production training/quality gates.
+  Single-GPU FA4 correctness and timing cannot be extrapolated to those gates.

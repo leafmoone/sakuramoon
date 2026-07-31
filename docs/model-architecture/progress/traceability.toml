@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 91
+registry_revision = 92
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -4092,6 +4092,7 @@ tests = [
 ]
 benchmarks = [
     "benchmarks/model/**",
+    "benchmarks/attention/**",
 ]
 artifacts = [
     "artifacts/model/**",
@@ -8693,6 +8694,7 @@ tests = [
 ]
 benchmarks = [
     "benchmarks/model/**",
+    "benchmarks/attention/**",
 ]
 artifacts = [
     "artifacts/model/**",
