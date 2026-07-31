@@ -23,6 +23,10 @@ class ShardStateError(RuntimeError):
     """Shard state is invalid or an operation violates replay order."""
 
 
+class ShardStateCommittedError(ShardStateError):
+    """The state committed, but cleanup durability could not be confirmed."""
+
+
 @dataclass(frozen=True)
 class ShardRunState:
     completed: tuple[str, ...]
@@ -44,6 +48,14 @@ def _payload(state: ShardRunState, manifest_digest: str) -> dict[str, object]:
         "replayed_shards": state.replayed_shards,
         "schema_version": 2,
     }
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class ShardStateStore:
@@ -108,6 +120,9 @@ class ShardStateStore:
 
     def save(self, state: ShardRunState) -> None:
         temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
+        rollback = self.path.with_name(
+            f".{self.path.name}.{uuid.uuid4().hex}.rollback"
+        )
         body = (
             json.dumps(
                 _payload(state, self._manifest_sha256),
@@ -117,20 +132,57 @@ class ShardStateStore:
             + "\n"
         ).encode()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        rollback_linked = False
+        published = False
         try:
             with temporary.open("wb") as handle:
                 handle.write(body)
                 handle.flush()
                 os.fsync(handle.fileno())
+            if self.path.exists():
+                os.link(self.path, rollback)
+                rollback_linked = True
+                _fsync_directory(self.path.parent)
             os.replace(temporary, self.path)
-            descriptor = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            published = True
+            _fsync_directory(self.path.parent)
         except OSError:
-            temporary.unlink(missing_ok=True)
+            rollback_error: OSError | None = None
+            rollback_removed = False
+            if published:
+                try:
+                    if rollback_linked:
+                        os.replace(rollback, self.path)
+                        rollback_linked = False
+                    else:
+                        self.path.unlink(missing_ok=True)
+                    _fsync_directory(self.path.parent)
+                except OSError as exc:
+                    rollback_error = exc
+            for residue in (temporary, rollback if rollback_linked else None):
+                if residue is None:
+                    continue
+                try:
+                    residue.unlink(missing_ok=True)
+                    rollback_removed = rollback_removed or residue == rollback
+                except OSError as exc:
+                    rollback_error = rollback_error or exc
+            if rollback_removed:
+                try:
+                    _fsync_directory(self.path.parent)
+                except OSError as exc:
+                    rollback_error = rollback_error or exc
+            if rollback_error is not None:
+                raise ShardStateError("shard state rollback failed") from None
             raise ShardStateError("shard state could not be saved") from None
+        if rollback_linked:
+            try:
+                rollback.unlink()
+                _fsync_directory(self.path.parent)
+            except OSError:
+                raise ShardStateCommittedError(
+                    "shard state saved but rollback cleanup failed"
+                ) from None
 
     def recover(self) -> ShardRunState:
         state = self.load()

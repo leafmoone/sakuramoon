@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "task_id": "D012",
+  "status": "targeted_remediation_passed_package_rereview_pending",
+  "finding": "post-replace parent fsync failure exposed a state transition reported as rejected",
+  "implementation": "initial publication rollback removes and fsyncs; update rollback restores a pre-linked previous inode and fsyncs; committed cleanup failures use a distinct error",
+  "direct_and_fault_tests": "passed: 15",
+  "expanded_contracts": "passed: state cache fault-injection and 40 trace contracts",
+  "trace_verifier": "passed: requirements=222 source_nodes=222 archive_files=16 production_modules=98 runtime_config_keys=254",
+  "ruff": "passed",
+  "pyright": "passed: 0 errors 0 warnings",
+  "durable_two_worker": "pending",
+  "production_nvme_quota_benchmark": "pending"
+}

@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 78
+registry_revision = 79
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -5495,6 +5495,7 @@ implementation_paths = [
     "docs/model-architecture/reviews/D012/timing.json",
     "docs/model-architecture/reviews/D012/ai_review.md",
     "docs/model-architecture/reviews/D012/infra_review.md",
+    "docs/model-architecture/reviews/D012/state_publication_test_report.json",
     "src/sakuramoon/fault_injection/schema.py",
     "src/sakuramoon/fault_injection/evidence.py",
     "src/sakuramoon/data/pipeline.py",
@@ -5530,6 +5531,7 @@ benchmarks = [
 artifacts = [
     "docs/model-architecture/reviews/DATA/**",
     "docs/model-architecture/reviews/D012/**",
+    "docs/model-architecture/reviews/D012/state_publication_test_report.json",
     "artifacts/data/**",
 ]
 not_applicable_fields = [

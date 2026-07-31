@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 from typing import cast
 
@@ -18,6 +20,7 @@ from sakuramoon.data.manifest import (
 from sakuramoon.data.modelscope import FetchedShard, ModelScopeDatasetTransport
 from sakuramoon.data.state import (
     ShardRunState,
+    ShardStateCommittedError,
     ShardStateError,
     ShardStateStore,
     SingleProcessShardCoordinator,
@@ -88,6 +91,97 @@ def test_state_begin_complete_round_trip(tmp_path: Path) -> None:
     assert completed.completed == (first.path,)
     assert completed.active is None
     assert store.load() == completed
+
+
+def test_initial_state_publish_failure_rolls_back_visible_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sakuramoon.data.state as state_module
+
+    store = ShardStateStore(tmp_path / "state.json", _manifest())
+    real_fsync = os.fsync
+    directory_fsyncs = 0
+
+    def fail_first_directory_fsync(descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_fsyncs += 1
+            if directory_fsyncs == 1:
+                raise OSError("injected parent fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(state_module.os, "fsync", fail_first_directory_fsync)
+
+    with pytest.raises(ShardStateError, match="could not be saved"):
+        store.begin(ShardRunState.empty(), _manifest().shards[0].path)
+
+    assert directory_fsyncs == 2
+    assert store.load() == ShardRunState.empty()
+    assert not tuple(tmp_path.glob(".state.json.*"))
+
+
+def test_state_update_publish_failure_restores_previous_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sakuramoon.data.state as state_module
+
+    manifest = _manifest()
+    store = ShardStateStore(tmp_path / "state.json", manifest)
+    original = store.begin(ShardRunState.empty(), manifest.shards[0].path)
+    real_fsync = os.fsync
+    directory_fsyncs = 0
+
+    def fail_post_replace_directory_fsync(descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_fsyncs += 1
+            if directory_fsyncs == 2:
+                raise OSError("injected parent fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(state_module.os, "fsync", fail_post_replace_directory_fsync)
+
+    with pytest.raises(ShardStateError, match="could not be saved"):
+        store.complete(original, manifest.shards[0].path)
+
+    assert directory_fsyncs == 3
+    assert store.load() == original
+    assert not tuple(tmp_path.glob(".state.json.*"))
+
+
+def test_state_distinguishes_committed_state_from_rollback_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sakuramoon.data.state as state_module
+
+    manifest = _manifest()
+    store = ShardStateStore(tmp_path / "state.json", manifest)
+    original = store.begin(ShardRunState.empty(), manifest.shards[0].path)
+    expected = ShardRunState(
+        completed=(manifest.shards[0].path,),
+        active=None,
+        replayed_shards=0,
+        replayed_samples=0,
+    )
+    real_fsync = os.fsync
+    directory_fsyncs = 0
+
+    def fail_cleanup_directory_fsync(descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_fsyncs += 1
+            if directory_fsyncs == 3:
+                raise OSError("injected rollback cleanup fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(state_module.os, "fsync", fail_cleanup_directory_fsync)
+
+    with pytest.raises(ShardStateCommittedError, match="state saved"):
+        store.complete(original, manifest.shards[0].path)
+
+    assert directory_fsyncs == 3
+    assert store.load() == expected
+    assert not tuple(tmp_path.glob(".state.json.*"))
 
 
 def test_recovery_keeps_active_shard_and_counts_replay(tmp_path: Path) -> None:
