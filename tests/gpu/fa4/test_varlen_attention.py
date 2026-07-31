@@ -7,10 +7,14 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import sakuramoon.model.attention as attention_module
 from sakuramoon.model.attention import (
+    AcceptedCuSeqlens,
     DenseGQAAttention,
     FA4VarlenGQAAttention,
     ValidatedCuSeqlens,
+    accept_fa4_boundaries,
+    accepted_sample_indices,
     build_validated_cu_seqlens,
     dense_attention_mask,
     fa4_varlen_attention,
@@ -105,10 +109,16 @@ def _dense_production_attention() -> DenseGQAAttention:
 
 def _validated_boundaries(
     offsets: tuple[int, ...],
-) -> ValidatedCuSeqlens:
+) -> AcceptedCuSeqlens:
     lengths = tuple(end - start for start, end in pairwise(offsets))
-    return build_validated_cu_seqlens(
+    boundaries = build_validated_cu_seqlens(
         lengths,
+        device=torch.device("cuda"),
+    )
+    return accept_fa4_boundaries(
+        boundaries,
+        total_tokens=offsets[-1],
+        batch_size=len(lengths),
         device=torch.device("cuda"),
     )
 
@@ -271,7 +281,7 @@ def _forge_boundaries(
 
 @pytest.mark.parametrize(
     "case",
-    ["dtype", "shape", "contiguous", "host_metadata"],
+    ["dtype", "shape", "contiguous", "host_metadata", "offset_values"],
 )
 def test_forged_boundary_handle_fails_before_native_kernel(case: str) -> None:
     if case == "dtype":
@@ -284,17 +294,71 @@ def test_forged_boundary_handle_fails_before_native_kernel(case: str) -> None:
         boundaries = _forge_boundaries(
             torch.tensor([0, 99, 2], dtype=torch.int32, device="cuda")[::2]
         )
-    else:
+    elif case == "host_metadata":
         boundaries = _forge_boundaries(
             torch.tensor([0, 2], dtype=torch.int32, device="cuda"),
             sequence_lengths=(1, 1),
         )
+    else:
+        boundaries = _forge_boundaries(
+            torch.tensor([0, 3, 4], dtype=torch.int32, device="cuda"),
+            sequence_lengths=(2, 2),
+            total_tokens=4,
+            max_seqlen=2,
+            batch_size=2,
+        )
 
+    with pytest.raises(ValueError, match="metadata|values"):
+        accept_fa4_boundaries(
+            boundaries,
+            total_tokens=boundaries.total_tokens,
+            batch_size=boundaries.batch_size,
+            device=torch.device("cuda"),
+        )
+
+
+def test_post_construction_boundary_mutation_fails_at_packed_entry() -> None:
+    boundaries = build_validated_cu_seqlens(
+        (2, 2),
+        device=torch.device("cuda"),
+    )
+    boundaries.tensor[1] = 3
+
+    with pytest.raises(ValueError, match="differ from validated host lengths"):
+        accept_fa4_boundaries(
+            boundaries,
+            total_tokens=4,
+            batch_size=2,
+            device=torch.device("cuda"),
+        )
+
+
+def test_unaccepted_public_boundaries_cannot_reach_native_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     query = torch.zeros(2, 20, 128, dtype=torch.bfloat16, device="cuda")
     key = torch.zeros(2, 5, 128, dtype=torch.bfloat16, device="cuda")
-    value = torch.zeros_like(key)
-    with pytest.raises(ValueError, match="inconsistent static metadata"):
-        fa4_varlen_attention(query, key, value, boundaries)
+    boundaries = build_validated_cu_seqlens((2,), device=torch.device("cuda"))
+    native_imports: list[str] = []
+
+    def record_native_import(name: str) -> object:
+        native_imports.append(name)
+        raise AssertionError("native module must not be imported")
+
+    monkeypatch.setattr(attention_module.importlib, "import_module", record_native_import)
+
+    with pytest.raises(TypeError, match="accepted at the packed entry"):
+        fa4_varlen_attention(query, key, torch.zeros_like(key), boundaries)  # pyright: ignore[reportArgumentType]
+    assert native_imports == []
+
+
+def test_sample_routing_uses_the_accepted_host_identity() -> None:
+    boundaries = _validated_boundaries((0, 2, 4))
+
+    assert torch.equal(
+        accepted_sample_indices(boundaries),
+        torch.tensor([0, 0, 1, 1], device="cuda", dtype=torch.int64),
+    )
 
 
 def _pack_valid_tokens(padded: torch.Tensor, lengths: tuple[int, ...]) -> torch.Tensor:

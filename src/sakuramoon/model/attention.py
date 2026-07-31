@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+from dataclasses import dataclass, field
+from itertools import accumulate
 from typing import Protocol, cast
 
 import torch
@@ -18,6 +20,137 @@ from sakuramoon.conditioning.rope import QKRoPE2D
 FA4_QUERY_HEADS = 20
 FA4_KV_HEADS = 5
 FA4_HEAD_DIM = 128
+
+_ACCEPTED_BOUNDARY_CAPABILITY = object()
+
+
+@dataclass(frozen=True, init=False)
+class AcceptedCuSeqlens:
+    """Private packed-entry capability reused by every production block."""
+
+    sequence_lengths: tuple[int, ...]
+    total_tokens: int
+    max_seqlen: int
+    batch_size: int
+    __tensor: torch.Tensor = field(repr=False, compare=False)
+    __capability: object = field(repr=False, compare=False)
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("accepted boundaries can only be created at the packed entry")
+
+    @classmethod
+    def create_for_entry(
+        cls,
+        sequence_lengths: tuple[int, ...],
+        tensor: torch.Tensor,
+        *,
+        capability: object,
+    ) -> AcceptedCuSeqlens:
+        if capability is not _ACCEPTED_BOUNDARY_CAPABILITY:
+            raise TypeError("invalid accepted-boundary capability")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "sequence_lengths", sequence_lengths)
+        object.__setattr__(instance, "total_tokens", sum(sequence_lengths))
+        object.__setattr__(instance, "max_seqlen", max(sequence_lengths))
+        object.__setattr__(instance, "batch_size", len(sequence_lengths))
+        object.__setattr__(instance, "_AcceptedCuSeqlens__tensor", tensor)
+        object.__setattr__(instance, "_AcceptedCuSeqlens__capability", capability)
+        return instance
+
+    def has_capability(self, *, capability: object) -> bool:
+        return self.__capability is capability
+
+    def tensor_for_kernel(self, *, capability: object) -> torch.Tensor:
+        if capability is not _ACCEPTED_BOUNDARY_CAPABILITY:
+            raise TypeError("invalid accepted-boundary capability")
+        return self.__tensor
+
+
+def _require_accepted_boundaries(
+    boundaries: AcceptedCuSeqlens,
+) -> AcceptedCuSeqlens:
+    if (
+        type(boundaries) is not AcceptedCuSeqlens
+        or not boundaries.has_capability(
+            capability=_ACCEPTED_BOUNDARY_CAPABILITY
+        )
+    ):
+        raise TypeError("FA4 requires boundaries accepted at the packed entry")
+    return boundaries
+
+
+def accept_fa4_boundaries(
+    boundaries: ValidatedCuSeqlens,
+    *,
+    total_tokens: int,
+    batch_size: int,
+    device: torch.device,
+) -> AcceptedCuSeqlens:
+    """Validate boundary contents once, then rematerialize private CUDA offsets."""
+
+    if type(boundaries) is not ValidatedCuSeqlens:
+        raise TypeError("packed entry requires a ValidatedCuSeqlens input")
+    lengths = boundaries.sequence_lengths
+    if type(lengths) is not tuple or not lengths or any(
+        type(length) is not int or length <= 0 for length in lengths
+    ):
+        raise ValueError("validated boundaries contain invalid host lengths")
+    offsets = (0, *accumulate(lengths))
+    if (
+        boundaries.batch_size != len(lengths)
+        or boundaries.batch_size != batch_size
+        or boundaries.total_tokens != offsets[-1]
+        or boundaries.total_tokens != total_tokens
+        or boundaries.max_seqlen != max(lengths)
+    ):
+        raise ValueError("validated boundaries contain inconsistent host metadata")
+    if (
+        boundaries.tensor.ndim != 1
+        or boundaries.tensor.shape != (len(offsets),)
+        or boundaries.tensor.dtype != torch.int32
+        or not boundaries.tensor.is_contiguous()
+        or boundaries.tensor.device.type != device.type
+        or (
+            (device_index := getattr(device, "index", None)) is not None
+            and boundaries.tensor.device.index != device_index
+        )
+    ):
+        raise ValueError("validated boundaries contain inconsistent tensor metadata")
+
+    expected_cpu = torch.tensor(offsets, dtype=torch.int32, device="cpu")
+    actual_cpu = boundaries.tensor.detach().to(device="cpu", copy=True)
+    if not torch.equal(actual_cpu, expected_cpu):
+        raise ValueError("CUDA boundary values differ from validated host lengths")
+
+    private_tensor = expected_cpu.to(device=boundaries.tensor.device).contiguous()
+    return AcceptedCuSeqlens.create_for_entry(
+        lengths,
+        private_tensor,
+        capability=_ACCEPTED_BOUNDARY_CAPABILITY,
+    )
+
+
+def accepted_sample_indices(boundaries: AcceptedCuSeqlens) -> torch.Tensor:
+    """Build token routing from the same accepted host identity used by FA4."""
+
+    accepted = _require_accepted_boundaries(boundaries)
+    boundary_tensor = accepted.tensor_for_kernel(
+        capability=_ACCEPTED_BOUNDARY_CAPABILITY
+    )
+    lengths = torch.tensor(
+        accepted.sequence_lengths,
+        device=boundary_tensor.device,
+        dtype=torch.int64,
+    )
+    return torch.repeat_interleave(
+        torch.arange(
+            accepted.batch_size,
+            device=boundary_tensor.device,
+            dtype=torch.int64,
+        ),
+        lengths,
+        output_size=accepted.total_tokens,
+    )
 
 
 class _FA4VarlenCallable(Protocol):
@@ -42,7 +175,7 @@ def fa4_varlen_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    boundaries: ValidatedCuSeqlens,
+    boundaries: AcceptedCuSeqlens,
 ) -> torch.Tensor:
     """Run the locked FA4 self-attention kernel on padding-free sequences."""
 
@@ -58,20 +191,24 @@ def fa4_varlen_attention(
         raise ValueError("FA4 production attention requires CUDA tensors")
     if key.device != query.device or value.device != query.device:
         raise ValueError("query, key, and value must share one CUDA device")
-    if boundaries.total_tokens != total_tokens:
+    accepted = _require_accepted_boundaries(boundaries)
+    boundary_tensor = accepted.tensor_for_kernel(
+        capability=_ACCEPTED_BOUNDARY_CAPABILITY
+    )
+    if accepted.total_tokens != total_tokens:
         raise ValueError("validated boundaries do not match the token count")
     if (
-        boundaries.batch_size <= 0
-        or len(boundaries.sequence_lengths) != boundaries.batch_size
-        or sum(boundaries.sequence_lengths) != boundaries.total_tokens
-        or max(boundaries.sequence_lengths) != boundaries.max_seqlen
-        or boundaries.tensor.ndim != 1
-        or boundaries.tensor.shape != (boundaries.batch_size + 1,)
-        or boundaries.tensor.dtype != torch.int32
-        or not boundaries.tensor.is_contiguous()
+        accepted.batch_size <= 0
+        or len(accepted.sequence_lengths) != accepted.batch_size
+        or sum(accepted.sequence_lengths) != accepted.total_tokens
+        or max(accepted.sequence_lengths) != accepted.max_seqlen
+        or boundary_tensor.ndim != 1
+        or boundary_tensor.shape != (accepted.batch_size + 1,)
+        or boundary_tensor.dtype != torch.int32
+        or not boundary_tensor.is_contiguous()
     ):
-        raise ValueError("validated boundaries contain inconsistent static metadata")
-    if boundaries.tensor.device != query.device:
+        raise ValueError("accepted boundaries contain inconsistent static metadata")
+    if boundary_tensor.device != query.device:
         raise ValueError("cu_seqlens and query must share one CUDA device")
     if not all(tensor.is_contiguous() for tensor in (query, key, value)):
         raise ValueError("FA4 query, key, and value must be contiguous")
@@ -91,10 +228,10 @@ def fa4_varlen_attention(
         query,
         key,
         value,
-        cu_seqlens_q=boundaries.tensor,
-        cu_seqlens_k=boundaries.tensor,
-        max_seqlen_q=boundaries.max_seqlen,
-        max_seqlen_k=boundaries.max_seqlen,
+        cu_seqlens_q=boundary_tensor,
+        cu_seqlens_k=boundary_tensor,
+        max_seqlen_q=accepted.max_seqlen,
+        max_seqlen_k=accepted.max_seqlen,
         causal=False,
         pack_gqa=True,
         deterministic=False,
@@ -328,7 +465,7 @@ class FA4VarlenGQAAttention(nn.Module):
     def forward(
         self,
         tokens: torch.Tensor,
-        boundaries: ValidatedCuSeqlens,
+        boundaries: AcceptedCuSeqlens,
         coordinates: torch.Tensor,
     ) -> torch.Tensor:
         if tokens.ndim != 2 or tokens.shape[-1] != self.hidden_size:
@@ -361,6 +498,8 @@ __all__ = [
     "DenseGQAAttention",
     "FA4VarlenGQAAttention",
     "ValidatedCuSeqlens",
+    "accept_fa4_boundaries",
+    "accepted_sample_indices",
     "build_validated_cu_seqlens",
     "dense_attention_mask",
     "fa4_varlen_attention",

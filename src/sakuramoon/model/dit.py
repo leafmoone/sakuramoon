@@ -14,7 +14,12 @@ from sakuramoon.conditioning.global_condition import (
 from sakuramoon.conditioning.modality import ModalityEmbedding
 from sakuramoon.conditioning.packing import PackedSequences, pack_sequences
 from sakuramoon.conditioning.rope import image_coordinates, packed_coordinates
-from sakuramoon.model.attention import dense_attention_mask
+from sakuramoon.model.attention import (
+    AcceptedCuSeqlens,
+    accept_fa4_boundaries,
+    accepted_sample_indices,
+    dense_attention_mask,
+)
 from sakuramoon.model.block import DiTBlock, PackedDiTBlock
 from sakuramoon.model.growth import active_slot_ids, slot_growth, slot_name
 from sakuramoon.model.output_head import FinalOutputHead
@@ -494,17 +499,8 @@ class PackedDiT(nn.Module):
         )
 
     @staticmethod
-    def _sample_indices(packed: PackedSequences) -> torch.Tensor:
-        lengths = (packed.cu_seqlens[1:] - packed.cu_seqlens[:-1]).to(torch.int64)
-        return torch.repeat_interleave(
-            torch.arange(
-                len(packed.spans),
-                device=packed.tokens.device,
-                dtype=torch.int64,
-            ),
-            lengths,
-            output_size=packed.tokens.shape[0],
-        )
+    def _sample_indices(boundaries: AcceptedCuSeqlens) -> torch.Tensor:
+        return accepted_sample_indices(boundaries)
 
     def forward_packed_features(
         self,
@@ -519,9 +515,14 @@ class PackedDiT(nn.Module):
             raise ValueError("packed tokens must have shape [T,hidden_size]")
         if len(packed.spans) != timestep.shape[0]:
             raise ValueError("packed sample count must equal the condition batch")
+        boundaries = accept_fa4_boundaries(
+            packed.boundaries,
+            total_tokens=packed.tokens.shape[0],
+            batch_size=len(packed.spans),
+            device=packed.tokens.device,
+        )
         coordinates = packed_coordinates(packed)
-        sample_indices = self._sample_indices(packed)
-        boundaries = packed.boundaries
+        sample_indices = self._sample_indices(boundaries)
         condition = self.conditioner(
             timestep,
             size_scale,

@@ -5,8 +5,12 @@ from typing import cast
 import pytest
 import torch
 
+import sakuramoon.model.dit as dit_module
 from sakuramoon.conditioning.global_condition import BlockModulation
+from sakuramoon.conditioning.packing import ValidatedCuSeqlens
 from sakuramoon.model.attention import (
+    AcceptedCuSeqlens,
+    accept_fa4_boundaries,
     build_validated_cu_seqlens,
     dense_attention_mask,
 )
@@ -105,8 +109,14 @@ def test_packed_block_matches_dense_and_isolates_samples() -> None:
     flat_coordinates = torch.cat(
         tuple(coordinates[index, :length] for index, length in enumerate(lengths))
     )
-    boundaries = build_validated_cu_seqlens(
+    public_boundaries = build_validated_cu_seqlens(
         lengths,
+        device=torch.device("cuda"),
+    )
+    boundaries = accept_fa4_boundaries(
+        public_boundaries,
+        total_tokens=sum(lengths),
+        batch_size=len(lengths),
         device=torch.device("cuda"),
     )
     sample_indices = torch.repeat_interleave(
@@ -159,8 +169,30 @@ def test_packed_block_matches_dense_and_isolates_samples() -> None:
     )
 
 
-def test_full_packed_dit_three_stage_gradient_startup() -> None:
+def test_full_packed_dit_three_stage_gradient_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     torch.manual_seed(1202)  # pyright: ignore[reportUnknownMemberType]
+    acceptance_calls = 0
+    real_accept = dit_module.accept_fa4_boundaries
+
+    def counted_accept(
+        boundaries: ValidatedCuSeqlens,
+        *,
+        total_tokens: int,
+        batch_size: int,
+        device: torch.device,
+    ) -> AcceptedCuSeqlens:
+        nonlocal acceptance_calls
+        acceptance_calls += 1
+        return real_accept(
+            boundaries,
+            total_tokens=total_tokens,
+            batch_size=batch_size,
+            device=device,
+        )
+
+    monkeypatch.setattr(dit_module, "accept_fa4_boundaries", counted_accept)
     model = _model()
     latents = (
         torch.randn(128, 2, 2, device="cuda", dtype=torch.bfloat16),
@@ -197,6 +229,7 @@ def test_full_packed_dit_three_stage_gradient_startup() -> None:
         return total, predictions
 
     first_loss, first_predictions = loss()
+    assert acceptance_calls == 1
     assert tuple(prediction.shape for prediction in first_predictions) == (
         (128, 2, 2),
         (128, 2, 3),
@@ -211,6 +244,7 @@ def test_full_packed_dit_three_stage_gradient_startup() -> None:
     optimizer.zero_grad(set_to_none=True)  # pyright: ignore[reportUnknownMemberType]
 
     second_loss, second_predictions = loss()
+    assert acceptance_calls == 2
     assert any(torch.count_nonzero(prediction) > 0 for prediction in second_predictions)
     second_loss.backward()  # pyright: ignore[reportUnknownMemberType]
     shared_grad = model.conditioner.shared_block_projection.weight.grad
@@ -224,6 +258,7 @@ def test_full_packed_dit_three_stage_gradient_startup() -> None:
     optimizer.zero_grad(set_to_none=True)  # pyright: ignore[reportUnknownMemberType]
 
     third_loss, _third_predictions = loss()
+    assert acceptance_calls == 3
     third_loss.backward()  # pyright: ignore[reportUnknownMemberType]
     block_grad = first_block.attention.q_proj.weight.grad
     assert block_grad is not None and torch.count_nonzero(block_grad) > 0

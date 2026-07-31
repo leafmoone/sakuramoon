@@ -7,9 +7,9 @@ from torch import nn
 
 from sakuramoon.conditioning.global_condition import BlockModulation
 from sakuramoon.model.attention import (
+    AcceptedCuSeqlens,
     DenseGQAAttention,
     FA4VarlenGQAAttention,
-    ValidatedCuSeqlens,
 )
 from sakuramoon.model.mlp import SwiGLU
 from sakuramoon.model.norm import RMSNorm
@@ -196,7 +196,7 @@ class PackedDiTBlock(nn.Module):
     def forward(
         self,
         tokens: torch.Tensor,
-        boundaries: ValidatedCuSeqlens,
+        boundaries: AcceptedCuSeqlens,
         coordinates: torch.Tensor,
         sample_indices: torch.Tensor,
         modulation: BlockModulation,

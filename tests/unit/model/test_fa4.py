@@ -4,8 +4,11 @@ import pytest
 import torch
 
 from sakuramoon.model.attention import (
+    AcceptedCuSeqlens,
     FA4VarlenGQAAttention,
     ValidatedCuSeqlens,
+    accept_fa4_boundaries,
+    accepted_sample_indices,
     fa4_varlen_attention,
 )
 
@@ -73,7 +76,12 @@ def test_fa4_core_rejects_cpu_instead_of_falling_back() -> None:
     boundaries = ValidatedCuSeqlens((2,), device=torch.device("cpu"))
 
     with pytest.raises(ValueError, match="CUDA"):
-        fa4_varlen_attention(query, key, value, boundaries)
+        fa4_varlen_attention(
+            query,
+            key,
+            value,
+            boundaries,  # pyright: ignore[reportArgumentType]
+        )
 
 
 def test_boundary_handle_rejects_the_old_arbitrary_tensor_constructor() -> None:
@@ -84,3 +92,21 @@ def test_boundary_handle_rejects_the_old_arbitrary_tensor_constructor() -> None:
             2,
             1,
         )
+
+
+def test_accepted_boundary_capability_has_no_public_constructor() -> None:
+    with pytest.raises(TypeError, match="packed entry"):
+        AcceptedCuSeqlens((2,), torch.tensor([0, 2], dtype=torch.int32))
+
+
+def test_packed_entry_derives_routing_from_the_accepted_host_identity() -> None:
+    public = ValidatedCuSeqlens((2, 3), device=torch.device("cpu"))
+
+    accepted = accept_fa4_boundaries(
+        public,
+        total_tokens=5,
+        batch_size=2,
+        device=torch.device("cpu"),
+    )
+
+    assert torch.equal(accepted_sample_indices(accepted), torch.tensor([0, 0, 1, 1, 1]))
