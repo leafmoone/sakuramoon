@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 79
+registry_revision = 80
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -4329,7 +4329,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-001"
 kind = "requirement"
-status = "implemented"
+status = "verified"
 profile = "objective"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4351,10 +4351,13 @@ implementation_paths = [
     "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M035/test_report.json",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+evidence_hardware = "1GPU"
+evidence_artifacts = [
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
+]
+ai_review = "docs/model-architecture/reviews/DENSE/ai_review.md"
+infra_review = "docs/model-architecture/reviews/DENSE/infra_review.md"
 config_keys = [
     "objective.*",
     "evaluation.sampling.*",
@@ -4385,7 +4388,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-002"
 kind = "requirement"
-status = "implemented"
+status = "verified"
 profile = "objective"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4407,10 +4410,13 @@ implementation_paths = [
     "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M035/test_report.json",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+evidence_hardware = "1GPU"
+evidence_artifacts = [
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
+]
+ai_review = "docs/model-architecture/reviews/DENSE/ai_review.md"
+infra_review = "docs/model-architecture/reviews/DENSE/infra_review.md"
 config_keys = [
     "objective.*",
     "timestep.*",
@@ -4508,7 +4514,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-004"
 kind = "requirement"
-status = "implemented"
+status = "verified"
 profile = "objective"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4530,10 +4536,13 @@ implementation_paths = [
     "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M035/test_report.json",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+evidence_hardware = "1GPU"
+evidence_artifacts = [
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
+]
+ai_review = "docs/model-architecture/reviews/DENSE/ai_review.md"
+infra_review = "docs/model-architecture/reviews/DENSE/infra_review.md"
 config_keys = [
     "objective.*",
     "cfg.*",
@@ -4565,7 +4574,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-005"
 kind = "requirement"
-status = "implemented"
+status = "verified"
 profile = "objective"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4588,10 +4597,13 @@ implementation_paths = [
     "docs/model-architecture/reviews/M036/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M036/test_report.json",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+evidence_hardware = "1GPU"
+evidence_artifacts = [
+    "docs/model-architecture/reviews/M036/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M036/test_report.json",
+]
+ai_review = "docs/model-architecture/reviews/DENSE/ai_review.md"
+infra_review = "docs/model-architecture/reviews/DENSE/infra_review.md"
 config_keys = [
     "objective.*",
     "sampling.*",
