@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 77
+registry_revision = 78
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -5208,6 +5208,7 @@ implementation_paths = [
     "docs/model-architecture/reviews/D010/timing.json",
     "docs/model-architecture/reviews/D010/ai_review.md",
     "docs/model-architecture/reviews/D010/infra_review.md",
+    "docs/model-architecture/reviews/D010/rollback_test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -5276,6 +5277,7 @@ benchmarks = [
 ]
 artifacts = [
     "artifacts/data/**",
+    "docs/model-architecture/reviews/D010/rollback_test_report.json",
 ]
 not_applicable_fields = [
     "reference_modules",

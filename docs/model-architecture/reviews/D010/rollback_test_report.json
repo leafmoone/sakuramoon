@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "task_id": "D010",
+  "status": "targeted_remediation_passed_package_rereview_pending",
+  "finding": "downloaded shard rollback lacked parent-directory fsync",
+  "implementation": "rollback unlinks the visible final shard and fsyncs its parent directory before reporting publication failure",
+  "targeted_tests": "passed: 18 tests/unit/data/test_modelscope.py",
+  "expanded_contracts": "passed: 98 D010 and trace contracts",
+  "trace_verifier": "passed: requirements=222 source_nodes=222 archive_files=16 production_modules=98 runtime_config_keys=254",
+  "ruff": "passed",
+  "pyright": "passed: 0 errors 0 warnings",
+  "network_used": false,
+  "production_inventory": "pending"
+}

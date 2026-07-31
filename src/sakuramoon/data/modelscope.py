@@ -304,6 +304,14 @@ def _verify_existing(path: Path, shard: ShardRecord, chunk_bytes: int) -> bool:
     return digest.hexdigest() == shard.sha256
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def fetch_dataset_shard(
     transport: ModelScopeDatasetTransport,
     manifest: DatasetManifest,
@@ -343,14 +351,22 @@ def fetch_dataset_shard(
             raise ShardIntegrityError("downloaded shard differs from manifest")
         os.replace(partial, destination)
         published = True
-        descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        _fsync_directory(destination.parent)
     except Exception:
-        partial.unlink(missing_ok=True)
+        cleanup_error: OSError | None = None
         if published:
-            destination.unlink(missing_ok=True)
+            try:
+                destination.unlink(missing_ok=True)
+                _fsync_directory(destination.parent)
+            except OSError as exc:
+                cleanup_error = exc
+        try:
+            partial.unlink(missing_ok=True)
+        except OSError as exc:
+            cleanup_error = cleanup_error or exc
+        if cleanup_error is not None:
+            raise DatasetTransportError(
+                "dataset shard publication rollback failed"
+            ) from None
         raise
     return FetchedShard(destination, shard.path, shard.bytes, shard.sha256, False)

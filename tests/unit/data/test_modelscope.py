@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, cast
@@ -272,6 +274,35 @@ def test_fetch_streams_to_partial_and_atomically_publishes(
     assert result.path.read_bytes() == CONTENT
     assert not result.path.with_name("000001.tar.partial").exists()
     assert "FilePath=release-a%2F000001.tar" in cast(str, http.requests[0]["target"])
+
+
+def test_fetch_rolls_back_and_fsyncs_directory_after_publish_fsync_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(
+        monkeypatch,
+        [_Plan(_Response(200, CONTENT, {"Content-Length": str(len(CONTENT))}))],
+    )
+    real_fsync = os.fsync
+    directory_fsyncs = 0
+
+    def fail_first_directory_fsync(descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_fsyncs += 1
+            if directory_fsyncs == 1:
+                raise OSError("injected parent fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr("sakuramoon.data.modelscope.os.fsync", fail_first_directory_fsync)
+
+    with pytest.raises(OSError, match="injected parent fsync failure"):
+        fetch_dataset_shard(_transport(monkeypatch), _manifest(), SHARD_PATH, tmp_path)
+
+    target = tmp_path / SHARD_PATH
+    assert directory_fsyncs == 2
+    assert not target.exists()
+    assert not target.with_name("000001.tar.partial").exists()
 
 
 def test_valid_cache_hit_does_not_request_network(
