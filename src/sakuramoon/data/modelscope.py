@@ -333,6 +333,7 @@ def fetch_dataset_shard(
             digest.update(payload)
             return handle.write(payload)
 
+    published = False
     try:
         with partial.open("wb") as handle:
             transport.download(manifest, shard, _DigestWriter())
@@ -341,7 +342,15 @@ def fetch_dataset_shard(
         if written != shard.bytes or digest.hexdigest() != shard.sha256:
             raise ShardIntegrityError("downloaded shard differs from manifest")
         os.replace(partial, destination)
+        published = True
+        descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     except Exception:
         partial.unlink(missing_ok=True)
+        if published:
+            destination.unlink(missing_ok=True)
         raise
     return FetchedShard(destination, shard.path, shard.bytes, shard.sha256, False)

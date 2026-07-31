@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -42,14 +43,9 @@ def write_failure_bundle(root: Path, snapshot: FailureSnapshot) -> Path:
 
     root.mkdir(parents=True, exist_ok=True)
     target = root / snapshot.failure_id
-    temporary = root / f".{snapshot.failure_id}.tmp"
-    if (
-        target.exists()
-        or target.is_symlink()
-        or temporary.exists()
-        or temporary.is_symlink()
-    ):
+    if target.exists() or target.is_symlink():
         raise FileExistsError("failure diagnostic target already exists")
+    temporary = root / f".{snapshot.failure_id}.{uuid.uuid4().hex}.tmp"
     temporary.mkdir()
     try:
         payload = (
@@ -64,7 +60,25 @@ def write_failure_bundle(root: Path, snapshot: FailureSnapshot) -> Path:
         with marker.open("xb") as handle:
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, target)
+        directory = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        try:
+            os.rename(temporary, target)
+        except FileExistsError:
+            raise FileExistsError("failure diagnostic target already exists") from None
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            for child in target.iterdir():
+                child.unlink()
+            target.rmdir()
+            raise
+        finally:
+            os.close(descriptor)
     except Exception:
         for child in (temporary.iterdir() if temporary.exists() else ()):
             child.unlink()

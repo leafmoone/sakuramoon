@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 54
+registry_revision = 55
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -487,6 +487,7 @@ owner_tasks = [
     "D013",
     "D014",
     "D015",
+    "T054",
 ]
 config_keys = [
     "data.*",
@@ -569,6 +570,76 @@ not_applicable_fields = [
     "reference_modules",
 ]
 not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+
+[[profiles]]
+name = "fault_injection"
+owner_tasks = [
+    "T054",
+]
+config_keys = [
+    "failure.*",
+]
+modules = [
+    "src/sakuramoon/fault_injection/**",
+    "src/sakuramoon/data/modelscope.py",
+    "src/sakuramoon/data/pipeline.py",
+    "src/sakuramoon/data/state.py",
+    "src/sakuramoon/checkpoint/**",
+    "src/sakuramoon/train/**",
+]
+reference_modules = []
+tests = [
+    "tests/fault_injection/**",
+    "tests/unit/data/test_modelscope.py",
+    "tests/unit/data/test_pipeline.py",
+    "tests/unit/data/test_state.py",
+    "tests/unit/checkpoint/test_checkpoint.py",
+    "tests/gpu/checkpoint/test_raw_checkpoint.py",
+    "tests/unit/docs/test_verify_traceability.py",
+]
+benchmarks = []
+artifacts = [
+    "docs/model-architecture/reviews/T054/**",
+]
+hardware = "4GPU"
+not_applicable_fields = [
+    "reference_modules",
+    "benchmarks",
+]
+not_applicable_reason = "Fault correctness is validated by bounded fault tests rather than a standalone performance benchmark; complete distributed evidence requires four GPUs."
+
+[[profiles]]
+name = "fault_injection_cpu"
+owner_tasks = [
+    "T054",
+]
+config_keys = [
+    "failure.*",
+]
+modules = [
+    "src/sakuramoon/fault_injection/**",
+    "src/sakuramoon/data/modelscope.py",
+    "src/sakuramoon/data/pipeline.py",
+    "src/sakuramoon/data/state.py",
+]
+reference_modules = []
+tests = [
+    "tests/fault_injection/**",
+    "tests/unit/data/test_modelscope.py",
+    "tests/unit/data/test_pipeline.py",
+    "tests/unit/data/test_state.py",
+    "tests/unit/docs/test_verify_traceability.py",
+]
+benchmarks = []
+artifacts = [
+    "docs/model-architecture/reviews/T054/**",
+]
+hardware = "CPU"
+not_applicable_fields = [
+    "reference_modules",
+    "benchmarks",
+]
+not_applicable_reason = "Download fault correctness is covered by bounded CPU fault tests and has no standalone performance benchmark."
 
 [[profiles]]
 name = "observability"
@@ -5049,6 +5120,7 @@ implementation_paths = [
     "src/sakuramoon/data/collate.py",
     "tests/unit/data/test_pipeline.py",
     "tests/unit/docs/test_verify_traceability.py",
+    "tests/unit/docs/test_verify_traceability.py",
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/progress/tasks/D015.md",
     "docs/model-architecture/progress/time-log.jsonl",
@@ -5217,7 +5289,7 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = "task:D012"
+implementation_commit_ref = "task:T054"
 implementation_paths = [
     "src/sakuramoon/data/cache.py",
     "src/sakuramoon/data/state.py",
@@ -5232,6 +5304,18 @@ implementation_paths = [
     "docs/model-architecture/reviews/D012/timing.json",
     "docs/model-architecture/reviews/D012/ai_review.md",
     "docs/model-architecture/reviews/D012/infra_review.md",
+    "src/sakuramoon/fault_injection/schema.py",
+    "src/sakuramoon/fault_injection/evidence.py",
+    "src/sakuramoon/data/pipeline.py",
+    "tests/fault_injection/test_control_plane.py",
+    "tests/fault_injection/test_data_failures.py",
+    "tests/unit/data/test_pipeline.py",
+    "docs/model-architecture/progress/tasks/T054.md",
+    "docs/model-architecture/reviews/T054/implementation_report.md",
+    "docs/model-architecture/reviews/T054/test_report.json",
+    "docs/model-architecture/reviews/T054/fault_matrix.json",
+    "docs/model-architecture/reviews/T054/ai_review.md",
+    "docs/model-architecture/reviews/T054/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -5565,7 +5649,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C12-005"
 kind = "requirement"
-status = "planned"
+status = "blocked"
 profile = "training_system"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -5574,7 +5658,9 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "d531653dda3191014b9b1e9bdc917a042081c40ba5438a71f47851c49e8c85ef"
 source_occurrence = 0
-blocked_by = []
+blocked_by = [
+    "FOUR-GPU-AVAILABLE",
+]
 alias_of = ""
 superseded_by = ""
 implementation_commit_ref = ""
@@ -5853,7 +5939,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C12-010"
 kind = "requirement"
-status = "planned"
+status = "blocked"
 profile = "training_system"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -5862,7 +5948,9 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "c6871decf4f9659bc20675a03cb828bba7c97c4437877d7873957fdcd40b2b34"
 source_occurrence = 0
-blocked_by = []
+blocked_by = [
+    "FOUR-GPU-AVAILABLE",
+]
 alias_of = ""
 superseded_by = ""
 implementation_commit_ref = ""
@@ -10143,8 +10231,8 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-078"
 kind = "open_item"
-status = "planned"
-profile = "curriculum_growth"
+status = "implemented"
+profile = "fault_injection_cpu"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
     "7. P1：深度增长、恢复与故障注入",
@@ -10156,43 +10244,51 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T054"
+implementation_paths = [
+    "src/sakuramoon/data/modelscope.py",
+    "src/sakuramoon/fault_injection/driver.py",
+    "src/sakuramoon/fault_injection/evidence.py",
+    "tests/fault_injection/test_data_failures.py",
+    "tests/unit/data/test_modelscope.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/progress/tasks/T054.md",
+    "docs/model-architecture/reviews/T054/implementation_report.md",
+    "docs/model-architecture/reviews/T054/test_report.json",
+    "docs/model-architecture/reviews/T054/fault_matrix.json",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "stage.*",
-    "growth.*",
-    "data.image.*",
+    "failure.*",
 ]
 modules = [
-    "src/sakuramoon/train/stage.py",
-    "src/sakuramoon/model/growth.py",
-    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/fault_injection/**",
+    "src/sakuramoon/data/modelscope.py",
 ]
 reference_modules = []
 tests = [
-    "tests/**/stage*",
-    "tests/**/growth*",
+    "tests/fault_injection/**",
+    "tests/unit/data/test_modelscope.py",
 ]
-benchmarks = [
-    "benchmarks/stage/**",
-]
+benchmarks = []
 artifacts = [
-    "artifacts/stages/**",
+    "docs/model-architecture/reviews/T054/**",
 ]
 not_applicable_fields = [
     "reference_modules",
+    "benchmarks",
 ]
-not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+not_applicable_reason = "Download fault correctness is covered by bounded CPU fault tests and has no standalone performance benchmark."
 
 [[requirements]]
 id = "OPEN-079"
 kind = "open_item"
-status = "planned"
-profile = "curriculum_growth"
+status = "blocked"
+profile = "fault_injection"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
     "7. P1：深度增长、恢复与故障注入",
@@ -10201,7 +10297,9 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "330654a5d8c25991ad2c32e816d2498d21f7779312b4656a3d495e3717181689"
 source_occurrence = 0
-blocked_by = []
+blocked_by = [
+    "FOUR-GPU-AVAILABLE",
+]
 alias_of = ""
 superseded_by = ""
 implementation_commit_ref = ""
@@ -10211,36 +10309,32 @@ evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "stage.*",
-    "growth.*",
-    "data.image.*",
+    "failure.*",
 ]
 modules = [
-    "src/sakuramoon/train/stage.py",
-    "src/sakuramoon/model/growth.py",
-    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/fault_injection/**",
+    "src/sakuramoon/checkpoint/**",
 ]
 reference_modules = []
 tests = [
-    "tests/**/stage*",
-    "tests/**/growth*",
+    "tests/fault_injection/**",
+    "tests/gpu/checkpoint/test_raw_checkpoint.py",
 ]
-benchmarks = [
-    "benchmarks/stage/**",
-]
+benchmarks = []
 artifacts = [
-    "artifacts/stages/**",
+    "docs/model-architecture/reviews/T054/**",
 ]
 not_applicable_fields = [
     "reference_modules",
+    "benchmarks",
 ]
-not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+not_applicable_reason = "Microbatch, optimizer, and checkpoint kills have one-GPU evidence; DDP reduction kill remains blocked on four GPUs."
 
 [[requirements]]
 id = "OPEN-080"
 kind = "open_item"
-status = "planned"
-profile = "curriculum_growth"
+status = "blocked"
+profile = "fault_injection"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
     "7. P1：深度增长、恢复与故障注入",
@@ -10249,7 +10343,9 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "2671bb587f17db12c5eca00ba428e1ceda1197e57155fcd91a24f4a219ae609b"
 source_occurrence = 0
-blocked_by = []
+blocked_by = [
+    "FOUR-GPU-AVAILABLE",
+]
 alias_of = ""
 superseded_by = ""
 implementation_commit_ref = ""
@@ -10259,36 +10355,33 @@ evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "stage.*",
-    "growth.*",
-    "data.image.*",
+    "failure.*",
 ]
 modules = [
-    "src/sakuramoon/train/stage.py",
-    "src/sakuramoon/model/growth.py",
-    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/fault_injection/**",
+    "src/sakuramoon/data/state.py",
+    "src/sakuramoon/train/**",
 ]
 reference_modules = []
 tests = [
-    "tests/**/stage*",
-    "tests/**/growth*",
+    "tests/fault_injection/**",
+    "tests/unit/checkpoint/test_checkpoint.py",
 ]
-benchmarks = [
-    "benchmarks/stage/**",
-]
+benchmarks = []
 artifacts = [
-    "artifacts/stages/**",
+    "docs/model-architecture/reviews/T054/**",
 ]
 not_applicable_fields = [
     "reference_modules",
+    "benchmarks",
 ]
-not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+not_applicable_reason = "CPU and one-GPU nonfinite, OOM, worker, and disk faults are covered; rank divergence, NCCL failure, and synchronized rank stop require four GPUs."
 
 [[requirements]]
 id = "OPEN-081"
 kind = "open_item"
-status = "planned"
-profile = "curriculum_growth"
+status = "blocked"
+profile = "fault_injection"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
     "7. P1：深度增长、恢复与故障注入",
@@ -10297,7 +10390,9 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "9d20d55f1ac149e8eda68aed45043f4dc9e2d9def6a2a1ab749579eb19f34186"
 source_occurrence = 0
-blocked_by = []
+blocked_by = [
+    "FOUR-GPU-AVAILABLE",
+]
 alias_of = ""
 superseded_by = ""
 implementation_commit_ref = ""
@@ -10307,30 +10402,25 @@ evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "stage.*",
-    "growth.*",
-    "data.image.*",
+    "failure.*",
 ]
 modules = [
-    "src/sakuramoon/train/stage.py",
-    "src/sakuramoon/model/growth.py",
-    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/fault_injection/**",
+    "src/sakuramoon/data/state.py",
 ]
 reference_modules = []
 tests = [
-    "tests/**/stage*",
-    "tests/**/growth*",
+    "tests/fault_injection/**",
 ]
-benchmarks = [
-    "benchmarks/stage/**",
-]
+benchmarks = []
 artifacts = [
-    "artifacts/stages/**",
+    "docs/model-architecture/reviews/T054/**",
 ]
 not_applicable_fields = [
     "reference_modules",
+    "benchmarks",
 ]
-not_applicable_reason = "This mapping dimension does not apply to this requirement profile."
+not_applicable_reason = "Shard replay and one-GPU controls are verified; invariant preservation for blocked four-GPU faults is not inferred."
 
 [[requirements]]
 id = "OPEN-082"

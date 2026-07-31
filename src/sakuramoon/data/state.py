@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
@@ -104,7 +107,7 @@ class ShardStateStore:
         )
 
     def save(self, state: ShardRunState) -> None:
-        temporary = self.path.with_name(f".{self.path.name}.tmp")
+        temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
         body = (
             json.dumps(
                 _payload(state, self._manifest_sha256),
@@ -120,6 +123,11 @@ class ShardStateStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
+            descriptor = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
         except OSError:
             temporary.unlink(missing_ok=True)
             raise ShardStateError("shard state could not be saved") from None
@@ -176,3 +184,16 @@ class SingleProcessShardCoordinator:
 
     def mark_completed(self, shard_path: str) -> None:
         self.state = self.store.complete(self.state, shard_path)
+
+    @contextmanager
+    def lease(self, shard_path: str) -> Generator[CachedShard | None]:
+        """Mark a prepared shard complete only after its consumer exits normally."""
+
+        cached = self.prepare(shard_path)
+        completed_normally = False
+        try:
+            yield cached
+            completed_normally = True
+        finally:
+            if completed_normally and cached is not None:
+                self.mark_completed(shard_path)

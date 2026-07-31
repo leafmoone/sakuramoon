@@ -30,7 +30,7 @@ from sakuramoon.data.serialize import (
     TokenEncoder,
     serialize_caption,
 )
-from sakuramoon.data.state import ShardRunState
+from sakuramoon.data.state import ShardRunState, SingleProcessShardCoordinator
 
 CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
 _IMAGE_KEYS = ("jpg", "jpeg", "png", "webp")
@@ -243,8 +243,8 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             rng=identity,
         )
 
-    def __iter__(self) -> Iterator[PipelineSample]:
-        urls = [str(path) for path in self.shard_paths]
+    def _iter_paths(self, shard_paths: tuple[Path, ...]) -> Iterator[PipelineSample]:
+        urls = [str(path) for path in shard_paths]
         factory = cast(
             Callable[..., Iterable[dict[str, Any]]],
             wds.WebDataset,  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
@@ -258,6 +258,26 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             processed = self._process(cast(Mapping[str, object], raw_sample))
             if processed is not None:
                 yield processed
+
+    def iter_leased_shards(
+        self,
+        coordinator: SingleProcessShardCoordinator,
+        shard_paths: tuple[str, ...],
+    ) -> Iterator[PipelineSample]:
+        """Consume cached shards under the durable at-least-once lease boundary."""
+
+        if not shard_paths or any(not path for path in shard_paths):
+            raise PipelineSampleError("leased pipeline requires explicit shard paths")
+        for shard_path in shard_paths:
+            with coordinator.lease(shard_path) as cached:
+                if cached is None:
+                    continue
+                if cached.fetched.relative_path != shard_path:
+                    raise PipelineSampleError("cache returned a different leased shard")
+                yield from self._iter_paths((cached.fetched.path,))
+
+    def __iter__(self) -> Iterator[PipelineSample]:
+        yield from self._iter_paths(self.shard_paths)
 
 
 __all__ = [

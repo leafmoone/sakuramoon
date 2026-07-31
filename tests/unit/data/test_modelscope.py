@@ -332,10 +332,11 @@ def test_retryable_status_is_bounded(
     assert len(http.requests) == 2
 
 
+@pytest.mark.parametrize("status", [401, 403])
 def test_authentication_failure_is_not_retried(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int
 ) -> None:
-    http = _install(monkeypatch, [_Plan(_Response(401))])
+    http = _install(monkeypatch, [_Plan(_Response(status))])
     with pytest.raises(DatasetAuthenticationError):
         fetch_dataset_shard(_transport(monkeypatch), _manifest(), SHARD_PATH, tmp_path)
     assert len(http.requests) == 1

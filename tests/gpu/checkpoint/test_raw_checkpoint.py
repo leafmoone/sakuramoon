@@ -30,6 +30,7 @@ from sakuramoon.checkpoint.schema import CheckpointError
 from sakuramoon.conditioning.style_resampler import StyleResampler
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.data.state import ShardRunState
+from sakuramoon.fault_injection import select_complete_raw_parent
 from sakuramoon.model.dit import DenseDiT
 from sakuramoon.model.growth import BASE_SLOT_IDS
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
@@ -371,3 +372,26 @@ def test_fresh_process_resume_matches_next_update(tmp_path: Path) -> None:
         torch.testing.assert_close(parameter.cpu(), expected, atol=0, rtol=0)
     assert restored_optimizer.audit_state() == expected_audit
     assert torch.equal(restored_optimizer.sr_rng.state, expected_sr)
+
+
+def test_fault_recovery_selector_requires_exact_complete_raw_parent(
+    tmp_path: Path,
+) -> None:
+    module = _compact_composite()
+    optimizer = _optimizer(module, 1235)
+    _update(module, optimizer)
+    identity = _identity("fault-parent", 1, optimizer.audit.schema_sha256)
+    checkpoint = save_raw_checkpoint(
+        tmp_path, identity, module, optimizer, _raw_state(1)
+    ).path
+
+    selected = select_complete_raw_parent(
+        tmp_path, checkpoint_id="fault-parent", successful_update=1
+    )
+
+    assert selected.path == checkpoint
+    assert selected.identity == identity
+    with pytest.raises(CheckpointError, match="exact COMPLETE"):
+        select_complete_raw_parent(
+            tmp_path, checkpoint_id="fault-parent", successful_update=2
+        )

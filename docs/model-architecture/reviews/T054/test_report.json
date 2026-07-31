@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "task_id": "T054",
+  "targeted_cpu": {
+    "command": "uv run --frozen pytest -q tests/fault_injection/test_control_plane.py tests/fault_injection/test_data_failures.py tests/fault_injection/test_training_failures.py",
+    "status": "passed",
+    "passed": 16,
+    "failed": 0,
+    "scope": "credential-free SIGKILL/expected-exit IPC, killed download restart, truncated/checksum/ENOSPC publication, WebDatasetPipeline lease replay after DataLoader os._exit, nonfinite gradient, strict per-scenario evidence binding and recovery selector control plane"
+  },
+  "associated_cpu_regression": {
+    "command": "uv run --frozen pytest -q tests/unit/data/test_state.py tests/unit/data/test_modelscope.py tests/unit/data/test_cache.py tests/unit/data/test_pipeline.py tests/unit/train/test_step.py tests/unit/train/test_loop.py tests/unit/train/test_preflight_failures.py tests/unit/checkpoint/test_checkpoint.py",
+    "status": "passed",
+    "passed": 87,
+    "failed": 0
+  },
+  "targeted_single_gpu": {
+    "command": "LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.105.08 uv run --frozen pytest -q tests/fault_injection/test_single_gpu_faults.py tests/gpu/checkpoint/test_raw_checkpoint.py::test_fault_recovery_selector_requires_exact_complete_raw_parent tests/gpu/checkpoint/test_raw_checkpoint.py::test_fresh_process_resume_matches_next_update -s",
+    "status": "passed",
+    "passed": 7,
+    "failed": 0,
+    "duration_seconds": 89.3,
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "scope": "weights-only recovery deserialization, three real TorchAO phase SIGKILLs, explicit COMPLETE-parent restore before allocator OOM, post-OOM fresh-process restore, context reclaim, exact production raw parent selection, fresh-process raw next-step model/optimizer/SR equality"
+  },
+  "nvml": "default userspace library mismatch; matching installed 580.105.08 library explicitly preloaded for the single-GPU test command only",
+  "long_run": "not_run",
+  "ddp_nccl_four_gpu": "blocked:FOUR-GPU-AVAILABLE",
+  "sr_rank_divergence": "blocked:FOUR-GPU-AVAILABLE",
+  "all_rank_stop": "blocked:FOUR-GPU-AVAILABLE",
+  "formal_stage_fault_canary": "blocked:FOUR-GPU-AVAILABLE-and-NO-LONG-RUN",
+  "independent_pre_remediation_audit": "completed_with_three_blocking_findings",
+  "remediation_acceptance": "main_agent_passed",
+  "independent_ai_rereview": "unavailable_after_two_direct_spawn_failures",
+  "independent_infra_rereview": "unavailable_after_two_direct_spawn_failures"
+}

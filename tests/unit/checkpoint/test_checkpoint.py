@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import importlib
 import json
 import random
@@ -251,12 +252,13 @@ def test_failed_save_removes_only_its_temporary_directory(
     save_module = importlib.import_module("sakuramoon.checkpoint.save")
 
     def fail_write(*_args: object, **_kwargs: object) -> None:
-        raise OSError("injected write failure")
+        raise OSError(errno.ENOSPC, "injected checkpoint disk full")
 
     monkeypatch.setattr(save_module, "_write_model", fail_write)
-    with pytest.raises(OSError, match="injected"):
+    with pytest.raises(OSError) as captured:
         save_model_only(tmp_path, _identity("failed"), _tiny_composite())
 
+    assert captured.value.errno == errno.ENOSPC
     assert discover_complete_checkpoints(tmp_path) == (complete,)
     assert [path.name for path in tmp_path.iterdir()] == [complete.name]
 
