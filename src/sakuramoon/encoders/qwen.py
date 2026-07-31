@@ -76,8 +76,10 @@ class FrozenQwenEncoder(nn.Module):
             raise ValueError("input_ids and attention_mask must have shape [batch, length]")
         if input_ids.dtype != torch.long:
             raise TypeError("input_ids must use torch.long")
-        if attention_mask.dtype not in (torch.bool, torch.long):
-            raise TypeError("attention_mask must use torch.bool or torch.long")
+        if attention_mask.dtype != torch.bool:
+            raise TypeError(
+                "attention_mask must use torch.bool with True meaning valid token"
+            )
 
         output = cast(
             _ModelOutput,
@@ -102,7 +104,7 @@ class FrozenQwenEncoder(nn.Module):
             raise RuntimeError(f"Qwen hidden size must be 2048, got {selected.shape[-1]}")
         return QwenEncoderOutput(
             hidden_states=selected.detach(),
-            attention_mask=attention_mask.to(dtype=torch.bool),
+            attention_mask=attention_mask,
         )
 
 

@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 64
+registry_revision = 65
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -1948,6 +1948,8 @@ superseded_by = ""
 implementation_commit_ref = "task:T021"
 implementation_paths = [
     "src/sakuramoon/encoders/qwen.py",
+    "tests/unit/encoders/test_qwen.py",
+    "tests/gpu/encoders/test_qwen.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -2626,6 +2628,8 @@ superseded_by = ""
 implementation_commit_ref = "task:T021"
 implementation_paths = [
     "src/sakuramoon/encoders/qwen.py",
+    "tests/unit/encoders/test_qwen.py",
+    "tests/gpu/encoders/test_qwen.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""

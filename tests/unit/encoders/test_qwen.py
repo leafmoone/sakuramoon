@@ -31,7 +31,7 @@ def test_selects_seven_states_from_one_frozen_forward() -> None:
     backend = _FakeQwen()
     encoder = FrozenQwenEncoder(backend)
     input_ids = torch.tensor([[1, 2, 3], [4, 5, 0]])
-    mask = torch.tensor([[1, 1, 1], [1, 1, 0]])
+    mask = torch.tensor([[True, True, True], [True, True, False]])
 
     output = encoder(input_ids, mask)
 
@@ -41,6 +41,7 @@ def test_selects_seven_states_from_one_frozen_forward() -> None:
     assert output.hidden_states.shape == (2, 3, 7, 2048)
     assert output.hidden_states[0, 0, :, 0].tolist() == [2, 4, 8, 12, 16, 20, 24]
     assert output.attention_mask.dtype == torch.bool
+    assert output.attention_mask is mask
     assert not output.hidden_states.requires_grad
     assert not backend.weight.requires_grad
     assert not encoder.training
@@ -63,3 +64,24 @@ def test_rejects_invalid_inputs() -> None:
         encoder(torch.ones(1, 2), torch.ones(1, 2, dtype=torch.bool))
     with pytest.raises(ValueError, match="shape"):
         encoder(torch.ones(1, 2, dtype=torch.long), torch.ones(1, 3, dtype=torch.bool))
+
+
+@pytest.mark.parametrize(
+    "mask",
+    (
+        torch.tensor([[0, 1]], dtype=torch.long),
+        torch.tensor([[1, 2]], dtype=torch.long),
+        torch.tensor([[1, -1]], dtype=torch.long),
+        torch.tensor([[0.0, 1.0]]),
+    ),
+)
+def test_rejects_non_boolean_attention_mask_before_forward(
+    mask: torch.Tensor,
+) -> None:
+    backend = _FakeQwen()
+    encoder = FrozenQwenEncoder(backend)
+
+    with pytest.raises(TypeError, match="torch.bool"):
+        encoder(torch.ones(1, 2, dtype=torch.long), mask)
+
+    assert backend.calls == 0
