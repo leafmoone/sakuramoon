@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 import torch
 
+from sakuramoon.data.caption import CAPTION_DROPOUT_KEYS, CaptionDropoutHits
 from sakuramoon.data.collate import (
     BucketedBatchDataset,
     CollateError,
@@ -14,6 +15,7 @@ from sakuramoon.data.collate import (
 )
 from sakuramoon.data.pipeline import ImageAudit, PipelineSample, RngIdentity
 from sakuramoon.data.serialize import SerializedCaption
+from sakuramoon.telemetry.metrics import DROPOUT_KEYS
 
 
 def _sample(sample_id: int, *, width: int = 8, dense_length: int = 64) -> PipelineSample:
@@ -28,6 +30,20 @@ def _sample(sample_id: int, *, width: int = 8, dense_length: int = 64) -> Pipeli
         artist_mask=(),
         use_null_style=True,
         all_condition_dropped=False,
+        dropout_hits=CaptionDropoutHits(
+            all_condition=False,
+            nsfw=False,
+            character=False,
+            copyright=False,
+            general=bool(sample_id % 2),
+            artist=bool(sample_id % 2),
+            candidate_source=False,
+            long_names=False,
+            long_no_names=False,
+            short_vibes=False,
+            nl2=False,
+            nl3=False,
+        ),
         selected_nl=None,
         body="",
         artist_text="",
@@ -64,6 +80,12 @@ def test_collate_pads_eot_and_preserves_structured_metadata() -> None:
     assert batch.artist_token_indices.shape == (2, 0)
     assert batch.active_style_sample_indices.numel() == 0
     assert torch.equal(batch.sample_ids, torch.tensor([1, 2]))
+    assert CAPTION_DROPOUT_KEYS == DROPOUT_KEYS
+    dropout_hits = batch.dropout_hits.as_mapping()
+    assert tuple(dropout_hits) == CAPTION_DROPOUT_KEYS
+    assert dropout_hits["general"] == 1
+    assert dropout_hits["artist"] == 1
+    assert sum(dropout_hits.values()) == 2
 
 
 def test_bucketed_batches_never_mix_image_or_text_buckets() -> None:

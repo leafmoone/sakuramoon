@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from sakuramoon.data.caption import CATEGORY_ORDER, CaptionPlan, Tag
+from sakuramoon.data.caption import (
+    CATEGORY_ORDER,
+    CaptionDropoutHits,
+    CaptionPlan,
+    Tag,
+)
 
 SYSTEM_PREFIX = (
     "<|im_start|>system\n"
@@ -59,6 +64,7 @@ class SerializedCaption:
     artist_mask: tuple[bool, ...]
     use_null_style: bool
     all_condition_dropped: bool
+    dropout_hits: CaptionDropoutHits
     selected_nl: str | None
     body: str
     artist_text: str
@@ -176,6 +182,7 @@ def serialize_caption(
         artist_mask=(True,) * len(artist_indices),
         use_null_style=not bool(artist_indices),
         all_condition_dropped=plan.all_condition_dropped,
+        dropout_hits=plan.dropout_hits,
         selected_nl=plan.selected_nl if nl_text is not None else None,
         body=body,
         artist_text=artist_text,

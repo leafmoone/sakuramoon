@@ -6,7 +6,7 @@ from typing import cast
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from sakuramoon.data.caption import CaptionPlan, Tag
+from sakuramoon.data.caption import CaptionDropoutHits, CaptionPlan, Tag
 from sakuramoon.data.serialize import (
     CONDITION_BUCKETS,
     MAIN_SUFFIX,
@@ -47,6 +47,20 @@ def _plan(
     selected_nl: str | None = None,
     all_condition_dropped: bool = False,
 ) -> CaptionPlan:
+    dropout_hits = CaptionDropoutHits(
+        all_condition=all_condition_dropped,
+        nsfw=False,
+        character=False,
+        copyright=False,
+        general=False,
+        artist=False,
+        candidate_source=False,
+        long_names=False,
+        long_no_names=False,
+        short_vibes=False,
+        nl2=False,
+        nl3=False,
+    )
     return CaptionPlan(
         nsfw=nsfw,
         character=character,
@@ -56,6 +70,7 @@ def _plan(
         nl_text=nl_text,
         selected_nl=selected_nl,  # type: ignore[arg-type]
         all_condition_dropped=all_condition_dropped,
+        dropout_hits=dropout_hits,
     )
 
 
@@ -127,6 +142,7 @@ def test_all_condition_empty_template_uses_null_style() -> None:
     assert result.artist_token_indices == ()
     assert result.use_null_style is True
     assert result.all_condition_dropped is True
+    assert result.dropout_hits.all_condition is True
 
 
 def test_truncation_removes_nl_before_complete_low_priority_tag() -> None:

@@ -321,6 +321,15 @@ sakuramoon/
 - **完成证据：** D016 task、针对性 CPU test report 与原子 commit；不回写 D014 历史证据，不创建独立 timing artifact。
 - **GPU：** 无。
 
+### D020：Caption component dropout hit telemetry remediation
+
+- **依赖：** D014 caption 决策路径、D016 严格概率配置与 T051 固定 metrics key。
+- **实现路径：** `data/caption.py`、`data/serialize.py`、`data/collate.py` 与针对性 contract tests。
+- **动作：** 对 all-condition、四类 tag、Artist、candidate source 和五个 NL 分支保留逐样本独立 hit decision，经 serializer 传递并在 collate 聚合为 batch counts；禁止从最终空 body 反推。
+- **验证：** 空源与重叠 dropout golden、固定 key 与 T051 metrics 对齐、DataLoader worker pickle round-trip。
+- **完成边界：** CPU telemetry 代码可完成；100k 生产分布、最终空 body 率和 `all_condition=10%+/-0.5pp` 仍是独立 pending evidence。
+- **GPU：** 无。
+
 ## 9. Phase 2：冻结编码器与条件分支
 
 ### T020：Mage-VAE wrapper 与重建验收

@@ -4,6 +4,8 @@ import pytest
 
 from sakuramoon.data.caption import (
     ALL_CONDITION_DROPOUT,
+    CAPTION_DROPOUT_KEYS,
+    CaptionDropoutHits,
     CaptionDropoutProbabilities,
     CaptionError,
     CaptionFields,
@@ -75,6 +77,8 @@ def test_all_condition_probability_is_fixed_and_produces_empty_plan() -> None:
     assert plan.nsfw == plan.character == plan.copyright == plan.general == ()
     assert plan.artists == ()
     assert plan.nl_text is None
+    assert plan.dropout_hits.all_condition is True
+    assert tuple(plan.dropout_hits.as_mapping()) == CAPTION_DROPOUT_KEYS
 
 
 def test_category_order_data_and_internal_shuffle_are_deterministic() -> None:
@@ -173,6 +177,54 @@ def test_explicit_nl_dropout_removes_all_available_branches() -> None:
     )
     assert plan.selected_nl is None
     assert plan.nl_text is None
+    assert all(
+        getattr(plan.dropout_hits, branch)
+        for branch in ("long_names", "long_no_names", "short_vibes", "nl2", "nl3")
+    )
+
+
+def test_component_hits_are_retained_when_sources_are_empty() -> None:
+    fields = CaptionFields(
+        nsfw=(),
+        character=(),
+        copyright=(),
+        general=(),
+        artists=(),
+        candidate_tags=frozenset(),
+        nl=NlCandidates(None, None, None, None, None),
+    )
+    plan = build_caption_plan(
+        fields,
+        CaptionDropoutProbabilities(
+            nsfw=1.0,
+            character=1.0,
+            copyright=1.0,
+            general=1.0,
+            artist=1.0,
+            candidate_source=1.0,
+            nl=NlDropoutProbabilities(1.0, 1.0, 1.0, 1.0, 1.0),
+        ),
+        seed=_seed_for_global_dropout(False),
+    )
+
+    assert plan.all_condition_dropped is False
+    assert plan.nsfw == plan.character == plan.copyright == plan.general == ()
+    assert plan.artists == ()
+    assert plan.nl_text is None
+    assert plan.dropout_hits.as_mapping() == {
+        "all_condition": False,
+        "nsfw": True,
+        "character": True,
+        "copyright": True,
+        "general": True,
+        "artist": True,
+        "candidate_source": True,
+        "long_names": True,
+        "long_no_names": True,
+        "short_vibes": True,
+        "nl2": True,
+        "nl3": True,
+    }
 
 
 def test_five_nl_probabilities_must_remain_equal() -> None:
@@ -252,4 +304,18 @@ def test_all_condition_plan_cannot_carry_content() -> None:
             nl_text=None,
             selected_nl=None,
             all_condition_dropped=True,
+            dropout_hits=CaptionDropoutHits(
+                all_condition=True,
+                nsfw=False,
+                character=False,
+                copyright=False,
+                general=False,
+                artist=False,
+                candidate_source=False,
+                long_names=False,
+                long_no_names=False,
+                short_vibes=False,
+                nl2=False,
+                nl3=False,
+            ),
         )

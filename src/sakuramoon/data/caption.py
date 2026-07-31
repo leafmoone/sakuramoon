@@ -9,6 +9,20 @@ from typing import Literal
 
 CATEGORY_ORDER = ("nsfw", "character", "copyright", "general")
 ALL_CONDITION_DROPOUT = 0.10
+CAPTION_DROPOUT_KEYS: tuple[str, ...] = (
+    "all_condition",
+    "nsfw",
+    "character",
+    "copyright",
+    "general",
+    "artist",
+    "candidate_source",
+    "long_names",
+    "long_no_names",
+    "short_vibes",
+    "nl2",
+    "nl3",
+)
 NlBranch = Literal["long_names", "long_no_names", "short_vibes", "nl2", "nl3"]
 NL_BRANCHES: tuple[NlBranch, ...] = (
     "long_names",
@@ -132,6 +146,81 @@ class CaptionDropoutProbabilities:
 
 
 @dataclass(frozen=True)
+class CaptionDropoutHits:
+    all_condition: bool
+    nsfw: bool
+    character: bool
+    copyright: bool
+    general: bool
+    artist: bool
+    candidate_source: bool
+    long_names: bool
+    long_no_names: bool
+    short_vibes: bool
+    nl2: bool
+    nl3: bool
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not bool for value in self.as_mapping().values()):
+            raise CaptionError("caption dropout hits must be exact booleans")
+
+    def as_mapping(self) -> dict[str, bool]:
+        return {
+            "all_condition": self.all_condition,
+            "nsfw": self.nsfw,
+            "character": self.character,
+            "copyright": self.copyright,
+            "general": self.general,
+            "artist": self.artist,
+            "candidate_source": self.candidate_source,
+            "long_names": self.long_names,
+            "long_no_names": self.long_no_names,
+            "short_vibes": self.short_vibes,
+            "nl2": self.nl2,
+            "nl3": self.nl3,
+        }
+
+
+@dataclass(frozen=True)
+class CaptionDropoutCounts:
+    all_condition: int
+    nsfw: int
+    character: int
+    copyright: int
+    general: int
+    artist: int
+    candidate_source: int
+    long_names: int
+    long_no_names: int
+    short_vibes: int
+    nl2: int
+    nl3: int
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not int or value < 0
+            for value in self.as_mapping().values()
+        ):
+            raise CaptionError("caption dropout counts must be non-negative integers")
+
+    def as_mapping(self) -> dict[str, int]:
+        return {
+            "all_condition": self.all_condition,
+            "nsfw": self.nsfw,
+            "character": self.character,
+            "copyright": self.copyright,
+            "general": self.general,
+            "artist": self.artist,
+            "candidate_source": self.candidate_source,
+            "long_names": self.long_names,
+            "long_no_names": self.long_no_names,
+            "short_vibes": self.short_vibes,
+            "nl2": self.nl2,
+            "nl3": self.nl3,
+        }
+
+
+@dataclass(frozen=True)
 class CaptionPlan:
     nsfw: tuple[Tag, ...]
     character: tuple[Tag, ...]
@@ -141,11 +230,17 @@ class CaptionPlan:
     nl_text: str | None
     selected_nl: NlBranch | None
     all_condition_dropped: bool
+    dropout_hits: CaptionDropoutHits
 
     def __post_init__(self) -> None:
         has_content = any(
             (self.nsfw, self.character, self.copyright, self.general, self.artists)
         ) or self.nl_text is not None
+        if (
+            type(self.all_condition_dropped) is not bool
+            or self.all_condition_dropped != self.dropout_hits.all_condition
+        ):
+            raise CaptionError("all-condition result and dropout hit must agree")
         if self.all_condition_dropped and has_content:
             raise CaptionError("all-condition dropout plan must be empty")
         if (self.nl_text is None) != (self.selected_nl is None):
@@ -178,20 +273,41 @@ def build_caption_plan(
 
     if type(seed) is not int or seed < 0:
         raise CaptionError("caption seed must be a non-negative integer")
-    if _drop(seed, "all_condition", ALL_CONDITION_DROPOUT):
-        return CaptionPlan((), (), (), (), (), None, None, True)
+    dropout_hits = CaptionDropoutHits(
+        all_condition=_drop(seed, "all_condition", ALL_CONDITION_DROPOUT),
+        nsfw=_drop(seed, "dropout:nsfw", probabilities.nsfw),
+        character=_drop(seed, "dropout:character", probabilities.character),
+        copyright=_drop(seed, "dropout:copyright", probabilities.copyright),
+        general=_drop(seed, "dropout:general", probabilities.general),
+        artist=_drop(seed, "dropout:artist", probabilities.artist),
+        candidate_source=_drop(
+            seed, "dropout:candidate_source", probabilities.candidate_source
+        ),
+        long_names=_drop(
+            seed, "dropout:nl:long_names", probabilities.nl.long_names
+        ),
+        long_no_names=_drop(
+            seed, "dropout:nl:long_no_names", probabilities.nl.long_no_names
+        ),
+        short_vibes=_drop(
+            seed, "dropout:nl:short_vibes", probabilities.nl.short_vibes
+        ),
+        nl2=_drop(seed, "dropout:nl:nl2", probabilities.nl.nl2),
+        nl3=_drop(seed, "dropout:nl:nl3", probabilities.nl.nl3),
+    )
+    if dropout_hits.all_condition:
+        return CaptionPlan((), (), (), (), (), None, None, True, dropout_hits)
 
     categories: dict[str, tuple[Tag, ...]] = {}
     for category in CATEGORY_ORDER:
-        probability = getattr(probabilities, category)
         source = getattr(fields, category)
         categories[category] = (
             ()
-            if _drop(seed, f"dropout:{category}", probability)
+            if getattr(dropout_hits, category)
             else _shuffle(source, seed, f"shuffle:{category}")
         )
 
-    if _drop(seed, "dropout:candidate_source", probabilities.candidate_source):
+    if dropout_hits.candidate_source:
         for category in CATEGORY_ORDER:
             categories[category] = tuple(
                 tag
@@ -201,14 +317,14 @@ def build_caption_plan(
 
     artists = (
         ()
-        if _drop(seed, "dropout:artist", probabilities.artist)
+        if dropout_hits.artist
         else _shuffle(fields.artists, seed, "shuffle:artist")
     )
 
     available_nl: tuple[tuple[NlBranch, str], ...] = tuple(
         (branch, text)
         for branch, text in fields.nl.available()
-        if not _drop(seed, f"dropout:nl:{branch}", getattr(probabilities.nl, branch))
+        if not getattr(dropout_hits, branch)
     )
     if available_nl:
         selected_nl, nl_text = available_nl[
@@ -225,4 +341,5 @@ def build_caption_plan(
         nl_text=nl_text,
         selected_nl=selected_nl,
         all_condition_dropped=False,
+        dropout_hits=dropout_hits,
     )

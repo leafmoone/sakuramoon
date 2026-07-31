@@ -8,6 +8,10 @@ from dataclasses import dataclass, replace
 import torch
 from torch.utils.data import DataLoader, IterableDataset
 
+from sakuramoon.data.caption import (
+    CAPTION_DROPOUT_KEYS,
+    CaptionDropoutCounts,
+)
 from sakuramoon.data.pipeline import (
     ImageAudit,
     PipelineSample,
@@ -39,6 +43,7 @@ class TrainingBatch:
     dense_length: int
     use_null_style: torch.Tensor
     all_condition_dropped: torch.Tensor
+    dropout_hits: CaptionDropoutCounts
     releases: tuple[str, ...]
     audits: tuple[ImageAudit, ...]
     rng_identities: tuple[RngIdentity, ...]
@@ -167,6 +172,10 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     artist_indices, artist_mask = _index_tensor(
         tuple(sample.caption.artist_token_indices for sample in samples)
     )
+    dropout_hits = dict.fromkeys(CAPTION_DROPOUT_KEYS, 0)
+    for sample in samples:
+        for key, hit in sample.caption.dropout_hits.as_mapping().items():
+            dropout_hits[key] += int(hit)
     return TrainingBatch(
         images=torch.stack(tuple(sample.image for sample in samples)),
         input_ids=input_ids,
@@ -190,6 +199,7 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
             tuple(sample.caption.all_condition_dropped for sample in samples),
             dtype=torch.bool,
         ),
+        dropout_hits=CaptionDropoutCounts(**dropout_hits),
         releases=tuple(sample.release for sample in samples),
         audits=tuple(sample.audit for sample in samples),
         rng_identities=tuple(sample.rng for sample in samples),

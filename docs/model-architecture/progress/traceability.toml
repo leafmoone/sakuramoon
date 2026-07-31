@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 83
+registry_revision = 84
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -759,6 +759,7 @@ owner_tasks = [
     "C002",
     "D014",
     "D016",
+    "D020",
 ]
 config_keys = [
     "caption.dropout.*",
@@ -7064,7 +7065,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-009"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "dropout_decision"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -7077,8 +7078,19 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D020"
+implementation_paths = [
+    "src/sakuramoon/data/caption.py",
+    "src/sakuramoon/data/serialize.py",
+    "src/sakuramoon/data/collate.py",
+    "tests/unit/data/test_caption.py",
+    "tests/unit/data/test_collate.py",
+    "tests/contracts/text_protocol/test_caption_serializer.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D020.md",
+    "docs/model-architecture/reviews/D020/test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -7099,6 +7111,7 @@ benchmarks = []
 artifacts = [
     "docs/model-architecture/progress/tasks/D016.md",
     "docs/model-architecture/reviews/D016/test_report.json",
+    "docs/model-architecture/reviews/D020/**",
     "artifacts/data/caption_dry_run*",
 ]
 not_applicable_fields = [
