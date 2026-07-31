@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 69
+registry_revision = 70
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -2785,7 +2785,9 @@ superseded_by = ""
 implementation_commit_ref = "task:T022"
 implementation_paths = [
     "src/sakuramoon/conditioning/text_mixer.py",
+    "src/sakuramoon/data/collate.py",
     "tests/unit/conditioning/test_text_mixer.py",
+    "tests/unit/data/test_collate.py",
     "tests/gpu/conditioning/test_text_mixer_gpu.py",
     "docs/model-architecture/progress/traceability.toml",
 ]

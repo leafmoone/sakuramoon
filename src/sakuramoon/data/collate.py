@@ -70,6 +70,25 @@ def _index_tensor(
     return indices, mask
 
 
+def _validate_main_indices(samples: tuple[PipelineSample, ...]) -> None:
+    for sample in samples:
+        indices = sample.caption.main_token_indices
+        mask = sample.caption.main_mask
+        if (
+            len(indices) != len(mask)
+            or any(type(active) is not bool or not active for active in mask)
+            or any(
+                type(index) is not int
+                or index < 0
+                or index >= len(sample.caption.input_ids)
+                for index in indices
+            )
+        ):
+            raise CollateError(
+                "main token indices must be active positions in the serialized Qwen input"
+            )
+
+
 def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     if not samples:
         raise CollateError("collate requires samples")
@@ -93,6 +112,7 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         for sample in samples
     ):
         raise CollateError("batch images must be RGB uint8 tensors at the target size")
+    _validate_main_indices(samples)
 
     dense_length = first.caption.dense_length
     input_ids = torch.full(

@@ -93,6 +93,33 @@ def test_collate_binds_padding_to_each_sample_framing() -> None:
         collate_samples((_sample(1), mismatched))
 
 
+@pytest.mark.parametrize(
+    ("indices", "mask"),
+    [
+        ((0, 3), (True, True)),
+        ((0, -1), (True, True)),
+        ((0, 1), (True, False)),
+        ((0, 1), (True,)),
+    ],
+)
+def test_collate_rejects_invalid_main_index_metadata(
+    indices: tuple[int, ...],
+    mask: tuple[bool, ...],
+) -> None:
+    sample = _sample(1)
+    invalid = replace(
+        sample,
+        caption=replace(
+            sample.caption,
+            main_token_indices=indices,
+            main_mask=mask,
+        ),
+    )
+
+    with pytest.raises(CollateError, match="main token indices"):
+        collate_samples((invalid,))
+
+
 class _EmptyDataset(torch.utils.data.IterableDataset[PipelineSample]):
     def __iter__(self):
         return iter(())

@@ -127,8 +127,24 @@ class TextConditioner(nn.Module):
             raise TypeError("main_token_indices must use torch.long")
         if main_token_indices.shape[0] != qwen_states.shape[0]:
             raise ValueError("main indices batch size differs from Qwen states")
-        active = main_token_indices[main_mask]
-        if active.numel() and (active.min() < 0 or active.max() >= qwen_states.shape[1]):
+        if (
+            main_token_indices.device != qwen_states.device
+            or main_mask.device != qwen_states.device
+        ):
+            raise ValueError("Qwen states, main indices, and mask must share one device")
+
+        in_range = (~main_mask) | (
+            (main_token_indices >= 0)
+            & (main_token_indices < qwen_states.shape[1])
+        )
+        if qwen_states.is_cuda:
+            # The CPU collate boundary validates values before transfer. This
+            # device-side assertion preserves fail-closed direct-call behavior
+            # without synchronizing CUDA scalars into the Python hot path.
+            torch._assert_async(  # pyright: ignore[reportPrivateUsage,reportPrivateImportUsage]
+                in_range.all()
+            )
+        elif not bool(in_range.all()):
             raise ValueError("active main token index is outside the Qwen sequence")
 
         safe_indices = main_token_indices.masked_fill(~main_mask, 0)

@@ -34,7 +34,11 @@ def test_text_mixer_production_shape_bf16_forward_backward_on_one_gpu() -> None:
     mask[1, 24:] = False
     indices[1, 24:] = torch.iinfo(torch.long).max
 
-    output = module(states, indices, mask)
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        output = module(states, indices, mask)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
     output.tokens.float().square().mean().backward()
 
     assert output.tokens.shape == (2, 32, 2560)

@@ -74,6 +74,17 @@ def test_active_out_of_range_indices_still_fail(invalid_index: int) -> None:
         )
 
 
+def test_indices_and_mask_must_share_qwen_device() -> None:
+    module = _conditioner()
+
+    with pytest.raises(ValueError, match="share one device"):
+        module(
+            torch.randn(1, 4, 7, 16),
+            torch.tensor([[0]], device="meta"),
+            torch.ones(1, 1, dtype=torch.bool, device="meta"),
+        )
+
+
 def test_production_constructor_locks_decided_architecture_and_precision() -> None:
     signature = inspect.signature(TextConditioner.for_production)
     assert tuple(signature.parameters) == (

@@ -44,7 +44,26 @@
     "duration_seconds": 20.24,
     "direct_verifier_passed": true
   },
-  "package_review_status": "encoders_conditioning_review_pending_after_T020_T024_freeze",
+  "package_review_status": "encoders_conditioning_changes_required_remediation_pending_rereview",
+  "sync_remediation": {
+    "cpu_collate_value_validation": true,
+    "cuda_boolean_compression_removed": true,
+    "python_cuda_min_max_removed": true,
+    "masked_indices_sanitized_before_gather": true,
+    "direct_cuda_fail_closed_assertion": "device_side_async",
+    "targeted_cpu": {
+      "command": "uv run --frozen pytest -q tests/unit/conditioning/test_text_mixer.py tests/unit/data/test_collate.py",
+      "passed": 19,
+      "failed": 0
+    },
+    "targeted_real_gpu": {
+      "command": "uv run --frozen pytest -q tests/gpu/conditioning/test_text_mixer_gpu.py",
+      "passed": 1,
+      "failed": 0,
+      "cuda_sync_debug_mode": "error",
+      "detected_host_synchronizations": 0
+    }
+  },
   "multi_gpu_ddp_nccl_status": "not_run_pending_or_blocked",
   "training_long_run_status": "not_run"
 }

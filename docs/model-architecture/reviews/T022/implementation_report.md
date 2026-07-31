@@ -9,3 +9,12 @@ and BF16/FP32 parameter precision. MHA heads, mix-gate initialization, LayerScal
 initialization, and projection bias remain required keyword-only inputs because the
 current decisions do not lock them. CPU contracts and a production-shape RTX 5090
 BF16 forward/backward passed. Encoders/Conditioning package review remains pending.
+
+The package review then identified CUDA boolean compression and Python `min/max`
+checks as per-forward synchronization points. The CPU collate boundary now rejects
+malformed or out-of-input main-token positions before transfer. `TextConditioner`
+checks a fixed-shape in-range predicate, uses the normal synchronous `ValueError` path
+on CPU, and uses a device-side asynchronous assertion on CUDA before sanitizing masked
+positions. This retains fail-closed direct-call behavior without reading a CUDA scalar
+into Python. A production-shape forward/backward passed under CUDA synchronization
+debug mode `error`. Package rereview is pending.
