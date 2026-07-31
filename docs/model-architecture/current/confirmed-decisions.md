@@ -131,7 +131,7 @@ Describe the image by detailing the color, shape, size, texture, quantity, text,
 # 9. 训练目标、CFG 与采样
 - clean latent 记为 `x`，噪声为 `epsilon~N(0,I)`，训练状态为 `z_t=t*x+(1-t)*epsilon`；`t=0` 噪声、`t=1` clean。
 - timestep 采用 JLT 参数 `P_mean=-0.8`、`P_std=0.8`；`noise_scale=1`、`t_eps=0.05`。
-- 网络输出 `x_pred`。令 `d=max(1-t,0.05)`，严格以 FP32 计算 `v_target=(x-z_t)/d` 与 `v_pred=(x_pred-z_t)/d`；训练损失为 `MSE(v_pred,v_target)=MSE(x_pred,x)/d^2`，endpoint 最大权重为 400，并严格先做 per-sample mean、再做 global sample mean。观测分桶固定为 high noise `t<0.5`、low noise `t>=0.5`，只影响日志聚合，不改变全 batch 总 loss。objective TOML 必须记录 loss、target velocity 与 endpoint weighting 身份；旧 objective raw checkpoint 因 resolved-config identity 不匹配禁止 resume，model-only 权重仅可标记为 `pre_fix` 后用于推理。
+- 网络输出 `x_pred`。令 `d=max(1-t,0.05)`，严格以 FP32 计算 `v_target=(x-z_t)/d` 与 `v_pred=(x_pred-z_t)/d`；训练损失为 `MSE(v_pred,v_target)=MSE(x_pred,x)/d^2`，endpoint 最大权重为 400，并严格先做 per-sample mean、再做 global sample mean。观测分桶固定为 high noise `t<0.95`、low noise `t>=0.95`，只影响日志聚合，不改变全 batch 总 loss。objective TOML 必须记录 loss、target velocity 与 endpoint weighting 身份；旧 objective raw checkpoint 因 resolved-config identity 不匹配禁止 resume，model-only 权重仅可标记为 `pre_fix` 后用于推理。
 - CFG 必须先分别把 conditional/unconditional 的 `x_pred` 转成 velocity，再做 `v_cfg=v_uncond+2.9*(v_cond-v_uncond)`；默认全时间区间 guidance，不做 CFG rescale。
 - 正式评估使用 linear-time Heun-50 + final Euler，solver state 为 FP32，共 99 NFE；快速预览结果不得混入质量验收。
 - 采样只允许三个固定 profile：`preview=Euler-28/28 NFE`、`balanced=Heun-25 + final Euler/49 NFE`、`reference=Heun-50 + final Euler/99 NFE`。三档共用 linear `0→1`、FP32 state、`noise_scale=1.0`、`t_eps=0.05`、x-pred 与全区间 CFG 2.9；conditional/unconditional 仍分别 x-to-v 后再做 CFG，最终 endpoint 不在 `t=1` 再评估 DiT。`sampling.profile` 必须显式填写且不得配置 NFE，正式评估必须显式选择 `reference`；resolved config、评估 artifact 与生成 metadata 必须记录 profile、solver、steps、推导 NFE 和 CFG，旧 objective model-only 权重必须标记为 `pre_fix`。
@@ -191,6 +191,7 @@ Artist 只走 style 分支、在线 segment metadata、无第二次 Qwen/离线 
 - 2026-07-30：用户确认 Qwen TE 与 Mage-VAE 为 `model/` 下已准备本地资产，锁定只校验/只本地加载且禁止下载或 fallback；`reference/` 收窄为纯人工理解/对照，禁止任何工程路径导入、执行或调用其中代码。
 - 2026-07-31：用户锁定全部 caption dropout 数值；D016 将其绑定为无默认、不可漂移的严格 TOML schema，100k 生产分布 dry run 仍作为独立验证项。
 - 2026-07-31：用户修正严格 JLT x-pred loss：target 与 prediction 都从 clean/state 经同一 clamped x-to-v 计算，锁定 inverse-square endpoint weighting、最大权重 400，以及 `t=0.5` 的 high/low-noise 观测边界。
+- 2026-07-31：用户将仅用于日志聚合的 high/low-noise 观测边界从 `t=0.5` 修订为 `t=0.95`；严格 JLT loss、clamp 与最大权重 400 不变。
 - 会话证据：Codex 会话导出附件 `pasted-text.txt`；原组件页保留讨论过程和外部参考。
 ## Notion 原始组件
 - <mention-page url="https://app.notion.com/p/3aaae967ecf281ba8f73fac2f9e4c4f3"/>

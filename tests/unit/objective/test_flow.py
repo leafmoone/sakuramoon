@@ -93,6 +93,7 @@ def test_exact_x_prediction_has_zero_velocity_loss() -> None:
         clean,
         timestep,
         t_eps=0.05,
+        noise_observation_boundary=0.95,
     )
 
     assert result.loss.dtype == torch.float32
@@ -111,6 +112,7 @@ def test_velocity_loss_uses_t_eps_above_point_nine_five() -> None:
         clean,
         timestep,
         t_eps=0.05,
+        noise_observation_boundary=0.95,
     )
 
     torch.testing.assert_close(result.loss, torch.tensor(0.0), atol=1e-10, rtol=0)
@@ -128,6 +130,7 @@ def test_loss_reduces_each_sample_before_global_mean() -> None:
         clean,
         timestep,
         t_eps=0.05,
+        noise_observation_boundary=0.95,
     )
 
     torch.testing.assert_close(result.per_sample, torch.tensor([1.0, 4.0]))
@@ -148,6 +151,7 @@ def test_strict_jlt_loss_is_x_error_times_inverse_square_weight() -> None:
         clean,
         timestep,
         t_eps=0.05,
+        noise_observation_boundary=0.95,
     )
     expected = ((prediction - clean).float() / denominator).square().mean(dim=1)
 
@@ -167,16 +171,17 @@ def test_endpoint_weight_is_clamped_to_four_hundred() -> None:
         clean,
         torch.tensor([0.99], dtype=torch.float32),
         t_eps=0.05,
+        noise_observation_boundary=0.95,
     )
 
     torch.testing.assert_close(result.loss, torch.tensor(400.0))
 
 
-def test_noise_observation_boundary_is_half_open_with_sum_count_outputs() -> None:
+def test_noise_observation_boundary_is_point_nine_five_with_sum_count_outputs() -> None:
     clean = torch.zeros(2, 1)
     state = torch.zeros_like(clean)
-    timestep = torch.tensor([0.49, 0.5], dtype=torch.float32)
-    prediction = torch.tensor([[1.02], [1.5]])
+    timestep = torch.tensor([0.94, 0.95], dtype=torch.float32)
+    prediction = torch.tensor([[0.12], [0.15]])
 
     result = flow_matching_loss(
         prediction,
@@ -184,9 +189,11 @@ def test_noise_observation_boundary_is_half_open_with_sum_count_outputs() -> Non
         clean,
         timestep,
         t_eps=0.05,
+        noise_observation_boundary=0.95,
     )
 
     torch.testing.assert_close(result.per_sample, torch.tensor([4.0, 9.0]))
+    torch.testing.assert_close(result.loss, torch.tensor(6.5))
     torch.testing.assert_close(result.high_noise_loss_sum, torch.tensor(4.0))
     torch.testing.assert_close(result.low_noise_loss_sum, torch.tensor(9.0))
     assert result.high_noise_sample_count.item() == 1
@@ -226,6 +233,14 @@ def test_noise_observation_boundary_is_half_open_with_sum_count_outputs() -> Non
             torch.zeros(1, dtype=torch.float32),
             t_eps=0.05,
             guidance_scale=3.0,
+        ),
+        lambda: flow_matching_loss(
+            torch.zeros(1, 1),
+            torch.zeros(1, 1),
+            torch.zeros(1, 1),
+            torch.zeros(1, dtype=torch.float32),
+            t_eps=0.05,
+            noise_observation_boundary=0.5,
         ),
     ],
 )
@@ -267,6 +282,7 @@ def test_flow_loss_rejects_invalid_tensor_contracts(
             clean,
             torch.zeros(1, dtype=torch.float32),
             t_eps=0.05,
+            noise_observation_boundary=0.95,
         )
 
 

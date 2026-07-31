@@ -35,6 +35,7 @@ def test_bf16_flow_loss_backward_update_cfg_and_heun_on_cuda() -> None:
         clean,
         timestep,
         t_eps=0.05,
+        noise_observation_boundary=0.95,
     )
     loss_output.loss.backward()  # pyright: ignore[reportUnknownMemberType]
     optimizer.step()  # pyright: ignore[reportUnknownMemberType]

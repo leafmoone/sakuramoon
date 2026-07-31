@@ -418,7 +418,7 @@ sakuramoon/
 - **对应文档：** `C08-*`。
 - **实现路径：** `objectives/*`、`sampling/*`。
 - **动作：** JLT `P_mean=-0.8/P_std=0.8`、noise_scale1、t_eps0.05；`z_t=t*x+(1-t)*epsilon`；网络x-pred；以 `d=max(1-t,0.05)` 对 clean/prediction 分别做 FP32 x-to-v，loss 为 `MSE(x_pred,x)/d^2`；per-sample mean后global mean；velocity CFG2.9。采样 profile 由 M034 独立实现。
-- **验证：** t=0 noise/t=1 clean；`x_pred=x` 在 t=0.99 为零 loss；inverse-square 最大权重400；high noise `t<0.5`、low noise `t>=0.5`；cond/uncond分别x-to-v后CFG；旧 objective raw config hash 禁止 resume，model-only 仅标记 `pre_fix` 推理；DDP global mean留到 `T041`。
+- **验证：** t=0 noise/t=1 clean；`x_pred=x` 在 t=0.99 为零 loss；inverse-square 最大权重400；high noise `t<0.95`、low noise `t>=0.95`；cond/uncond分别x-to-v后CFG；旧 objective raw config hash 禁止 resume，model-only 仅标记 `pre_fix` 推理；DDP global mean留到 `T041`。
 - **完成证据：** math golden、finite-difference solver tests、sampling determinism。
 - **GPU：** CPU + 1GPU integration。
 

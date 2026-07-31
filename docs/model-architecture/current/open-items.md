@@ -69,7 +69,7 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [ ] 实现独立 `condition_hidden→SiLU→Linear(1024,5120)` final modulation；测试它不复用 block `6d`。
 - [ ] 实现 image-only conditional final RMSNorm 与 zero-init `Linear(2560,128,bias=true)`；初始化时任意输入的 `x_pred` 为 0。
 - [ ] 用 golden test 固化 `z_t=t*x+(1-t)*epsilon`、`t=0` noise、`t=1` clean，并禁止把 clean endpoint 写作 `z0`。
-- [x] 验证严格 JLT FP32 `v_target=(x-z_t)/d`、`v_pred=(x_pred-z_t)/d`、inverse-square clamp 最大权重 400、per-sample/global mean、`t<0.5`/`t>=0.5` 观测分桶，以及 cond/uncond 各自 x-to-v 后才做 CFG；采样 profile 的 solver/NFE 合同由 M034 单独关闭。
+- [x] 验证严格 JLT FP32 `v_target=(x-z_t)/d`、`v_pred=(x_pred-z_t)/d`、inverse-square clamp 最大权重 400、per-sample/global mean、`t<0.95`/`t>=0.95` 观测分桶，以及 cond/uncond 各自 x-to-v 后才做 CFG；采样 profile 的 solver/NFE 合同由 M034 单独关闭。
 # 5. P0：环境、Optimizer 与 Checkpoint Canary
 ## 5.1 环境和 kernel preflight
 - [ ] 锁定 driver、CUDA、PyTorch、TorchAO、FA4/CuTeDSL、Triton、causal_conv1d、fla、ModelScope Hub、Safetensors 和 NCCL 版本。

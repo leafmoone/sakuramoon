@@ -12,6 +12,7 @@ _JLT_P_STD = 0.8
 _NOISE_SCALE = 1.0
 _T_EPS = 0.05
 _GUIDANCE_SCALE = 2.9
+_NOISE_OBSERVATION_BOUNDARY = 0.95
 
 
 @dataclass(frozen=True)
@@ -154,9 +155,15 @@ def flow_matching_loss(
     timestep: torch.Tensor,
     *,
     t_eps: float,
+    noise_observation_boundary: float,
 ) -> FlowLossOutput:
     _validate_flow_tensors(state, x_prediction, clean)
     _require_locked_float("t_eps", t_eps, _T_EPS)
+    _require_locked_float(
+        "noise_observation_boundary",
+        noise_observation_boundary,
+        _NOISE_OBSERVATION_BOUNDARY,
+    )
     _validate_batch_timestep(timestep, state, validate_range=True)
     predicted_velocity = _x_prediction_to_velocity(
         x_prediction, state, timestep, t_eps
@@ -164,7 +171,7 @@ def flow_matching_loss(
     target_velocity = _x_prediction_to_velocity(clean, state, timestep, t_eps)
     squared_error = (predicted_velocity - target_velocity).square()
     per_sample = squared_error.flatten(1).mean(dim=1)
-    high_noise = timestep < 0.5
+    high_noise = timestep < noise_observation_boundary
     low_noise = ~high_noise
     return FlowLossOutput(
         loss=per_sample.mean(),

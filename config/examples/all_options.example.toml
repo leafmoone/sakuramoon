@@ -316,6 +316,7 @@ automatic_backend_change = false # fixed
 local_jsonl_path = "artifacts/example/metrics.jsonl"
 flush_every_updates = "BENCHMARK_REQUIRED" # integer > 0
 async_remote = true # fixed
+noise_observation_boundary = 0.95 # fixed; high t<0.95, low t>=0.95
 
 [wandb]
 enabled = true

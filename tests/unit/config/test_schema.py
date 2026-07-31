@@ -120,6 +120,7 @@ def test_caption_dropout_values_are_exactly_locked(
         (("objective", "loss"), "velocity_mse"),
         (("objective", "target_velocity"), "clean-noise"),
         (("objective", "endpoint_weighting"), "none"),
+        (("logging", "noise_observation_boundary"), 0.5),
         (("timestep", "p_mean"), -0.7),
         (("timestep", "p_std"), 0.9),
         (("timestep", "noise_scale"), 0.9),

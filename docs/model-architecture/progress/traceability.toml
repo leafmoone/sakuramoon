@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 84
+registry_revision = 85
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -90,10 +90,34 @@ new_sha256 = "58229867784918efa636d4602205aaaace8f1e87f8465c899caa47c45917d7ce"
 changed_at = "2026-07-31"
 summary = "Lock three fixed sampling profiles, derived NFE, evaluation selection, and generation provenance."
 
+[[changes]]
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+revision = 8
+previous_sha256 = "58229867784918efa636d4602205aaaace8f1e87f8465c899caa47c45917d7ce"
+new_sha256 = "cc633b7a00e0d206898ea6bec90323a524d9138691df4d55149bd2ad3e735f69"
+changed_at = "2026-07-31"
+summary = "Revise the observation-only high/low-noise boundary from t=0.5 to t=0.95 without changing the strict JLT objective."
+
+[[changes]]
+source_path = "docs/model-architecture/current/open-items.md"
+revision = 6
+previous_sha256 = "5016165fa9b58e4945bd573f3dfb082228d06087c69b54982734707f36c77cae"
+new_sha256 = "013a0c1a9b7f9d986c4c512be7316bc9bb734c5590386c52e75459a87e10a455"
+changed_at = "2026-07-31"
+summary = "Update the closed JLT validation item to the t=0.95 observation boundary."
+
+[[changes]]
+source_path = "docs/model-architecture/current/observability-and-evaluation.md"
+revision = 3
+previous_sha256 = "d26bebf67d7197aec5590e710b5386ab2f31ccee1f4f1efdbd7d00c6011a4657"
+new_sha256 = "b6ed7cf68d0ee480921d40b9f7a210965b6c2ed1a7ff3b23d7a951d062add1e5"
+changed_at = "2026-07-31"
+summary = "Move the loss observation boundary to t=0.95 while preserving full-batch loss semantics."
+
 [[sources]]
 path = "docs/model-architecture/current/confirmed-decisions.md"
 kind = "confirmed"
-revision = 7
+revision = 8
 include_top_headings = [
     "0.",
     "1.",
@@ -114,13 +138,13 @@ include_top_headings = [
 excluded_top_headings = [
     "15.",
 ]
-sha256 = "58229867784918efa636d4602205aaaace8f1e87f8465c899caa47c45917d7ce"
+sha256 = "cc633b7a00e0d206898ea6bec90323a524d9138691df4d55149bd2ad3e735f69"
 initial_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
 
 [[sources]]
 path = "docs/model-architecture/current/open-items.md"
 kind = "open_items"
-revision = 5
+revision = 6
 include_top_headings = [
     "0.",
     "1.",
@@ -137,18 +161,18 @@ include_top_headings = [
 excluded_top_headings = [
     "11.",
 ]
-sha256 = "5016165fa9b58e4945bd573f3dfb082228d06087c69b54982734707f36c77cae"
+sha256 = "013a0c1a9b7f9d986c4c512be7316bc9bb734c5590386c52e75459a87e10a455"
 initial_sha256 = "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6"
 
 [[sources]]
 path = "docs/model-architecture/current/observability-and-evaluation.md"
 kind = "observability"
-revision = 2
+revision = 3
 include_top_headings = [
     "可观测性与评估补充决定",
 ]
 excluded_top_headings = []
-sha256 = "d26bebf67d7197aec5590e710b5386ab2f31ccee1f4f1efdbd7d00c6011a4657"
+sha256 = "b6ed7cf68d0ee480921d40b9f7a210965b6c2ed1a7ff3b23d7a951d062add1e5"
 initial_sha256 = "9a8b4fd39c5e5bf76a343f1b02e3507abddc27e98e34946a0fd0f1e98be64201"
 
 [[profiles]]
@@ -488,6 +512,7 @@ config_keys = [
     "sampling.*",
     "cfg.*",
     "evaluation.sampling.*",
+    "logging.noise_observation_boundary",
 ]
 modules = [
     "src/sakuramoon/objective/**",
@@ -503,6 +528,7 @@ benchmarks = [
 ]
 artifacts = [
     "docs/model-architecture/reviews/M034/**",
+    "docs/model-architecture/reviews/M037/**",
     "docs/model-architecture/reviews/DENSE/**",
     "artifacts/objective/**",
 ]
@@ -4478,18 +4504,24 @@ implementation_paths = [
     "docs/model-architecture/progress/tasks/M035.md",
     "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M035/test_report.json",
+    "docs/model-architecture/progress/tasks/M037.md",
+    "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M037/test_report.json",
 ]
 evidence_hardware = "1GPU"
 evidence_artifacts = [
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
     "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M035/test_report.json",
+    "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M037/test_report.json",
 ]
 ai_review = "docs/model-architecture/reviews/DENSE/ai_review.md"
 infra_review = "docs/model-architecture/reviews/DENSE/infra_review.md"
 config_keys = [
     "objective.*",
     "evaluation.sampling.*",
+    "logging.noise_observation_boundary",
 ]
 modules = [
     "src/sakuramoon/objective/**",
@@ -4508,6 +4540,8 @@ artifacts = [
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
     "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M035/test_report.json",
+    "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M037/test_report.json",
     "artifacts/objective/**",
 ]
 not_applicable_fields = [
@@ -8813,6 +8847,9 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/progress/tasks/M033.md",
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
+    "docs/model-architecture/progress/tasks/M037.md",
+    "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M037/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -8822,6 +8859,7 @@ config_keys = [
     "objective.*",
     "timestep.*",
     "cfg.*",
+    "logging.noise_observation_boundary",
 ]
 modules = [
     "src/sakuramoon/objective/**",
@@ -8836,6 +8874,8 @@ benchmarks = [
 ]
 artifacts = [
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
+    "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M037/test_report.json",
     "artifacts/objective/**",
 ]
 not_applicable_fields = [
@@ -11624,6 +11664,9 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/reviews/T051/test_report.json",
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
+    "docs/model-architecture/progress/tasks/M037.md",
+    "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M037/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -11631,6 +11674,7 @@ ai_review = ""
 infra_review = ""
 config_keys = [
     "logging.*",
+    "logging.noise_observation_boundary",
     "wandb.*",
     "timing.*",
     "profiling.*",
@@ -11652,6 +11696,8 @@ benchmarks = [
 ]
 artifacts = [
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
+    "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M037/test_report.json",
     "artifacts/metrics/**",
     "artifacts/evaluation/**",
     "artifacts/profiles/**",

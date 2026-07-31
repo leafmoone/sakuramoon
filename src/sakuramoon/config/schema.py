@@ -56,6 +56,7 @@ FixedPointOne = Annotated[ExactFloat, Field(ge=0.1, le=0.1)]
 FixedPointTwo = Annotated[ExactFloat, Field(ge=0.2, le=0.2)]
 FixedPointThree = Annotated[ExactFloat, Field(ge=0.3, le=0.3)]
 FixedPointEight = Annotated[ExactFloat, Field(ge=0.8, le=0.8)]
+FixedPointNineFive = Annotated[ExactFloat, Field(ge=0.95, le=0.95)]
 FixedFour = Annotated[ExactFloat, Field(ge=4.0, le=4.0)]
 FixedSixteen = Annotated[ExactFloat, Field(ge=16.0, le=16.0)]
 FixedThousand = Annotated[ExactFloat, Field(ge=1000.0, le=1000.0)]
@@ -633,6 +634,7 @@ class LoggingConfig(StrictModel):
     local_jsonl_path: Annotated[str, StringConstraints(min_length=1)]
     flush_every_updates: PositiveInt
     async_remote: Literal[True]
+    noise_observation_boundary: FixedPointNineFive
 
 
 class WandbConfig(StrictModel):
