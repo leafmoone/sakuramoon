@@ -8,4 +8,19 @@ Temporary publication directories are task-owned and removed on failure; a final
 
 `checkpoint.pma` validates exactly ten complete raw sources, exact required raw sidecars, strict update order, identity hashes, architecture/shard layout, completed growth alpha and stage/world/resolution/slot topology. It averages one shard at a time in FP32 and casts back to the source dtype. PMA and explicit manual release artifacts carry immutable source records and no trainer/optimizer/RNG continuation state.
 
-AI/model self-check: same-topology next-update equality covers model parameters, TorchAO state progression, isolated SR state and Python/NumPy/Torch RNG; copied raw `model/` content also loads without training sidecars. Synthetic CPU PMA contracts establish exact arithmetic and kind separation, not production PMA quality. Infra self-check: model and PMA shards are streamed with bounded per-shard CPU state, physical full-composite shard sizes remain below 2 GiB, and no timing is represented as formal NVMe performance.
+The retention apply boundary now accepts the trusted accepted-checkpoint set again,
+replans against the same resolved root and compares the complete plan plus checkpoint
+identities before deleting anything. This prevents a caller-constructed plan from
+moving an accepted raw into the deletion set. Retention validates canonical names,
+strict manifests, the exact physical file tree, symlink absence and payload sizes, but
+deliberately does not recalculate every multi-GiB payload checksum; full load, PMA and
+resume validation continue to calculate and enforce those checksums.
+
+AI/model self-check: same-topology next-update equality covers model parameters, TorchAO state progression, isolated SR state and Python/NumPy/Torch RNG; copied raw `model/` content also loads without training sidecars. Synthetic CPU contracts establish exact arithmetic and kind separation, while a real CUDA composite now establishes that a ten-raw PMA fresh-loads through the public inference artifact boundary with the exact expected mean. This remains a mechanics contract, not a production PMA quality result. Infra self-check: model and PMA shards are streamed with bounded per-shard CPU state, retention selection is metadata-only, physical full-composite shard sizes remain below 2 GiB, and no timing is represented as formal NVMe performance.
+
+Main-agent remediation review found that the initial expansion allowed a forged
+`RawRetentionPlan` to nominate an accepted raw for deletion and lacked a real-composite
+PMA fresh-load contract. Both findings are fixed and targeted CPU/one-GPU suites pass.
+Two direct attempts to start a fresh independent reviewer failed with
+`agent thread limit reached`; per user direction work continued without agents. The
+expansion therefore has no falsely claimed independent rereview.

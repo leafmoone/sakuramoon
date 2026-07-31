@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -223,5 +224,88 @@ def test_raw_retention_keeps_two_rolling_and_every_accepted(tmp_path: Path) -> N
 
     assert plan.keep == (paths[1], paths[3], paths[4])
     assert plan.remove == (paths[0], paths[2])
-    apply_raw_retention(tmp_path, plan)
+    apply_raw_retention(
+        tmp_path,
+        plan,
+        accepted_checkpoint_ids=frozenset({"source-02"}),
+    )
     assert tuple(path.exists() for path in paths) == (False, True, False, True, True)
+
+
+def test_raw_retention_rejects_forged_or_stale_plan(tmp_path: Path) -> None:
+    paths = tuple(_raw_fixture(tmp_path, index, float(index)) for index in range(1, 6))
+    accepted = frozenset({"source-02"})
+    plan = plan_raw_retention(tmp_path, accepted_checkpoint_ids=accepted)
+    forged = replace(
+        plan,
+        keep=plan.keep[1:],
+        remove=(paths[1],) + plan.remove,
+    )
+
+    with pytest.raises(ValueError, match="stale|policy"):
+        apply_raw_retention(
+            tmp_path, forged, accepted_checkpoint_ids=accepted
+        )
+    with pytest.raises(ValueError, match="stale|policy"):
+        apply_raw_retention(
+            tmp_path, plan, accepted_checkpoint_ids=frozenset()
+        )
+    assert all(path.exists() for path in paths)
+
+    manifest_path = paths[0] / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["identity"]["update"] = 100
+    manifest_path.write_bytes(_json_bytes(manifest))
+    with pytest.raises(ValueError, match="stale|policy"):
+        apply_raw_retention(
+            tmp_path, plan, accepted_checkpoint_ids=accepted
+        )
+    assert all(path.exists() for path in paths)
+
+
+def test_raw_retention_does_not_rehash_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = tuple(_raw_fixture(tmp_path, index, float(index)) for index in range(1, 6))
+
+    def fail_hash(_path: Path) -> str:
+        raise AssertionError("retention must not hash checkpoint payloads")
+
+    monkeypatch.setattr("sakuramoon.checkpoint.load._sha256", fail_hash)
+    plan = plan_raw_retention(tmp_path, accepted_checkpoint_ids=frozenset())
+    apply_raw_retention(
+        tmp_path,
+        plan,
+        accepted_checkpoint_ids=frozenset(),
+    )
+
+    assert tuple(path.exists() for path in paths) == (False, False, False, True, True)
+
+
+@pytest.mark.parametrize("mutation", ["payload-size", "extra-file", "symlink", "name"])
+def test_raw_retention_rejects_physical_tree_mutation(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    paths = tuple(_raw_fixture(tmp_path, index, float(index)) for index in range(1, 6))
+    plan = plan_raw_retention(tmp_path, accepted_checkpoint_ids=frozenset())
+
+    if mutation == "payload-size":
+        payload = paths[0] / "train_state" / "optimizer.pt"
+        payload.write_bytes(payload.read_bytes() + b"changed\n")
+    elif mutation == "extra-file":
+        (paths[0] / "unexpected.bin").write_bytes(b"unexpected\n")
+    elif mutation == "symlink":
+        (paths[0] / "payload-link").symlink_to("train_state/optimizer.pt")
+    else:
+        paths[0].rename(tmp_path / "renamed-raw")
+
+    with pytest.raises(ValueError, match="stale|policy"):
+        apply_raw_retention(
+            tmp_path,
+            plan,
+            accepted_checkpoint_ids=frozenset(),
+        )
+    assert paths[1].exists()
+    assert paths[2].exists()

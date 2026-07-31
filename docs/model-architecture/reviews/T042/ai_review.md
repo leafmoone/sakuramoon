@@ -1,7 +1,8 @@
 # T042 AI review
 
-Status: prior raw/model-only PASS remains valid. Fresh independent review of the
-PMA/release/policy expansion is pending.
+Status: prior raw/model-only independent PASS remains valid. The PMA/release/policy
+remediation passed main-agent correctness review; fresh independent rereview is
+unavailable after two direct agent-start failures.
 
 The independent review confirmed that raw and model-only artifacts use distinct kinds and publication names. Raw resume requires `CheckpointKind.RAW`, while the model-only loader requires `CheckpointKind.MODEL_ONLY`; PMA and release remain non-resumable artifact kinds. Model tensors are deterministically sharded by sorted canonical FQN, and load rejects any FQN, dtype, shape, declared-size, architecture, parameter-schema or full checkpoint-identity mismatch.
 
@@ -11,4 +12,25 @@ The checkpoint boundary is exactly the unwrapped `TrainableComposite` with `dit`
 
 The reviewer ran 81 CPU tests covering checkpoint plus the directly affected conditioning, model, optimizer and train contracts. Ruff, strict Pyright, traceability verification and `git diff --check` all passed.
 
-Four-rank sharding/barriers and all-rank state equality remain pending until four RTX 5090 GPUs are available. Growth migration remains T043. The new PMA/release/cadence/retention code and its CPU contracts were added after this review and therefore are not covered by this PASS until a fresh reviewer signs them off.
+Four-rank sharding/barriers and all-rank state equality remain pending until four RTX 5090 GPUs are available. Growth migration remains T043. The new PMA/release/cadence/retention code and its CPU contracts were added after this review and therefore are not covered by the prior independent PASS.
+
+The expansion review found one blocking correctness issue: an externally constructed
+retention plan could move an accepted raw into the removal set because apply only
+rechecked that the target was currently raw. Apply now requires the trusted accepted-ID
+set, recomputes the complete policy plan, compares root, keep/remove membership and
+checkpoint identities, then revalidates each target before deletion. Tests reject a
+forged plan, wrong accepted-ID policy, manifest identity drift, payload-size drift,
+extra files, symlinks and a renamed checkpoint without deleting remaining candidates.
+
+The earlier synthetic PMA arithmetic contract was insufficient to establish that the
+artifact architecture is reconstructable through the production public loader. A real
+CUDA `TrainableComposite` is now saved as ten complete TorchAO raw checkpoints, PMA is
+computed in FP32, and `load_inference_artifact(..., device="cuda")` reconstructs a
+fresh module whose BF16/FP32 tensors exactly equal 5.5. This is a serialization and
+arithmetic result, not evidence of production sample quality or a stable-window model
+selection decision.
+
+The main-agent remediation review passed 33 checkpoint CPU tests and 11 real RTX 5090
+tests. It does not supersede the need for an independent expansion rereview. Two direct
+`collaboration.spawn_agent` attempts failed with `agent thread limit reached`; the user
+directed continuation without agents, so no independent PASS is asserted.

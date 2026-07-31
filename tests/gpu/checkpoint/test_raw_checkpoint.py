@@ -20,9 +20,11 @@ from sakuramoon.checkpoint import (
     CheckpointKind,
     GrowthCheckpointState,
     RawCheckpointState,
+    load_inference_artifact,
     load_model_directory,
     load_model_only,
     load_raw_checkpoint,
+    save_pma10,
     save_raw_checkpoint,
 )
 from sakuramoon.checkpoint.rng import capture_rank_rng
@@ -372,6 +374,40 @@ def test_fresh_process_resume_matches_next_update(tmp_path: Path) -> None:
         torch.testing.assert_close(parameter.cpu(), expected, atol=0, rtol=0)
     assert restored_optimizer.audit_state() == expected_audit
     assert torch.equal(restored_optimizer.sr_rng.state, expected_sr)
+
+
+def test_pma10_real_composite_loads_as_fresh_inference_artifact(
+    tmp_path: Path,
+) -> None:
+    source = _compact_composite()
+    optimizer = _optimizer(source, 1236)
+    raw_sources: list[Path] = []
+    for update in range(1, 11):
+        with torch.no_grad():
+            for tensor in source.state_dict(keep_vars=True).values():
+                tensor.fill_(float(update))
+        raw_sources.append(
+            save_raw_checkpoint(
+                tmp_path,
+                _identity(f"pma-source-{update:02d}", update, optimizer.audit.schema_sha256),
+                source,
+                optimizer,
+                _raw_state(update),
+            ).path
+        )
+
+    identity = _identity("pma-roundtrip", 10, optimizer.audit.schema_sha256)
+    result = save_pma10(tmp_path, identity, tuple(raw_sources))
+    restored = load_inference_artifact(result.path, identity, device="cuda")
+
+    assert type(restored) is TrainableComposite
+    for tensor in restored.state_dict().values():
+        torch.testing.assert_close(
+            tensor,
+            torch.full_like(tensor, 5.5),
+            atol=0,
+            rtol=0,
+        )
 
 
 def test_fault_recovery_selector_requires_exact_complete_raw_parent(

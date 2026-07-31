@@ -1,7 +1,8 @@
 # T042 Infra review
 
-Status: prior raw/model-only PASS remains valid. Fresh independent review of the
-PMA/release/policy expansion is pending.
+Status: prior raw/model-only independent PASS remains valid. The PMA/release/policy
+remediation passed main-agent infrastructure review; fresh independent rereview is
+unavailable after two direct agent-start failures.
 
 ## Publication and failure behavior
 
@@ -106,5 +107,28 @@ Operational cadence/retention integration, actual NFS/NVMe durability and perfor
 measured host RSS, cache-high-water checkpoint reservation, fault-injection
 matrices, and formal stage canaries remain pending. No long training was run,
 and this PASS must not be used to close any of those gates. The later
-PMA/release/cadence/retention expansion also requires fresh review before its
-single-GPU code evidence can be accepted.
+PMA/release/cadence/retention expansion is covered only by the main-agent remediation
+review below, not by this independent PASS.
+
+## Expansion remediation review
+
+The initial retention implementation called full checkpoint validation while planning
+and applying deletions, rereading and hashing every payload twice. At the observed
+5.14 GB raw size this amplified checkpoint I/O solely for retention selection. The new
+metadata validator reads strict manifests and COMPLETE markers, enforces canonical raw
+directory names, exact file/directory sets, no symlinks and manifest-declared payload
+sizes, while full checksum verification remains mandatory for resume, PMA and model
+load. A monkeypatched contract makes the load-path SHA function fail if retention calls
+it; planning and application still complete and preserve the newest two raws.
+
+Apply recomputes the full plan before any deletion and rejects policy/root/identity or
+physical-tree drift. This fail-closed behavior prevents deletion from a stale or forged
+plan. It does not claim safety against concurrent writers or malicious filesystem
+replacement; checkpoint retention remains an operational single-writer boundary.
+
+The complete checkpoint CPU suite passed 33 tests in 8.06 seconds. Eleven real RTX
+5090 tests, including TorchAO restore and real-composite PMA fresh-load, passed in 43.27
+seconds with the matching installed NVML library explicitly preloaded. No long run or
+formal NFS/NVMe performance test was executed. Two direct independent-review agent
+starts failed with `agent thread limit reached`; this section records main-agent review
+only.
