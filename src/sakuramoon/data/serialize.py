@@ -35,6 +35,10 @@ class FramingContract:
     padding_token_id: int
 
     def __post_init__(self) -> None:
+        if type(self.padding_token_id) is not int or self.padding_token_id < 0:
+            raise CaptionSerializationError(
+                "Qwen padding token ID must be a non-negative integer"
+            )
         if (
             self.prefix_tokens != EXPECTED_PREFIX_TOKENS
             or self.suffix_tokens != EXPECTED_SUFFIX_TOKENS
@@ -66,7 +70,7 @@ class SerializedCaption:
 
 def _encode(tokenizer: TokenEncoder, text: str) -> tuple[int, ...]:
     encoded = tokenizer.encode(text, add_special_tokens=False)
-    if any(type(token) is not int for token in encoded):
+    if any(type(token) is not int or token < 0 for token in encoded):
         raise CaptionSerializationError("tokenizer returned invalid token IDs")
     return tuple(encoded)
 

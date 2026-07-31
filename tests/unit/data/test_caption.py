@@ -184,6 +184,22 @@ def test_tag_boundaries_and_thinking_markers_are_rejected(text: str) -> None:
         Tag(text, "canonical")
 
 
+@pytest.mark.parametrize("canonical", ["", " bad", "bad "])
+def test_tag_canonical_ids_must_be_trim_stable(canonical: str) -> None:
+    with pytest.raises(CaptionError, match="boundaries"):
+        Tag("valid", canonical)
+
+
+@pytest.mark.parametrize("seed", [-1, True, "1"])
+def test_caption_seed_requires_a_non_negative_integer(seed: object) -> None:
+    with pytest.raises(CaptionError, match="caption seed"):
+        build_caption_plan(
+            _fields(),
+            _probabilities(),
+            seed=seed,  # pyright: ignore[reportArgumentType]
+        )
+
+
 def test_nl_thinking_markers_are_rejected_when_consumed() -> None:
     fields = _fields()
     fields = CaptionFields(

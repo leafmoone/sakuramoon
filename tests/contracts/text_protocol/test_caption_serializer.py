@@ -244,6 +244,30 @@ def test_changed_framing_token_counts_fail() -> None:
         )
 
 
+@pytest.mark.parametrize("padding_token_id", [-1, True])
+def test_framing_rejects_invalid_padding_token_id(padding_token_id: object) -> None:
+    with pytest.raises(CaptionSerializationError, match="padding token"):
+        FramingContract(
+            prefix_tokens=34,
+            suffix_tokens=5,
+            padding_token_id=padding_token_id,  # pyright: ignore[reportArgumentType]
+        )
+
+
+def test_tokenizer_negative_token_id_is_rejected() -> None:
+    class _NegativeTokenTokenizer(_CharacterTokenizer):
+        def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
+            if text == "invalid":
+                return [-1]
+            return super().encode(text, add_special_tokens=add_special_tokens)
+
+    tokenizer = _NegativeTokenTokenizer()
+    with pytest.raises(CaptionSerializationError, match="invalid token IDs"):
+        serialize_caption(
+            _plan(general=(_tag("invalid"),)), tokenizer, _framing(tokenizer)
+        )
+
+
 def test_real_local_tokenizer_framing_and_segment_equivalence() -> None:
     repository_root = Path(__file__).parents[3]
     tokenizer = cast(

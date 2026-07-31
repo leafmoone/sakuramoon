@@ -4,16 +4,16 @@
   "hardware": "CPU",
   "targeted": {
     "command": "uv run --frozen pytest -q tests/unit/data/test_caption.py tests/contracts/text_protocol/test_caption_serializer.py",
-    "passed": 33,
+    "passed": 42,
     "failed": 0,
-    "duration_seconds": 9.19
+    "duration_seconds": 6.95
   },
-  "full_cpu_suite": {
-    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
-    "passed": 362,
+  "data_protocol_suite": {
+    "command": "CUDA_VISIBLE_DEVICES= uv run --frozen pytest -q tests/unit/data tests/contracts/text_protocol",
+    "passed": 197,
     "failed": 0,
-    "warnings": 24,
-    "duration_seconds": 27.61
+    "warnings": 9,
+    "duration_seconds": 13.95
   },
   "ruff": true,
   "pyright_errors": 0,
@@ -25,17 +25,24 @@
   "all_condition_dropped": 10090,
   "all_condition_rate": 0.1009,
   "gpu_used": false,
-  "package_review_status": "initial_finding_remediated_final_package_rereview_pending",
+  "package_review_status": "cpu_scope_main_agent_passed_fresh_independent_rereview_unavailable",
   "artist_boundary_contracts": [
     "oversized first source skipped for valid later source",
     "combined fitting sources trimmed at complete trailing boundaries",
     "unique oversized source hard fails",
     "all oversized sources hard fail"
   ],
+  "strict_boundary_contracts": [
+    "canonical IDs are non-empty and trim-stable",
+    "caption seeds are exact non-negative integers",
+    "padding token ID is an exact non-negative integer",
+    "tokenizer IDs are exact non-negative integers"
+  ],
   "pending": [
     "eleven non-global dropout decisions",
     "production metadata canonical mapping",
     "non-global dropout and truncation distributions",
-    "collated padding behavior"
+    "production collated padding distribution",
+    "fresh independent AI/model and Infra/performance rereview"
   ]
 }

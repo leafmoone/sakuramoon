@@ -30,9 +30,12 @@ class Tag:
 
     def __post_init__(self) -> None:
         if (
-            not self.text
+            type(self.text) is not str
+            or type(self.canonical) is not str
+            or not self.text
             or not self.canonical
             or self.text != self.text.strip()
+            or self.canonical != self.canonical.strip()
             or ", " in self.text
             or "\n" in self.text
             or "<think>" in self.text
@@ -162,6 +165,8 @@ def build_caption_plan(
 ) -> CaptionPlan:
     """Apply the fixed global dropout and all explicit per-field probabilities."""
 
+    if type(seed) is not int or seed < 0:
+        raise CaptionError("caption seed must be a non-negative integer")
     if _drop(seed, "all_condition", ALL_CONDITION_DROPOUT):
         return CaptionPlan((), (), (), (), (), None, None, True)
 

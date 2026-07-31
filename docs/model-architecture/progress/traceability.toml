@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 60
+registry_revision = 61
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
