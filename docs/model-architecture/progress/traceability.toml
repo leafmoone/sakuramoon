@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 68
+registry_revision = 69
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -3985,6 +3985,7 @@ superseded_by = ""
 implementation_commit_ref = "task:M030"
 implementation_paths = [
     "src/sakuramoon/conditioning/global_condition.py",
+    "tests/unit/conditioning/test_global_condition.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -4031,6 +4032,7 @@ superseded_by = ""
 implementation_commit_ref = "task:M030"
 implementation_paths = [
     "src/sakuramoon/conditioning/global_condition.py",
+    "tests/unit/conditioning/test_global_condition.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -4077,6 +4079,7 @@ superseded_by = ""
 implementation_commit_ref = "task:M030"
 implementation_paths = [
     "src/sakuramoon/conditioning/global_condition.py",
+    "tests/unit/conditioning/test_global_condition.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -4123,6 +4126,7 @@ superseded_by = ""
 implementation_commit_ref = "task:M030"
 implementation_paths = [
     "src/sakuramoon/conditioning/global_condition.py",
+    "tests/unit/conditioning/test_global_condition.py",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""

@@ -7,6 +7,7 @@ from sakuramoon.conditioning.global_condition import (
     GlobalConditioner,
     fixed_sinusoidal_embedding,
 )
+from sakuramoon.conditioning.packing import canvas_condition
 
 
 def _module() -> GlobalConditioner:
@@ -29,6 +30,96 @@ def test_fixed_embedding_zero_and_shape() -> None:
     assert embedded.shape == (2, 64)
     assert torch.equal(embedded[:, :32], torch.ones(2, 32))
     assert torch.equal(embedded[:, 32:], torch.zeros(2, 32))
+
+
+def test_fixed_embedding_nonzero_frequency_golden() -> None:
+    embedded = fixed_sinusoidal_embedding(
+        torch.tensor([1.0, -1.0], dtype=torch.float32),
+        64,
+    )
+    selected = embedded[:, (0, 1, 31, 32, 33, 63)]
+    expected = torch.tensor(
+        [
+            [
+                0.54030231,
+                0.73176098,
+                0.99999999,
+                0.84147098,
+                0.68156135,
+                0.00013335214,
+            ],
+            [
+                0.54030231,
+                0.73176098,
+                0.99999999,
+                -0.84147098,
+                -0.68156135,
+                -0.00013335214,
+            ],
+        ],
+        dtype=torch.float32,
+    )
+
+    torch.testing.assert_close(selected, expected, atol=1e-7, rtol=1e-6)
+
+
+def test_target_canvas_condition_integrates_with_cfg_shared_inputs() -> None:
+    module = _module()
+    size_scale, aspect = canvas_condition(height_px=512, width_px=1024)
+    timestep = torch.tensor([0.375, 0.375], dtype=torch.float32)
+    cfg_size_scale = torch.full((2,), size_scale, dtype=torch.float32)
+    cfg_aspect = torch.full((2,), aspect, dtype=torch.float32)
+    captured_inputs: list[torch.Tensor] = []
+
+    def capture_condition_input(
+        _module: torch.nn.Module,
+        inputs: tuple[torch.Tensor, ...],
+    ) -> None:
+        captured_inputs.append(inputs[0].detach().clone())
+
+    hook = module.condition_mlp.register_forward_pre_hook(capture_condition_input)
+    try:
+        output = module(timestep, cfg_size_scale, cfg_aspect, (0, 3))
+    finally:
+        hook.remove()
+
+    assert size_scale == 0.5
+    assert aspect == 1.0
+    assert len(captured_inputs) == 1
+    embedded = captured_inputs[0]
+    assert embedded.shape == (2, 384)
+    torch.testing.assert_close(
+        embedded[:, (0, 128, 256, 288, 320, 352)],
+        torch.tensor(
+            [
+                [
+                    0.93050762,
+                    0.36627253,
+                    0.87758256,
+                    0.47942554,
+                    0.54030231,
+                    0.84147098,
+                ],
+                [
+                    0.93050762,
+                    0.36627253,
+                    0.87758256,
+                    0.47942554,
+                    0.54030231,
+                    0.84147098,
+                ],
+            ],
+            dtype=torch.float32,
+        ),
+        atol=1e-7,
+        rtol=1e-6,
+    )
+    torch.testing.assert_close(
+        output.condition_hidden[0],
+        output.condition_hidden[1],
+        atol=0,
+        rtol=0,
+    )
 
 
 def test_modulation_paths_start_zero_and_are_independent() -> None:
@@ -57,6 +148,49 @@ def test_modulation_paths_start_zero_and_are_independent() -> None:
         module.final_projection.weight.data_ptr()
         != module.shared_block_projection.weight.data_ptr()
     )
+
+
+def test_block_bias_chunks_follow_locked_modulation_order() -> None:
+    module = _module()
+    with torch.no_grad():
+        values = torch.arange(1, 7, dtype=torch.float32).repeat_interleave(32)
+        module.block_biases["slot_03"].copy_(values)
+    output = module(
+        torch.tensor([0.5], dtype=torch.float32),
+        torch.tensor([0.0], dtype=torch.float32),
+        torch.tensor([0.0], dtype=torch.float32),
+        (3,),
+    )
+
+    for expected, actual in enumerate(
+        (
+            output.block.attention_scale,
+            output.block.attention_shift,
+            output.block.attention_gate,
+            output.block.mlp_scale,
+            output.block.mlp_shift,
+            output.block.mlp_gate,
+        ),
+        start=1,
+    ):
+        torch.testing.assert_close(actual, torch.full_like(actual, expected))
+
+
+def test_condition_parameters_and_outputs_remain_fp32_under_autocast() -> None:
+    module = _module()
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = module(
+            torch.tensor([0.5], dtype=torch.float32),
+            torch.tensor([0.25], dtype=torch.float32),
+            torch.tensor([-0.5], dtype=torch.float32),
+            (0, 3),
+        )
+
+    assert {parameter.dtype for parameter in module.parameters()} == {torch.float32}
+    assert output.condition_hidden.dtype == torch.float32
+    assert output.block.attention_scale.dtype == torch.float32
+    assert output.final_scale.dtype == torch.float32
 
 
 def test_final_path_applies_silu_and_does_not_reuse_block_projection() -> None:
