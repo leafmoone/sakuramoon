@@ -73,6 +73,17 @@ class CaptionFields:
     candidate_tags: frozenset[str]
     nl: NlCandidates
 
+    def __post_init__(self) -> None:
+        if type(self.candidate_tags) is not frozenset or any(
+            type(candidate) is not str
+            or not candidate
+            or candidate != candidate.strip()
+            for candidate in self.candidate_tags
+        ):
+            raise CaptionError(
+                "candidate deletion IDs must be a frozenset of trim-stable strings"
+            )
+
 
 @dataclass(frozen=True)
 class NlDropoutProbabilities:

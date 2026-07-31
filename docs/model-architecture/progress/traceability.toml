@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 82
+registry_revision = 83
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -2522,6 +2522,8 @@ implementation_commit_ref = "task:D014"
 implementation_paths = [
     "src/sakuramoon/data/caption.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D019.md",
+    "docs/model-architecture/reviews/D019/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -2547,6 +2549,7 @@ benchmarks = [
 ]
 artifacts = [
     "artifacts/qwen/**",
+    "docs/model-architecture/reviews/D019/**",
 ]
 not_applicable_fields = [
     "reference_modules",

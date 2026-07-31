@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "task_id": "D019",
+  "status": "targeted_validation_passed_data_package_rereview_pending",
+  "hardware": "CPU",
+  "caption_unit_tests": "passed: 29",
+  "data_and_text_protocol_contracts": "passed: 222",
+  "trace_contracts": "passed: 40",
+  "trace_verifier": "passed: requirements=222 source_nodes=222 archive_files=16 production_modules=98 runtime_config_keys=254",
+  "candidate_id_contract": {
+    "exact_frozenset_required": true,
+    "non_string_rejected": true,
+    "empty_rejected": true,
+    "leading_whitespace_rejected": true,
+    "trailing_whitespace_rejected": true,
+    "coercion_or_normalization": false
+  },
+  "dropout_probabilities_changed": false,
+  "component_hit_telemetry": "pending:separate_remediation",
+  "ruff": "passed",
+  "pyright": "passed: 0 errors 0 warnings",
+  "production_100k_distribution_run": "pending",
+  "multi_gpu_ddp_nccl": "not_in_scope"
+}

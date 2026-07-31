@@ -112,6 +112,32 @@ def test_candidate_dropout_deletes_canonical_matches_only_from_tag_categories() 
     assert plan.nl_text is not None
 
 
+@pytest.mark.parametrize(
+    "candidate_tags",
+    [
+        frozenset({""}),
+        frozenset({" character:alice"}),
+        frozenset({"character:alice "}),
+        frozenset({1}),
+        {"character:alice"},
+    ],
+)
+def test_candidate_deletion_ids_require_exact_canonical_boundaries(
+    candidate_tags: object,
+) -> None:
+    fields = _fields()
+    with pytest.raises(CaptionError, match="candidate deletion IDs"):
+        CaptionFields(
+            nsfw=fields.nsfw,
+            character=fields.character,
+            copyright=fields.copyright,
+            general=fields.general,
+            artists=fields.artists,
+            candidate_tags=candidate_tags,  # pyright: ignore[reportArgumentType]
+            nl=fields.nl,
+        )
+
+
 def test_explicit_category_and_artist_dropout() -> None:
     plan = build_caption_plan(
         _fields(),
