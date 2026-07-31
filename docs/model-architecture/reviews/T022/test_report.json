@@ -1,14 +1,50 @@
 {
   "schema_version": 1,
   "task_id": "T022",
-  "cpu_unit_passed": 3,
+  "cpu_unit_passed": 7,
+  "cpu_targeted": {
+    "command": "uv run --frozen pytest -q tests/unit/conditioning/test_text_mixer.py",
+    "passed": 7,
+    "failed": 0,
+    "duration_seconds": 3.23
+  },
   "gpu_tested": true,
   "gpu": "NVIDIA GeForce RTX 5090",
+  "gpu_driver": "580.105.08",
   "bf16_output_shape": [2, 32, 2560],
   "forward_ms": [2.582, 2.382, 2.254],
   "backward_ms": [2.662, 2.401, 2.306],
   "peak_memory_mib": 114.8,
   "finite_outputs_and_gradients": true,
   "qwen_input_gradient": false,
-  "package_review_status": "pending"
+  "inactive_extreme_indices_sanitized_before_gather": true,
+  "active_out_of_range_indices_hard_fail": true,
+  "production_factory": {
+    "approved_architecture_and_precision_locked": true,
+    "unresolved_choices_required_without_defaults": [
+      "attention_heads",
+      "mix_gate_init",
+      "layer_scale_init",
+      "projection_bias"
+    ]
+  },
+  "targeted_real_gpu": {
+    "command": "uv run --frozen pytest -q tests/gpu/conditioning/test_text_mixer_gpu.py",
+    "passed": 1,
+    "failed": 0,
+    "duration_seconds": 2.60,
+    "output_shape": [2, 32, 2560],
+    "finite_outputs_and_gradients": true,
+    "masked_extreme_index_accepted_without_gather": true
+  },
+  "traceability": {
+    "command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py",
+    "passed": 40,
+    "failed": 0,
+    "duration_seconds": 20.24,
+    "direct_verifier_passed": true
+  },
+  "package_review_status": "encoders_conditioning_review_pending_after_T020_T024_freeze",
+  "multi_gpu_ddp_nccl_status": "not_run_pending_or_blocked",
+  "training_long_run_status": "not_run"
 }

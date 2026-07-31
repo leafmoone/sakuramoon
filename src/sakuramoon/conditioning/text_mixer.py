@@ -20,6 +20,30 @@ class TextConditioningOutput:
 
 
 class TextConditioner(nn.Module):
+    @classmethod
+    def for_production(
+        cls,
+        *,
+        attention_heads: int,
+        mix_gate_init: float,
+        layer_scale_init: float,
+        projection_bias: bool,
+    ) -> TextConditioner:
+        """Build the locked architecture while keeping undecided choices explicit."""
+        return cls(
+            input_size=2048,
+            adapter_size=1024,
+            output_size=2560,
+            groups=8,
+            attention_heads=attention_heads,
+            norm_eps=1e-6,
+            mix_gate_init=mix_gate_init,
+            layer_scale_init=layer_scale_init,
+            projection_bias=projection_bias,
+            linear_dtype=torch.bfloat16,
+            sensitive_dtype=torch.float32,
+        )
+
     def __init__(
         self,
         *,
@@ -107,7 +131,7 @@ class TextConditioner(nn.Module):
         if active.numel() and (active.min() < 0 or active.max() >= qwen_states.shape[1]):
             raise ValueError("active main token index is outside the Qwen sequence")
 
-        safe_indices = main_token_indices.clamp(min=0)
+        safe_indices = main_token_indices.masked_fill(~main_mask, 0)
         gather_index = safe_indices[:, :, None, None].expand(-1, -1, 7, self.input_size)
         selected = torch.gather(qwen_states.detach(), dim=1, index=gather_index)
         selected = selected * main_mask[:, :, None, None]
