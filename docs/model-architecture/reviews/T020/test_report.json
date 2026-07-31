@@ -3,9 +3,16 @@
   "task_id": "T020",
   "targeted_cpu": {
     "command": "uv run --frozen pytest -q tests/unit/encoders/test_mage_vae.py tests/unit/eval/test_vae_reconstruction.py",
-    "passed": 28,
+    "passed": 34,
     "failed": 0,
-    "duration_seconds": 3.36
+    "duration_seconds": 2.87
+  },
+  "traceability": {
+    "command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py",
+    "passed": 40,
+    "failed": 0,
+    "duration_seconds": 16.62,
+    "direct_verifier_passed": true
   },
   "full_cpu_suite": {
     "command": "uv run --frozen pytest -q tests/unit tests/contracts",
@@ -29,12 +36,19 @@
   "cohort_executor_contracts": {
     "vae_round_trip_per_batch": true,
     "metric_engine_required": true,
-    "metric_identity_explicit": true,
-    "cohort_manifest_sha256_bound": true,
-    "duplicate_ids_fail_before_affected_forward": true,
+    "metric_identity_engine_single_source": true,
+    "canonical_manifest_exact_members_bound": true,
+    "canonical_manifest_resolution_classes": {
+      "base_512": 1500,
+      "extended": 500
+    },
+    "cohort_manifest_sha256_derived": true,
+    "complete_batch_plan_fails_before_model_work": true,
     "finite_per_sample_vectors": true,
     "report_recomputed_from_observations": true,
-    "canonical_no_clobber_fsync_artifact": true
+    "replaceable_report_temp_file_fsync_os_replace": true,
+    "replace_failure_preserves_previous_report": true,
+    "temporary_cleanup_on_failure": true
   },
   "quality_evaluator_contracts": {
     "total_samples": 2000,
@@ -49,5 +63,7 @@
   "quality_gate_status": "pending_2000_image_evaluation",
   "production_metric_engine_status": "pending_locked_implementation_weights_and_parameters",
   "latent_statistics_status": "pending_50000_to_100000_images",
-  "package_review_status": "executor_artifact_expansion_independent_review_pending"
+  "package_review_status": "encoders_conditioning_review_pending_after_T020_T024_freeze",
+  "multi_gpu_ddp_nccl_status": "not_run_pending_or_blocked",
+  "training_long_run_status": "not_run"
 }

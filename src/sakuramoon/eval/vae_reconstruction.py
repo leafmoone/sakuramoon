@@ -12,11 +12,12 @@ import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import torch
 
 ReconstructionCohort = Literal["stratified", "risk"]
+ReconstructionResolutionClass = Literal["base_512", "extended"]
 
 STRATIFIED_SAMPLES = 1600
 RISK_SAMPLES = 400
@@ -33,12 +34,23 @@ class ReconstructionEvaluationError(ValueError):
     """Reconstruction observations do not satisfy the acceptance contract."""
 
 
-class ReconstructionArtifactExistsError(ReconstructionEvaluationError):
-    """The requested reconstruction artifact already exists."""
-
-
 def _is_tensor(value: object) -> bool:
     return isinstance(value, torch.Tensor)
+
+
+def _is_tuple_of(value: object, member_type: type[object]) -> bool:
+    if type(value) is not tuple:
+        return False
+    members = cast(tuple[object, ...], value)
+    return all(isinstance(member, member_type) for member in members)
+
+
+def _require_metric_identity(value: object) -> ReconstructionMetricIdentity:
+    if not isinstance(value, ReconstructionMetricIdentity):
+        raise ReconstructionEvaluationError(
+            "metric engine must expose one valid metric identity"
+        )
+    return value
 
 
 def _validate_sha256(value: str, label: str) -> None:
@@ -98,6 +110,9 @@ class ReconstructionMetricBatch:
 
 
 class ReconstructionMetricEngine(Protocol):
+    @property
+    def identity(self) -> ReconstructionMetricIdentity: ...
+
     def score(
         self,
         source: torch.Tensor,
@@ -109,6 +124,108 @@ class ReconstructionVAE(Protocol):
     def encode(self, image: torch.Tensor) -> torch.Tensor: ...
 
     def decode(self, latent: torch.Tensor) -> torch.Tensor: ...
+
+
+@dataclass(frozen=True)
+class ReconstructionCohortMember:
+    sample_id: int
+    cohort: ReconstructionCohort
+    image_height: int
+    image_width: int
+    resolution_class: ReconstructionResolutionClass
+
+    def __post_init__(self) -> None:
+        if type(self.sample_id) is not int or self.sample_id <= 0:
+            raise ReconstructionEvaluationError("sample ID must be a positive integer")
+        if self.cohort not in ("stratified", "risk"):
+            raise ReconstructionEvaluationError("reconstruction cohort is invalid")
+        if (
+            type(self.image_height) is not int
+            or type(self.image_width) is not int
+            or self.image_height <= 0
+            or self.image_width <= 0
+            or self.image_height % 16
+            or self.image_width % 16
+        ):
+            raise ReconstructionEvaluationError(
+                "reconstruction cohort dimensions must be positive multiples of 16"
+            )
+        if self.resolution_class not in ("base_512", "extended"):
+            raise ReconstructionEvaluationError(
+                "reconstruction resolution class is invalid"
+            )
+
+
+@dataclass(frozen=True)
+class ReconstructionCohortManifest:
+    members: tuple[ReconstructionCohortMember, ...]
+
+    def __post_init__(self) -> None:
+        if not _is_tuple_of(self.members, ReconstructionCohortMember):
+            raise ReconstructionEvaluationError(
+                "reconstruction cohort manifest members must be an immutable tuple"
+            )
+        if len(self.members) != TOTAL_SAMPLES:
+            raise ReconstructionEvaluationError(
+                "reconstruction cohort manifest requires exactly 2,000 members"
+            )
+        sample_ids = tuple(member.sample_id for member in self.members)
+        if sample_ids != tuple(sorted(sample_ids)) or len(set(sample_ids)) != TOTAL_SAMPLES:
+            raise ReconstructionEvaluationError(
+                "reconstruction cohort manifest IDs must be unique and sorted"
+            )
+        stratified = sum(member.cohort == "stratified" for member in self.members)
+        risk = sum(member.cohort == "risk" for member in self.members)
+        if stratified != STRATIFIED_SAMPLES or risk != RISK_SAMPLES:
+            raise ReconstructionEvaluationError(
+                "reconstruction cohort manifest requires 1,600 stratified and 400 risk members"
+            )
+        base_512 = sum(
+            member.resolution_class == "base_512" for member in self.members
+        )
+        if base_512 != 1500:
+            raise ReconstructionEvaluationError(
+                "reconstruction cohort manifest requires 1,500 base-512 and 500 extended members"
+            )
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(
+            canonical_reconstruction_cohort_manifest_bytes(self)
+        ).hexdigest()
+
+
+@dataclass(frozen=True)
+class ReconstructionBatchSpec:
+    sample_ids: tuple[int, ...]
+    cohorts: tuple[ReconstructionCohort, ...]
+    image_height: int
+    image_width: int
+
+    def __post_init__(self) -> None:
+        if type(self.sample_ids) is not tuple or type(self.cohorts) is not tuple:
+            raise ReconstructionEvaluationError(
+                "reconstruction batch spec metadata must be immutable tuples"
+            )
+        if not self.sample_ids or len(self.sample_ids) != len(self.cohorts):
+            raise ReconstructionEvaluationError(
+                "reconstruction batch spec metadata lengths are invalid"
+            )
+        if any(type(sample_id) is not int or sample_id <= 0 for sample_id in self.sample_ids):
+            raise ReconstructionEvaluationError("sample ID must be a positive integer")
+        if any(cohort not in ("stratified", "risk") for cohort in self.cohorts):
+            raise ReconstructionEvaluationError("reconstruction cohort is invalid")
+        if (
+            type(self.image_height) is not int
+            or type(self.image_width) is not int
+            or self.image_height <= 0
+            or self.image_width <= 0
+            or self.image_height % 16
+            or self.image_width % 16
+        ):
+            raise ReconstructionEvaluationError(
+                "reconstruction batch spec dimensions must be positive multiples of 16"
+            )
 
 
 @dataclass(frozen=True)
@@ -153,6 +270,15 @@ class ReconstructionBatch:
             raise ReconstructionEvaluationError("reconstruction cohort is invalid")
         if any(type(value) is not bool for value in self.severe_errors + self.detail_losses):
             raise ReconstructionEvaluationError("manual quality labels must be booleans")
+
+    @property
+    def spec(self) -> ReconstructionBatchSpec:
+        return ReconstructionBatchSpec(
+            sample_ids=self.sample_ids,
+            cohorts=self.cohorts,
+            image_height=self.images.shape[2],
+            image_width=self.images.shape[3],
+        )
 
 
 @dataclass(frozen=True)
@@ -279,29 +405,86 @@ def _metric_values(
     return lpips, ssim
 
 
+def canonical_reconstruction_cohort_manifest_bytes(
+    manifest: ReconstructionCohortManifest,
+) -> bytes:
+    payload = {
+        "members": [
+            {
+                "cohort": member.cohort,
+                "image_height": member.image_height,
+                "image_width": member.image_width,
+                "resolution_class": member.resolution_class,
+                "sample_id": member.sample_id,
+            }
+            for member in manifest.members
+        ],
+        "schema_version": 1,
+    }
+    return (
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+
+
+def _validate_batch_plan(
+    cohort_manifest: ReconstructionCohortManifest,
+    batch_plan: tuple[ReconstructionBatchSpec, ...],
+) -> None:
+    if not _is_tuple_of(batch_plan, ReconstructionBatchSpec):
+        raise ReconstructionEvaluationError(
+            "reconstruction batch plan must be an immutable tuple of batch specs"
+        )
+    planned_members = tuple(
+        (
+            sample_id,
+            cohort,
+            spec.image_height,
+            spec.image_width,
+        )
+        for spec in batch_plan
+        for sample_id, cohort in zip(spec.sample_ids, spec.cohorts, strict=True)
+    )
+    expected_members = tuple(
+        (
+            member.sample_id,
+            member.cohort,
+            member.image_height,
+            member.image_width,
+        )
+        for member in cohort_manifest.members
+    )
+    if planned_members != expected_members:
+        raise ReconstructionEvaluationError(
+            "reconstruction batch plan does not exactly match the canonical cohort manifest"
+        )
+
+
 @torch.inference_mode()
 def evaluate_reconstruction_batches(
     vae: ReconstructionVAE,
     metric_engine: ReconstructionMetricEngine,
     batches: Iterable[ReconstructionBatch],
     *,
-    cohort_manifest_sha256: str,
-    metric_identity: ReconstructionMetricIdentity,
+    cohort_manifest: ReconstructionCohortManifest,
+    batch_plan: tuple[ReconstructionBatchSpec, ...],
 ) -> ReconstructionEvaluation:
     """Execute VAE round trips and locked external metrics over the fixed cohort."""
 
-    _validate_sha256(cohort_manifest_sha256, "reconstruction cohort manifest")
+    _validate_batch_plan(cohort_manifest, batch_plan)
+    metric_identity = _require_metric_identity(metric_engine.identity)
     observations: list[ReconstructionObservation] = []
-    seen_ids: set[int] = set()
-    for batch in batches:
-        if (
-            len(set(batch.sample_ids)) != len(batch.sample_ids)
-            or seen_ids.intersection(batch.sample_ids)
-        ):
+    batch_iterator = iter(batches)
+    for expected_spec in batch_plan:
+        try:
+            batch = next(batch_iterator)
+        except StopIteration:
             raise ReconstructionEvaluationError(
-                "reconstruction sample IDs must be unique"
+                "reconstruction batch source ended before its canonical plan"
+            ) from None
+        if batch.spec != expected_spec:
+            raise ReconstructionEvaluationError(
+                "reconstruction batch does not match its canonical batch plan"
             )
-        seen_ids.update(batch.sample_ids)
         latent = vae.encode(batch.images)
         reconstruction = vae.decode(latent)
         if reconstruction.shape != batch.images.shape:
@@ -333,14 +516,18 @@ def evaluate_reconstruction_batches(
                 strict=True,
             )
         )
-        if len(observations) > TOTAL_SAMPLES:
-            raise ReconstructionEvaluationError(
-                "reconstruction acceptance exceeds 2,000 observations"
-            )
+    try:
+        next(batch_iterator)
+    except StopIteration:
+        pass
+    else:
+        raise ReconstructionEvaluationError(
+            "reconstruction batch source exceeds its canonical plan"
+        )
     ordered = tuple(sorted(observations, key=lambda item: item.sample_id))
     report = summarize_reconstruction_quality(ordered)
     return ReconstructionEvaluation(
-        cohort_manifest_sha256=cohort_manifest_sha256,
+        cohort_manifest_sha256=cohort_manifest.sha256,
         metric_identity=metric_identity,
         observations=ordered,
         report=report,
@@ -402,10 +589,6 @@ def write_reconstruction_evaluation(
     temporary: Path | None = None
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists() or destination.is_symlink():
-            raise ReconstructionArtifactExistsError(
-                "reconstruction evaluation artifact already exists"
-            )
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{destination.name}.",
             suffix=".tmp",
@@ -416,19 +599,8 @@ def write_reconstruction_evaluation(
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        try:
-            os.link(temporary, destination)
-        except FileExistsError:
-            raise ReconstructionArtifactExistsError(
-                "reconstruction evaluation artifact already exists"
-            ) from None
-        temporary.unlink()
+        os.replace(temporary, destination)
         temporary = None
-        parent_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
     except ReconstructionEvaluationError:
         raise
     except OSError:
@@ -450,8 +622,10 @@ __all__ = [
     "RISK_SAMPLES",
     "STRATIFIED_SAMPLES",
     "TOTAL_SAMPLES",
-    "ReconstructionArtifactExistsError",
     "ReconstructionBatch",
+    "ReconstructionBatchSpec",
+    "ReconstructionCohortManifest",
+    "ReconstructionCohortMember",
     "ReconstructionEvaluation",
     "ReconstructionEvaluationError",
     "ReconstructionMetricBatch",
@@ -460,6 +634,7 @@ __all__ = [
     "ReconstructionObservation",
     "ReconstructionQualityReport",
     "ReconstructionVAE",
+    "canonical_reconstruction_cohort_manifest_bytes",
     "canonical_reconstruction_evaluation_bytes",
     "evaluate_reconstruction_batches",
     "summarize_reconstruction_quality",
