@@ -30,8 +30,6 @@ def transition_plan(request: StageTransitionRequest) -> dict[str, object]:
         "automatic_retry": False,
         "automatic_transition": False,
         "manual_approval": True,
-        "next_pass_index": request.next_pass_index,
-        "next_seed": request.next_seed,
         "planned_updates": request.planned_updates,
         "ramp_updates": request.ramp_updates,
         "rollback_checkpoint": str(request.source_checkpoint),
@@ -103,8 +101,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-stage", required=True)
     parser.add_argument("--source-checkpoint", type=Path, required=True)
     parser.add_argument("--source-checkpoint-id", required=True)
-    parser.add_argument("--next-pass-index", type=int, required=True)
-    parser.add_argument("--next-seed", type=int, required=True)
     parser.add_argument("--planned-updates", type=int, required=True)
     parser.add_argument("--manual-approval", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
@@ -118,8 +114,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         target_stage=args.target_stage,
         source_checkpoint=args.source_checkpoint,
         source_checkpoint_id=args.source_checkpoint_id,
-        next_pass_index=args.next_pass_index,
-        next_seed=args.next_seed,
         planned_updates=args.planned_updates,
         manual_approval=args.manual_approval,
     )

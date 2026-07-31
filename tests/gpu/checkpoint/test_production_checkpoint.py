@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -16,7 +17,6 @@ from sakuramoon.checkpoint import (
 )
 from sakuramoon.conditioning.style_resampler import StyleResampler
 from sakuramoon.conditioning.text_mixer import TextConditioner
-from sakuramoon.data.state import ShardRunState
 from sakuramoon.model.dit import PackedDiT
 from sakuramoon.model.growth import BASE_SLOT_IDS
 from sakuramoon.optim.adamw8bit import build_adamw8bit
@@ -25,6 +25,9 @@ from sakuramoon.train.step import SingleGpuUpdateState, TrainableComposite
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is required"
 )
+
+_RESOLVED_CONFIG = b'[run]\nname = "t044-production"\n'
+_CONFIG_SHA256 = hashlib.sha256(_RESOLVED_CONFIG).hexdigest()
 
 
 def _production_composite() -> TrainableComposite:
@@ -110,13 +113,12 @@ def test_full_s0_composite_raw_save_and_restore(tmp_path: Path) -> None:
     identity = CheckpointIdentity(
         checkpoint_id="full-s0",
         update=1,
-        config_sha256="a" * 64,
+        config_sha256=_CONFIG_SHA256,
         dependency_sha256="b" * 64,
         parameter_schema_sha256=optimizer.audit.schema_sha256,
     )
     state = RawCheckpointState(
         trainer=SingleGpuUpdateState(1, 1, 1),
-        data=ShardRunState.empty(),
         growth=GrowthCheckpointState(
             BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
         ),
@@ -127,7 +129,10 @@ def test_full_s0_composite_raw_save_and_restore(tmp_path: Path) -> None:
     expected = representative.parameter.detach().clone()
 
     save_start = time.perf_counter()
-    result = save_raw_checkpoint(tmp_path, identity, module, optimizer, state)
+    result = save_raw_checkpoint(
+        tmp_path, identity, module, optimizer, state,
+        resolved_config=_RESOLVED_CONFIG,
+    )
     save_seconds = time.perf_counter() - save_start
     shard_sizes = [
         path.stat().st_size for path in (result.path / "model").glob("*.safetensors")

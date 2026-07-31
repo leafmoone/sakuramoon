@@ -8,11 +8,11 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from sakuramoon.data.state import ShardRunState
 from sakuramoon.model.growth import ACTIVE_SLOT_IDS, half_cosine_growth_alpha
 from sakuramoon.train.step import SingleGpuUpdateState
 
 SCHEMA_VERSION = 1
+RAW_SCHEMA_VERSION = 2
 MAX_MODEL_SHARD_BYTES = 2 * 1024**3
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _CHECKPOINT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -92,28 +92,15 @@ class GrowthCheckpointState:
 @dataclass(frozen=True, slots=True)
 class RawCheckpointState:
     trainer: SingleGpuUpdateState
-    data: ShardRunState
     growth: GrowthCheckpointState
 
     def __post_init__(self) -> None:
-        completed = self.data.completed
         if (
-            any(type(path) is not str or not path for path in completed)
-            or (
-                self.data.active is not None
-                and (type(self.data.active) is not str or not self.data.active)
-            )
-            or completed != tuple(sorted(set(completed)))
-            or self.data.active in completed
-            or type(self.data.replayed_shards) is not int
-            or self.data.replayed_shards < 0
-            or type(self.data.replayed_samples) is not int
-            or self.data.replayed_samples < 0
-            or type(self.trainer.attempted_updates) is not int
+            type(self.trainer.attempted_updates) is not int
             or type(self.trainer.successful_updates) is not int
             or type(self.trainer.effective_samples) is not int
         ):
-            raise ValueError("checkpoint data state is inconsistent")
+            raise ValueError("checkpoint trainer state is inconsistent")
         growth = self.growth
         if growth.ramp_start_successful_update is not None:
             if self.trainer.successful_updates < growth.ramp_start_successful_update:
@@ -185,7 +172,11 @@ def manifest_to_dict(manifest: CheckpointManifest) -> dict[str, object]:
         ],
         "identity": identity_to_dict(manifest.identity),
         "kind": manifest.kind.value,
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": (
+            RAW_SCHEMA_VERSION
+            if manifest.kind is CheckpointKind.RAW
+            else SCHEMA_VERSION
+        ),
     }
 
 
@@ -200,9 +191,9 @@ def _exact_keys(document: dict[str, Any], expected: set[str], name: str) -> None
         raise CheckpointError(f"{name} has unknown or missing fields")
 
 
-def _has_schema_version(document: dict[str, Any]) -> bool:
+def _has_schema_version(document: dict[str, Any], expected: int) -> bool:
     value = document.get("schema_version")
-    return type(value) is int and value == SCHEMA_VERSION
+    return type(value) is int and value == expected
 
 
 def identity_from_dict(value: object) -> CheckpointIdentity:
@@ -243,12 +234,17 @@ def identity_from_dict(value: object) -> CheckpointIdentity:
 def manifest_from_dict(value: object) -> CheckpointManifest:
     document = _mapping(value, "checkpoint manifest")
     _exact_keys(document, {"schema_version", "kind", "identity", "files"}, "checkpoint manifest")
-    if not _has_schema_version(document):
-        raise CheckpointError("checkpoint manifest schema version is unsupported")
     try:
         kind = CheckpointKind(document["kind"])
     except (TypeError, ValueError):
         raise CheckpointError("checkpoint kind is invalid") from None
+    expected_schema = (
+        RAW_SCHEMA_VERSION if kind is CheckpointKind.RAW else SCHEMA_VERSION
+    )
+    if not _has_schema_version(document, expected_schema):
+        if kind is CheckpointKind.RAW:
+            raise CheckpointError("legacy raw checkpoint schema is unsupported")
+        raise CheckpointError("checkpoint manifest schema version is unsupported")
     raw_files = document["files"]
     if not isinstance(raw_files, list):
         raise CheckpointError("checkpoint manifest files must be an array")
@@ -275,19 +271,14 @@ def manifest_from_dict(value: object) -> CheckpointManifest:
         raise CheckpointError("checkpoint manifest is invalid") from None
 
 
-def raw_state_to_dict(state: RawCheckpointState) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+def raw_state_to_dict(
+    state: RawCheckpointState,
+) -> tuple[dict[str, object], dict[str, object]]:
     trainer: dict[str, object] = {
         "attempted_updates": state.trainer.attempted_updates,
         "effective_samples": state.trainer.effective_samples,
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": RAW_SCHEMA_VERSION,
         "successful_updates": state.trainer.successful_updates,
-    }
-    data: dict[str, object] = {
-        "active": state.data.active,
-        "completed": list(state.data.completed),
-        "replayed_samples": state.data.replayed_samples,
-        "replayed_shards": state.data.replayed_shards,
-        "schema_version": SCHEMA_VERSION,
     }
     growth: dict[str, object] = {
         "active_slot_ids": list(state.growth.active_slot_ids),
@@ -295,19 +286,19 @@ def raw_state_to_dict(state: RawCheckpointState) -> tuple[dict[str, object], dic
         "ramp_start_successful_update": state.growth.ramp_start_successful_update,
         "ramp_updates": state.growth.ramp_updates,
         "resolution": state.growth.resolution,
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": RAW_SCHEMA_VERSION,
         "stage": state.growth.stage,
         "world_size": state.growth.world_size,
     }
-    return trainer, data, growth
+    return trainer, growth
 
 
-def raw_state_from_dicts(trainer_value: object, data_value: object, growth_value: object) -> RawCheckpointState:
+def raw_state_from_dicts(
+    trainer_value: object, growth_value: object
+) -> RawCheckpointState:
     trainer = _mapping(trainer_value, "trainer state")
-    data = _mapping(data_value, "data state")
     growth = _mapping(growth_value, "growth state")
     _exact_keys(trainer, {"schema_version", "attempted_updates", "successful_updates", "effective_samples"}, "trainer state")
-    _exact_keys(data, {"schema_version", "completed", "active", "replayed_shards", "replayed_samples"}, "data state")
     _exact_keys(
         growth,
         {
@@ -322,14 +313,12 @@ def raw_state_from_dicts(trainer_value: object, data_value: object, growth_value
         },
         "growth state",
     )
-    if not all(_has_schema_version(document) for document in (trainer, data, growth)):
-        raise CheckpointError("checkpoint state schema version is unsupported")
-    completed = data["completed"]
-    slots = growth["active_slot_ids"]
-    if not isinstance(completed, list) or not all(
-        isinstance(item, str) for item in cast(list[object], completed)
+    if not all(
+        _has_schema_version(document, RAW_SCHEMA_VERSION)
+        for document in (trainer, growth)
     ):
-        raise CheckpointError("data completed shards are invalid")
+        raise CheckpointError("checkpoint state schema version is unsupported")
+    slots = growth["active_slot_ids"]
     if not isinstance(slots, list) or not all(
         type(item) is int for item in cast(list[object], slots)
     ):
@@ -340,12 +329,6 @@ def raw_state_from_dicts(trainer_value: object, data_value: object, growth_value
                 attempted_updates=trainer["attempted_updates"],
                 successful_updates=trainer["successful_updates"],
                 effective_samples=trainer["effective_samples"],
-            ),
-            data=ShardRunState(
-                completed=tuple(cast(list[str], completed)),
-                active=data["active"],
-                replayed_shards=data["replayed_shards"],
-                replayed_samples=data["replayed_samples"],
             ),
             growth=GrowthCheckpointState(
                 active_slot_ids=tuple(cast(list[int], slots)),
@@ -363,6 +346,7 @@ def raw_state_from_dicts(trainer_value: object, data_value: object, growth_value
 
 __all__ = [
     "MAX_MODEL_SHARD_BYTES",
+    "RAW_SCHEMA_VERSION",
     "CheckpointError",
     "CheckpointIdentity",
     "CheckpointKind",

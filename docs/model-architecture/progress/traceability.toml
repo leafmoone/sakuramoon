@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 96
+registry_revision = 97
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -12689,7 +12689,7 @@ not_applicable_reason = "The trainer/data-service decoupling requirement has no 
 [[requirements]]
 id = "C12-012"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = ["12. 优化器、并行、Checkpoint 与生产门槛"]
@@ -12699,8 +12699,15 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T044"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/checkpoint/save.py",
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/pma.py",
+    "src/sakuramoon/train/stage.py",
+    "src/sakuramoon/cli/transition.py",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -12708,9 +12715,16 @@ infra_review = ""
 config_keys = ["optimizer.*", "scheduler.*", "gradient.*", "distributed.*", "checkpoint.*", "failure.*"]
 modules = ["src/sakuramoon/optim/**", "src/sakuramoon/distributed/**", "src/sakuramoon/checkpoint/**", "src/sakuramoon/train/**"]
 reference_modules = []
-tests = ["tests/**/optim*", "tests/**/distributed*", "tests/**/checkpoint*", "tests/fault_injection/**"]
+tests = [
+    "tests/**/optim*",
+    "tests/**/distributed*",
+    "tests/**/checkpoint*",
+    "tests/fault_injection/**",
+    "tests/unit/train/test_stage.py",
+    "tests/unit/cli/test_transition.py",
+]
 benchmarks = ["benchmarks/training/**"]
-artifacts = ["artifacts/training/**", "checkpoints/**"]
+artifacts = ["artifacts/training/**", "checkpoints/**", "docs/model-architecture/reviews/T044/**"]
 not_applicable_fields = ["reference_modules"]
 not_applicable_reason = "The checkpoint-state boundary has no reference-code dependency."
 
@@ -12829,7 +12843,7 @@ not_applicable_reason = "The fault and mainset-rollover requirement has no refer
 [[requirements]]
 id = "OPEN-104"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = ["3. P0：数据、VAE 与输入协议", "3.3 独立数据供给 service 与 `mainset`"]
@@ -12839,8 +12853,15 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T044"
+implementation_paths = [
+    "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/checkpoint/save.py",
+    "src/sakuramoon/checkpoint/load.py",
+    "src/sakuramoon/checkpoint/pma.py",
+    "src/sakuramoon/train/stage.py",
+    "src/sakuramoon/cli/transition.py",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -12848,9 +12869,15 @@ infra_review = ""
 config_keys = ["optimizer.*", "scheduler.*", "gradient.*", "distributed.*", "checkpoint.*", "failure.*"]
 modules = ["src/sakuramoon/optim/**", "src/sakuramoon/distributed/**", "src/sakuramoon/checkpoint/**", "src/sakuramoon/train/**"]
 reference_modules = []
-tests = ["tests/**/optim*", "tests/**/distributed*", "tests/**/checkpoint*", "tests/fault_injection/**"]
+tests = [
+    "tests/**/optim*",
+    "tests/**/distributed*",
+    "tests/**/checkpoint*",
+    "tests/fault_injection/**",
+    "tests/unit/data/test_d024_service.py",
+]
 benchmarks = ["benchmarks/training/**"]
-artifacts = ["artifacts/training/**", "checkpoints/**"]
+artifacts = ["artifacts/training/**", "checkpoints/**", "docs/model-architecture/reviews/T044/**"]
 not_applicable_fields = ["reference_modules"]
 not_applicable_reason = "The service-decoupled checkpoint requirement has no reference-code dependency."
 

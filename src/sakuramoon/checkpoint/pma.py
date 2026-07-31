@@ -44,7 +44,7 @@ from sakuramoon.checkpoint.schema import (
 
 PMA_WINDOW = 10
 _RAW_SIDECARS = {
-    "train_state/data_state.json",
+    "resolved_config.toml",
     "train_state/growth_state.json",
     "train_state/optimizer.pt",
     "train_state/optimizer_schema.json",
@@ -231,7 +231,7 @@ def save_pma10(
         sidecars = {
             record.path
             for record in manifest.files
-            if record.path.startswith("train_state/")
+            if not record.path.startswith("model/")
         }
         if sidecars != _RAW_SIDECARS:
             raise CheckpointError("PMA source raw checkpoint sidecars are incomplete")

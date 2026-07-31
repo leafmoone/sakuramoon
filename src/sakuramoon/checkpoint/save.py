@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import tomllib
 import uuid
 from pathlib import Path
 from typing import cast
@@ -186,15 +187,16 @@ def _write_raw_sidecars(
     temporary: Path,
     optimizer: IsolatedAdamW8bit,
     state: RawCheckpointState,
+    resolved_config: bytes,
 ) -> None:
+    _write_bytes(temporary / "resolved_config.toml", resolved_config)
     train_state = temporary / "train_state"
     train_state.mkdir()
     torch.save(optimizer.optimizer.state_dict(), train_state / "optimizer.pt")
     _fsync_file(train_state / "optimizer.pt")
     _write_json(train_state / "optimizer_schema.json", _optimizer_schema(optimizer))
-    trainer, data, growth = raw_state_to_dict(state)
+    trainer, growth = raw_state_to_dict(state)
     _write_json(train_state / "trainer_state.json", trainer)
-    _write_json(train_state / "data_state.json", data)
     _write_json(train_state / "growth_state.json", growth)
     rng_dir = train_state / "rng"
     rng_dir.mkdir()
@@ -236,12 +238,26 @@ def _save(
     *,
     optimizer: IsolatedAdamW8bit | None,
     state: RawCheckpointState | None,
+    resolved_config: bytes | None,
     max_shard_bytes: int,
 ) -> CheckpointSaveResult:
     if kind not in {CheckpointKind.RAW, CheckpointKind.MODEL_ONLY}:
         raise ValueError("checkpoint artifact kind is unsupported")
     if (kind is CheckpointKind.RAW) != (optimizer is not None and state is not None):
         raise ValueError("raw checkpoint requires optimizer and training state sidecars")
+    if kind is CheckpointKind.RAW:
+        if type(resolved_config) is not bytes:
+            raise TypeError("raw checkpoint requires resolved config bytes")
+        try:
+            parsed_config = tomllib.loads(resolved_config.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            raise ValueError("resolved config must be valid UTF-8 TOML") from None
+        if not parsed_config:
+            raise ValueError("resolved config must be nonempty")
+        if hashlib.sha256(resolved_config).hexdigest() != identity.config_sha256:
+            raise ValueError("resolved config hash does not match checkpoint identity")
+    elif resolved_config is not None:
+        raise ValueError("non-raw artifacts cannot contain resolved config sidecars")
     export_trainable_composite(module)
     if optimizer is not None and optimizer.audit.schema_sha256 != identity.parameter_schema_sha256:
         raise ValueError("optimizer parameter schema does not match checkpoint identity")
@@ -272,8 +288,8 @@ def _save(
     temporary.mkdir()
     try:
         _write_model(temporary, module, identity, kind, max_shard_bytes)
-        if optimizer is not None and state is not None:
-            _write_raw_sidecars(temporary, optimizer, state)
+        if optimizer is not None and state is not None and resolved_config is not None:
+            _write_raw_sidecars(temporary, optimizer, state, resolved_config)
         records = _payload_records(temporary)
         manifest = CheckpointManifest(kind=kind, identity=identity, files=records)
         _write_json(temporary / "manifest.json", manifest_to_dict(manifest))
@@ -308,6 +324,7 @@ def save_raw_checkpoint(
     optimizer: IsolatedAdamW8bit,
     state: RawCheckpointState,
     *,
+    resolved_config: bytes,
     max_shard_bytes: int = MAX_MODEL_SHARD_BYTES,
 ) -> CheckpointSaveResult:
     return _save(
@@ -317,6 +334,7 @@ def save_raw_checkpoint(
         module,
         optimizer=optimizer,
         state=state,
+        resolved_config=resolved_config,
         max_shard_bytes=max_shard_bytes,
     )
 
@@ -335,6 +353,7 @@ def save_model_only(
         module,
         optimizer=None,
         state=None,
+        resolved_config=None,
         max_shard_bytes=max_shard_bytes,
     )
 

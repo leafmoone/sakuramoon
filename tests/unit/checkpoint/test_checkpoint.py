@@ -35,7 +35,6 @@ from sakuramoon.checkpoint.schema import (
 )
 from sakuramoon.conditioning.style_resampler import StyleResampler
 from sakuramoon.conditioning.text_mixer import TextConditioner
-from sakuramoon.data.state import ShardRunState
 from sakuramoon.model.dit import DenseDiT
 from sakuramoon.model.growth import BASE_SLOT_IDS
 from sakuramoon.optim.groups import audit_trainable_parameters
@@ -291,7 +290,6 @@ def test_rank_rng_rejects_state_that_cannot_be_restored() -> None:
 def test_raw_training_state_is_strict_and_round_trips() -> None:
     state = RawCheckpointState(
         trainer=SingleGpuUpdateState(3, 2, 11),
-        data=ShardRunState(("a.tar",), "b.tar", 1, 7),
         growth=GrowthCheckpointState(
             BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
         ),
@@ -302,12 +300,29 @@ def test_raw_training_state_is_strict_and_round_trips() -> None:
     invalid = dict(documents[0])
     invalid["unexpected"] = True
     with pytest.raises(CheckpointError, match="unknown or missing"):
-        raw_state_from_dicts(invalid, documents[1], documents[2])
+        raw_state_from_dicts(invalid, documents[1])
 
     invalid = dict(documents[0])
     invalid["schema_version"] = True
     with pytest.raises(CheckpointError, match="schema version"):
-        raw_state_from_dicts(invalid, documents[1], documents[2])
+        raw_state_from_dicts(invalid, documents[1])
+
+
+def test_raw_state_rejects_legacy_data_document() -> None:
+    state = RawCheckpointState(
+        trainer=SingleGpuUpdateState(3, 2, 11),
+        growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
+    )
+    trainer, growth = raw_state_to_dict(state)
+    legacy_data: dict[str, object] = {
+        "active": None,
+        "completed": [],
+        "replayed_samples": 0,
+        "replayed_shards": 0,
+        "schema_version": 1,
+    }
+    with pytest.raises(TypeError):
+        raw_state_from_dicts(trainer, growth, legacy_data)  # type: ignore[call-arg]
 
 
 def test_manifest_rejects_boolean_schema_version(tmp_path: Path) -> None:
@@ -319,6 +334,14 @@ def test_manifest_rejects_boolean_schema_version(tmp_path: Path) -> None:
 
     with pytest.raises(CheckpointError, match="schema version"):
         load_model_only(result.path, _tiny_composite(), _identity())
+
+
+def test_model_only_manifest_remains_schema_v1(tmp_path: Path) -> None:
+    result = save_model_only(tmp_path, _identity(), _tiny_composite())
+    manifest = json.loads((result.path / "manifest.json").read_bytes())
+
+    assert manifest["kind"] == CheckpointKind.MODEL_ONLY.value
+    assert manifest["schema_version"] == 1
 
 
 def test_invalid_identity_and_shard_limit_are_rejected(tmp_path: Path) -> None:
@@ -398,7 +421,6 @@ def test_growth_state_rejects_alpha_that_differs_from_persisted_progress() -> No
     with pytest.raises(ValueError, match="differs from persisted ramp progress"):
         RawCheckpointState(
             trainer=SingleGpuUpdateState(501, 501, 1),
-            data=ShardRunState.empty(),
             growth=GrowthCheckpointState(
                 BASE_SLOT_IDS, 0.25, "G1", 4, 256, 1, 1000
             ),

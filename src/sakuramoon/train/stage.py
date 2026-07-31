@@ -7,7 +7,6 @@ from enum import StrEnum
 from pathlib import Path
 
 from sakuramoon.checkpoint.schema import GrowthCheckpointState, RawCheckpointState
-from sakuramoon.data.state import ShardRunState
 from sakuramoon.model.growth import (
     active_slot_ids,
     growth_ramp_updates,
@@ -49,8 +48,6 @@ class StageTransitionRequest:
     target_stage: str
     source_checkpoint: Path
     source_checkpoint_id: str
-    next_pass_index: int
-    next_seed: int
     planned_updates: int
     manual_approval: bool
 
@@ -77,10 +74,6 @@ class StageTransitionRequest:
             or not self.source_checkpoint.is_dir()
         ):
             raise ValueError("transition requires an existing source checkpoint directory")
-        if type(self.next_pass_index) is not int or self.next_pass_index < 0:
-            raise ValueError("next pass index must be a nonnegative integer")
-        if type(self.next_seed) is not int or self.next_seed < 0:
-            raise ValueError("next seed must be a nonnegative integer")
         if type(self.planned_updates) is not int or self.planned_updates <= 0:
             raise ValueError("planned updates must be a positive integer")
         if self.manual_approval is not True:
@@ -208,7 +201,6 @@ def transition_checkpoint_state(
         raise ValueError("a stage transition requires a completed growth ramp")
     return RawCheckpointState(
         trainer=source.trainer,
-        data=ShardRunState.empty(),
         growth=GrowthCheckpointState(
             active_slot_ids=active_slot_ids(target_spec.depth),
             alpha=0.0 if request.is_growth else 1.0,

@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from sakuramoon.checkpoint.schema import GrowthCheckpointState, RawCheckpointState
-from sakuramoon.data.state import ShardRunState
 from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.train.stage import (
     ForcedCheckpoint,
@@ -46,8 +45,6 @@ def _request(root: Path, **overrides: object) -> StageTransitionRequest:
         "target_stage": "G1",
         "source_checkpoint": checkpoint,
         "source_checkpoint_id": "source",
-        "next_pass_index": 3,
-        "next_seed": 101,
         "planned_updates": 75_000,
         "manual_approval": True,
     }
@@ -73,15 +70,13 @@ def test_transition_requires_unique_predecessor_and_manual_approval(tmp_path: Pa
         _request(tmp_path, source_stage="S3", target_stage="H1")
 
 
-def test_transition_resets_data_but_preserves_global_counters(tmp_path: Path) -> None:
+def test_transition_preserves_global_counters_without_data_state(tmp_path: Path) -> None:
     source = RawCheckpointState(
         trainer=SingleGpuUpdateState(2001, 2000, 8000),
-        data=ShardRunState(("a.tar",), "b.tar", 1, 9),
         growth=_growth(16, "S1", 4, 256),
     )
     target = transition_checkpoint_state(source, _request(tmp_path))
     assert target.trainer == source.trainer
-    assert target.data == ShardRunState.empty()
     assert target.growth == _growth(
         20, "G1", 4, 256, alpha=0.0, ramp_start=2000, ramp_updates=1500
     )
@@ -90,7 +85,6 @@ def test_transition_resets_data_but_preserves_global_counters(tmp_path: Path) ->
 def test_transition_rejects_incomplete_growth_source(tmp_path: Path) -> None:
     source = RawCheckpointState(
         trainer=SingleGpuUpdateState.initial(),
-        data=ShardRunState.empty(),
         growth=_growth(
             16, "S1", 4, 256, alpha=0.0, ramp_start=0, ramp_updates=1000
         ),
@@ -125,7 +119,6 @@ def test_transition_rejects_caller_relabelled_predecessor_stage(
     successful = 1001 if growth.ramp_updates is not None else 1
     source = RawCheckpointState(
         trainer=SingleGpuUpdateState(successful, successful, 4),
-        data=ShardRunState.empty(),
         growth=growth,
     )
     with pytest.raises(ValueError, match="axes do not match"):
@@ -145,7 +138,6 @@ def test_growth_progress_uses_successful_updates_and_forced_points() -> None:
         progress.alpha(9999)
     state = RawCheckpointState(
         trainer=SingleGpuUpdateState(10_500, 10_500, 1),
-        data=ShardRunState.empty(),
         growth=_growth(
             20,
             "G1",

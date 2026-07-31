@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+import tomllib
 from pathlib import Path
 from typing import Any, Protocol, Self, cast
 
@@ -50,6 +51,15 @@ _TORCH_TO_SAFE_DTYPE = {
 _FINAL_CHECKPOINT_NAME = re.compile(
     r"(?:ckpt|model|pma|release)_[0-9]+_[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
 )
+_RAW_SIDECARS = {
+    "resolved_config.toml",
+    "train_state/growth_state.json",
+    "train_state/optimizer.pt",
+    "train_state/optimizer_schema.json",
+    "train_state/rng/optimizer_sr.safetensors",
+    "train_state/rng/rank-0.safetensors",
+    "train_state/trainer_state.json",
+}
 
 
 class _SafeSlice(Protocol):
@@ -148,15 +158,54 @@ def read_raw_checkpoint_state(
     manifest = read_checkpoint_manifest(checkpoint)
     if manifest.kind is not CheckpointKind.RAW:
         raise CheckpointError("raw checkpoint state accepts raw checkpoints only")
+    _validate_raw_sidecars(checkpoint, manifest)
     train_state = checkpoint / "train_state"
     state = raw_state_from_dicts(
         _read_json(train_state / "trainer_state.json", "trainer state"),
-        _read_json(train_state / "data_state.json", "data state"),
         _read_json(train_state / "growth_state.json", "growth state"),
     )
     if manifest.identity.update != state.trainer.successful_updates:
         raise CheckpointError("checkpoint update differs from trainer successful updates")
     return manifest, state
+
+
+def _validate_raw_sidecars(
+    checkpoint: Path, manifest: CheckpointManifest
+) -> None:
+    sidecars = {
+        record.path
+        for record in manifest.files
+        if not record.path.startswith("model/")
+    }
+    if "train_state/data_state.json" in sidecars:
+        raise CheckpointError("legacy raw data sidecar is unsupported")
+    if sidecars != _RAW_SIDECARS:
+        raise CheckpointError("raw checkpoint sidecars are unknown or missing")
+    model_records = _model_manifest_records(checkpoint / "model")
+    outer_model = {
+        record.path.removeprefix("model/"): record
+        for record in manifest.files
+        if record.path.startswith("model/")
+    }
+    expected_model_paths = {
+        "manifest.json",
+        *(record.path for record in model_records),
+    }
+    if set(outer_model) != expected_model_paths:
+        raise CheckpointError("raw checkpoint model payload set is invalid")
+    for record in model_records:
+        outer = outer_model[record.path]
+        if outer.size != record.size or outer.sha256 != record.sha256:
+            raise CheckpointError("raw checkpoint model manifests differ")
+    try:
+        resolved_config = (checkpoint / "resolved_config.toml").read_bytes()
+        parsed_config = tomllib.loads(resolved_config.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        raise CheckpointError("resolved config is unreadable") from None
+    if not parsed_config:
+        raise CheckpointError("resolved config is unreadable")
+    if hashlib.sha256(resolved_config).hexdigest() != manifest.identity.config_sha256:
+        raise CheckpointError("resolved config hash differs from checkpoint identity")
 
 
 def _validate_identity(
@@ -498,7 +547,7 @@ def _load_sr_rng(path: Path, optimizer: IsolatedAdamW8bit) -> dict[str, object]:
     return {"device_type": "cuda", "device_index": current_index, "state": state}
 
 
-def _validate_standalone_model_manifest(model_dir: Path) -> None:
+def _model_manifest_records(model_dir: Path) -> tuple[FileRecord, ...]:
     document = _mapping(
         _read_json(model_dir / "manifest.json", "model manifest"), "model manifest"
     )
@@ -520,6 +569,24 @@ def _validate_standalone_model_manifest(model_dir: Path) -> None:
     expected = {record.path for record in records}
     if not expected or len(expected) != len(records):
         raise CheckpointError("model manifest file set is invalid")
+    weight_map, _declared_size = _model_index(
+        model_dir / "model.safetensors.index.json"
+    )
+    shard_names = set(weight_map.values())
+    if any("/" in name or not name.endswith(".safetensors") for name in shard_names):
+        raise CheckpointError("model shard name is invalid")
+    if expected != {
+        "config.json",
+        "model.safetensors.index.json",
+        *shard_names,
+    }:
+        raise CheckpointError("model manifest contains an unknown payload")
+    return tuple(records)
+
+
+def _validate_standalone_model_manifest(model_dir: Path) -> None:
+    records = _model_manifest_records(model_dir)
+    expected = {record.path for record in records}
     actual: set[str] = set()
     for path in model_dir.iterdir():
         if path.is_symlink() or not path.is_file():
@@ -621,6 +688,7 @@ def load_raw_checkpoint(
 ) -> RawCheckpointState:
     manifest = read_checkpoint_manifest(checkpoint)
     _validate_identity(manifest, expected, CheckpointKind.RAW)
+    _validate_raw_sidecars(checkpoint, manifest)
     try:
         validate_optimizer_coverage(
             module,
@@ -640,7 +708,6 @@ def load_raw_checkpoint(
     optimizer_state = _load_optimizer_state(train_state / "optimizer.pt")
     state = raw_state_from_dicts(
         _read_json(train_state / "trainer_state.json", "trainer state"),
-        _read_json(train_state / "data_state.json", "data state"),
         _read_json(train_state / "growth_state.json", "growth state"),
     )
     if expected.update != state.trainer.successful_updates:

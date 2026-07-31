@@ -22,11 +22,15 @@ from sakuramoon.checkpoint import (
     save_pma10,
     save_release,
 )
-from sakuramoon.checkpoint.load import read_checkpoint_manifest
+from sakuramoon.checkpoint.load import (
+    read_checkpoint_manifest,
+    read_raw_checkpoint_state,
+)
 from sakuramoon.checkpoint.schema import (
     CheckpointError,
     CheckpointManifest,
     FileRecord,
+    identity_from_dict,
     identity_to_dict,
     manifest_to_dict,
 )
@@ -52,14 +56,27 @@ def _records(root: Path) -> tuple[FileRecord, ...]:
     )
 
 
+def _refresh_manifest(root: Path, *, identity: CheckpointIdentity | None = None) -> None:
+    existing = json.loads((root / "manifest.json").read_bytes())
+    manifest = CheckpointManifest(
+        CheckpointKind.RAW,
+        identity_from_dict(existing["identity"]) if identity is None else identity,
+        _records(root),
+    )
+    (root / "manifest.json").write_bytes(_json_bytes(manifest_to_dict(manifest)))
+
+
 def _identity(update: int, checkpoint_id: str) -> CheckpointIdentity:
     return CheckpointIdentity(
         checkpoint_id=checkpoint_id,
         update=update,
-        config_sha256="a" * 64,
+        config_sha256=hashlib.sha256(_RESOLVED_CONFIG).hexdigest(),
         dependency_sha256="b" * 64,
         parameter_schema_sha256="c" * 64,
     )
+
+
+_RESOLVED_CONFIG = b"[run]\nname = \"unit\"\n"
 
 
 def _raw_fixture(root: Path, update: int, value: float) -> Path:
@@ -110,19 +127,8 @@ def _raw_fixture(root: Path, update: int, value: float) -> Path:
             {
                 "attempted_updates": update,
                 "effective_samples": update,
-                "schema_version": 1,
+                "schema_version": 2,
                 "successful_updates": update,
-            }
-        )
-    )
-    (train_state / "data_state.json").write_bytes(
-        _json_bytes(
-            {
-                "active": None,
-                "completed": [],
-                "replayed_samples": 0,
-                "replayed_shards": 0,
-                "schema_version": 1,
             }
         )
     )
@@ -134,7 +140,7 @@ def _raw_fixture(root: Path, update: int, value: float) -> Path:
                 "ramp_start_successful_update": None,
                 "ramp_updates": None,
                 "resolution": 256,
-                "schema_version": 1,
+                "schema_version": 2,
                 "stage": "S0",
                 "world_size": 1,
             }
@@ -144,6 +150,7 @@ def _raw_fixture(root: Path, update: int, value: float) -> Path:
     (train_state / "optimizer_schema.json").write_bytes(_json_bytes({}))
     (rng / "optimizer_sr.safetensors").write_bytes(b"test-only\n")
     (rng / "rank-0.safetensors").write_bytes(b"test-only\n")
+    (checkpoint / "resolved_config.toml").write_bytes(_RESOLVED_CONFIG)
     manifest = CheckpointManifest(CheckpointKind.RAW, identity, _records(checkpoint))
     (checkpoint / "manifest.json").write_bytes(_json_bytes(manifest_to_dict(manifest)))
     (checkpoint / "COMPLETE").write_bytes(b"complete\n")
@@ -184,8 +191,74 @@ def test_pma_rejects_wrong_window_order_topology_and_missing_sidecars(
         CheckpointKind.RAW, _identity(1, "source-01"), _records(sources[0])
     )
     manifest_path.write_bytes(_json_bytes(manifest_to_dict(manifest)))
-    with pytest.raises(CheckpointError, match="sidecars"):
+    with pytest.raises(CheckpointError, match="sidecars|legacy raw data sidecar"):
         save_pma10(tmp_path, _identity(10, "missing-sidecar"), sources)
+
+
+def test_raw_v1_manifest_is_rejected_before_pma_reads_state(tmp_path: Path) -> None:
+    source = _raw_fixture(tmp_path, 1, 1.0)
+    manifest = json.loads((source / "manifest.json").read_bytes())
+    manifest["schema_version"] = 1
+    (source / "manifest.json").write_bytes(_json_bytes(manifest))
+
+    with pytest.raises(CheckpointError, match="legacy raw checkpoint schema"):
+        read_raw_checkpoint_state(source)
+
+
+@pytest.mark.parametrize(
+    "extra_path",
+    [
+        "train_state/data_state.json",
+        "opaque.bin",
+        "model/data_state.json",
+        "model/opaque.bin",
+    ],
+)
+def test_raw_unknown_sidecars_are_rejected(tmp_path: Path, extra_path: str) -> None:
+    source = _raw_fixture(tmp_path, 1, 1.0)
+    extra = source / extra_path
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(b"legacy\n")
+    if extra_path.startswith("model/"):
+        model = source / "model"
+        model_records = tuple(
+            record for record in _records(model) if record.path != "manifest.json"
+        )
+        (model / "manifest.json").write_bytes(
+            _json_bytes(
+                {
+                    "files": [
+                        {"path": row.path, "sha256": row.sha256, "size": row.size}
+                        for row in model_records
+                    ],
+                    "schema_version": 1,
+                }
+            )
+        )
+    _refresh_manifest(source)
+
+    with pytest.raises(
+        CheckpointError,
+        match="sidecars|legacy raw data sidecar|model manifest|model payload",
+    ):
+        read_raw_checkpoint_state(source)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "invalid", "hash"])
+def test_raw_resolved_config_is_fail_closed(tmp_path: Path, mutation: str) -> None:
+    source = _raw_fixture(tmp_path, 1, 1.0)
+    config = source / "resolved_config.toml"
+    if mutation == "missing":
+        config.unlink()
+    elif mutation == "invalid":
+        config.write_bytes(b"[run\n")
+        _refresh_manifest(source)
+    else:
+        config.write_bytes(b"[run]\nname = \"different\"\n")
+        _refresh_manifest(source)
+
+    with pytest.raises(CheckpointError, match="(?:payload|resolved config)"):
+        read_raw_checkpoint_state(source)
 
 
 def test_checkpoint_cadence_advances_only_after_matching_commit() -> None:

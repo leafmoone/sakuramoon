@@ -20,10 +20,11 @@ from sakuramoon.checkpoint.schema import (
     raw_state_to_dict,
 )
 from sakuramoon.cli.transition import main, transition_plan, write_transition_plan
-from sakuramoon.data.state import ShardRunState
 from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.train.stage import StageTransitionRequest
 from sakuramoon.train.step import SingleGpuUpdateState
+
+_RESOLVED_CONFIG = b"[run]\nname = \"transition-unit\"\n"
 
 
 def _checkpoint(
@@ -35,13 +36,75 @@ def _checkpoint(
 ) -> Path:
     checkpoint = root / "ckpt_42_source"
     checkpoint.mkdir()
-    payload = checkpoint / "payload.bin"
+    identity = CheckpointIdentity(
+        "source",
+        42,
+        hashlib.sha256(_RESOLVED_CONFIG).hexdigest(),
+        "b" * 64,
+        "c" * 64,
+    )
+    model = checkpoint / "model"
+    model.mkdir()
+    payload = model / "model-00001-of-00001.safetensors"
     payload.write_bytes(b"x")
-    payloads = [payload]
+    model_index = model / "model.safetensors.index.json"
+    model_index.write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": 1},
+                "weight_map": {"test.weight": payload.name},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    model_config = model / "config.json"
+    model_config.write_text(
+        json.dumps(
+            {
+                "architecture": {"class": "transition-test-only"},
+                "identity": {
+                    "checkpoint_id": identity.checkpoint_id,
+                    "config_sha256": identity.config_sha256,
+                    "dependency_sha256": identity.dependency_sha256,
+                    "parameter_schema_sha256": identity.parameter_schema_sha256,
+                    "update": identity.update,
+                },
+                "kind": kind.value,
+                "out_channels": 128,
+                "prediction_type": "x",
+                "schema_version": 1,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    model_records = tuple(
+        FileRecord(
+            path.name,
+            path.stat().st_size,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in sorted((payload, model_config, model_index))
+    )
+    model_manifest = model / "manifest.json"
+    model_manifest.write_text(
+        json.dumps(
+            {
+                "files": [
+                    {"path": row.path, "sha256": row.sha256, "size": row.size}
+                    for row in model_records
+                ],
+                "schema_version": 1,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    payloads = [payload, model_config, model_index, model_manifest]
     if kind is CheckpointKind.RAW:
         state = RawCheckpointState(
             trainer=SingleGpuUpdateState(42, 42, 100),
-            data=ShardRunState.empty(),
             growth=GrowthCheckpointState(
                 active_slot_ids(16),
                 1.0,
@@ -56,7 +119,7 @@ def _checkpoint(
         train_state.mkdir()
         documents = raw_state_to_dict(state)
         for name, document in zip(
-            ("trainer_state.json", "data_state.json", "growth_state.json"),
+            ("trainer_state.json", "growth_state.json"),
             documents,
             strict=True,
         ):
@@ -66,7 +129,21 @@ def _checkpoint(
                 encoding="utf-8",
             )
             payloads.append(state_file)
-    identity = CheckpointIdentity("source", 42, "a" * 64, "b" * 64, "c" * 64)
+        config = checkpoint / "resolved_config.toml"
+        config.write_bytes(_RESOLVED_CONFIG)
+        payloads.append(config)
+        optimizer = train_state / "optimizer.pt"
+        optimizer.write_bytes(b"test-only\n")
+        payloads.append(optimizer)
+        optimizer_schema = train_state / "optimizer_schema.json"
+        optimizer_schema.write_bytes(b"{}\n")
+        payloads.append(optimizer_schema)
+        rng = train_state / "rng"
+        rng.mkdir()
+        for name in ("optimizer_sr.safetensors", "rank-0.safetensors"):
+            rng_file = rng / name
+            rng_file.write_bytes(b"test-only\n")
+            payloads.append(rng_file)
     manifest = CheckpointManifest(
         kind=kind,
         identity=identity,
@@ -92,8 +169,6 @@ def _request(checkpoint: Path) -> StageTransitionRequest:
         target_stage="G1",
         source_checkpoint=checkpoint,
         source_checkpoint_id="source",
-        next_pass_index=1,
-        next_seed=2,
         planned_updates=50_000,
         manual_approval=True,
     )
@@ -106,6 +181,28 @@ def test_transition_plan_is_raw_only_and_records_manual_rollback(tmp_path: Path)
     assert plan["automatic_transition"] is False
     assert plan["rollback_checkpoint"] == str(checkpoint)
     assert plan["ramp_updates"] == 1000
+    assert set(plan) == {
+        "automatic_retry",
+        "automatic_transition",
+        "manual_approval",
+        "planned_updates",
+        "ramp_updates",
+        "rollback_checkpoint",
+        "schema_version",
+        "source",
+        "target",
+    }
+    serialized = json.dumps(plan, sort_keys=True)
+    assert not any(
+        forbidden in serialized
+        for forbidden in (
+            "mainset",
+            "next_pass",
+            "next_seed",
+            "tar_cursor",
+            "tar_order",
+        )
+    )
 
 
 def test_transition_plan_rejects_nonraw_artifact(tmp_path: Path) -> None:
@@ -136,10 +233,6 @@ def test_cli_requires_manual_approval_and_never_overwrites(tmp_path: Path) -> No
         str(checkpoint),
         "--source-checkpoint-id",
         "source",
-        "--next-pass-index",
-        "1",
-        "--next-seed",
-        "2",
         "--planned-updates",
         "50000",
         "--manual-approval",

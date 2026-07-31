@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,7 +20,6 @@ from sakuramoon.checkpoint.migrate import (
 )
 from sakuramoon.conditioning.style_resampler import StyleResampler
 from sakuramoon.conditioning.text_mixer import TextConditioner
-from sakuramoon.data.state import ShardRunState
 from sakuramoon.model.dit import DenseDiT
 from sakuramoon.model.growth import (
     active_slot_ids,
@@ -34,6 +34,9 @@ from sakuramoon.train.step import SingleGpuUpdateState, TrainableComposite
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is required"
 )
+
+_RESOLVED_CONFIG = b'[run]\nname = "t044-growth"\n'
+_CONFIG_SHA256 = hashlib.sha256(_RESOLVED_CONFIG).hexdigest()
 
 
 def _composite(depth: int) -> TrainableComposite:
@@ -116,7 +119,7 @@ def _identity(name: str, update: int, optimizer: IsolatedAdamW8bit) -> Checkpoin
     return CheckpointIdentity(
         checkpoint_id=name,
         update=update,
-        config_sha256="a" * 64,
+        config_sha256=_CONFIG_SHA256,
         dependency_sha256="b" * 64,
         parameter_schema_sha256=optimizer.audit.schema_sha256,
     )
@@ -125,7 +128,6 @@ def _identity(name: str, update: int, optimizer: IsolatedAdamW8bit) -> Checkpoin
 def _source_state(depth: int, stage: str) -> RawCheckpointState:
     return RawCheckpointState(
         trainer=SingleGpuUpdateState(1, 1, 4),
-        data=ShardRunState(("complete.tar",), "active.tar", 2, 9),
         growth=GrowthCheckpointState(
             active_slot_ids(depth),
             1.0,
@@ -155,7 +157,10 @@ def _assert_loaded_growth_point(
         growth=replace(state.growth, alpha=alpha),
     )
     identity = _identity(f"alpha-{elapsed_updates}", update, optimizer)
-    result = save_raw_checkpoint(root, identity, module, optimizer, point)
+    result = save_raw_checkpoint(
+        root, identity, module, optimizer, point,
+        resolved_config=_RESOLVED_CONFIG,
+    )
     restored = _composite(target_depth)
     restored_optimizer = _optimizer(restored, 999)
     loaded = load_raw_checkpoint(result.path, restored, restored_optimizer, identity)
@@ -223,6 +228,7 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
         source,
         source_optimizer,
         _source_state(source_depth, source_stage),
+        resolved_config=_RESOLVED_CONFIG,
     ).path
     source_parameters = {
         name: parameter.detach().clone() for name, parameter in source.named_parameters()
@@ -244,8 +250,6 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
         target_stage=target_stage,
         source_checkpoint=source_checkpoint,
         source_checkpoint_id="source",
-        next_pass_index=2,
-        next_seed=4305,
         planned_updates=50_000,
         manual_approval=True,
     )
@@ -262,7 +266,6 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
             source_optimizer,
             RawCheckpointState(
                 trainer=SingleGpuUpdateState(501, 501, 4),
-                data=ShardRunState.empty(),
                 growth=GrowthCheckpointState(
                     active_slot_ids(source_depth),
                     half_cosine_growth_alpha(500, 1000),
@@ -296,7 +299,6 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
     assert report.target_depth == target_depth
     assert set(report.preserved_optimizer_fqns) == set(initialized_names)
     assert state.trainer == _source_state(source_depth, source_stage).trainer
-    assert state.data == ShardRunState.empty()
     assert state.growth == GrowthCheckpointState(
         active_slot_ids(target_depth),
         0.0,
@@ -362,9 +364,7 @@ def test_growth_migration_rejects_optimizer_owned_by_another_module(
     sr_state = target_optimizer.sr_rng.state.clone()
     checkpoint = tmp_path / "source"
     checkpoint.mkdir()
-    request = StageTransitionRequest(
-        "S1", "G1", checkpoint, "source", 2, 4405, 50_000, True
-    )
+    request = StageTransitionRequest("S1", "G1", checkpoint, "source", 50_000, True)
 
     with pytest.raises(ValueError, match="canonical parameters differ"):
         migrate_loaded_growth(
@@ -392,9 +392,7 @@ def test_growth_migration_rejects_new_slot_prefix_collision(tmp_path: Path) -> N
     sr_state = target_optimizer.sr_rng.state.clone()
     checkpoint = tmp_path / "source"
     checkpoint.mkdir()
-    request = StageTransitionRequest(
-        "S1", "G1", checkpoint, "source", 2, 4503, 50_000, True
-    )
+    request = StageTransitionRequest("S1", "G1", checkpoint, "source", 50_000, True)
 
     assert not is_new_slot_fqn(20, "dit.conditioner.block_biases.slot_02evil")
     with pytest.raises(ValueError, match="new-slot allowlist"):

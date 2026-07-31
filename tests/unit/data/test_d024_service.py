@@ -14,6 +14,7 @@ from typing import Protocol, cast
 import pytest
 
 from sakuramoon.data.cache import CacheQuota, ShardCache
+from sakuramoon.data.client import DataServiceClient
 from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetSourceIdentity,
@@ -389,6 +390,70 @@ def test_trainer_lifecycle_fields_cannot_enter_service_identity_or_cli() -> None
                 "snapshot.json",
             ]
         )
+
+
+def test_resumed_client_leases_current_service_position_without_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, bodies = _manifest(3)
+    first_service = _service(tmp_path, manifest, _SlowTransport(bodies))
+    first_service.start()
+    order = tuple(row.path for row in first_service.mainset.rows)
+    first = first_service.lease(0)
+    assert first is not None and first.record.path == order[0]
+    first_service.acknowledge(
+        first.lease_id, first.worker_id, first.state_identity
+    )
+    first_service.close()
+
+    resumed_service = _service(tmp_path, manifest, _SlowTransport(bodies))
+    socket_path = (
+        Path(__file__).parents[3] / f".t044-resume-{os.getpid()}.sock"
+    ).absolute()
+    socket_path.unlink(missing_ok=True)
+    server = DataServiceServer(
+        resumed_service, socket_path, request_timeout_seconds=5.0
+    )
+    requests: list[frozenset[str]] = []
+    dispatch = server._dispatch  # pyright: ignore[reportPrivateUsage]
+
+    def capture(request: dict[str, object]) -> dict[str, object]:
+        requests.append(frozenset(request))
+        return dispatch(request)
+
+    monkeypatch.setattr(server, "_dispatch", capture)
+    stop = threading.Event()
+    ready = threading.Event()
+    errors: list[BaseException] = []
+
+    def serve() -> None:
+        try:
+            server.serve(stop, ready_callback=ready.set)
+        except BaseException as exc:  # noqa: BLE001 - surface server failure
+            errors.append(exc)
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    assert ready.wait(timeout=5.0)
+    try:
+        client = DataServiceClient(
+            socket_path,
+            _identity(manifest),
+            request_timeout_seconds=5.0,
+        )
+        resumed = client.lease(0)
+        assert resumed is not None
+        assert resumed.record.path == order[1]
+        assert requests == [
+            frozenset({"op", "protocol_version", "session_identity"}),
+            frozenset({"op", "worker_id"}),
+        ]
+    finally:
+        stop.set()
+        thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    assert errors == []
+    assert not socket_path.exists()
 
 
 def test_mainset_has_one_process_owner(tmp_path: Path) -> None:
