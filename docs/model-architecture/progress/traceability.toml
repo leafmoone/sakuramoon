@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 93
+registry_revision = 94
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -8996,6 +8996,7 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/reviews/R002/test_report.json",
     "docs/model-architecture/reviews/R002/artifacts.json",
+    "docs/model-architecture/reviews/R002/post-remediation-binding.json",
     "docs/model-architecture/reviews/R002/dependency-licenses.json",
     "docs/model-architecture/reviews/R002/fresh-env-report.json",
     "docs/model-architecture/reviews/R002/cold-rebuild-report.json",

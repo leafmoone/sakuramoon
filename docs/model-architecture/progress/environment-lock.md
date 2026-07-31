@@ -79,6 +79,8 @@ env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=<isolated>/venv UV_CACHE_DIR=<isolated
 
 冷重建启动与当前 `pyproject.toml` SHA-256 分别为 `77ef980615f6a501330a6943bf2995632fdb7583a4eaf5747a7f08574566bd9a` 与 `b718f6c8c235af6df19d7fa10cd1f49348907844ad3ed5ffff65716d5dc87fc2`。对 `[project]`、`[dependency-groups]`、完整 `[tool.uv]` 生成排序紧凑 JSON 后，两份 canonical lock input 均为 1678 bytes，SHA-256 `7f10b80856f5e6d20b6637c416f753980a7347a3c3e64c601c289b0afb3035cf`；中途加入的 pytest/Pyright 配置不改变依赖重建结论。
 
+上段的“当前”仅指 cold-rebuild evidence 捕获时点，不是滚动工作树身份。提交 `9775755a24a6f3bd55e1e35562b3602a0bf968bb` 随后加入精确 `uv==0.12.0` 工具门槛；该提交后的 `pyproject.toml` 为 2531 bytes、SHA-256 `0fa1c0488ce0acbb573340f81f017a88a0fff2c5e530babf79f9efc31f6bbea3`，canonical lock input 为 1708 bytes、SHA-256 `a1a3559fcdf9454bd7a04a14664718a46d0f9b15e321202123a35bfe4df28d5d`。`uv.lock` 仍为 75101 bytes、SHA-256 `ee6a52d796e029a9a19db1e59011f8a801f3ea3b451f3a70b0190679dc2244ef`；依赖、source 与 build variables 未改变。不可变的时点映射见 `reviews/R002/post-remediation-binding.json`，既有 cold-rebuild artifact 保持原样。
+
 ## 存储与正式训练阻塞
 
 工作区 mount 是 NFSv3 PVC（`local_lock=none`），总量 400 GiB，验收时约 363 GiB 可用。容量已达到 300–500 GiB cache 区间的低端，但它不是已验证本地 NVMe，且尚未在 cache 高水位之外预留或实测 3 份 full raw checkpoint 空间。因此：
