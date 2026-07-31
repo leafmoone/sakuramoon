@@ -59,3 +59,9 @@ ok=true; 221 requirements; 221 source nodes; 67 production modules; 234 runtime 
 ```
 
 这些正向结果证明现有测试与 live registry 自洽；它们不抵消上述独立负探针暴露的合同缺口。
+
+## R002 post-remediation rereview (`4ade567`)
+
+本节追加于历史审查之后；历史 findings 与结论保持不变。对 `4ade567` 的独立复审结论为 **PASS**：`post-remediation-binding.json` 已区分 cold-rebuild 历史快照和 remediation 后工程输入，bytes/SHA-256、canonical lock-input 与未变化的 `uv.lock` 均独立复算一致。Foundation 逐任务 AI/模型正确性结论为 R001 remediation、R002、D001、C001、A001 全部 PASS。
+
+复验：Foundation targeted `156 passed`；trace `235/235`、0 errors；`uv lock --check`、Ruff、Pyright（0 errors/0 warnings）和 `git diff --check` 均通过。未关闭 GPU kernel、DDP/NCCL、长跑或正式 stage 门槛。不可变复审记录见 `r002_ai_rereview.md`。

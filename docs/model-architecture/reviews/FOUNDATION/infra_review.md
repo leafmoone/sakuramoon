@@ -56,3 +56,9 @@ ok=true; requirements=221; source_nodes=221; archive_files=16; production_module
 ```
 
 没有生成 `perf_baseline.json`/`perf_after.json`，因为这些 Foundation 任务不是训练性能任务；没有执行长跑或任何多卡项目。
+
+## R002 post-remediation rereview (`4ade567`)
+
+本节追加于历史审查之后；历史 findings 与结论保持不变。对 `4ade567` 的独立复审结论为 **PASS**：工程仍以 `[tool.uv] required-version = "==0.12.0"` 硬约束工具版本，环境锁已明确区分 cold-rebuild 捕获时点与 remediation 后输入，dependency sources/build variables 未变化，且已有 cold rebuild 确实使用 uv 0.12.0，因此无需重复冷构建。Foundation 逐任务 Infra/性能结论为 R001 remediation、R002、D001、C001、A001 全部 PASS。
+
+复验：Foundation targeted `156 passed`；trace `235/235`、0 errors；`uv lock --check`、Ruff、Pyright（0 errors/0 warnings）和 `git diff --check` 均通过。未关闭 GPU kernel、DDP/NCCL、长跑或正式 stage 门槛。不可变复审记录见 `r002_infra_rereview.md`。

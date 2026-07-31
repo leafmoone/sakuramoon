@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 94
+registry_revision = 95
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -8973,7 +8973,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-049"
 kind = "open_item"
-status = "implemented"
+status = "verified"
 profile = "environment_lock"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -9004,14 +9004,18 @@ implementation_paths = [
     "docs/model-architecture/reviews/R002/implementation_report.md",
     "docs/model-architecture/reviews/R002/ai_review.md",
     "docs/model-architecture/reviews/R002/infra_review.md",
+    "docs/model-architecture/reviews/FOUNDATION/r002_ai_rereview.md",
+    "docs/model-architecture/reviews/FOUNDATION/r002_infra_rereview.md",
     "docs/model-architecture/progress/time-log.jsonl",
     "tests/unit/docs/test_verify_traceability.py",
     "tests/unit/environment/test_uv_version.py",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+evidence_hardware = "CPU"
+evidence_artifacts = [
+    "docs/model-architecture/reviews/R002/post-remediation-binding.json",
+]
+ai_review = "docs/model-architecture/reviews/FOUNDATION/ai_review.md"
+infra_review = "docs/model-architecture/reviews/FOUNDATION/infra_review.md"
 config_keys = []
 modules = []
 reference_modules = []
