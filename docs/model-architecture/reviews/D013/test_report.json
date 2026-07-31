@@ -3,17 +3,18 @@
   "task_id": "D013",
   "hardware": "CPU",
   "targeted": {
-    "command": "uv run --frozen pytest -q tests/unit/data/test_buckets.py tests/unit/data/test_image_ops.py",
-    "passed": 37,
+    "command": "CUDA_VISIBLE_DEVICES= uv run --frozen pytest -q tests/unit/data/test_buckets.py tests/unit/data/test_image_ops.py",
+    "passed": 39,
     "failed": 0,
-    "duration_seconds": 2.22
+    "duration_seconds": 1.23
   },
   "full_cpu_suite": {
-    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
-    "passed": 499,
+    "command": "CUDA_VISIBLE_DEVICES= uv run --frozen pytest -q --ignore=tests/gpu",
+    "passed": 539,
     "failed": 0,
-    "warnings": 24,
-    "duration_seconds": 36.33
+    "skipped": 5,
+    "warnings": 10,
+    "duration_seconds": 51.12
   },
   "ruff": true,
   "pyright_errors": 0,
@@ -28,9 +29,12 @@
     "inclusive_mismatch_threshold": 0.001,
     "diagnostic_hard_failure": true,
     "bounded_counter_state": true,
-    "canonical_no_clobber_fsync_publication": true
+    "canonical_no_clobber_fsync_publication": true,
+    "post_link_failure_rolls_back_final": true,
+    "strict_scan_evidence_constructors": true,
+    "exact_integer_crop_seed": true
   },
-  "package_review_status": "scan_report_expansion_independent_review_pending",
+  "package_review_status": "scan_report_expansion_main_agent_passed_fresh_independent_rereview_unavailable",
   "invalid_retention_thresholds_rejected": [
     "NaN",
     "positive infinity",
@@ -45,6 +49,6 @@
     "100k decoded dimension check",
     "production retention and rejection distributions",
     "CPU throughput and Mage-VAE round trip",
-    "fresh independent AI/model and Infra/performance review"
+    "fresh independent AI/model and Infra/performance rereview"
   ]
 }

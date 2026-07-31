@@ -76,6 +76,17 @@ class BucketSampleCount:
     width: int
     samples: int
 
+    def __post_init__(self) -> None:
+        if (
+            type(self.height) is not int
+            or type(self.width) is not int
+            or type(self.samples) is not int
+            or self.height <= 0
+            or self.width <= 0
+            or self.samples < 0
+        ):
+            raise BucketError("bucket sample counts are invalid")
+
 
 @dataclass(frozen=True)
 class BucketScanReport:
@@ -88,13 +99,24 @@ class BucketScanReport:
 
     def __post_init__(self) -> None:
         rejection_total = self.no_upscale_rejections + self.retention_rejections
+        shapes = tuple(BucketShape(item.height, item.width) for item in self.bucket_counts)
+        expected_order = tuple(
+            sorted(shapes, key=lambda shape: (shape.aspect_log2, shape.height, shape.width))
+        )
         if (
             type(self.expected_samples) is not int
             or self.expected_samples <= 0
+            or type(self.total_samples) is not int
+            or type(self.assigned_samples) is not int
+            or type(self.no_upscale_rejections) is not int
+            or type(self.retention_rejections) is not int
             or self.total_samples != self.expected_samples
             or self.assigned_samples < 0
             or self.no_upscale_rejections < 0
             or self.retention_rejections < 0
+            or not shapes
+            or shapes != expected_order
+            or len(set(shapes)) != len(shapes)
             or self.assigned_samples + rejection_total != self.total_samples
             or sum(item.samples for item in self.bucket_counts)
             != self.assigned_samples

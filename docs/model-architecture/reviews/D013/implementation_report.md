@@ -19,5 +19,20 @@ exactly 100 mismatches, and raises `DimensionMismatchError` with the rejected re
 
 `write_image_scan_report` emits canonical JSON through a unique sibling temporary file,
 file fsync, atomic no-clobber hard link, temporary unlink, and parent-directory fsync.
+Main-agent review found that a failure of the final parent fsync left the hard-linked
+destination visible even though publication reported failure. The writer now tracks
+publication, removes that destination on a later `OSError`, best-effort fsyncs the
+rollback, and isolates temporary/final cleanup failures so they cannot mask the stable
+`ImageScanError`.
+
+The evidence dataclasses also now reject forged or malformed direct construction:
+bucket sample counts require positive exact-integer dimensions and non-negative exact
+integer counts; bucket reports require exact integer totals, a non-empty unique tuple
+in canonical aspect/height/width order, and consistent accounting. Dimension reports
+require exact counter/float/bool field types before recomputing their acceptance
+invariants. `resize_and_crop` accepts only an exact integer seed, excluding booleans.
+
 No production data was scanned and no report artifact was generated for this ordinary
-implementation task. Fresh independent review remains pending.
+implementation task. Two direct fresh-review starts failed with
+`agent thread limit reached`; the current conclusion is main-agent remediation
+acceptance, not an independent PASS.

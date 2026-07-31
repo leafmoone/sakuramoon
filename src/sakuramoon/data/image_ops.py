@@ -93,7 +93,16 @@ class DimensionScanReport:
     accepted: bool
 
     def __post_init__(self) -> None:
-        if self.total_samples <= 0:
+        if (
+            type(self.expected_samples) is not int
+            or type(self.total_samples) is not int
+            or type(self.matching_samples) is not int
+            or type(self.mismatch_samples) is not int
+            or type(self.mismatch_rate) is not float
+            or type(self.maximum_mismatch_rate) is not float
+            or type(self.accepted) is not bool
+            or self.total_samples <= 0
+        ):
             raise ImageScanError("dimension scan report is inconsistent")
         expected_rate = self.mismatch_samples / self.total_samples
         if (
@@ -206,6 +215,7 @@ def write_image_scan_report(report: ImageScanReport, destination: Path) -> str:
 
     payload = canonical_image_scan_report_bytes(report)
     temporary: Path | None = None
+    published = False
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists() or destination.is_symlink():
@@ -222,6 +232,7 @@ def write_image_scan_report(report: ImageScanReport, destination: Path) -> str:
             os.fsync(handle.fileno())
         try:
             os.link(temporary, destination)
+            published = True
         except FileExistsError:
             raise ImageScanReportExistsError("image scan report already exists") from None
         temporary.unlink()
@@ -234,10 +245,28 @@ def write_image_scan_report(report: ImageScanReport, destination: Path) -> str:
     except ImageScanError:
         raise
     except OSError:
+        if published:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                parent_fd = os.open(
+                    destination.parent, os.O_RDONLY | os.O_DIRECTORY
+                )
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
+            except OSError:
+                pass
         raise ImageScanError("image scan report could not be written") from None
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -249,6 +278,8 @@ def resize_and_crop(
 ) -> ProcessedImage:
     """Resize by cover and choose one deterministic uniform crop offset."""
 
+    if type(crop_seed) is not int:
+        raise ValueError("crop seed must be an integer")
     if image.size != (assignment.source_width, assignment.source_height):
         raise ValueError("image dimensions differ from the bucket assignment")
     resized = image.resize(

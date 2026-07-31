@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -78,6 +79,9 @@ def test_resize_crop_rejects_dimension_mismatch() -> None:
     )
     with pytest.raises(ValueError, match="differ"):
         resize_and_crop(image, assignment, crop_seed=1)
+
+    with pytest.raises(ValueError, match="crop seed"):
+        resize_and_crop(image, assignment, crop_seed=True)
 
 
 def test_prepare_image_runs_normalize_route_resize_crop() -> None:
@@ -222,3 +226,36 @@ def test_image_scan_report_is_canonical_fsynced_and_no_clobber(
     with pytest.raises(ImageScanReportExistsError, match="already exists"):
         write_image_scan_report(report, destination)
     assert destination.read_bytes() == payload
+
+
+def test_image_scan_report_rolls_back_final_when_parent_fsync_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bucket_report = scan_bucket_assignments(
+        (SourceDimensions(512, 512),),
+        (BucketShape(512, 512),),
+        min_crop_retention=0.8,
+        expected_samples=1,
+    )
+    report = ImageScanReport(
+        bucket_report,
+        scan_decoded_dimensions(_dimension_observations(0)),
+    )
+    destination = tmp_path / "image-scan.json"
+    real_fsync = os.fsync
+    calls = 0
+
+    def fail_parent_fsync(file_descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            raise OSError("injected parent fsync failure")
+        real_fsync(file_descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_parent_fsync)
+    with pytest.raises(ImageScanError, match="could not be written"):
+        write_image_scan_report(report, destination)
+
+    assert not destination.exists()
+    assert not tuple(tmp_path.glob(".image-scan.json.*.tmp"))

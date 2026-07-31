@@ -209,3 +209,19 @@ def test_bucket_scan_requires_exact_manifest_count_and_unique_shapes() -> None:
 def test_bucket_shape_rejects_invalid_dimensions(height: int, width: int) -> None:
     with pytest.raises(BucketError, match="bucket dimensions"):
         BucketShape(height, width)
+
+
+def test_bucket_scan_report_rejects_noncanonical_counts() -> None:
+    with pytest.raises(BucketError, match="sample counts"):
+        BucketSampleCount(height=512, width=512, samples=-1)
+
+    duplicate = BucketSampleCount(height=512, width=512, samples=1)
+    with pytest.raises(BucketError, match="inconsistent"):
+        BucketScanReport(
+            expected_samples=2,
+            total_samples=2,
+            assigned_samples=2,
+            no_upscale_rejections=0,
+            retention_rejections=0,
+            bucket_counts=(duplicate, duplicate),
+        )
