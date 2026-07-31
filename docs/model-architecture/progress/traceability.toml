@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 75
+registry_revision = 76
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -4347,6 +4347,9 @@ implementation_paths = [
     "tests/unit/objective/test_flow.py",
     "tests/gpu/objective/test_flow_sampling.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/M035.md",
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -4364,12 +4367,15 @@ reference_modules = []
 tests = [
     "tests/**/objective*",
     "tests/**/sampling*",
+    "tests/unit/objective/test_flow.py",
 ]
 benchmarks = [
     "benchmarks/sampling/**",
 ]
 artifacts = [
     "artifacts/objective/**",
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
 ]
 not_applicable_fields = [
     "reference_modules",
@@ -4397,6 +4403,9 @@ implementation_paths = [
     "tests/unit/objective/test_flow.py",
     "tests/gpu/objective/test_flow_sampling.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/M035.md",
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -4415,12 +4424,15 @@ reference_modules = []
 tests = [
     "tests/**/objective*",
     "tests/**/sampling*",
+    "tests/unit/objective/test_flow.py",
 ]
 benchmarks = [
     "benchmarks/sampling/**",
 ]
 artifacts = [
     "artifacts/objective/**",
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
 ]
 not_applicable_fields = [
     "reference_modules",
@@ -4453,10 +4465,15 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/progress/tasks/M033.md",
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
+    "docs/model-architecture/progress/tasks/M035.md",
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
 ]
 evidence_hardware = "1GPU"
 evidence_artifacts = [
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
 ]
 ai_review = "docs/model-architecture/reviews/DENSE/ai_review.md"
 infra_review = "docs/model-architecture/reviews/DENSE/infra_review.md"
@@ -4472,12 +4489,15 @@ reference_modules = []
 tests = [
     "tests/**/objective*",
     "tests/**/sampling*",
+    "tests/unit/objective/test_flow.py",
 ]
 benchmarks = [
     "benchmarks/sampling/**",
 ]
 artifacts = [
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
     "artifacts/objective/**",
 ]
 not_applicable_fields = [
@@ -4506,6 +4526,9 @@ implementation_paths = [
     "tests/unit/objective/test_flow.py",
     "tests/gpu/objective/test_flow_sampling.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/M035.md",
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -4524,12 +4547,15 @@ reference_modules = []
 tests = [
     "tests/**/objective*",
     "tests/**/sampling*",
+    "tests/unit/objective/test_flow.py",
 ]
 benchmarks = [
     "benchmarks/sampling/**",
 ]
 artifacts = [
     "artifacts/objective/**",
+    "docs/model-architecture/reviews/M035/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M035/test_report.json",
 ]
 not_applicable_fields = [
     "reference_modules",
