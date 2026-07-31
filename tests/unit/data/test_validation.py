@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tarfile
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from sakuramoon.data.validation import (
     VALIDATION_SAMPLE_COUNT,
     ValidationBundleExistsError,
     ValidationEntry,
+    ValidationPublicationError,
     ValidationSelection,
     ValidationSelectionError,
     ValidationShardMember,
@@ -221,6 +223,31 @@ def test_validation_bundle_rejects_id_drift_and_cleans_temporary_directory(
             _validation_samples(tuple(ids)),
             destination,
         )
+
+    assert not destination.exists()
+    assert not tuple(tmp_path.glob(".validation.*.tmp"))
+
+
+def test_validation_bundle_rolls_back_final_when_parent_fsync_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    selection = select_validation_records(_records(), seed=17, aspect_bucket=_bucket)
+    ids = tuple(entry.id for entry in selection.entries)
+    destination = tmp_path / "validation"
+    real_fsync = os.fsync
+    calls = 0
+
+    def fail_parent_fsync(file_descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls >= 4:
+            raise OSError("injected parent fsync failure")
+        real_fsync(file_descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_parent_fsync)
+    with pytest.raises(ValidationPublicationError, match="could not be published"):
+        write_validation_bundle(selection, _validation_samples(ids), destination)
 
     assert not destination.exists()
     assert not tuple(tmp_path.glob(".validation.*.tmp"))

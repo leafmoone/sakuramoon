@@ -23,7 +23,14 @@ no value was guessed. The production aspect-bucket mapping remains owned by D013
 is supplied through a small callback. No database, identity registry, capability
 object, distributed coordination, or external compatibility layer was added.
 
-The earlier Data package review found and accepted a weak bucket-key check. That
-conclusion predates the explicit mapping and bundle publisher. Production field names,
-full scans, real validation payloads, and a fresh independent review remain pending;
-no current independent PASS is claimed.
+The earlier Data package review found and accepted a weak bucket-key check. Main-agent
+review of the later explicit mapping and bundle publisher found that failure of the
+parent fsync after directory rename left the final bundle visible even though the API
+reported failure. Publication now tracks rename completion, removes the task's fixed
+manifest/tar/final directory on later `OSError`, and best-effort fsyncs that rollback.
+Cleanup failures are isolated so one unlink cannot mask the stable publication error.
+
+The corrected implementation passed 32 targeted CPU contracts, Ruff and strict
+Pyright. Production field names, full scans and real validation payloads remain
+pending. Two direct fresh-review starts failed with `agent thread limit reached`; this
+is main-agent remediation acceptance, not an independent PASS.

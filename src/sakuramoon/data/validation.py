@@ -329,6 +329,18 @@ def _write_validation_shard(
     return writer.sha256, writer.bytes_written
 
 
+def _remove_bundle_directory(root: Path) -> None:
+    for name in ("validation.tar", "validation_manifest.jsonl"):
+        try:
+            (root / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+
+
 def write_validation_bundle(
     selection: ValidationSelection,
     samples: Iterable[ValidationShardSample],
@@ -341,6 +353,7 @@ def write_validation_bundle(
     temporary: Path | None = None
     manifest_path: Path | None = None
     shard_path: Path | None = None
+    published = False
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists() or destination.is_symlink():
@@ -373,6 +386,7 @@ def write_validation_bundle(
                 "validation bundle destination already exists"
             )
         os.rename(temporary, destination)
+        published = True
         temporary = None
         parent_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -382,19 +396,24 @@ def write_validation_bundle(
     except (ValidationSelectionError, ValidationPublicationError):
         raise
     except OSError:
+        if published:
+            _remove_bundle_directory(destination)
+            try:
+                parent_fd = os.open(
+                    destination.parent, os.O_RDONLY | os.O_DIRECTORY
+                )
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
+            except OSError:
+                pass
         raise ValidationPublicationError(
             "validation bundle could not be published"
         ) from None
     finally:
         if temporary is not None:
-            if shard_path is not None:
-                shard_path.unlink(missing_ok=True)
-            if manifest_path is not None:
-                manifest_path.unlink(missing_ok=True)
-            try:
-                temporary.rmdir()
-            except OSError:
-                pass
+            _remove_bundle_directory(temporary)
 
     published_manifest = destination / "validation_manifest.jsonl"
     published_shard = destination / "validation.tar"
