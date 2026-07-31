@@ -20,10 +20,10 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - 低中风险实现由里程碑包共享 `ai_review.md` 与 `infra_review.md` 并逐 ID 给出结论；高风险任务和正式 stage canary 仍分别产出双审。普通 CPU 任务不要求独立 timing artifact，真实性能变更仍须提供同配置 before/after 数据。
 # 1. 仅剩的待用户决定
 ## 1.1 Dropout 数值
-- [ ] 填写 general、artist、character、copyright、nsfw、candidate_source 的概率。
-- [ ] 填写 long_names、long_no_names、short_vibes、nl2、nl3；五项必须逐项存在且数值相同。
+- [x] 固定 `general=0.1`、`artist=0.1`、`character=0.2`、`copyright=0.1`、`nsfw=0.1`、`candidate_source=0.3`。
+- [x] 固定 `long_names=0.3`、`long_no_names=0.3`、`short_vibes=0.3`、`nl2=0.3`、`nl3=0.3`；五项逐项存在且数值相同。
 - [ ] 用至少 100k 样本 dry run 验证 `all_condition=0.10` 命中率为 `10%±0.5` 个百分点，并分别报告最终空 body 率和各 component 命中率。
-- [ ] 确认所有字段无代码默认值、未知 key、范围错误或 NL 值不一致时启动即失败。
+- [x] 所有字段无代码默认值；缺失、未知 key、错误类型或任一批准值漂移时启动即失败。
 # 2. 已关闭，不再重复确认
 - [x] 官方 Mage-VAE、posterior mean、在线编码、原生 128ch latent、无额外 patchify、严格 no-upscale。
 - [x] 指定 ModelScope Qwen checkpoint、Krea 2 式手工 framing、无 thinking、无有效 EOT、空 body CFG 模板。

@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 72
+registry_revision = 73
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -42,10 +42,26 @@ new_sha256 = "125172c8bd1e3031e2866389f01871582ee200c46b5930f00361e1dcecc05438"
 changed_at = "2026-07-31"
 summary = "Align open evidence requirements with package reviews and ordinary CPU timing simplification."
 
+[[changes]]
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+revision = 5
+previous_sha256 = "12d95d33686ad07fbf83833c9b57770ef8e078eb55d830e9afcde97944ceed44"
+new_sha256 = "ef81bc9b21a6770e4140a0b47f7508a0c136f734f27ef5d462fd302cd7928521"
+changed_at = "2026-07-31"
+summary = "Lock all caption dropout probabilities as explicit fixed values."
+
+[[changes]]
+source_path = "docs/model-architecture/current/open-items.md"
+revision = 4
+previous_sha256 = "125172c8bd1e3031e2866389f01871582ee200c46b5930f00361e1dcecc05438"
+new_sha256 = "7ed5dcd34f365436b6a961c615c311e0fe3728bd2ef3b4972ca82d53c08dabde"
+changed_at = "2026-07-31"
+summary = "Close the caption probability decisions while retaining the production distribution dry run."
+
 [[sources]]
 path = "docs/model-architecture/current/confirmed-decisions.md"
 kind = "confirmed"
-revision = 4
+revision = 5
 include_top_headings = [
     "0.",
     "1.",
@@ -66,13 +82,13 @@ include_top_headings = [
 excluded_top_headings = [
     "15.",
 ]
-sha256 = "12d95d33686ad07fbf83833c9b57770ef8e078eb55d830e9afcde97944ceed44"
+sha256 = "ef81bc9b21a6770e4140a0b47f7508a0c136f734f27ef5d462fd302cd7928521"
 initial_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
 
 [[sources]]
 path = "docs/model-architecture/current/open-items.md"
 kind = "open_items"
-revision = 3
+revision = 4
 include_top_headings = [
     "0.",
     "1.",
@@ -89,7 +105,7 @@ include_top_headings = [
 excluded_top_headings = [
     "11.",
 ]
-sha256 = "125172c8bd1e3031e2866389f01871582ee200c46b5930f00361e1dcecc05438"
+sha256 = "7ed5dcd34f365436b6a961c615c311e0fe3728bd2ef3b4972ca82d53c08dabde"
 initial_sha256 = "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6"
 
 [[sources]]
@@ -705,19 +721,24 @@ name = "dropout_decision"
 owner_tasks = [
     "C002",
     "D014",
+    "D016",
 ]
 config_keys = [
     "caption.dropout.*",
 ]
 modules = [
+    "src/sakuramoon/config/schema.py",
     "src/sakuramoon/data/caption.py",
 ]
 reference_modules = []
 tests = [
     "tests/**/caption*",
+    "tests/unit/config/**",
 ]
 benchmarks = []
 artifacts = [
+    "docs/model-architecture/progress/tasks/D016.md",
+    "docs/model-architecture/reviews/D016/test_report.json",
     "artifacts/data/caption_dry_run*",
 ]
 hardware = "CPU"
@@ -6138,7 +6159,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "DEC-001"
 kind = "requirement"
-status = "blocked"
+status = "implemented"
 profile = "dropout_decision"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -6147,13 +6168,19 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "073ce2365fe00ecd94459f503bba1f93ccea021a19f208b5b4cf25a03a960b8d"
 source_occurrence = 0
-blocked_by = [
-    "DECISION-DROPOUT-VALUES",
-]
+blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D016"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/config/test_schema.py",
+    "tests/contracts/config/test_runtime_contract.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D016.md",
+    "docs/model-architecture/reviews/D016/test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -6162,14 +6189,18 @@ config_keys = [
     "caption.dropout.*",
 ]
 modules = [
+    "src/sakuramoon/config/schema.py",
     "src/sakuramoon/data/caption.py",
 ]
 reference_modules = []
 tests = [
     "tests/**/caption*",
+    "tests/unit/config/**",
 ]
 benchmarks = []
 artifacts = [
+    "docs/model-architecture/progress/tasks/D016.md",
+    "docs/model-architecture/reviews/D016/test_report.json",
     "artifacts/data/caption_dry_run*",
 ]
 not_applicable_fields = [
@@ -6821,7 +6852,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-007"
 kind = "open_item"
-status = "blocked"
+status = "implemented"
 profile = "dropout_decision"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -6831,13 +6862,19 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "50480a341ba178db17d449176ae445971a7ded336c9165d12966fa3fe281e119"
 source_occurrence = 0
-blocked_by = [
-    "DECISION-DROPOUT-VALUES",
-]
+blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D016"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/config/test_schema.py",
+    "tests/contracts/config/test_runtime_contract.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D016.md",
+    "docs/model-architecture/reviews/D016/test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -6846,14 +6883,18 @@ config_keys = [
     "caption.dropout.*",
 ]
 modules = [
+    "src/sakuramoon/config/schema.py",
     "src/sakuramoon/data/caption.py",
 ]
 reference_modules = []
 tests = [
     "tests/**/caption*",
+    "tests/unit/config/**",
 ]
 benchmarks = []
 artifacts = [
+    "docs/model-architecture/progress/tasks/D016.md",
+    "docs/model-architecture/reviews/D016/test_report.json",
     "artifacts/data/caption_dry_run*",
 ]
 not_applicable_fields = [
@@ -6865,7 +6906,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-008"
 kind = "open_item"
-status = "blocked"
+status = "implemented"
 profile = "dropout_decision"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -6875,13 +6916,19 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "8bd0451c02782ea6a78d00addc0ab47d3c4192982b92c661e93e9e1431611ea4"
 source_occurrence = 0
-blocked_by = [
-    "DECISION-DROPOUT-VALUES",
-]
+blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D016"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/config/test_schema.py",
+    "tests/contracts/config/test_runtime_contract.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D016.md",
+    "docs/model-architecture/reviews/D016/test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -6890,14 +6937,18 @@ config_keys = [
     "caption.dropout.*",
 ]
 modules = [
+    "src/sakuramoon/config/schema.py",
     "src/sakuramoon/data/caption.py",
 ]
 reference_modules = []
 tests = [
     "tests/**/caption*",
+    "tests/unit/config/**",
 ]
 benchmarks = []
 artifacts = [
+    "docs/model-architecture/progress/tasks/D016.md",
+    "docs/model-architecture/reviews/D016/test_report.json",
     "artifacts/data/caption_dry_run*",
 ]
 not_applicable_fields = [
@@ -6909,7 +6960,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-009"
 kind = "open_item"
-status = "blocked"
+status = "planned"
 profile = "dropout_decision"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -6919,9 +6970,7 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "1ce3a022a785b6936b7f2db957c4b08ebaed26298e828127586eb1e91ee913ea"
 source_occurrence = 0
-blocked_by = [
-    "DECISION-DROPOUT-VALUES",
-]
+blocked_by = []
 alias_of = ""
 superseded_by = ""
 implementation_commit_ref = ""
@@ -6934,14 +6983,18 @@ config_keys = [
     "caption.dropout.*",
 ]
 modules = [
+    "src/sakuramoon/config/schema.py",
     "src/sakuramoon/data/caption.py",
 ]
 reference_modules = []
 tests = [
     "tests/**/caption*",
+    "tests/unit/config/**",
 ]
 benchmarks = []
 artifacts = [
+    "docs/model-architecture/progress/tasks/D016.md",
+    "docs/model-architecture/reviews/D016/test_report.json",
     "artifacts/data/caption_dry_run*",
 ]
 not_applicable_fields = [
@@ -6953,7 +7006,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-010"
 kind = "open_item"
-status = "blocked"
+status = "implemented"
 profile = "dropout_decision"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -6963,13 +7016,19 @@ heading_path = [
 node_kind = "list_item"
 source_fingerprint = "4c6db6be75b60e130b4bc6cb0e15768b7ea8c2af37666a5b0c1adb2b76c98b05"
 source_occurrence = 0
-blocked_by = [
-    "DECISION-DROPOUT-VALUES",
-]
+blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D016"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/config/test_schema.py",
+    "tests/contracts/config/test_runtime_contract.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D016.md",
+    "docs/model-architecture/reviews/D016/test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
@@ -6978,14 +7037,18 @@ config_keys = [
     "caption.dropout.*",
 ]
 modules = [
+    "src/sakuramoon/config/schema.py",
     "src/sakuramoon/data/caption.py",
 ]
 reference_modules = []
 tests = [
     "tests/**/caption*",
+    "tests/unit/config/**",
 ]
 benchmarks = []
 artifacts = [
+    "docs/model-architecture/progress/tasks/D016.md",
+    "docs/model-architecture/reviews/D016/test_report.json",
     "artifacts/data/caption_dry_run*",
 ]
 not_applicable_fields = [

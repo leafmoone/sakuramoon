@@ -94,21 +94,20 @@ qwen_dense_lengths = [98, 162, 226, 290, 354, 418, 482, 546] # fixed
 
 [caption.dropout]
 all_condition = 0.10 # fixed
-# The following six probabilities remain undecided; no number is implied.
-general = "DECISION_REQUIRED"
-artist = "DECISION_REQUIRED"
-character = "DECISION_REQUIRED"
-copyright = "DECISION_REQUIRED"
-nsfw = "DECISION_REQUIRED"
-candidate_source = "DECISION_REQUIRED"
+general = 0.1 # fixed
+artist = 0.1 # fixed
+character = 0.2 # fixed
+copyright = 0.1 # fixed
+nsfw = 0.1 # fixed
+candidate_source = 0.3 # fixed
 
 [caption.dropout.nl]
-# These five probabilities remain undecided and must eventually be equal.
-long_names = "DECISION_REQUIRED"
-long_no_names = "DECISION_REQUIRED"
-short_vibes = "DECISION_REQUIRED"
-nl2 = "DECISION_REQUIRED"
-nl3 = "DECISION_REQUIRED"
+# All five NL branches use the same fixed dropout probability.
+long_names = 0.3 # fixed
+long_no_names = 0.3 # fixed
+short_vibes = 0.3 # fixed
+nl2 = 0.3 # fixed
+nl3 = 0.3 # fixed
 
 [model.text]
 hidden_state_blocks = [2, 4, 8, 12, 16, 20, 24] # fixed, after block

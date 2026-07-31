@@ -26,8 +26,8 @@ def _out_of_range(data: dict[str, Any]) -> None:
     data["caption"]["dropout"]["general"] = 1.01
 
 
-def _mismatched_nl(data: dict[str, Any]) -> None:
-    data["caption"]["dropout"]["nl"]["nl3"] = 0.03
+def _changed_fixed_nl(data: dict[str, Any]) -> None:
+    data["caption"]["dropout"]["nl"]["nl3"] = 0.2
 
 
 def _fixed_architecture_change(data: dict[str, Any]) -> None:
@@ -47,7 +47,7 @@ INVALID_MUTATIONS: list[tuple[Callable[[dict[str, Any]], None], str]] = [
     (_remove_required, "missing"),
     (_wrong_type, "int_type"),
     (_out_of_range, "less_than_equal"),
-    (_mismatched_nl, "all five NL dropout"),
+    (_changed_fixed_nl, "greater_than_equal"),
     (_fixed_architecture_change, "literal_error"),
     (_invalid_transition, "approved transition graph"),
     (_world_size_mismatch, "distributed and stage world_size"),
@@ -60,10 +60,48 @@ def test_valid_synthetic_fixture_is_strict_and_frozen(
     config = RuntimeConfig.model_validate(valid_payload)
 
     assert config.caption.dropout.all_condition == 0.1
+    assert config.caption.dropout.general == 0.1
+    assert config.caption.dropout.artist == 0.1
+    assert config.caption.dropout.character == 0.2
+    assert config.caption.dropout.copyright == 0.1
+    assert config.caption.dropout.nsfw == 0.1
+    assert config.caption.dropout.candidate_source == 0.3
+    assert set(config.caption.dropout.nl.model_dump().values()) == {0.3}
     assert config.caption.condition_buckets[-1] == 512
     assert config.model.packing.modality_init_std == 0.02
     with pytest.raises(ValidationError, match="frozen"):
         config.run.seed = 5
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("caption", "dropout", "all_condition"), 0.2),
+        (("caption", "dropout", "general"), 0.2),
+        (("caption", "dropout", "artist"), 0.2),
+        (("caption", "dropout", "character"), 0.1),
+        (("caption", "dropout", "copyright"), 0.2),
+        (("caption", "dropout", "nsfw"), 0.2),
+        (("caption", "dropout", "candidate_source"), 0.2),
+        (("caption", "dropout", "nl", "long_names"), 0.2),
+        (("caption", "dropout", "nl", "long_no_names"), 0.2),
+        (("caption", "dropout", "nl", "short_vibes"), 0.2),
+        (("caption", "dropout", "nl", "nl2"), 0.2),
+        (("caption", "dropout", "nl", "nl3"), 0.2),
+    ],
+)
+def test_caption_dropout_values_are_exactly_locked(
+    valid_payload: dict[str, Any], path: tuple[str, ...], value: float
+) -> None:
+    current = valid_payload
+    for component in path[:-1]:
+        child = current[component]
+        assert isinstance(child, dict)
+        current = cast(dict[str, Any], child)
+    current[path[-1]] = value
+
+    with pytest.raises(ValidationError):
+        RuntimeConfig.model_validate(valid_payload)
 
 
 @pytest.mark.parametrize(

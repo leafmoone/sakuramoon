@@ -30,7 +30,6 @@ def _require_toml_float(value: object) -> object:
 StringTuple = Annotated[tuple[str, ...], BeforeValidator(_toml_array_to_tuple)]
 IntTuple = Annotated[tuple[int, ...], BeforeValidator(_toml_array_to_tuple)]
 ExactFloat = Annotated[float, BeforeValidator(_require_toml_float)]
-Probability = Annotated[ExactFloat, Field(ge=0.0, le=1.0)]
 PositiveFloat = Annotated[ExactFloat, Field(gt=0.0)]
 NonNegativeFloat = Annotated[ExactFloat, Field(ge=0.0)]
 PositiveInt = Annotated[int, Field(gt=0)]
@@ -44,6 +43,8 @@ SecretEnvName = Annotated[
 FixedZero = Annotated[ExactFloat, Field(ge=0.0, le=0.0)]
 FixedOne = Annotated[ExactFloat, Field(ge=1.0, le=1.0)]
 FixedPointOne = Annotated[ExactFloat, Field(ge=0.1, le=0.1)]
+FixedPointTwo = Annotated[ExactFloat, Field(ge=0.2, le=0.2)]
+FixedPointThree = Annotated[ExactFloat, Field(ge=0.3, le=0.3)]
 FixedPointEight = Annotated[ExactFloat, Field(ge=0.8, le=0.8)]
 FixedFour = Annotated[ExactFloat, Field(ge=4.0, le=4.0)]
 FixedSixteen = Annotated[ExactFloat, Field(ge=16.0, le=16.0)]
@@ -189,11 +190,11 @@ class DataConfig(StrictModel):
 
 
 class NlDropoutConfig(StrictModel):
-    long_names: Probability
-    long_no_names: Probability
-    short_vibes: Probability
-    nl2: Probability
-    nl3: Probability
+    long_names: FixedPointThree
+    long_no_names: FixedPointThree
+    short_vibes: FixedPointThree
+    nl2: FixedPointThree
+    nl3: FixedPointThree
 
     @model_validator(mode="after")
     def require_equal_probabilities(self) -> NlDropoutConfig:
@@ -211,12 +212,12 @@ class NlDropoutConfig(StrictModel):
 
 class CaptionDropoutConfig(StrictModel):
     all_condition: FixedPointOne
-    general: Probability
-    artist: Probability
-    character: Probability
-    copyright: Probability
-    nsfw: Probability
-    candidate_source: Probability
+    general: FixedPointOne
+    artist: FixedPointOne
+    character: FixedPointTwo
+    copyright: FixedPointOne
+    nsfw: FixedPointOne
+    candidate_source: FixedPointThree
     nl: NlDropoutConfig
 
 

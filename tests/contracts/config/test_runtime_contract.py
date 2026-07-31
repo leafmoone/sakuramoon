@@ -11,7 +11,7 @@ REPOSITORY_ROOT = Path(__file__).parents[3]
 
 
 def test_documentation_example_is_parseable_but_not_runtime_acceptable() -> None:
-    with pytest.raises(ConfigurationError, match="unresolved.*caption.dropout"):
+    with pytest.raises(ConfigurationError, match="unresolved decision/benchmark"):
         load_config(
             Path("examples/all_options.example.toml"),
             config_root=REPOSITORY_ROOT / "config",

@@ -15,7 +15,7 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 1. **确定方案：**会话中已明确批准，或者是被后续组件正式继承的接口。
 2. **已取代：**早期方案与后续决定冲突时，只保留后者作为实现依据。
 3. **待验证：**结构已经决定，但仍需单元测试、canary、目标机 benchmark 或质量验收。
-4. **尚未决定：**只剩除整体条件外的 dropout 数值，见第 13 节与配套清单。Artist 路径与文本长度桶已由后续会话锁定。
+4. **已关闭的输入决定：**caption dropout 数值已由 D016 锁定，见第 13 节与配套清单。Artist 路径与文本长度桶也已由后续会话锁定。
 5. 实现配置不得从原组件的候选、推荐、早期记录或历史决定中自动取值。
 6. **本地模型资产边界：**Qwen TE 与 Mage-VAE 已分别位于 `model/qwen_3.5_2B/` 和 `model/vae/`。代码只检查固定目录和加载必需文件是否存在，然后直接本地加载；不维护资产 manifest，不计算或核对本地文件 bytes/SHA-256，不建立 capability、TOCTOU 或防伪造层。禁止自动下载、缺失补下载、联网替换或 fallback，必需文件缺失时在加载前硬失败。
 7. **参考工程硬边界：**`reference/` 仅供人工理解和对照，可以完全不使用。生产代码、测试、preflight、训练和运行时绝对不得 import、执行或调用其中任何代码；实现必须以本地现行决定与独立实现为准。
@@ -83,7 +83,7 @@ Describe the image by detailing the color, shape, size, texture, quantity, text,
 - 所有非空 tags 用精确的 `, ` 连接；tags 与 NL 同时存在时使用双换行 `\n\n`。不加入 `Tags:`、`Description:` 或类别标签。
 - 五个 NL 候选分支只在当前可用分支中等概率选一个；单样本最多包含一个 NL。
 - `candidate_tags` 不是第五类文本，而是四类 tag 的删除掩码；candidate dropout 命中时跨四类删除 canonical match，不追加副本、不改 NL。
-- `all_condition` dropout 固定为 0.10；命中后 body 为空且 style 使用 null tokens。其余类别、candidate 和 NL dropout 数值仍待配置。
+- `all_condition` dropout 固定为 0.10；命中后 body 为空且 style 使用 null tokens。`general=0.1`、`artist=0.1`、`character=0.2`、`copyright=0.1`、`nsfw=0.1`、`candidate_source=0.3`，五个 NL key 均为 `0.3`。
 - 截断只在完整字段或完整 tag 边界发生：优先保留高优先级 tags，先裁 NL 尾部，禁止半个 tag/token 语义单元。
 来源：<mention-page url="https://app.notion.com/p/3aaae967ecf281fba3cfe0f5dc53fece"/> · <mention-page url="https://app.notion.com/p/3aaae967ecf281db800cfb1d6545f880"/>
 # 5. 文本聚合与 Style 分支
@@ -170,7 +170,7 @@ Describe the image by detailing the color, shape, size, texture, quantity, text,
 - 低中风险实现按里程碑包统一完成 AI/模型正确性与 Infra/性能审查；kernel、optimizer、DDP、checkpoint、growth/transition、训练 step、故障注入和正式 stage canary 保持逐任务独立双审。证据按风险提供，普通 CPU 任务不要求独立 timing artifact，before/after 只用于真实性能变更。
 来源：<mention-page url="https://app.notion.com/p/3abae967ecf281ebadadd176e1b492db"/>
 # 13. 尚未决定的接口
-1. **Dropout 数值：**除 `all_condition=0.10` 外，general、artist、character、copyright、nsfw、candidate_source 和五个 NL key 的概率。
+1. **Dropout 数值已关闭：**`all_condition=0.10`、`general=0.1`、`artist=0.1`、`character=0.2`、`copyright=0.1`、`nsfw=0.1`、`candidate_source=0.3`；`long_names`、`long_no_names`、`short_vibes`、`nl2`、`nl3` 均为 `0.3`。
 Artist 只走 style 分支、在线 segment metadata、无第二次 Qwen/离线 style cache，以及 `text_condition_max=512` 与 8 个长度桶均已锁定，不再作为待确认项；后续变更应作为新的架构变更记录。
 # 14. 明确覆盖关系
 - “约 1B” → **1.85B–1.90B**。
@@ -188,6 +188,7 @@ Artist 只走 style 分支、在线 segment metadata、无第二次 Qwen/离线 
 - 2026-07-29：补入架构图评审结论：clean latent `x`、modality/packing/RoPE 分层、独立 final modulation head、velocity-space CFG、双重 zero-init 与固定 growth alpha。
 - 2026-07-29：用户锁定 Artist 仅进入 style 分支；serializer 在线记录 segment/token indices，同一 Qwen 只前向一次，不做 style cache。文本预算固定为 condition 512 和 8 桶，不因 Artist 路径变化重新扫描。
 - 2026-07-30：用户确认 Qwen TE 与 Mage-VAE 为 `model/` 下已准备本地资产，锁定只校验/只本地加载且禁止下载或 fallback；`reference/` 收窄为纯人工理解/对照，禁止任何工程路径导入、执行或调用其中代码。
+- 2026-07-31：用户锁定全部 caption dropout 数值；D016 将其绑定为无默认、不可漂移的严格 TOML schema，100k 生产分布 dry run 仍作为独立验证项。
 - 会话证据：Codex 会话导出附件 `pasted-text.txt`；原组件页保留讨论过程和外部参考。
 ## Notion 原始组件
 - <mention-page url="https://app.notion.com/p/3aaae967ecf281ba8f73fac2f9e4c4f3"/>

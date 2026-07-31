@@ -71,7 +71,7 @@
 2026-07-29 用户批准以下执行协议。它只减少代理调用、重复文档与重复测试，不改变架构、凭据安全、生产训练或真实硬件门槛。
 
 1. 每个任务 ID 仍是独立实现与回滚单元。主代理创建 `progress/tasks/<TASK_ID>.md`，每个 ID 保持独立状态、diff、针对性测试和原子 commit。
-2. 低中风险任务按包复用同一个实现代理：Foundation=`R002,D001,C001,A001`；Data=`D010-D015`；Encoders/Conditioning=`T020-T024`；Dense Model=`M030-M033`；Training Utilities=`T051-T053`。A001 只保留已完成的最小本地资产边界；A002 重型审计保持撤销。
+2. 低中风险任务按包复用同一个实现代理：Foundation=`R002,D001,C001,A001`；Data=`D010-D016`；Encoders/Conditioning=`T020-T024`；Dense Model=`M030-M034`；Training Utilities=`T051-T053`。A001 只保留已完成的最小本地资产边界；A002 重型审计保持撤销。
    包级证据目录依次固定为 `reviews/FOUNDATION/`、`reviews/DATA/`、`reviews/ENCODERS/`、`reviews/DENSE/` 和 `reviews/TRAINING_UTILITIES/`。
 3. 低中风险任务从逐任务审查改为包级里程碑审查。审查报告仍逐 ID 分别给出 AI/模型正确性与 Infra/性能结论；问题只修复受影响任务，不重跑无关任务。
 4. `K001`、optimizer `T040`、DDP `T041`、checkpoint `T042`、growth/transition `T043`、训练 step `T050`、故障注入 `T054` 和所有正式 stage canary 保持单独实现、独立 AI reviewer、独立 Infra reviewer。
@@ -172,7 +172,7 @@ sakuramoon/
 | `kernels/compile/profiling/failure` | FA4/SDPA policy、compile gate、profile 采样和硬失败 |
 | `logging/wandb/timing/evaluation` | loss/grad/perf、local spool、FID/IS 周期和正式协议 |
 
-除 `all_condition=0.10` 外的 dropout 仍是 `DECISION_REQUIRED`。可运行的 `train_s0.toml` 不得编造这些值；`C002` 在用户明确决定前保持阻塞。
+全部 caption dropout 已由 D016 锁定为显式 TOML 固定值。`C002` 不再受用户 dropout 决定阻塞，但仍须独立完成 stage overlays 与 benchmark 后填写项。
 
 ## 7. Phase 0：仓库、环境、文档和配置
 
@@ -311,6 +311,15 @@ sakuramoon/
 - **验证：** 1/2/3 workers与 queue sweep；无 unbounded queue、重复 decode/tokenize、validation leak、跨 batch activation cache；resume 语义与 `D012` 一致。
 - **完成证据：** pipeline contract、stage timing、CPU/RSS/pinned memory report。
 - **GPU：** 最终 1GPU 联测。
+
+### D016：锁定 caption dropout 配置合同
+
+- **依赖：** D014 caption 协议、C001 strict schema 与 G001 向前治理规则已完成；不依赖模型 packing rereview。
+- **实现路径：** `config/schema.py`、`config/examples/all_options.example.toml`、配置合同测试、现行决定与 trace registry。
+- **动作：** 精确锁定 `all_condition/general/artist/copyright/nsfw=0.1`、`character=0.2`、`candidate_source=0.3`，五个 NL key 均为 `0.3`；字段仍全部必填且无代码默认值。
+- **验证：** 示例 TOML 使用批准值；缺失、未知 key、整数冒充 float 或任一数值漂移均启动失败。100k 生产分布 dry run 单独保持 pending。
+- **完成证据：** D016 task、针对性 CPU test report 与原子 commit；不回写 D014 历史证据，不创建独立 timing artifact。
+- **GPU：** 无。
 
 ## 9. Phase 2：冻结编码器与条件分支
 
@@ -583,11 +592,11 @@ sakuramoon/
   ↓
 R001 → R002 → D001 → C001
                          ↓
-D010 → D011 → D012 → D013 → D014 → D015 → G001
+D010 → D011 → D012 → D013 → D014 → D015 → G001 → D016
                                               ↓
 T020 + T021 → T022 + T023 → T024
   ↓
-M030 → M031 → M032 → M033 → K001
+M030 → M031 → M032 → M033 → M034 → K001
   ↓
 T040 → T041 → T042 → T043 → T050 → T051/T052/T053 → T054
   ↓
@@ -602,11 +611,7 @@ A001：只保留已完成的最小本地资产边界；A002 重型审计保持�
 
 ## 16. 开工前仍需用户决定
 
-唯一架构输入阻塞项仍是 dropout：
-
-- `general`、`artist`、`character`、`copyright`、`nsfw`、`candidate_source`。
-- `long_names`、`long_no_names`、`short_vibes`、`nl2`、`nl3`，五项必须逐项存在且值相同。
-- `all_condition=0.10` 已锁定。
+D016 已关闭唯一 caption 架构输入阻塞项。批准值为 `all_condition/general/artist/copyright/nsfw=0.1`、`character=0.2`、`candidate_source=0.3`，五个 NL key 均为 `0.3`；后续仍需 100k 生产 dry run 验证实际分布，但它不再是数值决策。
 
 FID/IS的10k-update/10k趋势样本和stage-end/50k正式样本是新增示例配置，不是既有绝对质量阈值。首次accepted baseline后再决定是否建立数值放行阈值，不能在实现前杜撰。
 
@@ -617,5 +622,5 @@ FID/IS的10k-update/10k趋势样本和stage-end/50k正式样本是新增示例�
 - 本路线图通过独立AI与Infra审查，差异已修正。
 - `R001` 建立Git基线，secret和大资产不进入历史。
 - `D001` 建立可机检的requirement追踪。
-- 用户完成dropout决定。
+- D016 已将用户 dropout 决定绑定到严格配置并通过针对性测试。
 - 当前单卡/未来四卡资源边界被明确，不把1GPU证据外推为4GPU结论。
