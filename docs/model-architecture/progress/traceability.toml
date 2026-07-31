@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 89
+registry_revision = 90
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -2051,6 +2051,10 @@ implementation_paths = [
     "tests/unit/encoders/test_qwen.py",
     "tests/gpu/encoders/test_qwen.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/T021.md",
+    "docs/model-architecture/reviews/T021/implementation_report.md",
+    "docs/model-architecture/reviews/T021/test_report.json",
+    "docs/model-architecture/reviews/T021/raw_block24_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -2734,6 +2738,10 @@ implementation_paths = [
     "tests/unit/encoders/test_qwen.py",
     "tests/gpu/encoders/test_qwen.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/T021.md",
+    "docs/model-architecture/reviews/T021/implementation_report.md",
+    "docs/model-architecture/reviews/T021/test_report.json",
+    "docs/model-architecture/reviews/T021/raw_block24_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []

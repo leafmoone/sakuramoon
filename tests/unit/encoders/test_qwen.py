@@ -10,10 +10,22 @@ from torch import nn
 from sakuramoon.encoders.qwen import FrozenQwenEncoder
 
 
+class _FakeBlock(nn.Module):
+    def __init__(self, block: int) -> None:
+        super().__init__()
+        self.block = block
+        self.calls = 0
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        self.calls += 1
+        return torch.full_like(hidden_states, float(self.block))
+
+
 class _FakeQwen(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(()))
+        self.layers = nn.ModuleList(_FakeBlock(block) for block in range(1, 25))
         self.calls = 0
         self.kwargs: dict[str, Any] = {}
 
@@ -21,10 +33,15 @@ class _FakeQwen(nn.Module):
         self.calls += 1
         self.kwargs = kwargs
         batch, length = input_ids.shape
-        states = tuple(
-            torch.full((batch, length, 2048), float(index)) for index in range(25)
-        )
-        return SimpleNamespace(hidden_states=states)
+        hidden_states = torch.zeros(batch, length, 2048)
+        states = [hidden_states]
+        for layer in self.layers:
+            hidden_states = layer(hidden_states)
+            states.append(hidden_states)
+        # Transformers 5.14.1 replaces the final captured block output with
+        # last_hidden_state after final RMSNorm. Make that semantic visible.
+        states[-1] = states[-1] + 1000.0
+        return SimpleNamespace(hidden_states=tuple(states))
 
 
 def test_selects_seven_states_from_one_frozen_forward() -> None:
@@ -40,6 +57,7 @@ def test_selects_seven_states_from_one_frozen_forward() -> None:
     assert backend.kwargs["output_hidden_states"] is True
     assert output.hidden_states.shape == (2, 3, 7, 2048)
     assert output.hidden_states[0, 0, :, 0].tolist() == [2, 4, 8, 12, 16, 20, 24]
+    assert backend.layers[-1].calls == 1
     assert output.attention_mask.dtype == torch.bool
     assert output.attention_mask is mask
     assert not output.hidden_states.requires_grad
