@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 74
+registry_revision = 75
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -82,10 +82,18 @@ new_sha256 = "d26bebf67d7197aec5590e710b5386ab2f31ccee1f4f1efdbd7d00c6011a4657"
 changed_at = "2026-07-31"
 summary = "Define high- and low-noise loss observation buckets at t=0.5 without changing total loss."
 
+[[changes]]
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+revision = 7
+previous_sha256 = "9005ac51058b25c9ec1234bd4787ddfe7b2b9b31d5a28c85c53461d9704f023c"
+new_sha256 = "58229867784918efa636d4602205aaaace8f1e87f8465c899caa47c45917d7ce"
+changed_at = "2026-07-31"
+summary = "Lock three fixed sampling profiles, derived NFE, evaluation selection, and generation provenance."
+
 [[sources]]
 path = "docs/model-architecture/current/confirmed-decisions.md"
 kind = "confirmed"
-revision = 6
+revision = 7
 include_top_headings = [
     "0.",
     "1.",
@@ -106,7 +114,7 @@ include_top_headings = [
 excluded_top_headings = [
     "15.",
 ]
-sha256 = "9005ac51058b25c9ec1234bd4787ddfe7b2b9b31d5a28c85c53461d9704f023c"
+sha256 = "58229867784918efa636d4602205aaaace8f1e87f8465c899caa47c45917d7ce"
 initial_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
 
 [[sources]]
@@ -473,9 +481,12 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 name = "objective"
 owner_tasks = [
     "M033",
+    "M034",
 ]
 config_keys = [
     "objective.*",
+    "sampling.*",
+    "cfg.*",
     "evaluation.sampling.*",
 ]
 modules = [
@@ -491,6 +502,8 @@ benchmarks = [
     "benchmarks/sampling/**",
 ]
 artifacts = [
+    "docs/model-architecture/reviews/M034/**",
+    "docs/model-architecture/reviews/DENSE/**",
     "artifacts/objective/**",
 ]
 hardware = "1GPU"
@@ -4417,7 +4430,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C08-003"
 kind = "requirement"
-status = "implemented"
+status = "verified"
 profile = "objective"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -4441,10 +4454,12 @@ implementation_paths = [
     "docs/model-architecture/progress/tasks/M033.md",
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+evidence_hardware = "1GPU"
+evidence_artifacts = [
+    "docs/model-architecture/reviews/M033/remediation_test_report.json",
+]
+ai_review = "docs/model-architecture/reviews/DENSE/ai_review.md"
+infra_review = "docs/model-architecture/reviews/DENSE/infra_review.md"
 config_keys = [
     "objective.*",
     "evaluation.sampling.*",
@@ -12211,3 +12226,84 @@ not_applicable_fields = [
     "benchmarks",
 ]
 not_applicable_reason = "Reference code is excluded by repository policy and direct review; no runtime option, generated scanner, test fixture, or benchmark authorizes it."
+
+[[requirements]]
+id = "C08-007"
+kind = "requirement"
+status = "verified"
+profile = "objective"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = [
+    "9. 训练目标、CFG 与采样",
+]
+node_kind = "list_item"
+source_fingerprint = "2aac70604747703d19ee777308c667d1b3fc743d8ff27a3a1ec26caf4619ef07"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:M034"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/sampling/__init__.py",
+    "src/sakuramoon/sampling/heun.py",
+    "src/sakuramoon/sampling/profiles.py",
+    "src/sakuramoon/sampling/sampler.py",
+    "src/sakuramoon/eval/spec.py",
+    "src/sakuramoon/cli/eval.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/config/test_schema.py",
+    "tests/unit/config/test_resolve_redact.py",
+    "tests/unit/config/test_eval_jobs.py",
+    "tests/unit/sampling/test_heun.py",
+    "tests/unit/eval/test_spec_schedule.py",
+    "tests/unit/eval/test_artifacts_quality.py",
+    "tests/gpu/sampling/test_profiles.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "tools/verify_traceability.py",
+    "docs/model-architecture/current/confirmed-decisions.md",
+    "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/M033.md",
+    "docs/model-architecture/progress/tasks/M034.md",
+    "docs/model-architecture/reviews/M034/test_report.json",
+]
+evidence_hardware = "1GPU"
+evidence_artifacts = [
+    "docs/model-architecture/reviews/M034/test_report.json",
+]
+ai_review = "docs/model-architecture/reviews/DENSE/ai_review.md"
+infra_review = "docs/model-architecture/reviews/DENSE/infra_review.md"
+config_keys = [
+    "sampling.*",
+    "cfg.*",
+    "evaluation.sampling.*",
+]
+modules = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/sampling/**",
+    "src/sakuramoon/eval/spec.py",
+    "src/sakuramoon/cli/eval.py",
+    "tools/verify_traceability.py",
+]
+reference_modules = []
+tests = [
+    "tests/unit/config/test_schema.py",
+    "tests/unit/config/test_resolve_redact.py",
+    "tests/unit/config/test_eval_jobs.py",
+    "tests/unit/sampling/test_heun.py",
+    "tests/unit/eval/test_spec_schedule.py",
+    "tests/unit/eval/test_artifacts_quality.py",
+    "tests/gpu/sampling/test_profiles.py",
+    "tests/unit/docs/test_verify_traceability.py",
+]
+benchmarks = []
+artifacts = [
+    "docs/model-architecture/progress/tasks/M034.md",
+    "docs/model-architecture/reviews/M034/test_report.json",
+]
+not_applicable_fields = [
+    "reference_modules",
+    "benchmarks",
+]
+not_applicable_reason = "M034 independently implements fixed solver identities and has no reference-code dependency or performance optimization benchmark."

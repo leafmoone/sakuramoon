@@ -150,7 +150,7 @@ PACKAGE_REVIEW_TASKS = {
     "A001": "FOUNDATION",
     **{f"D{serial:03d}": "DATA" for serial in range(10, 16)},
     **{f"T{serial:03d}": "ENCODERS" for serial in range(20, 25)},
-    **{f"M{serial:03d}": "DENSE" for serial in range(30, 34)},
+    **{f"M{serial:03d}": "DENSE" for serial in range(30, 35)},
     **{f"T{serial:03d}": "TRAINING_UTILITIES" for serial in range(51, 54)},
 }
 INDEPENDENT_REVIEW_TASKS = {

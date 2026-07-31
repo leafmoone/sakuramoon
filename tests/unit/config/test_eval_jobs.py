@@ -39,9 +39,24 @@ def test_jobs_bind_resolved_toml_checkpoint_and_prompt_manifest(
     assert first == second
     assert [job.metric for job in first] == ["fid", "is"]
     assert all(job.prompt_manifest_sha256 == prompts.sha256 for job in first)
+    assert all(
+        (
+            job.sampling_profile,
+            job.solver,
+            job.solver_steps,
+            job.solver_nfe,
+            job.cfg_scale,
+        )
+        == ("reference", "heun_final_euler", 50, 99, 2.9)
+        for job in first
+    )
     path = tmp_path / "job.json"
     write_evaluation_job(path, first[0])
-    assert json.loads(path.read_text())["job_id"] == first[0].job_id
+    payload = json.loads(path.read_text())
+    assert payload["job_id"] == first[0].job_id
+    assert payload["sampling_profile"] == "reference"
+    assert payload["solver"] == "heun_final_euler"
+    assert payload["solver_nfe"] == 99
     with pytest.raises(FileExistsError):
         write_evaluation_job(path, first[0])
 

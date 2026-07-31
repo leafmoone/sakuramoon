@@ -38,9 +38,16 @@ def build_evaluation_jobs(
         identity = {
             "artifact_kind": artifact_kind,
             "checkpoint_id": checkpoint.checkpoint_id,
+            "checkpoint_resolved_config_sha256": checkpoint.resolved_config_sha256,
+            "cfg_scale": config.cfg.scale,
             "prompt_manifest_sha256": prompts.sha256,
             "sample_count": request.sample_count,
+            "sampling_profile": config.evaluation.sampling.profile,
+            "solver": config.evaluation.sampling.solver,
+            "solver_nfe": config.evaluation.sampling.nfe,
+            "solver_steps": config.evaluation.sampling.steps,
             "successful_update": successful_update,
+            "time_schedule": config.evaluation.sampling.time_schedule,
         }
         digest = hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -54,6 +61,9 @@ def build_evaluation_jobs(
                 prompt_manifest_sha256=prompts.sha256,
                 sample_count=request.sample_count,
                 cfg_scale=config.cfg.scale,
+                sampling_profile=config.evaluation.sampling.profile,
+                solver=config.evaluation.sampling.solver,
+                time_schedule=config.evaluation.sampling.time_schedule,
                 solver_steps=config.evaluation.sampling.steps,
                 solver_nfe=config.evaluation.sampling.nfe,
                 feature_extractor=config.evaluation.fid.feature_extractor,
@@ -79,7 +89,9 @@ def write_evaluation_job(path: Path, job: EvaluationJob) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     if temporary.exists() or temporary.is_symlink():
         raise FileExistsError("evaluation job temporary path exists")
-    body = (json.dumps(job.as_mapping(), sort_keys=True, separators=(",", ":")) + "\n").encode()
+    body = (
+        json.dumps(job.as_mapping(), sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
     try:
         with temporary.open("xb") as handle:
             handle.write(body)

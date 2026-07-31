@@ -6,9 +6,9 @@ import pytest
 
 from sakuramoon.config.schema import (
     EvaluationConfig,
+    EvaluationSamplingConfig,
     FidConfig,
     IsConfig,
-    SamplingConfig,
 )
 from sakuramoon.eval.schedule import scheduled_evaluations
 from sakuramoon.eval.spec import (
@@ -27,12 +27,7 @@ def _config() -> EvaluationConfig:
         prompt_manifest_sha256="1" * 64,
         gpu_index=0,
         training_paused=True,
-        sampling=SamplingConfig(
-            solver="heun_linear_time_final_euler",
-            steps=50,
-            nfe=99,
-            state_dtype="float32",
-        ),
+        sampling=EvaluationSamplingConfig(profile="reference"),
         fid=FidConfig(
             enabled=True,
             every_successful_updates=10,
@@ -64,6 +59,9 @@ def _job() -> EvaluationJob:
         prompt_manifest_sha256="2" * 64,
         sample_count=100,
         cfg_scale=2.9,
+        sampling_profile="reference",
+        solver="heun_final_euler",
+        time_schedule="linear",
         solver_steps=50,
         solver_nfe=99,
         feature_extractor="inception",
@@ -79,9 +77,7 @@ def _job() -> EvaluationJob:
 def test_schedule_is_config_driven_by_successful_updates_and_stage_end() -> None:
     config = _config()
 
-    assert scheduled_evaluations(
-        config, successful_update=9, stage_end=False
-    ) == ()
+    assert scheduled_evaluations(config, successful_update=9, stage_end=False) == ()
     at_ten = scheduled_evaluations(config, successful_update=10, stage_end=False)
     assert [(item.metric, item.run_kind, item.sample_count) for item in at_ten] == [
         ("fid", "trend", 100)
@@ -119,7 +115,9 @@ def test_prompt_manifest_hash_is_deterministic_and_binds_every_field() -> None:
     ("changes", "expected"),
     [
         ({"cfg_scale": 3.0}, "CFG"),
-        ({"solver_nfe": 50}, "99 NFE"),
+        ({"sampling_profile": "balanced"}, "reference profile"),
+        ({"solver": "euler"}, "inconsistent"),
+        ({"solver_nfe": 50}, "inconsistent"),
         ({"artifact_kind": "is_trend"}, "inconsistent"),
         ({"training_paused": 1}, "explicit"),
     ],

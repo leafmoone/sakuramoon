@@ -38,6 +38,9 @@ def repo_copy(tmp_path: Path) -> Path:
         ROOT / "docs/model-architecture/reviews/ROADMAP",
         model_docs / "reviews/ROADMAP",
     )
+    dense_reviews = ROOT / "docs/model-architecture/reviews/DENSE"
+    if dense_reviews.exists():
+        shutil.copytree(dense_reviews, model_docs / "reviews/DENSE")
     shutil.copytree(
         ROOT / "src/sakuramoon",
         root / "src/sakuramoon",
@@ -80,6 +83,7 @@ def repo_copy(tmp_path: Path) -> Path:
         "docs/model-architecture/progress/tasks/D015.md",
         "docs/model-architecture/progress/tasks/D016.md",
         "docs/model-architecture/progress/tasks/M033.md",
+        "docs/model-architecture/progress/tasks/M034.md",
         "docs/model-architecture/progress/tasks/T020.md",
         "docs/model-architecture/progress/tasks/T050.md",
         "docs/model-architecture/progress/tasks/T051.md",
@@ -157,6 +161,7 @@ def repo_copy(tmp_path: Path) -> Path:
         "docs/model-architecture/reviews/D015/infra_review.md",
         "docs/model-architecture/reviews/D016/test_report.json",
         "docs/model-architecture/reviews/M033/remediation_test_report.json",
+        "docs/model-architecture/reviews/M034/test_report.json",
         "docs/model-architecture/reviews/T020/implementation_report.md",
         "docs/model-architecture/reviews/T020/task.md",
         "docs/model-architecture/reviews/T020/test_report.json",
@@ -233,12 +238,16 @@ def source_by_kind(data: dict[str, Any], kind: str) -> dict[str, Any]:
 def test_live_registry_and_source_coverage() -> None:
     report = vt.verify(ROOT)
     assert report.ok, report.errors
-    assert report.requirement_count == report.source_node_count == 221
+    assert report.requirement_count == report.source_node_count == 222
     assert report.archive_file_count == 16
+    assert vt._required_review_paths("M034") == (
+        "docs/model-architecture/reviews/DENSE/ai_review.md",
+        "docs/model-architecture/reviews/DENSE/infra_review.md",
+    )
 
     data = load_registry(ROOT)
     expected = {
-        "confirmed": (110, {f"{index}." for index in range(15)}),
+        "confirmed": (111, {f"{index}." for index in range(15)}),
         "open_items": (99, {f"{index}." for index in range(11)}),
         "observability": (12, {"可观测性与评估补充决定"}),
     }

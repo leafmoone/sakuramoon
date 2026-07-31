@@ -192,10 +192,23 @@ noise_scale = 1.0 # fixed
 t_eps = 0.05 # fixed
 
 [sampling]
-solver = "heun_linear_time_final_euler" # fixed
-steps = 50 # fixed
-nfe = 99 # fixed
+profile = "balanced" # required choice: preview, balanced, or reference
 state_dtype = "float32" # fixed
+
+[sampling.profiles.preview]
+solver = "euler" # fixed
+steps = 28 # fixed; NFE is derived as 28
+time_schedule = "linear" # fixed
+
+[sampling.profiles.balanced]
+solver = "heun_final_euler" # fixed
+steps = 25 # fixed; NFE is derived as 49
+time_schedule = "linear" # fixed
+
+[sampling.profiles.reference]
+solver = "heun_final_euler" # fixed
+steps = 50 # fixed; NFE is derived as 99
+time_schedule = "linear" # fixed
 
 [cfg]
 scale = 2.9 # fixed
@@ -328,10 +341,7 @@ gpu_index = "BENCHMARK_REQUIRED" # integer >= 0
 training_paused = "BENCHMARK_REQUIRED" # boolean; evaluator resource plan
 
 [evaluation.sampling]
-solver = "heun_linear_time_final_euler" # fixed
-steps = 50 # fixed
-nfe = 99 # fixed
-state_dtype = "float32" # fixed
+profile = "reference" # fixed for formal checkpoint evaluation
 
 [evaluation.fid]
 enabled = true

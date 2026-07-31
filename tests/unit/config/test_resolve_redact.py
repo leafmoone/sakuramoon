@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,30 @@ def test_resolved_hash_matches_exact_bytes(valid_payload: dict[str, Any]) -> Non
 
     assert b"DECISION_REQUIRED" not in payload
     assert b"model/qwen_3.5_2B" in payload
-    assert resolved_config_sha256(config) == __import__("hashlib").sha256(payload).hexdigest()
+    assert (
+        resolved_config_sha256(config)
+        == __import__("hashlib").sha256(payload).hexdigest()
+    )
+
+
+def test_resolved_config_records_selected_sampling_identity(
+    valid_payload: dict[str, Any],
+) -> None:
+    config = RuntimeConfig.model_validate(valid_payload)
+    resolved = tomllib.loads(resolved_config_bytes(config).decode())
+
+    assert resolved["sampling"]["profile"] == "balanced"
+    assert resolved["sampling"]["solver"] == "heun_final_euler"
+    assert resolved["sampling"]["steps"] == 25
+    assert resolved["sampling"]["nfe"] == 49
+    assert resolved["cfg"]["scale"] == 2.9
+    assert resolved["evaluation"]["sampling"] == {
+        "profile": "reference",
+        "solver": "heun_final_euler",
+        "steps": 50,
+        "nfe": 99,
+        "time_schedule": "linear",
+    }
 
 
 def test_atomic_writer_creates_normal_parent_chain(

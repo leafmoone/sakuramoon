@@ -11,7 +11,17 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    computed_field,
     model_validator,
+)
+
+from sakuramoon.sampling.profiles import (
+    SAMPLING_PROFILES,
+    SamplingProfile,
+    SamplingProfileName,
+    SamplingSolver,
+    TimeSchedule,
+    resolve_sampling_profile,
 )
 
 
@@ -364,11 +374,89 @@ class TimestepConfig(StrictModel):
     t_eps: FixedPointZeroFive
 
 
+class SamplingProfileConfig(StrictModel):
+    solver: SamplingSolver
+    steps: PositiveInt
+    time_schedule: TimeSchedule
+
+
+class SamplingProfilesConfig(StrictModel):
+    preview: SamplingProfileConfig
+    balanced: SamplingProfileConfig
+    reference: SamplingProfileConfig
+
+    @model_validator(mode="after")
+    def validate_canonical_registry(self) -> SamplingProfilesConfig:
+        for name in ("preview", "balanced", "reference"):
+            configured = getattr(self, name)
+            canonical = SAMPLING_PROFILES[name]
+            if (
+                configured.solver != canonical.solver
+                or configured.steps != canonical.steps
+                or configured.time_schedule != canonical.time_schedule
+            ):
+                raise ValueError(
+                    f"sampling profile {name} differs from the approved registry"
+                )
+        return self
+
+
 class SamplingConfig(StrictModel):
-    solver: Literal["heun_linear_time_final_euler"]
-    steps: Literal[50]
-    nfe: Literal[99]
+    profile: SamplingProfileName
+    profiles: SamplingProfilesConfig
     state_dtype: Literal["float32"]
+
+    @property
+    def selected(self) -> SamplingProfile:
+        return resolve_sampling_profile(self.profile)
+
+    @computed_field
+    @property
+    def solver(self) -> SamplingSolver:
+        return self.selected.solver
+
+    @computed_field
+    @property
+    def steps(self) -> int:
+        return self.selected.steps
+
+    @computed_field
+    @property
+    def nfe(self) -> int:
+        return self.selected.nfe
+
+    @computed_field
+    @property
+    def time_schedule(self) -> TimeSchedule:
+        return self.selected.time_schedule
+
+
+class EvaluationSamplingConfig(StrictModel):
+    profile: Literal["reference"]
+
+    @property
+    def selected(self) -> SamplingProfile:
+        return resolve_sampling_profile(self.profile)
+
+    @computed_field
+    @property
+    def solver(self) -> SamplingSolver:
+        return self.selected.solver
+
+    @computed_field
+    @property
+    def steps(self) -> int:
+        return self.selected.steps
+
+    @computed_field
+    @property
+    def nfe(self) -> int:
+        return self.selected.nfe
+
+    @computed_field
+    @property
+    def time_schedule(self) -> TimeSchedule:
+        return self.selected.time_schedule
 
 
 class CfgConfig(StrictModel):
@@ -515,7 +603,9 @@ class BenchmarkConfig(StrictModel):
         if self.warmup_updates != 100:
             raise ValueError("benchmark requires exactly 100 warmup updates")
         if self.kind == "candidate" and self.measured_updates != 500:
-            raise ValueError("candidate benchmark requires exactly 500 measured updates")
+            raise ValueError(
+                "candidate benchmark requires exactly 500 measured updates"
+            )
         if self.kind == "final" and self.measured_updates < 1000:
             raise ValueError("final benchmark requires at least 1,000 measured updates")
         if self.profile_trace_updates > self.measured_updates:
@@ -607,7 +697,7 @@ class EvaluationConfig(StrictModel):
     prompt_manifest_sha256: Sha256
     gpu_index: NonNegativeInt
     training_paused: bool
-    sampling: SamplingConfig
+    sampling: EvaluationSamplingConfig
     fid: FidConfig
     is_: IsConfig = Field(alias="is")
 

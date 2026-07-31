@@ -413,6 +413,16 @@ sakuramoon/
 - **完成证据：** math golden、finite-difference solver tests、sampling determinism。
 - **GPU：** CPU + 1GPU integration。
 
+### M034：三档采样 profile 与生成 provenance
+
+- **对应文档：** `C08-007`。
+- **实现路径：** `config/schema.py`、`sampling/*`、`eval/spec.py`、`cli/eval.py`。
+- **动作：** 固定 `preview=Euler-28/28 NFE`、`balanced=Heun-25 + final Euler/49 NFE`、`reference=Heun-50 + final Euler/99 NFE`；三档仅允许 linear time、FP32 state、noise scale 1、t_eps 0.05、x-pred 与全区间 CFG 2.9。TOML 必须显式选择 profile，不允许提供 NFE 或构造未验证组合；正式评估显式绑定 `reference`。
+- **验证：** solver/steps/NFE registry golden；Euler/Heun NFE、endpoint 与 determinism；unknown/missing profile、用户提供 NFE、profile 漂移全部硬失败；resolved config、评估与生成 metadata 记录完整采样身份，旧 objective model-only 推理标记 `pre_fix`。
+- **边界：** 不加入 er_sde、DPM++、beta57、resolution shift、多卡路径或正式质量长跑。
+- **完成证据：** schema/profile contracts、finite-difference/determinism、短单卡真实 solver smoke、Dense Model 包级 AI/Infra 审查。
+- **GPU：** CPU + 1GPU integration；不得外推四卡结论。
+
 ### K001：FA4 varlen BF16 GQA 生产后端
 
 - **对应文档：** `C05`、`C06`、`C12` kernel规范。

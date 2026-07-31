@@ -9,6 +9,13 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from sakuramoon.sampling.profiles import (
+    SamplingProfileName,
+    SamplingSolver,
+    TimeSchedule,
+    resolve_sampling_profile,
+)
+
 CheckpointKind = Literal["raw_latest", "pma10", "accepted"]
 MetricName = Literal["fid", "is", "manual_quality", "vae_reconstruction"]
 ArtifactKind = Literal[
@@ -132,6 +139,9 @@ class EvaluationJob:
     prompt_manifest_sha256: str
     sample_count: int
     cfg_scale: float
+    sampling_profile: SamplingProfileName
+    solver: SamplingSolver
+    time_schedule: TimeSchedule
     solver_steps: int
     solver_nfe: int
     feature_extractor: str
@@ -164,8 +174,16 @@ class EvaluationJob:
             raise ValueError("evaluation sample count must be positive")
         if type(self.cfg_scale) is not float or self.cfg_scale != 2.9:
             raise ValueError("formal evaluation CFG must equal 2.9")
-        if self.solver_steps != 50 or self.solver_nfe != 99:
-            raise ValueError("formal evaluation must use Heun-50 with 99 NFE")
+        selected = resolve_sampling_profile(self.sampling_profile)
+        if self.sampling_profile != "reference":
+            raise ValueError("formal evaluation must select the reference profile")
+        if (
+            self.solver != selected.solver
+            or self.time_schedule != selected.time_schedule
+            or self.solver_steps != selected.steps
+            or self.solver_nfe != selected.nfe
+        ):
+            raise ValueError("formal evaluation sampling identity is inconsistent")
         if (
             not self.feature_extractor
             or not self.feature_extractor_version
@@ -199,9 +217,12 @@ class EvaluationJob:
             "prompt_manifest_sha256": self.prompt_manifest_sha256,
             "real_stats_sha256": self.real_stats_sha256,
             "sample_count": self.sample_count,
+            "sampling_profile": self.sampling_profile,
             "schema_version": 1,
+            "solver": self.solver,
             "solver_nfe": self.solver_nfe,
             "solver_steps": self.solver_steps,
+            "time_schedule": self.time_schedule,
             "training_paused": self.training_paused,
         }
 

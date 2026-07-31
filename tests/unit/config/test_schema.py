@@ -69,6 +69,15 @@ def test_valid_synthetic_fixture_is_strict_and_frozen(
     assert set(config.caption.dropout.nl.model_dump().values()) == {0.3}
     assert config.caption.condition_buckets[-1] == 512
     assert config.model.packing.modality_init_std == 0.02
+    assert config.sampling.profile == "balanced"
+    assert (
+        config.sampling.solver,
+        config.sampling.steps,
+        config.sampling.nfe,
+        config.sampling.time_schedule,
+    ) == ("heun_final_euler", 25, 49, "linear")
+    assert config.evaluation.sampling.profile == "reference"
+    assert config.evaluation.sampling.nfe == 99
     with pytest.raises(ValidationError, match="frozen"):
         config.run.seed = 5
 
@@ -129,6 +138,79 @@ def test_strict_jlt_objective_identity_is_exactly_locked(
     current[path[-1]] = value
 
     with pytest.raises(ValidationError):
+        RuntimeConfig.model_validate(valid_payload)
+
+
+@pytest.mark.parametrize(
+    ("profile", "field", "value"),
+    [
+        ("preview", "solver", "heun_final_euler"),
+        ("preview", "steps", 27),
+        ("balanced", "steps", 50),
+        ("reference", "solver", "euler"),
+        ("reference", "time_schedule", "cosine"),
+    ],
+)
+def test_sampling_profile_registry_rejects_unapproved_combinations(
+    valid_payload: dict[str, Any], profile: str, field: str, value: object
+) -> None:
+    valid_payload["sampling"]["profiles"][profile][field] = value
+
+    with pytest.raises(ValidationError, match="sampling profile|literal"):
+        RuntimeConfig.model_validate(valid_payload)
+
+
+@pytest.mark.parametrize("profile", ["preview", "balanced", "reference"])
+def test_runtime_sampling_profile_selection_is_explicit(
+    valid_payload: dict[str, Any], profile: str
+) -> None:
+    valid_payload["sampling"]["profile"] = profile
+
+    config = RuntimeConfig.model_validate(valid_payload)
+
+    selected = config.sampling.profiles.model_dump()[profile]
+    assert config.sampling.solver == selected["solver"]
+    assert config.sampling.steps == selected["steps"]
+    assert (
+        config.sampling.nfe
+        == {
+            "preview": 28,
+            "balanced": 49,
+            "reference": 99,
+        }[profile]
+    )
+
+
+def test_sampling_rejects_missing_unknown_or_user_supplied_nfe(
+    valid_payload: dict[str, Any],
+) -> None:
+    missing = copy.deepcopy(valid_payload)
+    missing["sampling"].pop("profile")
+    with pytest.raises(ValidationError, match="profile"):
+        RuntimeConfig.model_validate(missing)
+
+    unknown = copy.deepcopy(valid_payload)
+    unknown["sampling"]["profile"] = "custom"
+    with pytest.raises(ValidationError, match="literal"):
+        RuntimeConfig.model_validate(unknown)
+
+    supplied = copy.deepcopy(valid_payload)
+    supplied["sampling"]["nfe"] = 49
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        RuntimeConfig.model_validate(supplied)
+
+    supplied_to_profile = copy.deepcopy(valid_payload)
+    supplied_to_profile["sampling"]["profiles"]["preview"]["nfe"] = 28
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        RuntimeConfig.model_validate(supplied_to_profile)
+
+
+def test_formal_evaluation_requires_reference_profile(
+    valid_payload: dict[str, Any],
+) -> None:
+    valid_payload["evaluation"]["sampling"]["profile"] = "balanced"
+
+    with pytest.raises(ValidationError, match="literal"):
         RuntimeConfig.model_validate(valid_payload)
 
 
