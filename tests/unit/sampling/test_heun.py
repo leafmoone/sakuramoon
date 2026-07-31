@@ -54,6 +54,36 @@ def test_heun_50_uses_99_evaluations_and_fp32_state() -> None:
     )
 
 
+def test_time_dependent_velocity_uses_next_timestep_for_heun_corrector() -> None:
+    timesteps: list[float] = []
+
+    def time_dependent_velocity(
+        state: torch.Tensor,
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        timesteps.append(float(timestep[0]))
+        return timestep.reshape(-1, *([1] * (state.ndim - 1))).expand_as(state)
+
+    steps = 50
+    result = heun_final_euler(
+        time_dependent_velocity,
+        torch.zeros(1, 3, dtype=torch.bfloat16),
+        steps=steps,
+    )
+
+    expected = 0.5 - 1.0 / (2.0 * steps**2)
+    assert result.nfe == len(timesteps) == 99
+    assert timesteps[0] == 0.0
+    assert timesteps[1] == pytest.approx(1.0 / steps)
+    assert max(timesteps) < 1.0
+    torch.testing.assert_close(
+        result.state,
+        torch.full((1, 3), expected),
+        atol=2e-7,
+        rtol=0.0,
+    )
+
+
 def test_constant_velocity_is_exact_and_deterministic() -> None:
     def constant_velocity(
         state: torch.Tensor,

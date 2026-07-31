@@ -3,12 +3,36 @@ from __future__ import annotations
 import pytest
 import torch
 
+from sakuramoon.sampling.heun import heun_final_euler
 from sakuramoon.sampling.profiles import SamplingProfileName
 from sakuramoon.sampling.sampler import build_generation_metadata, sample_profile
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is required"
 )
+
+
+def test_time_dependent_heun_golden_executes_on_cuda() -> None:
+    steps = 50
+
+    def velocity(state: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+        assert state.is_cuda and timestep.is_cuda
+        return timestep.reshape(-1, 1).expand_as(state)
+
+    result = heun_final_euler(
+        velocity,
+        torch.zeros(1, 8, device="cuda", dtype=torch.bfloat16),
+        steps=steps,
+    )
+
+    expected = 0.5 - 1.0 / (2.0 * steps**2)
+    assert result.nfe == 99
+    torch.testing.assert_close(
+        result.state,
+        torch.full_like(result.state, expected),
+        atol=2e-7,
+        rtol=0.0,
+    )
 
 
 @pytest.mark.parametrize(

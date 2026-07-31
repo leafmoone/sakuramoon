@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 76
+registry_revision = 77
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -4581,8 +4581,12 @@ implementation_commit_ref = "task:M033"
 implementation_paths = [
     "src/sakuramoon/sampling/heun.py",
     "tests/unit/sampling/test_heun.py",
+    "tests/gpu/sampling/test_profiles.py",
     "tests/gpu/objective/test_flow_sampling.py",
     "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/M036.md",
+    "docs/model-architecture/reviews/M036/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M036/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -4601,12 +4605,16 @@ reference_modules = []
 tests = [
     "tests/**/objective*",
     "tests/**/sampling*",
+    "tests/unit/sampling/test_heun.py",
+    "tests/gpu/sampling/test_profiles.py",
 ]
 benchmarks = [
     "benchmarks/sampling/**",
 ]
 artifacts = [
     "artifacts/objective/**",
+    "docs/model-architecture/reviews/M036/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M036/test_report.json",
 ]
 not_applicable_fields = [
     "reference_modules",
