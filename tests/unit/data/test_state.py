@@ -4,13 +4,14 @@ import hashlib
 import json
 import os
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 import sakuramoon.data.cache as cache_module
-from sakuramoon.data.cache import CacheQuota, ShardCache
+from sakuramoon.data.cache import CachedShard, CacheQuota, ShardCache
 from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetSourceIdentity,
@@ -27,7 +28,9 @@ from sakuramoon.data.state import (
 )
 
 
-def _manifest(revision: str = "b" * 40) -> DatasetManifest:
+def _manifest(
+    revision: str = "b" * 40, *, shard_count: int = 2
+) -> DatasetManifest:
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
         revision=revision,
@@ -42,7 +45,7 @@ def _manifest(revision: str = "b" * 40) -> DatasetManifest:
             sha256=hashlib.sha256(bytes([index]) * 4).hexdigest(),
             samples=(index + 1) * 10,
         )
-        for index in range(2)
+        for index in range(shard_count)
     )
     return DatasetManifest.from_shards(source, shards)
 
@@ -91,6 +94,60 @@ def test_state_begin_complete_round_trip(tmp_path: Path) -> None:
     assert completed.completed == (first.path,)
     assert completed.active is None
     assert store.load() == completed
+
+
+def test_schema_v3_persists_bounded_active_shards_and_worker_count(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(shard_count=3)
+    store = ShardStateStore(tmp_path / "state.json", manifest, worker_count=2)
+    state = ShardRunState.empty(worker_count=2)
+    state = store.begin(state, manifest.shards[1].path)
+    state = store.begin(state, manifest.shards[0].path)
+
+    document = cast(dict[str, object], json.loads(store.path.read_bytes()))
+
+    assert document["schema_version"] == 3
+    assert document["worker_count"] == 2
+    assert document["active_shards"] == [
+        manifest.shards[0].path,
+        manifest.shards[1].path,
+    ]
+    assert store.load() == state
+
+
+@pytest.mark.parametrize("worker_count", [0, -1, True])
+def test_worker_count_requires_positive_exact_integer(
+    tmp_path: Path, worker_count: int
+) -> None:
+    with pytest.raises(ValueError, match="worker_count"):
+        ShardStateStore(
+            tmp_path / "state.json", _manifest(), worker_count=worker_count
+        )
+
+
+def test_state_rejects_worker_count_drift_and_active_overflow(tmp_path: Path) -> None:
+    manifest = _manifest(shard_count=3)
+    path = tmp_path / "state.json"
+    writer = ShardStateStore(path, manifest, worker_count=2)
+    active = writer.begin(
+        ShardRunState.empty(worker_count=2), manifest.shards[0].path
+    )
+
+    with pytest.raises(ShardStateError, match="invalid"):
+        ShardStateStore(path, manifest, worker_count=1).load()
+    with pytest.raises(ShardStateError, match="invalid"):
+        writer.save(
+            ShardRunState(
+                completed=(),
+                active_shards=tuple(shard.path for shard in manifest.shards),
+                worker_count=2,
+            )
+        )
+
+    second = writer.begin(active, manifest.shards[1].path)
+    with pytest.raises(ShardStateError, match="capacity"):
+        writer.begin(second, manifest.shards[2].path)
 
 
 def test_initial_state_publish_failure_rolls_back_visible_state(
@@ -197,6 +254,139 @@ def test_recovery_keeps_active_shard_and_counts_replay(tmp_path: Path) -> None:
     assert store.load() == recovered
 
 
+class _RecordingCache:
+    def __init__(self, root: Path, manifest: DatasetManifest) -> None:
+        self.root = root
+        self.manifest = manifest
+        self.protected_calls: list[tuple[str, frozenset[str]]] = []
+        self.on_fetch: Callable[[str], None] | None = None
+
+    def fetch(
+        self, shard_path: str, *, protected_paths: frozenset[str]
+    ) -> CachedShard:
+        self.protected_calls.append((shard_path, protected_paths))
+        if self.on_fetch is not None:
+            self.on_fetch(shard_path)
+        shard = self.manifest.shard(shard_path)
+        path = self.root / shard_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bytes(shard.bytes))
+        return CachedShard(
+            fetched=FetchedShard(
+                path=path,
+                relative_path=shard.path,
+                bytes=shard.bytes,
+                sha256=shard.sha256,
+                cache_hit=False,
+            ),
+            evicted_paths=(),
+            usage_bytes=shard.bytes,
+        )
+
+
+def test_activation_is_persisted_before_fetch_and_all_active_are_protected(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(shard_count=3)
+    store = ShardStateStore(tmp_path / "state.json", manifest, worker_count=2)
+    cache = _RecordingCache(tmp_path / "cache", manifest)
+    coordinator = SingleProcessShardCoordinator(cast(ShardCache, cache), store)
+
+    def assert_persisted(shard_path: str) -> None:
+        assert shard_path in store.load().active_shards
+
+    cache.on_fetch = assert_persisted
+    first, second, third = (shard.path for shard in manifest.shards)
+    coordinator.prepare(first)
+    coordinator.prepare(second)
+
+    assert cache.protected_calls == [
+        (first, frozenset({first})),
+        (second, frozenset({first, second})),
+    ]
+
+    coordinator.mark_completed(first)
+    assert coordinator.state.completed == (first,)
+    assert coordinator.state.active_shards == (second,)
+
+    coordinator.prepare(third)
+    assert cache.protected_calls[-1] == (
+        third,
+        frozenset({second, third}),
+    )
+
+
+def test_active_shard_cannot_be_prepared_twice(tmp_path: Path) -> None:
+    manifest = _manifest()
+    cache = _RecordingCache(tmp_path / "cache", manifest)
+    coordinator = SingleProcessShardCoordinator(
+        cast(ShardCache, cache),
+        ShardStateStore(tmp_path / "state.json", manifest),
+    )
+    first = manifest.shards[0].path
+
+    coordinator.prepare(first)
+
+    with pytest.raises(ShardStateError, match="already prepared"):
+        coordinator.prepare(first)
+    assert [path for path, _protected in cache.protected_calls] == [first]
+
+
+def test_restart_counts_every_active_shard_and_requires_all_reprepared(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(shard_count=3)
+    state_path = tmp_path / "state.json"
+    writer = ShardStateStore(state_path, manifest, worker_count=2)
+    state = ShardRunState.empty(worker_count=2)
+    state = writer.begin(state, manifest.shards[0].path)
+    writer.begin(state, manifest.shards[1].path)
+
+    cache = _RecordingCache(tmp_path / "cache", manifest)
+    restarted = SingleProcessShardCoordinator(
+        cast(ShardCache, cache),
+        ShardStateStore(state_path, manifest, worker_count=2),
+    )
+    first, second, third = (shard.path for shard in manifest.shards)
+
+    assert restarted.state.active_shards == (first, second)
+    assert restarted.state.replayed_shards == 2
+    assert restarted.state.replayed_samples == (
+        manifest.shards[0].samples + manifest.shards[1].samples
+    )
+
+    with pytest.raises(ShardStateError, match="replayed and prepared"):
+        restarted.prepare(third)
+    restarted.prepare(first)
+    restarted.mark_completed(first)
+    with pytest.raises(ShardStateError, match="replayed and prepared"):
+        restarted.prepare(third)
+    restarted.prepare(second)
+    restarted.prepare(third)
+
+    assert restarted.state.active_shards == (second, third)
+    assert restarted.state.replayed_shards == 2
+    assert restarted.state.replayed_samples == 30
+
+
+def test_singleton_lease_remains_compatible_with_active_view(tmp_path: Path) -> None:
+    manifest = _manifest()
+    cache = _RecordingCache(tmp_path / "cache", manifest)
+    coordinator = SingleProcessShardCoordinator(
+        cast(ShardCache, cache),
+        ShardStateStore(tmp_path / "state.json", manifest),
+    )
+    first = manifest.shards[0].path
+
+    with coordinator.lease(first) as cached:
+        assert cached is not None
+        assert coordinator.state.active == first
+        assert coordinator.state.active_shards == (first,)
+
+    assert coordinator.state.active is None
+    assert coordinator.state.completed == (first,)
+
+
 def test_coordinator_replays_active_first_and_skips_completed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -243,12 +433,13 @@ def test_state_rejects_unknown_keys_and_paths(tmp_path: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "manifest_sha256": manifest_sha256(manifest),
                 "completed": ["missing.tar"],
-                "active": None,
+                "active_shards": [],
                 "replayed_shards": 0,
                 "replayed_samples": 0,
+                "worker_count": 1,
                 "unexpected": True,
             }
         )
@@ -272,13 +463,16 @@ def test_state_rejects_different_manifest_with_identical_paths(tmp_path: Path) -
         ShardStateStore(path, changed).load()
 
 
-def test_state_rejects_legacy_unbound_schema(tmp_path: Path) -> None:
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_state_rejects_legacy_schema(
+    tmp_path: Path, schema_version: int
+) -> None:
     manifest = _manifest()
     path = tmp_path / "state.json"
     path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": schema_version,
                 "completed": [manifest.shards[0].path],
                 "active": None,
                 "replayed_shards": 0,
@@ -287,7 +481,7 @@ def test_state_rejects_legacy_unbound_schema(tmp_path: Path) -> None:
         )
     )
 
-    with pytest.raises(ShardStateError, match="invalid"):
+    with pytest.raises(ShardStateError, match="unsupported"):
         ShardStateStore(path, manifest).load()
 
 

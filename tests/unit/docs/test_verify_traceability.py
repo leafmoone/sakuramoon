@@ -166,6 +166,8 @@ def repo_copy(tmp_path: Path) -> Path:
         "docs/model-architecture/reviews/D020/test_report.json",
         "docs/model-architecture/progress/tasks/D021.md",
         "docs/model-architecture/reviews/D021/test_report.json",
+        "docs/model-architecture/progress/tasks/D022.md",
+        "docs/model-architecture/reviews/D022/test_report.json",
         "docs/model-architecture/reviews/D014/timing.json",
         "docs/model-architecture/reviews/D014/ai_review.md",
         "docs/model-architecture/reviews/D014/infra_review.md",

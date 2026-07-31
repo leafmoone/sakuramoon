@@ -27,26 +27,64 @@ class ShardStateCommittedError(ShardStateError):
     """The state committed, but cleanup durability could not be confirmed."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ShardRunState:
     completed: tuple[str, ...]
-    active: str | None
+    active_shards: tuple[str, ...]
+    worker_count: int
     replayed_shards: int
     replayed_samples: int
 
+    def __init__(
+        self,
+        completed: tuple[str, ...],
+        active_shards: tuple[str, ...] = (),
+        worker_count: int = 1,
+        replayed_shards: int = 0,
+        replayed_samples: int = 0,
+        *,
+        active: str | None = None,
+    ) -> None:
+        """Build v3 state while accepting the legacy singleton constructor shape."""
+
+        if active is not None:
+            if active_shards:
+                raise ValueError("active and active_shards cannot both be set")
+            active_shards = (active,)
+        object.__setattr__(self, "completed", completed)
+        object.__setattr__(self, "active_shards", active_shards)
+        object.__setattr__(self, "worker_count", worker_count)
+        object.__setattr__(self, "replayed_shards", replayed_shards)
+        object.__setattr__(self, "replayed_samples", replayed_samples)
+
+    @property
+    def active(self) -> str | None:
+        """Expose the historical singleton view used by the D015 lease path."""
+
+        if len(self.active_shards) > 1:
+            raise ShardStateError("singleton active view has multiple active shards")
+        return self.active_shards[0] if self.active_shards else None
+
     @classmethod
-    def empty(cls) -> ShardRunState:
-        return cls(completed=(), active=None, replayed_shards=0, replayed_samples=0)
+    def empty(cls, worker_count: int = 1) -> ShardRunState:
+        return cls(
+            completed=(),
+            active_shards=(),
+            worker_count=worker_count,
+            replayed_shards=0,
+            replayed_samples=0,
+        )
 
 
 def _payload(state: ShardRunState, manifest_digest: str) -> dict[str, object]:
     return {
-        "active": state.active,
+        "active_shards": list(state.active_shards),
         "completed": list(state.completed),
         "manifest_sha256": manifest_digest,
         "replayed_samples": state.replayed_samples,
         "replayed_shards": state.replayed_shards,
-        "schema_version": 2,
+        "schema_version": 3,
+        "worker_count": state.worker_count,
     }
 
 
@@ -61,64 +99,91 @@ def _fsync_directory(path: Path) -> None:
 class ShardStateStore:
     """Read and atomically replace one small JSON state file."""
 
-    def __init__(self, path: Path, manifest: DatasetManifest) -> None:
+    def __init__(
+        self, path: Path, manifest: DatasetManifest, *, worker_count: int = 1
+    ) -> None:
+        if type(worker_count) is not int or worker_count <= 0:
+            raise ValueError("worker_count must be a positive integer")
         self.path = path
         self.manifest = manifest
+        self.worker_count = worker_count
         self._manifest_sha256 = manifest_sha256(manifest)
         self._known_paths = frozenset(shard.path for shard in manifest.shards)
 
+    def _validate_state(self, state: ShardRunState) -> None:
+        completed = state.completed
+        active_shards = state.active_shards
+        if (
+            type(state.worker_count) is not int
+            or state.worker_count != self.worker_count
+            or type(completed) is not tuple
+            or any(type(item) is not str for item in completed)
+            or completed != tuple(sorted(set(completed)))
+            or not set(completed).issubset(self._known_paths)
+            or type(active_shards) is not tuple
+            or any(type(item) is not str for item in active_shards)
+            or active_shards != tuple(sorted(set(active_shards)))
+            or len(active_shards) > self.worker_count
+            or not set(active_shards).issubset(self._known_paths)
+            or not set(active_shards).isdisjoint(completed)
+            or type(state.replayed_shards) is not int
+            or state.replayed_shards < 0
+            or type(state.replayed_samples) is not int
+            or state.replayed_samples < 0
+        ):
+            raise ShardStateError("shard state is invalid")
+
     def load(self) -> ShardRunState:
         if not self.path.exists():
-            return ShardRunState.empty()
+            return ShardRunState.empty(self.worker_count)
         try:
-            document = cast(dict[str, Any], json.loads(self.path.read_bytes()))
+            raw_document = json.loads(self.path.read_bytes())
+            if not isinstance(raw_document, dict):
+                raise TypeError
+            document = cast(dict[str, Any], raw_document)
+            if document.get("schema_version") != 3:
+                raise ShardStateError("unsupported shard state schema version")
             if set(document) != {
-                "active",
+                "active_shards",
                 "completed",
                 "manifest_sha256",
                 "replayed_samples",
                 "replayed_shards",
                 "schema_version",
+                "worker_count",
             }:
                 raise ValueError
-            if (
-                document["schema_version"] != 2
-                or document["manifest_sha256"] != self._manifest_sha256
-            ):
+            if document["manifest_sha256"] != self._manifest_sha256:
                 raise ValueError
-            active = document["active"]
+            active = cast(object, document["active_shards"])
             completed = cast(object, document["completed"])
             replayed_shards = document["replayed_shards"]
             replayed_samples = document["replayed_samples"]
-            if active is not None and not isinstance(active, str):
+            worker_count = document["worker_count"]
+            if not isinstance(active, list) or not isinstance(completed, list):
                 raise TypeError
-            if not isinstance(completed, list):
-                raise TypeError
+            active_items = cast(list[object], active)
             completed_items = cast(list[object], completed)
-            if not all(isinstance(item, str) for item in completed_items):
-                raise TypeError
-            if type(replayed_shards) is not int or replayed_shards < 0:
-                raise ValueError
-            if type(replayed_samples) is not int or replayed_samples < 0:
-                raise ValueError
-            completed_paths = tuple(cast(list[str], completed_items))
-            if (
-                completed_paths != tuple(sorted(set(completed_paths)))
-                or not set(completed_paths).issubset(self._known_paths)
-                or active not in self._known_paths | {None}
-                or active in completed_paths
+            if not all(isinstance(item, str) for item in active_items) or not all(
+                isinstance(item, str) for item in completed_items
             ):
-                raise ValueError
+                raise TypeError
+            state = ShardRunState(
+                completed=tuple(cast(list[str], completed_items)),
+                active_shards=tuple(cast(list[str], active_items)),
+                worker_count=cast(int, worker_count),
+                replayed_shards=cast(int, replayed_shards),
+                replayed_samples=cast(int, replayed_samples),
+            )
+            self._validate_state(state)
+            return state
+        except ShardStateError:
+            raise
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             raise ShardStateError("shard state is invalid") from None
-        return ShardRunState(
-            completed=completed_paths,
-            active=active,
-            replayed_shards=replayed_shards,
-            replayed_samples=replayed_samples,
-        )
 
     def save(self, state: ShardRunState) -> None:
+        self._validate_state(state)
         temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
         rollback = self.path.with_name(
             f".{self.path.name}.{uuid.uuid4().hex}.rollback"
@@ -186,56 +251,88 @@ class ShardStateStore:
 
     def recover(self) -> ShardRunState:
         state = self.load()
-        if state.active is None:
+        if not state.active_shards:
             return state
         try:
-            samples = self.manifest.shard(state.active).samples
+            samples = sum(
+                self.manifest.shard(shard_path).samples
+                for shard_path in state.active_shards
+            )
         except DatasetManifestError:
             raise ShardStateError("active shard is absent from the manifest") from None
         recovered = replace(
             state,
-            replayed_shards=state.replayed_shards + 1,
+            replayed_shards=state.replayed_shards + len(state.active_shards),
             replayed_samples=state.replayed_samples + samples,
         )
         self.save(recovered)
         return recovered
 
     def begin(self, state: ShardRunState, shard_path: str) -> ShardRunState:
+        self._validate_state(state)
         if shard_path not in self._known_paths:
             raise ShardStateError("unknown shard cannot become active")
         if shard_path in state.completed:
             raise ShardStateError("completed shard cannot become active")
-        if state.active not in (None, shard_path):
-            raise ShardStateError("active shard must be replayed before another shard")
-        started = replace(state, active=shard_path)
+        if shard_path in state.active_shards:
+            return state
+        if len(state.active_shards) >= state.worker_count:
+            raise ShardStateError("active shard capacity is exhausted")
+        started = replace(
+            state,
+            active_shards=tuple(sorted((*state.active_shards, shard_path))),
+        )
         self.save(started)
         return started
 
     def complete(self, state: ShardRunState, shard_path: str) -> ShardRunState:
-        if state.active != shard_path:
-            raise ShardStateError("only the active shard can be completed")
+        self._validate_state(state)
+        if shard_path not in state.active_shards:
+            raise ShardStateError("only an active shard can be completed")
         completed = tuple(sorted((*state.completed, shard_path)))
-        finished = replace(state, completed=completed, active=None)
+        active_shards = tuple(
+            active for active in state.active_shards if active != shard_path
+        )
+        finished = replace(
+            state, completed=completed, active_shards=active_shards
+        )
         self.save(finished)
         return finished
 
 
 class SingleProcessShardCoordinator:
-    """Prepare one shard at a time and preserve shard-level replay semantics."""
+    """Coordinate bounded active shards and preserve shard-level replay semantics."""
 
     def __init__(self, cache: ShardCache, store: ShardStateStore) -> None:
         self.cache = cache
         self.store = store
         self.state = store.recover()
+        self._recovery_pending = set(self.state.active_shards)
+        self._prepared = set[str]()
 
     def prepare(self, shard_path: str) -> CachedShard | None:
         if shard_path in self.state.completed:
             return None
+        if shard_path in self._prepared:
+            raise ShardStateError("active shard is already prepared")
+        if shard_path not in self.state.active_shards and self._recovery_pending:
+            raise ShardStateError(
+                "all recovered active shards must be replayed and prepared before a new shard"
+            )
         self.state = self.store.begin(self.state, shard_path)
-        return self.cache.fetch(shard_path, protected_paths=frozenset({shard_path}))
+        cached = self.cache.fetch(
+            shard_path, protected_paths=frozenset(self.state.active_shards)
+        )
+        self._recovery_pending.discard(shard_path)
+        self._prepared.add(shard_path)
+        return cached
 
     def mark_completed(self, shard_path: str) -> None:
+        if shard_path not in self._prepared:
+            raise ShardStateError("active shard must be prepared before completion")
         self.state = self.store.complete(self.state, shard_path)
+        self._prepared.remove(shard_path)
+        self._recovery_pending.discard(shard_path)
 
     @contextmanager
     def lease(self, shard_path: str) -> Generator[CachedShard | None]:

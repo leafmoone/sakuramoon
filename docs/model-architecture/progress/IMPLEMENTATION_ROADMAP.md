@@ -339,6 +339,16 @@ sakuramoon/
 - **完成边界：** CPU/真实数据本地模型单卡代码完成；Data package rereview pending。正式 immutable manifest 与 production caption-availability mapping 仍 pending；D012/D015 durable two-worker 由 D022/D023 独立修复。
 - **GPU：** CPU + 1GPU engineering smoke；多卡无。
 
+### D022：Bounded multi-active shard state schema v3
+
+- **依赖：** D012 manifest-bound durable state 与 D021 trusted shard boundary；D023 worker 调度尚未实现。
+- **实现路径：** `data/state.py`、state unit contracts、D022 task/test evidence 与 trace registry。
+- **动作：** schema v3 持久化显式 `worker_count` 与有界 `active_shards`；拒绝 worker topology drift 和 v1/v2；activation 在 fetch 前发布；cache fetch 保护全部 active shards；允许逐 shard complete。
+- **恢复：** 每次 restart 对全部 active shards 精确累计 replay shards/samples；所有 recovered active 都成功重新 prepare 前禁止激活新 shard。
+- **兼容边界：** 保留 D015 singleton lease 行为；本任务不修改 pipeline/collate 或实现两个 persistent workers，后者单独归 D023。
+- **完成证据：** targeted state contracts、邻接 singleton pipeline/fault 回归、ruff、pyright 与 D022 test report；Data 包级复审仍 pending。
+- **GPU：** 无。
+
 ## 9. Phase 2：冻结编码器与条件分支
 
 ### T020：Mage-VAE wrapper 与重建验收
