@@ -77,3 +77,7 @@ DDP/NCCL, multi-GPU validation, 1,000-step canary, or formal stage.
   plus real rejection counts, pinned/host memory, and production replay audit.
 - One-GPU consumer integration with the persistent two-worker path; no current CPU or
   one-GPU result may be extrapolated to four-GPU DDP/NCCL behavior.
+
+## D024 remediation rereview (`35e7e6f`)
+
+本节追加于历史 D010-D023 package report 之后；历史结论与生产 pending gates 保持不变。D024 的独立 Infra/性能结论为 **PASS（已实现 CPU/有界 1GPU scope）**。service ownership lock、winner socket preservation 和真实进程边界 CUDA consumer 三项 remediation finding 均已关闭；bounded channels、active eviction protection 与 whole-shard replay 保持成立。不可变复审记录见 `d024_infra_rereview.md`。

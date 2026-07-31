@@ -82,3 +82,7 @@ scope and does not close a throughput, quality, production inventory, or four-GP
   rate, and `all_condition=10% +/- 0.5pp` acceptance.
 - VAE reconstruction/latent quality evidence belongs to T020 and remains outside this
   CPU Data package pass.
+
+## D024 remediation rereview (`35e7e6f`)
+
+本节追加于历史 D010-D023 package report 之后；历史结论与生产 pending gates 保持不变。D024 的独立 AI/模型正确性结论为 **PASS（已实现 CPU/有界 1GPU scope）**。cache-root singleton、winner socket preservation 和真实 spawned service → AF_UNIX client → 两个 persistent workers → RTX 5090 consumer 三项 remediation finding 均已关闭；D021 trusted metadata、validation exclusion、caption/image/collate 与 D022/D023 replay 合同未改变。不可变复审记录见 `d024_ai_rereview.md`。
