@@ -35,6 +35,9 @@ if TYPE_CHECKING:
     from sakuramoon.data.state import SingleProcessShardCoordinator
 
 
+_WORKER_CONTEXT = mp.get_context("spawn")
+
+
 class CollateError(ValueError):
     """Samples cannot form one homogeneous training batch."""
 
@@ -153,13 +156,17 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
         # A command slot per worker prevents unbounded shard prefetch.  The
         # completion queue has the same bound because each active shard emits
         # exactly one terminal message.
+        self.multiprocessing_context = _WORKER_CONTEXT
         self.input_queues = tuple(
-            cast(MultiprocessingQueue[object], mp.Queue(maxsize=1))
+            cast(
+                MultiprocessingQueue[object],
+                self.multiprocessing_context.Queue(maxsize=1),
+            )
             for _ in range(worker_count)
         )
         self.completion_queue = cast(
             MultiprocessingQueue[object],
-            mp.Queue(maxsize=worker_count),
+            self.multiprocessing_context.Queue(maxsize=worker_count),
         )
         self.input_queue_capacity = worker_count
         self.input_queue_capacity_per_worker = 1
@@ -483,6 +490,7 @@ def _build_batch_loader[BatchItem](
         prefetch_factor=ready_batches // worker_count,
         pin_memory=pin_memory,
         in_order=in_order,
+        multiprocessing_context=_WORKER_CONTEXT,
     )
 
 

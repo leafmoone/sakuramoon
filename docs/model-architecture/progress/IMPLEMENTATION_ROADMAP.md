@@ -359,6 +359,22 @@ sakuramoon/
 - **完成证据：** 两个不同 worker ID/PID 跨多 shard 复用、真实 worker exit、父 close、精确 replay、reprepare barrier、bounded channel、ruff/pyright 与 D023 test report；Data 包级复审仍 pending。
 - **GPU：** 无；production cold-cache throughput/RSS/ready-wait sweep 保持 pending。
 
+### D024：Process-isolated dataset supply service
+
+- **依赖与覆盖边界：** 复用 D010 完整 shard 校验/原子发布、D012 LRU、D022 schema-v3 active/completed/replay 基础语义和 D023 persistent worker completion 合同。D024 只替换生产 ownership：训练父进程不再拥有 cache、tar 顺序或 shard state，改由单机唯一独立 data service 持有；不得回写 D022/D023 历史证据，也不得改变 trusted `ShardRecord`、validation exclusion、caption/image/collate 或 whole-shard at-least-once 语义。
+- **独立进程：** 新增独立启动、独立存活的 data-service CLI/process。它独占 ModelScope 网络、token 解析、`.partial`、bytes/SHA-256、fsync/原子发布、cache catalog、LRU/eviction、`mainset` 和 active/completed/replay state。trainer 不得 spawn、restart、stop 或以内联路径替代该 service；service 不可用时 preflight/训练硬失败，禁止退回训练进程或 DataLoader worker 下载。
+- **`mainset` 合同：** service 每轮从 immutable training manifest 读取全部 tar path，每个恰好一次，生成新的随机排列并原子持久化 `mainset_id`、manifest identity、shuffle identity、精确 ordinal 顺序和逐行状态。只有 service 能推进或恢复 cursor；trainer、checkpoint、stage、resolution/model growth、worker topology 和 resume 请求都不得携带、选择或改写 tar order/position。
+- **供给协议：** service 严格按当前 `mainset` ordinal 下载、校验、原子发布并租约保护 tar；在 worker 消费 active `A/B` 时并发准备后续 `C/D/E...`，内部保持有界 verified lookahead。它通过本机有界 IPC 向轻量 client 只发已经完整验证的 immutable `ShardRecord + absolute local path + lease identity`；训练侧只按 service 给出的顺序消费，不枚举、选择、下载、哈希、扫描或清理 shard。
+- **完成与轮换：** DataLoader worker 只读本地 tar、产生 batch 和 ordered done；父进程 client 只转发 normal-exhaustion completion ACK，不解释或修改 state。service 收到匹配 lease/worker identity 的 ACK 后才逐 tar complete；worker/service/client/trainer 异常、断连、中断或 ACK 缺失时保持 active，service restart 从 tar 起点 replay。只有当前 `mainset` 的全部 tar 已下载、验证、按序供给且所有 outstanding lease 正常完成后，service 才可原子关闭并删除旧表、创建下一份完整 manifest 随机 `mainset`；仅下载完但仍有 lease 时不得删表或供给下一轮。
+- **checkpoint 解耦：** service state 独立持久化且绝不快照、复制或引用到 raw checkpoint。trainer resume 只恢复训练与 optimizer state，然后连接 service 并消费 service 当前给出的 tar；人工暂停/续训、stage、分辨率和模型增长都不要求恢复数据位置、同一 tar 或同一 next batch。production checkpoint schema 的独立 remediation 由 T044 关闭，D024 不修改 T042 历史证据。
+- **有界与空间控制：** 实际接通严格 TOML `data.cache.download_concurrency`，新增无默认值的 `data.cache.verified_shard_lookahead`；service 内部 in-flight download、verified-ready shard、lease output 与 ACK channel，以及 DataLoader worker input/ready batch/completion channel 分别有界。每个下载按 manifest bytes 预留空间，quota 同时计算 published shard、in-flight reservation 与 manifest-owned `.partial`；active lease 全部防 eviction，inactive lookahead 可按 LRU 淘汰，不得预下载整个 dataset。
+- **关键路径隔离：** trainer 和 DataLoader worker 禁止 import/call transport、`fetch_dataset_shard`、SHA、cache eviction 或 partial cleanup。已验证 cache hit 的重新校验、启动 orphan `.partial` 清理和所有完整文件扫描都只在 service 内完成；shard IPC 每个 lease/完成各一次，绝不按 sample/batch/update 往返。训练热路径只能在 lookahead 耗尽时等待 descriptor，不能同步执行任何下载/校验工作。
+- **配置清理：** 现有 `range_workers` 不得继续作为无效果的必填字段；本任务必须依据固定 revision 的真实 ModelScope 合同，要么在 service 内实现有界 Range/断点续传及精确重组校验，要么通过受治理配置变更删除该字段。两条路径都必须保持完整 tar 校验后才可发布 lease。
+- **性能门槛：** 启动成本与稳态分开报告；正式计时前先由 service 填满配置的 verified lookahead。稳态 cold-cache 并发下载必须达到数据供给 `>=12 samples/s`、ready wait `<2%`、无 swap/无界 RSS/quota 越界，并与相同 workload 的 fully-cached control 比较 trainer step p50/p95/p99、GPU active/idle 和 DataLoader batch latency；超出预先登记的 same-backend control 波动即不放行。若共享 CPU/NVMe 无法隔离到该门槛，必须调整并显式锁定 service CPU/I/O/concurrency 配置或使用独立存储，不能声称“零影响”。
+- **验证：** 用独立真实 service process 和可控慢 transport 证明 worker 消费 `A/B` 时 `C/D/E` 已 ready/in-flight，trainer 进程没有网络/SHA/cache stack；验证每轮全 manifest permutation、每 tar 恰好一次、持久化 ordinal、IPC 身份/容量、精确并发/lookahead/bytes 上界、active 不 eviction、inactive 可 eviction、cache hit、损坏/截断/中断/ENOSPC/orphan partial、service/trainer/worker 分别退出、ACK 丢失、recovered-active barrier、mainset 收尾与下一轮原子创建。另验证 trainer checkpoint/restart 不读取或改变 service cursor。随后做 bounded 真实网络/NVMe/1GPU overlap smoke；两小时冷缓存 sweep 在 Data 里程碑集中执行一次。
+- **完成边界：** D024 保持独立 task、diff、测试、trace、证据和原子 commit。D024 完成后只启动一个新的 DATA 包级 reviewer；D024 与该 reviewer 关闭前，`T044/T050` 不得关闭 production resume/data-to-train 接线，`S000` 不得锁定 production service/download/lookahead/worker/queue 参数。
+- **GPU：** service 本身仅 CPU/网络/NVMe；使用 1GPU consumer 做 bounded 隔离/吞吐 smoke，不做长跑或正式 stage。
+
 ## 9. Phase 2：冻结编码器与条件分支
 
 ### T020：Mage-VAE wrapper 与重建验收
@@ -500,7 +516,7 @@ sakuramoon/
 
 - **对应文档：** `C12-E/F`。
 - **实现路径：** `checkpoint/schema.py`、`save.py`、`load.py`、`pma.py`。
-- **动作：** canonical-FQN sharded Safetensors model；完整TorchAO optimizer sidecar；trainer/data/growth/RNG state；checksum/manifest/temp dir/原子commit/`COMPLETE`；raw/model-only/PMA/release分kind。
+- **历史完成范围：** canonical-FQN sharded Safetensors model；完整TorchAO optimizer sidecar；trainer/data/growth/RNG state；checksum/manifest/temp dir/原子commit/`COMPLETE`；raw/model-only/PMA/release分kind。该实现与证据保持不回写，其中 data-state sidecar 已被 D024/T044 新决定取代，不能直接作为后续 production schema。
 - **周期：** 每1,000 successful updates或6小时先到者；finalize、pre/post growth、ramp中点/结束、pre-decay强制保存；保留最近2份滚动raw与所有accepted stage raw。
 - **验证：** save→fresh process load→next step对齐uninterrupted；缺失/bitflip/错误ID/dependency hash在forward前失败；checkpoint失败保留上一完整点；model-only不依赖续训sidecar。
 - **审查：** 独立AI + Infra reviewers。
@@ -511,18 +527,28 @@ sakuramoon/
 
 - **对应文档：** `C09-*`、`C10` stage顺序、`C12`迁移。
 - **实现路径：** `model/growth.py`、`checkpoint/migrate.py`、`train/stage.py`、`cli/transition.py`。
-- **动作：** 两次各均匀插入4个随机新slot；旧FQN/state原样保留，新optimizer state空；growth alpha固定半余弦0→1，计划updates的2%，限制1,000–5,000 successful updates；新stage/pass/seed从完整manifest重开。
+- **动作：** 两次各均匀插入4个随机新slot；旧FQN/state原样保留，新optimizer state空；growth alpha固定半余弦0→1，计划updates的2%，限制1,000–5,000 successful updates。transition 不控制 data-service `mainset` 或 tar cursor，service 继续当前代次与顺序。
 - **验证：** alpha=0新旧函数等价；new-slot allowlist；无copy/moment copy/LR multiplier；ramp中点/结束checkpoint恢复；失败回滚pre-transition raw且不自动重试。
 - **控制：** resume只允许同topology；transition只接受唯一前序；训练程序只写`stage_ready=true`，用户手工finalize/启动。
 - **审查：** 独立AI + Infra reviewers。
 - **完成证据：** FQN/state migration report、ramp曲线、rollback test。
 - **GPU：** 1GPU数学验证；4GPU G1/G2正式canary。
 
+### T044：Service-decoupled raw checkpoint 与恢复合同
+
+- **依赖与范围：** 依赖 T042 已完成 raw/model-only/PMA 基础和 D024 冻结的 service client 合同。本任务只去除 checkpoint 对 data state 的所有 schema/API/manifest 绑定并复验恢复；不实现 data service，不回写 T042 历史 task/review/evidence。
+- **实现路径：** `checkpoint/schema.py`、`save.py`、`load.py`、resume/preflight 接线、targeted CPU/1GPU checkpoint tests、T044 task/review evidence 与 trace registry。
+- **动作：** production raw 只保存 model parameters、完整 TorchAO optimizer state、scheduler/growth、trainer 与 successful-update/sample counters、训练 RNG、optimizer-SR RNG、resolved config 和 checkpoint identity；明确拒绝 `mainset_id`、tar cursor/order、active/completed/replay、cache/lease、prefetch/queue 或任意 opaque data sidecar。既有含 data state 的旧 schema 必须在 forward 前按显式版本合同拒绝或经受治理迁移，禁止忽略未知 sidecar 后静默加载。
+- **恢复验证：** save→fresh process load 完整恢复训练与 optimizer state；使用同一显式固定输入 batch 比较 uninterrupted 与 resumed 的 output/loss/all-gradient/clip/update/optimizer state/RNG。随后单独证明 resume 连接 D024 service 当前 cursor，既不请求旧数据位置，也不要求 live next batch 相同。
+- **审查：** checkpoint 高风险边界，保持独立实现、独立 AI reviewer、独立 Infra reviewer、独立 diff/test/trace/evidence/原子 commit。
+- **GPU：** targeted CPU + 1GPU；4-rank sharded restore 仍保持 blocked，不能由单卡证据关闭。
+
 ## 12. Phase 5：训练循环、可观测性、评估和性能
 
 ### T050：训练 loop、preflight 与硬失败语义
 
 - **对应文档：** `C12-F/G`、全部上游contract。
+- **数据依赖：** D024、新的 DATA 包级复审和 T044 独立双审必须先关闭；正式 CLI 先完整恢复 checkpoint 中的训练/optimizer state，再从 resolved config 连接并鉴别已运行的 data service、构造轻量 data client、persistent workers 与 batch consumer。trainer 禁止读取/恢复 service cursor，禁止构造 transport/cache、直接加载 shard state 或保留测试专用内联下载组装。
 - **实现路径：** `train/step.py`、`loop.py`、`preflight.py`、`failures.py`、`cli/train.py`。
 - **动作：** 成功update作为唯一scheduler/growth/checkpoint计数；microbatch/accumulation；global finite检查和clip；stage预算；no-force preflight；nonfinite/OOM/schema/kernel/backend异常同步停止。
 - **preflight：** config/hash、资产、dataset revision、GPU/driver/NCCL/NVMe、冻结零梯度、parameter schema、17 image shapes、八文本shape、zero-update loss、optimizer step、sample、checkpoint round-trip。
@@ -569,18 +595,108 @@ sakuramoon/
 - **对应文档：** `C11`恢复、`C12-F`故障矩阵。
 - **实现路径：** `tests/fault_injection/`、故障驱动CLI。
 - **注入：** 下载中断、截断shard、token失效、checksum错、worker退出、磁盘写满；microbatch/DDP reduction/optimizer/checkpoint各阶段杀进程；nonfinite、OOM、SR RNG分叉、NCCL rank failure。
-- **验收：** 只恢复上一`COMPLETE`；所有rank同步停；完成shard不重读、active shard从头；不得自动更改batch/backend/world size/optimizer/LR/checkpoint频率。
+- **验收：** 只恢复上一`COMPLETE`训练/optimizer state；所有rank同步停。data service 独立保证完成shard不重读、active shard从头，trainer restart 不恢复其位置；不得自动更改batch/backend/world size/optimizer/LR/checkpoint频率。
 - **审查：** 独立AI + Infra reviewers。
 - **完成证据：** 故障矩阵逐项pass、replay计数、恢复parent ID。
 - **GPU：** 1GPU子集；完整DDP/NCCL必须4GPU。
 
+## 12.5 Phase 5.5：人工训练边界与离线逐部性能优化
+
+本阶段不拥有训练生命周期，也不会在单卡实现刚完成时自动启动。必须先完成 Data、Encoders/Conditioning、K001、Dense Model、optimizer、checkpoint、训练 loop、telemetry 和单卡故障子集的当前 1GPU 实现与复审并填好 `S000` 单卡配置；随后由用户手工启动未优化 eager `S001`、观察训练是否正确，并自行决定 checkpoint 与停止时机。只有用户明确提供可完整续训的 raw checkpoint、确认 canonical 训练已停止并释放任务所需 GPU/NVMe 资源后，才执行 `P060-P067`。所有优化保持独立 task、diff、测试、证据和原子 commit；每个 task 的允许路径必须包含 `docs/model-architecture/progress/traceability.toml`，但只更新实际受影响的稳定 requirement ID。实现与审查不得并行，每个 task 都需要独立 AI/模型正确性和 Infra/性能审查。
+
+人工控制与训练状态保护协议固定如下：
+
+- 用户用生产 resolved config 和真实在线 Data/Qwen/VAE/conditioning/DiT/loss/backward/clip/optimizer 路径手工启动训练；zero-update、首个 successful update 和有界稳定窗口只提供 loss/grad/clip、OOM/swap、数据队列与 telemetry 证据，不触发自动暂停或优化。用户选择用于优化的 successful update 边界并记为 `N`。
+- 用户可以选择一份既有 `COMPLETE` raw checkpoint，或在 chosen update `N` 手工请求 T044 修订后的 production raw 协议保存；程序不得替用户选择 `N`、自动停止 trainer 或改写周期 checkpoint 频率。checkpoint 必须覆盖 model parameters、TorchAO optimizer state、scheduler/growth state、trainer 与 successful update/sample counters、训练 RNG、SR RNG、resolved config 和 checkpoint identity；不得包含任何 data-service state，model-only 或 PMA checkpoint 不得作为优化断点。
+- 用户手工停止 canonical trainer 并明确释放资源后，`P060-P067` 才能启动。优化任务不得向训练进程发送 signal/控制命令，不得自动 pause/resume，不得改写 canonical checkpoint、训练输出目录、data/cache state、W&B run 或 durable metrics；若训练仍占用同一 GPU 或 NVMe 路径，优化任务必须等待，不能抢占资源。
+- `P060-P067` 的 eager/candidate 测试只使用 checkpoint `N` 的只读身份和任务私有副本；测试 update、compile cache、profile、trace 和临时输出全部进入任务允许的隔离路径，不计入或回写正式训练状态。
+- `P067` 只交付 accepted optimization manifest、兼容性证据和人工续训命令所需的 resolved identity，不执行正式 update。由用户决定是否采用优化结果以及何时手工 fresh-load checkpoint `N`；采用时从 `N+1` 继续，不采用时以 eager 路径从同一 `N+1` 继续。successful update、sample、scheduler/growth 和 RNG 状态不得重置、跳步或重复记账；data service 保持独立，不被优化流程回退或改写。
+- 优化若改变 parameter layout、canonical FQN、optimizer state 或 checkpoint schema，必须提供显式、原子的版本迁移，并证明旧 checkpoint 导入、round-trip 和 eager/optimized `N+1` 对齐；否则拒绝该优化，不能牺牲既有训练状态。
+
+工期按 profiler 实际热点和保留候选计算，不要求为了“完成优化”实现无收益 kernel：
+
+| 范围 | 预计工程时间 | 适用条件 |
+|---|---:|---|
+| eager 启动证据与 `COMPLETE` checkpoint 验收 | 0.5-1 个工作日 | 仅为技术验收工作量；实际启动、checkpoint 和停止时机由用户决定 |
+| 只完成全链路审计，少量或没有候选被保留 | 7-10 个工作日 | profiler 未发现足够热点，候选以正确性/无收益证据关闭 |
+| 常规选择性 compile、算子、fusion、kernel 与 pipeline 优化 | 15-25 个工作日，约 3-5 周 | 预计路径；包含 targeted 1GPU 正确性、性能测试和独立复审 |
+| 深度自定义 Triton/QKV/optimizer kernel | 25-40 个工作日，约 5-8 周 | 仅在热点与端到端收益证明值得实现时进入 |
+
+任务级计划量为 `P060` 1-2 天、`P061` 2-4 天、`P062` 2-5 天、`P063` 3-6 天、`P064` 3-6 天、`P065` 2-4 天、`P066` 2-4 天、`P067` 2-3 天；这些范围不是必须全部相加，profile 无收益的候选应以证据关闭。GPU 排队、上游修复、依赖构建和四卡门槛不包含在上述单卡工期内。
+
+共同正确性门槛固定如下：
+
+- before/after 使用上述同一 `COMPLETE` eager checkpoint `N`、resolved config、显式固定 correctness batch/shape 序列、batch/accumulation、RNG 状态、软件锁和硬件；禁止把 live service tar 连续性作为正确性前提，也禁止通过减少 token、关闭功能、改变精度合同或未披露增加显存换速度。真实 service 只用于单独的端到端 overlap/吞吐比较。
+- 先以 eager 和 same-backend repeat 建立预先登记的数值容差，再比较模块 output、per-sample/mean loss、全部 canonical-FQN 参数梯度、clip coefficient、一次 optimizer update、optimizer state、checkpoint round-trip、fresh-process resume next step；不得在看到失败后放宽容差。
+- 涉及 varlen/attention/routing 的 task 额外验证 malformed boundary 硬失败、跨样本隔离、全部有效 token 路由和无 per-block D2H；涉及 custom kernel 的 task 必须覆盖真实 RTX 5090 forward/backward，不能用 import、shape 或 mock 代替。
+- 正确性、失败语义、checkpoint 兼容性、无 silent fallback、无 measured-window compile/recompile/fallback 任一失败时，不运行或不采信性能结论。单项优化只有在可复现 component gain 且端到端无 p50/p95/p99、显存、RSS/swap 或 checkpoint 摊销回退时才能保留。
+- 每项只运行 targeted CPU/1GPU 验证；17 image buckets × 8 text shapes、完整组合 benchmark 和恢复矩阵只在 `P067` 集中运行一次。1GPU 结果仍不得关闭 4GPU DDP/NCCL、正式 stage 或 regional compile 的四卡放行门槛。
+
+### P060：冻结 eager 正确性 oracle 与端到端热点基线
+
+- **依赖：** `D024`、`T020-T024`、`K001`、`M030-M037`、`T040-T044`、`T050-T054` 的当前 CPU/1GPU 实现与必要复审完成；`S000` 单卡 resolved config 已冻结，用户已手工启动并检查 `S001`、指定 `COMPLETE` raw checkpoint `N`，fresh-process 恢复门槛通过，并明确确认 canonical trainer 已停止且优化资源可用。
+- **动作：** 以 T051/T053 计时和 profiler 合同冻结 eager baseline；逐 phase 记录 data wait、H2D、Qwen、VAE、conditioning、packing/RoPE、DiT forward、loss/backward、clip、optimizer、checkpoint 的 p50/p95/p99、GPU active/idle、kernel launch/gap、allocated/reserved 和 host/pinned RSS。
+- **正确性：** 发布不可变 workload identity、eager output/loss/all-gradient/update/resume oracle 和 same-backend repeat p99；本任务不引入优化代码。
+- **完成证据：** `perf_baseline.json`、热点排序、trace 索引、正确性 oracle、候选/不优化理由矩阵。
+
+### P061：Regional `torch.compile` 候选
+
+- **范围：** 只编译 profiler 证实的稳定 tensor regions，优先重复 DiT block 的 norm/modulation、gate/residual、SwiGLU pointwise 与 output head；Data、Python packing、packed-entry boundary 验收、checkpoint 和故障控制保持 eager。FA4 作为显式 opaque/custom-op 边界，不由 Inductor 重写。
+- **验证：** graph break、guard、dynamic varlen、growth alpha、stride、autograd 和 cache 逐项检查；warmup 后 measured window 必须零 compile、零 recompile、零 fallback。Inductor cache 使用任务允许的 NVMe 路径，不依赖 `/tmp`，不进入 Git。
+- **放行：** 先通过共同 output/loss/all-gradient/update/resume gate；只有端到端稳态提升 `>=3%` 才保留候选。单卡任务不得把 `compile.regional_enabled` 改为生产开启；正式启用仍等待 hash-bound 4GPU correctness、DDP 和 resume 证据。
+- **完成证据：** eager/compiled golden、compile counters、graph-break/recompile 报告、`perf_baseline.json`/`perf_after.json` 和 retained/rejected 结论。
+
+### P062：算子选择、GEMM 与数据布局优化
+
+- **范围：** 审查 Q/K/V/content-gate projections、SwiGLU gate/up/down、condition projections、contiguous/cast、中间 tensor 生命周期和 grouped/packed GEMM；优先使用锁定 PyTorch/cuBLASLt/Triton 能复现的正式 API。
+- **约束：** 不改变 hidden/intermediate/head 数、GQA、bias/dropout、参数精度或计算顺序。QKV/QKVG 参数打包若改变 canonical FQN、optimizer state 或 checkpoint schema，必须作为本 task 内显式迁移协议并证明旧 checkpoint 导入、round-trip 和 next-step 对齐；没有收益证据时保持原布局。
+- **验证：** 每个候选分别比较 forward、loss、全部输入/参数梯度、一次 update、allocated/reserved、kernel 数和 gap；不得把 dense reference 或 KV repeat 引入生产路径。
+- **完成证据：** operator/layout matrix、GEMM trace、checkpoint compatibility report、before/after benchmark。
+
+### P063：RMSNorm、modulation、SwiGLU 与 residual fused operators
+
+- **范围：** 依次评估 `FP32 RMSNorm + sample modulation gather + affine`、`gate gather + growth + residual`、`SiLU(gate) * up`、content gate multiply 和 final-head norm/modulation 融合。先验证 P061 自动 fusion；只有 profiler 仍显示热点时才实现本地 Triton/custom op。
+- **正确性：** 保留 RMSNorm FP32 累计/BF16 输出、`eps=1e-6`、scale/shift/gate 顺序、growth switch 和 padding/varlen 语义；custom op 必须有明确 backward、非连续/边界 shape contract、grad reference 和异常硬失败，不允许 forward-only 加速。
+- **验证：** 逐 fused operator 做 eager golden、forward/backward、全参数梯度、update、same-backend repeat、峰值显存和 kernel launch/gap；再做多 block 小型 smoke。
+- **完成证据：** fused-op contract matrix、Triton/Inductor trace、numeric report、before/after benchmark。
+
+### P064：Q/K Norm、2D RoPE 与 FA4 周边 kernel 优化
+
+- **范围：** 评估 Q/K FP32 RMSNorm、`32/48/48` NoPE/y/x split、共享 frequency rotation、contiguous materialization和 FA4 前后 content-gate epilogue的融合；不得重新实现或替换已锁定 FA4 attention 核心。
+- **正确性：** 固定 Q/K norm-before-RoPE、V 不归一化、20Q/5KV、head_dim 128、native GQA、BF16、非因果、`pack_gqa=true`、跨样本隔离和 accepted boundary identity。任何 upstream kernel/库必须固定版本、wheel hash和可治理 commit/license provenance，禁止静默 fallback。
+- **验证：** dense numerical reference、真实 FA4 output/loss/all-gradient/update、malformed/mutated boundary negative、17×8 之外的 targeted 极值 shape、多 block timing/memory/profile；禁止 per-block D2H。
+- **完成证据：** kernel contract/provenance matrix、FA4 reference comparison、profiler kernel/gap 和 before/after benchmark。
+
+### P065：Gradient、finite/clip 与 optimizer fused update
+
+- **范围：** 评估 multi-tensor FP32 finite+sumsq+global norm、一次 coefficient scale、TorchAO AdamW8bit update kernel grouping和 SR RNG 状态切换开销；优化目标以 P060 中真实端到端占比为准，不从 isolated zero-gradient timing 外推。
+- **正确性：** 保留 global sample mean、FP32 norm、clip=1.0、nonfinite硬失败、BF16 matrix/FP32 sensitive parameter policy、256-block 8-bit moments、stochastic rounding、参数分组/FQN、attempted/successful update计数和 serialized bitwise next-step合同。
+- **验证：** 所有参数 finite/norm/clip、全部 optimizer state bytes/class、held-out EMA ratio、one-step update、checkpoint/resume RNG/state；单卡仅关闭本 task，四 rank global mean/state equality仍属于 T041/S002。
+- **完成证据：** multi-tensor golden、optimizer state/update report、RNG/resume report、before/after profile。
+
+### P066：Data、Qwen/VAE、conditioning、packing 与 H2D overlap
+
+- **范围：** 逐 phase 复审 D024 process-isolated data service/read-ahead/IPC、D023 worker/queue、cold-cache NVMe、pinned memory/nonblocking H2D、Qwen length buckets、VAE、Text/Style heads、packing/coordinates/sample IDs和安全的跨 batch CPU/GPU overlap；默认同GPU Qwen/VAE/DiT串行，只在 profiler 证明收益且显存有界时评估 stream overlap。P066 不负责补做 D024 核心能力。
+- **约束：** 不增加跨 batch text/latent/activation cache，不改变 caption/dropout、在线 Qwen/Mage-VAE、D024 `mainset`/lease/worker_count/state/cache语义、batch/accumulation、token上限或 backend；queue、prefetch、compile cache 和临时 buffer始终有界。
+- **验证：** service `mainset` 顺序/lease/replay、训练 RNG/validation exclusion、worker exit/restart、Qwen七状态、VAE posterior mean、conditioning output/grad、packing隔离和固定-batch end-to-end output/loss/update保持一致；报告 ready wait、H2D、RSS/swap、显存和吞吐。
+- **完成证据：** phase review matrix、cold/warm-cache report、overlap timeline、correctness/fault regressions和 before/after benchmark。
+
+### P067：单卡优化组合验收与逐部独立复审
+
+- **动作：** 从 `P061-P066` 只组合已单独通过正确性和性能门槛的变体；逐项消融 compile、operator/layout、fused op、kernel、optimizer和pipeline收益，检测交互回退，未达门槛的候选保持关闭并记录理由。
+- **集中验证：** 从同一 checkpoint `N` 的独立副本和同一显式固定 correctness batch 一次完成17 image buckets × 8 text shapes、真实 Qwen/VAE/conditioning/DiT/loss/backward/clip/optimizer/checkpoint、故障恢复子集、fresh-process resume next step和 eager-vs-optimized `N+1` output/loss/all-gradient/update/state；真实 D024 service 另做不要求数据位置连续的端到端供给/overlap benchmark，随后运行 T053 公平端到端 benchmark。
+- **审查：** 每个 `P061-P066` 独立 AI/Infra 结论必须已关闭；`P067` 再由新的独立 AI reviewer 和 Infra reviewer 检查组合正确性、数值容差、checkpoint兼容、无 silent fallback/recompile、内存边界和端到端收益。
+- **输出：** 生成唯一 accepted 1GPU optimization manifest，锁定启用/禁用项、source/config/build hash、kernel provenance、compile counters、数值报告和 `perf_baseline.json`/`perf_after.json`；发布可供用户手工从 checkpoint `N` 进入 update `N+1` 的 resume handoff，但不启动训练，且不得外推为4GPU结论。
+
 ## 13. Phase 6：Stage 配置填充与正式 canary
+
+本阶段所有训练启动、暂停、finalize、恢复、扩模型和扩分辨率都由用户手工决定。训练程序只执行用户明确选择的 resolved config、checkpoint 与唯一合法 transition，达到门槛时只写证据和 `stage_ready=true`；不得自动进入下一 stage。
 
 ### S000：目标机容量与 stage overlay 填充
 
 - **对应文档：** `C10-D/E`、`C12-F`。
-- **依赖：** `T053` benchmark完成，dropout已决定。
-- **动作：** 为S0/S1/G1/S2/G2/S3填写local/global batch、accumulation、checkpoint mode、valid samples/data passes、actual DiT FLOPs、successful updates、checkpoint slots和wall-time预测；H1/H2继续disabled。
+- **依赖：** `T053` benchmark harness完成，dropout已决定；本任务先为 eager `S001` 启动冻结单卡配置，不等待 `P060-P067`。regional compile 若缺少四卡证据仍保持关闭。
+- **动作：** 为S0/S1/G1/S2/G2/S3填写local/global batch、accumulation、checkpoint mode、valid samples/equivalent data passes、actual DiT FLOPs、successful updates、checkpoint slots和wall-time预测；equivalent data passes 只按样本暴露量换算，不对应或重置 service `mainset` 代次；H1/H2继续disabled。
 - **验证：** 相邻stage只变一个主轴；transition前序唯一；配置无placeholder、隐式默认或未知key；每个resolved config有hash。
 - **完成证据：** stage budget表、resolved configs、容量审查。
 - **GPU：** 1GPU填S0；S1以后必须4GPU benchmark。
@@ -588,14 +704,14 @@ sakuramoon/
 ### S001：S0 单卡 16L/256 canary
 
 - **进入门槛：** 全部P0 contract、Qwen/VAE、dense/FA4、optimizer 1,000-step canary、单卡checkpoint/fault tests通过。
-- **执行：** zero-update→1 step→200 updates→1,000 successful updates→耐久窗口，保持真实在线数据/Qwen/VAE/DiT/optimizer。
+- **执行：** 用户手工启动 eager zero-update、首个 successful update 和有界稳定窗口；用户选择 update `N` 的 `COMPLETE` raw checkpoint并手工停止。`P060-P067` 完成后只提供验收结果，由用户决定是否以及何时手工从同一 checkpoint 的 update `N+1` 恢复，再继续到累计200 updates、累计1,000 successful updates和耐久窗口。全程保持真实在线数据/Qwen/VAE/DiT/optimizer，优化测试产生的 update 不计入正式训练。
 - **验收：** loss/grad/clip稳定；无NaN/OOM/swap；checkpoint fresh-load next-step对齐；数据/验证隔离；W&B与本地metrics一致；用户手工批准S0。
 - **证据：** stage report、AI/Infra review、固定sample、timing/profile、accepted raw checkpoint。
 - **GPU：** 当前1×5090可执行。
 
 ### S002：S1 四卡 16L/256 canary
 
-- **唯一变化：** world size 1→4，新stage/pass/seed。
+- **唯一变化：** world size 1→4；训练 stage/RNG 按 transition 合同迁移，data service 不新建或重置 `mainset`。
 - **执行：** 4GPU preflight、NCCL/P2P、global mean/state hash、200–1,000 successful updates、checkpoint restore与rank failure。
 - **验收：** all-rank model/moments/step/SR hash一致；训练RNG rank-local；数据供给≥12 samples/s、wait<2%；无三卡fallback。
 - **GPU：** 必须4×5090；当前环境不可关闭此任务。
@@ -627,6 +743,7 @@ sakuramoon/
 | 1GPU smoke | load、forward、backward、update、峰值显存 | 不能证明四卡DDP/NCCL |
 | 1GPU numeric | reference vs production output/loss/grad/update | 不能只检查import或shape |
 | 1GPU perf | warmup、steady profile、17×8 shape边界 | 不能外推四卡吞吐 |
+| 1GPU optimization | eager vs candidate output/loss/all-grad/update/resume + before/after | 正确性先于性能；组合证据不能替代逐项消融 |
 | 4GPU correctness | global mean、state hashes、resume、rank failure | 必须真实4×5090 |
 | 4GPU endurance | 500–1,000 measured updates、fault、checkpoint | stage间不能复用 |
 | Quality | 固定prompts、VAE集、FID/IS、人工tag/美学/NL | loss或FID单项不能放行 |
@@ -640,22 +757,28 @@ sakuramoon/
   ↓
 R001 → R002 → D001 → C001
                          ↓
-D010 → D011 → D012 → D013 → D014 → D015 → G001 → D016
-                                              ↓
+D010 → D011 → D012 → D013 → D014 → D015 → G001 → D016 → D020 → D021 → D022 → D023 → D024 → DATA package review
+                                                                                                      ↓
 T020 + T021 → T022 + T023 → T024
   ↓
 M030 → M031 → M032 → M033 → M034 → K001
   ↓
-T040 → T041 → T042 → T043 → T050 → T051/T052/T053 → T054
+T040 → T041 → T042 → T043 → T044 → T050 → T051/T052/T053 → T054
   ↓
-C002/S000 → S001 → S002 → G1 → S2 → G2 → S3
+C002/S000 → 用户手工启动S001 eager → 用户选择COMPLETE raw checkpoint N并手工停止
+  ↓
+P060 → P061 → P062 → P063 → P064 → P065 → P066 → P067
+  ↓
+P067只交付优化manifest与续训证据 → 用户手工决定并从同一checkpoint恢复N+1
+  ↓
+累计200/1,000 updates/耐久窗口 → 用户逐stage手工finalize/启动S002 → G1 → S2 → G2 → S3
   ↓
 可选 H1 → H2
 
 A001：只保留已完成的最小本地资产边界；A002 重型审计保持撤销，不参与上述依赖链。
 ```
 
-允许并行的只有不写同一文件且接口已冻结的任务，例如T020与T021、T022与T023、T051与T052。实现和审查不得并行；上游contract未验证时不得提前写生产优化。
+允许并行的只有不写同一文件且接口已冻结的任务，例如T020与T021、T022与T023、T051与T052。`P061-P066` 为了保留逐项可归因的 baseline 默认按编号串行；只有 P060 热点矩阵证明写路径、benchmark identity和GPU资源互不冲突时才可并行只读预审。实现和审查不得并行；上游contract未验证时不得提前写生产优化。
 
 ## 16. 开工前仍需用户决定
 

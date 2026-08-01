@@ -10,8 +10,11 @@ from typing import Protocol
 import torch
 from torch import nn
 
-from sakuramoon.conditioning.style_resampler import StyleResampler
-from sakuramoon.conditioning.text_mixer import TextConditioner
+from sakuramoon.conditioning.style_resampler import (
+    StyleConditioningOutput,
+    StyleResampler,
+)
+from sakuramoon.conditioning.text_mixer import TextConditioner, TextConditioningOutput
 from sakuramoon.model.dit import PackedDiT
 from sakuramoon.optim.clip import ClipResult, clip_grad_norm_fp32
 from sakuramoon.telemetry.timers import PhaseTimer
@@ -58,7 +61,9 @@ class TrainableComposite(nn.Module):
         self.text = text
         self.style = style
 
-    def forward(self, inputs: TrainableCompositeInputs) -> tuple[torch.Tensor, ...]:
+    def forward_conditioning(
+        self, inputs: TrainableCompositeInputs
+    ) -> tuple[TextConditioningOutput, StyleConditioningOutput]:
         text = self.text(
             inputs.qwen_states,
             inputs.main_token_indices,
@@ -71,6 +76,14 @@ class TrainableComposite(nn.Module):
             inputs.use_null_style,
             inputs.active_style_sample_indices,
         )
+        return text, style
+
+    def forward_dit(
+        self,
+        inputs: TrainableCompositeInputs,
+        conditioning: tuple[TextConditioningOutput, StyleConditioningOutput],
+    ) -> tuple[torch.Tensor, ...]:
+        text, style = conditioning
         return self.dit(
             inputs.latents,
             text.tokens,
@@ -82,6 +95,17 @@ class TrainableComposite(nn.Module):
             inputs.aspect,
             growth_alpha=inputs.growth_alpha,
         )
+
+    def forward(
+        self,
+        inputs: TrainableCompositeInputs,
+        *,
+        phase_timer: PhaseTimer | None = None,
+    ) -> tuple[torch.Tensor, ...]:
+        with _record_phase(phase_timer, "conditioning"):
+            conditioning = self.forward_conditioning(inputs)
+        with _record_phase(phase_timer, "dit_forward"):
+            return self.forward_dit(inputs, conditioning)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +161,7 @@ class SingleGpuStep:
         self.module = module
         self.optimizer = optimizer
         self.accumulation_steps = accumulation_steps
-        self._state = state
+        self._state: SingleGpuUpdateState = state
         self._microbatches = 0
         self._samples = 0
         self._loss_sum: torch.Tensor | None = None
@@ -228,12 +252,29 @@ class SingleGpuStep:
                 clip = clip_grad_norm_fp32(parameters, max_norm=1.0)
             with _record_phase(phase_timer, "optimizer"):
                 self.optimizer.step()
+        except Exception as error:
+            self._failed = True
+            try:
+                with _record_phase(phase_timer, "zero_grad"):
+                    self.optimizer.zero_grad(set_to_none=True)
+            except Exception as cleanup_error:  # noqa: BLE001 - preserve both failures
+                raise ExceptionGroup(
+                    "update failed and gradient cleanup failed",
+                    [error, cleanup_error],
+                ) from None
+            raise
+
+        successful = replace(
+            attempted,
+            successful_updates=attempted.successful_updates + 1,
+            effective_samples=attempted.effective_samples + self._samples,
+        )
+        self._state = successful
+        try:
             with _record_phase(phase_timer, "zero_grad"):
                 self.optimizer.zero_grad(set_to_none=True)
         except Exception:
             self._failed = True
-            with _record_phase(phase_timer, "zero_grad"):
-                self.optimizer.zero_grad(set_to_none=True)
             raise
 
         result = SingleGpuUpdateResult(
@@ -241,11 +282,7 @@ class SingleGpuStep:
             clip=clip,
             microbatches=self._microbatches,
             effective_samples=self._samples,
-            state=replace(
-                attempted,
-                successful_updates=attempted.successful_updates + 1,
-                effective_samples=attempted.effective_samples + self._samples,
-            ),
+            state=successful,
         )
         self._state = result.state
         self._microbatches = 0

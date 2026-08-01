@@ -11,7 +11,7 @@ import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 from torch import nn
@@ -22,9 +22,7 @@ from sakuramoon.checkpoint.policy import (
 )
 from sakuramoon.checkpoint.schema import StageBudgetCheckpointState
 from sakuramoon.config.schema import RuntimeConfig
-from sakuramoon.data.collate import DataLeaseClient, TrainingBatch, iter_service_batches
-from sakuramoon.data.pipeline import WebDatasetPipeline
-from sakuramoon.data.service_protocol import ShardLeaseDescriptor
+from sakuramoon.data.collate import TrainingBatch
 from sakuramoon.encoders.mage_vae import FrozenMageVAE
 from sakuramoon.encoders.qwen import FrozenQwenEncoder
 from sakuramoon.model.dit import DenseDiT
@@ -42,6 +40,9 @@ from sakuramoon.train.step import (
     TrainableComposite,
     TrainableCompositeInputs,
 )
+
+if TYPE_CHECKING:
+    from sakuramoon.train.preflight import AcceptedPreflight
 
 
 class _Encoder(Protocol):
@@ -107,64 +108,6 @@ class RuntimeMeasurement:
     text_tokens: int
     sample_ids: tuple[str, ...]
     shape_keys: tuple[str, ...]
-
-
-class _PreleasedClient:
-    """Make one already-issued worker-0 lease visible to ``iter_service_batches``."""
-
-    def __init__(self, delegate: DataLeaseClient, first: ShardLeaseDescriptor) -> None:
-        self._delegate = delegate
-        self._first: ShardLeaseDescriptor | None = first
-        self.identity = delegate.identity
-
-    def health(self) -> bool:
-        # The caller performed health before taking the first lease.  Returning
-        # ``False`` here prevents the iterator from asking the service to repeat
-        # that health request while the preleased descriptor is still active.
-        return False
-
-    def lease(self, worker_id: int) -> ShardLeaseDescriptor | None:
-        if worker_id == 0 and self._first is not None:
-            descriptor, self._first = self._first, None
-            return descriptor
-        return self._delegate.lease(worker_id)
-
-    def acknowledge(self, descriptor: ShardLeaseDescriptor) -> None:
-        self._delegate.acknowledge(descriptor)
-
-
-def service_batches(
-    client: DataLeaseClient,
-    *,
-    pipeline_for_first_lease: Callable[[ShardLeaseDescriptor], WebDatasetPipeline],
-    batch_size: int,
-    worker_count: int,
-    ready_batches: int,
-    pin_memory: bool,
-    drop_last: bool,
-) -> Iterator[TrainingBatch]:
-    """Consume D024 leases without moving ownership into the trainer.
-
-    ``iter_service_batches`` needs a validated pipeline template before it can
-    start its persistent workers.  The first lease supplies that template's
-    trusted local path; the lease is then replayed through worker 0 exactly once.
-    """
-
-    if client.health():
-        return iter(())
-    first = client.lease(0)
-    if first is None:
-        return iter(())
-    pipeline = pipeline_for_first_lease(first)
-    return iter_service_batches(
-        pipeline,
-        _PreleasedClient(client, first),
-        batch_size=batch_size,
-        worker_count=worker_count,
-        ready_batches=ready_batches,
-        pin_memory=pin_memory,
-        drop_last=drop_last,
-    )
 
 
 def _require_batch(batch: TrainingBatch) -> None:
@@ -271,9 +214,11 @@ class SingleGpuBatchRuntime:
         if hidden_states.ndim != 4 or hidden_states.shape[0] != input_ids.shape[0]:
             raise ValueError("Qwen hidden states have an invalid batch shape")
 
-        images = batch.images.to(
-            self.device, dtype=torch.bfloat16, non_blocking=True
-        ).div(127.5).sub(1.0)
+        images = (
+            batch.images.to(self.device, dtype=torch.bfloat16, non_blocking=True)
+            .div(127.5)
+            .sub(1.0)
+        )
         if phase_timer is None:
             clean = self.vae.encode(images)
         else:
@@ -307,7 +252,9 @@ class SingleGpuBatchRuntime:
             main_token_indices=batch.main_token_indices.to(
                 self.device, dtype=torch.long, non_blocking=True
             ),
-            main_mask=batch.main_mask.to(self.device, dtype=torch.bool, non_blocking=True),
+            main_mask=batch.main_mask.to(
+                self.device, dtype=torch.bool, non_blocking=True
+            ),
             main_token_lengths=batch.main_token_lengths,
             artist_token_indices=batch.artist_token_indices.to(
                 self.device, dtype=torch.long, non_blocking=True
@@ -416,6 +363,7 @@ def require_single_gpu_config(config: RuntimeConfig) -> None:
 def run_single_gpu_training(
     config: RuntimeConfig,
     *,
+    preflight: AcceptedPreflight,
     runtime: SingleGpuBatchRuntime,
     module: nn.Module,
     optimizer: StepOptimizer,
@@ -429,14 +377,15 @@ def run_single_gpu_training(
     cadence: CheckpointCadence,
     forced_checkpoint: Callable[[int], CheckpointReason | None] | None = None,
     checkpoint_event: Callable[[int, CheckpointReason], None] | None = None,
-    checkpoint_cadence_event: Callable[
-        [int, CheckpointReason, CheckpointCadence], None
-    ]
+    checkpoint_cadence_event: Callable[[int, CheckpointReason, CheckpointCadence], None]
     | None = None,
     clock: Callable[[], float] | None = None,
 ) -> LoopResult:
     """Run the locked loop after all ownership and assembly objects are ready."""
 
+    from sakuramoon.train.preflight import require_accepted_preflight
+
+    require_accepted_preflight(preflight)
     require_single_gpu_config(config)
     if module is not runtime.composite:
         raise ValueError("training module must be the runtime trainable composite")
@@ -449,8 +398,7 @@ def run_single_gpu_training(
     ):
         raise ValueError("restored stage budget is inconsistent with trainer state")
     if (
-        stage_budget.terminal_successful_update
-        - stage_budget.start_successful_update
+        stage_budget.terminal_successful_update - stage_budget.start_successful_update
         != config.stage.planned_updates
     ):
         raise ValueError("restored stage budget differs from resolved config")
@@ -489,5 +437,4 @@ __all__ = [
     "SingleGpuBatchRuntime",
     "require_single_gpu_config",
     "run_single_gpu_training",
-    "service_batches",
 ]

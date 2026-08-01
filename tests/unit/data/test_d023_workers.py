@@ -4,11 +4,14 @@ from __future__ import annotations
 import io
 import json
 import tarfile
+import threading
 from collections.abc import Mapping
+from multiprocessing.context import BaseContext
 from pathlib import Path
 from typing import cast
 
 import pytest
+import torch
 from PIL import Image
 
 from sakuramoon.data.buckets import BucketShape
@@ -77,6 +80,10 @@ def _caption(_raw: Mapping[str, object]) -> CaptionFields:
     )
 
 
+def _observe_rejection(_reason: str) -> None:
+    return None
+
+
 def _probabilities() -> CaptionDropoutProbabilities:
     nl = NlDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0)
     return CaptionDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, nl)
@@ -141,7 +148,7 @@ def _pipeline(path: Path, record: ShardRecord) -> WebDatasetPipeline:
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         caption_fields_parser=_caption,
-        rejection_observer=lambda _reason: None,
+        rejection_observer=_observe_rejection,
         base_seed=9,
         stage="S0",
         pass_index=0,
@@ -174,18 +181,35 @@ def test_two_persistent_workers_coordinate_parent_state(tmp_path: Path) -> None:
         cast(ShardCache, cache),
         ShardStateStore(tmp_path / "run/state.json", manifest, worker_count=2),
     )
-    batches = tuple(
-        iter_leased_batches(
-            _pipeline(paths[0], records[0]),
-            coordinator,
-            tuple(record.path for record in records),
-            batch_size=1,
-            worker_count=2,
-            ready_batches=2,
-            pin_memory=False,
-            drop_last=True,
+    parent_thread_ready = threading.Event()
+    release_parent_thread = threading.Event()
+
+    def keep_torch_parent_thread_alive() -> None:
+        value = torch.ones((64, 64), dtype=torch.float32)
+        torch.mm(value, value)  # pyright: ignore[reportUnknownMemberType]
+        parent_thread_ready.set()
+        release_parent_thread.wait()
+
+    parent_thread = threading.Thread(target=keep_torch_parent_thread_alive)
+    parent_thread.start()
+    assert parent_thread_ready.wait(timeout=5.0)
+    try:
+        batches = tuple(
+            iter_leased_batches(
+                _pipeline(paths[0], records[0]),
+                coordinator,
+                tuple(record.path for record in records),
+                batch_size=1,
+                worker_count=2,
+                ready_batches=2,
+                pin_memory=False,
+                drop_last=True,
+            )
         )
-    )
+    finally:
+        release_parent_thread.set()
+        parent_thread.join(timeout=5.0)
+    assert not parent_thread.is_alive()
     assert sorted(int(batch.sample_ids[0]) for batch in batches) == [1, 2, 3, 4]
     assert coordinator.state.completed == tuple(record.path for record in records)
     assert coordinator.state.active_shards == ()
@@ -229,6 +253,12 @@ def test_worker_and_ready_channels_are_bounded_and_two_processes_persist(
     assert loader.prefetch_factor == 1
     assert loader.persistent_workers is True
     assert loader.in_order is False
+    loader_context = cast(
+        BaseContext,
+        loader.multiprocessing_context,  # pyright: ignore[reportUnknownMemberType]
+    )
+    assert loader_context is dataset.multiprocessing_context
+    assert loader_context.get_start_method() == "spawn"
 
     iterator = iter(loader)
     next_command = 0

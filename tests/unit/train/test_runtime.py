@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -12,18 +13,16 @@ from sakuramoon.checkpoint.policy import CheckpointCadence, CheckpointReason
 from sakuramoon.checkpoint.schema import StageBudgetCheckpointState
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.collate import TrainingBatch
-from sakuramoon.data.manifest import ShardRecord
-from sakuramoon.data.pipeline import WebDatasetPipeline
-from sakuramoon.data.service_protocol import (
-    DataServiceSessionIdentity,
-    ShardLeaseDescriptor,
+from sakuramoon.train.preflight import (
+    PREFLIGHT_CHECKS,
+    AcceptedPreflight,
+    PreflightError,
+    run_single_gpu_preflight,
 )
-from sakuramoon.train import runtime as runtime_module
 from sakuramoon.train.runtime import (
     SingleGpuBatchRuntime,
     require_single_gpu_config,
     run_single_gpu_training,
-    service_batches,
 )
 from sakuramoon.train.step import SingleGpuUpdateState, TrainableComposite
 
@@ -49,25 +48,11 @@ class _SgdAdapter:
         self.optimizer.zero_grad(set_to_none=set_to_none)
 
 
-class _FakeClient:
-    def __init__(self, descriptor: ShardLeaseDescriptor) -> None:
-        self.identity = DataServiceSessionIdentity("a" * 64, 2)
-        self.descriptor = descriptor
-        self.lease_calls: list[int] = []
-
-    def health(self) -> bool:
-        return False
-
-    def lease(self, worker_id: int) -> ShardLeaseDescriptor | None:
-        self.lease_calls.append(worker_id)
-        if worker_id == 0 and self.descriptor is not None:
-            descriptor, self.descriptor = self.descriptor, None  # type: ignore[assignment]
-            return descriptor
-        return None
-
-    def acknowledge(self, descriptor: ShardLeaseDescriptor) -> None:
-        del descriptor
-        raise AssertionError("the wrapper must not ACK before worker completion")
+def _accepted(tmp_path: Path) -> AcceptedPreflight:
+    return run_single_gpu_preflight(
+        {name: (lambda: None) for name in PREFLIGHT_CHECKS},
+        tmp_path / "accepted-preflight.json",
+    )
 
 
 def test_single_gpu_config_requires_native_s0() -> None:
@@ -89,66 +74,46 @@ def test_single_gpu_config_requires_native_s0() -> None:
         require_single_gpu_config(cast(RuntimeConfig, changed))
 
 
-def test_service_batches_replays_preleased_worker_zero_descriptor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    local_path = tmp_path / "sample.tar"
-    local_path.write_bytes(b"tar")
-    descriptor = ShardLeaseDescriptor(
-        lease_id="b" * 64,
-        worker_id=0,
-        state_identity="c" * 64,
-        record=ShardRecord(
-            path="sample.tar",
-            release="release",
-            bytes=3,
-            sha256="d" * 64,
-            samples=1,
-        ),
-        local_path=local_path,
+def test_training_boundary_accepts_only_d025_preassembled_batches() -> None:
+    parameters = signature(run_single_gpu_training).parameters
+
+    assert "batches" in parameters
+    assert {
+        "batch_size",
+        "worker_count",
+        "ready_batches",
+        "pin_memory",
+        "drop_last",
+        "pipeline",
+        "data_client",
+    }.isdisjoint(parameters)
+
+
+def test_training_rejects_forged_preflight_before_runtime_use(tmp_path: Path) -> None:
+    config = SimpleNamespace(
+        run=SimpleNamespace(stage="S0"),
+        stage=SimpleNamespace(world_size=1, accumulation=1, planned_updates=1),
+        distributed=SimpleNamespace(backend="native", world_size=1),
+        failure=SimpleNamespace(allow_force_bypass=False),
+        checkpoint=SimpleNamespace(full_every_updates=1000),
     )
-    client = _FakeClient(descriptor)
-    pipeline = cast(WebDatasetPipeline, object())
-    observed: dict[str, object] = {}
-
-    def fake_iter(
-        selected_pipeline: WebDatasetPipeline,
-        selected_client: Any,
-        **kwargs: object,
-    ) -> Iterator[TrainingBatch]:
-        observed["pipeline"] = selected_pipeline
-        observed["health"] = selected_client.health()
-        observed["lease"] = selected_client.lease(0)
-        observed["kwargs"] = kwargs
-        return iter(())
-
-    monkeypatch.setattr(runtime_module, "iter_service_batches", fake_iter)
-    batches = service_batches(
-        client,
-        pipeline_for_first_lease=lambda first: (
-            pipeline if first == descriptor else cast(WebDatasetPipeline, object())
-        ),
-        batch_size=1,
-        worker_count=2,
-        ready_batches=2,
-        pin_memory=True,
-        drop_last=True,
-    )
-
-    assert tuple(batches) == ()
-    assert client.lease_calls == [0]
-    assert observed == {
-        "pipeline": pipeline,
-        "health": False,
-        "lease": descriptor,
-        "kwargs": {
-            "batch_size": 1,
-            "worker_count": 2,
-            "ready_batches": 2,
-            "pin_memory": True,
-            "drop_last": True,
-        },
-    }
+    forged = object.__new__(AcceptedPreflight)
+    with pytest.raises(PreflightError, match="process-local"):
+        run_single_gpu_training(
+            cast(RuntimeConfig, config),
+            preflight=forged,
+            runtime=cast(SingleGpuBatchRuntime, object()),
+            module=torch.nn.ParameterList(),
+            optimizer=cast(Any, object()),
+            batches=iter(()),
+            scheduler_step=lambda _update: None,
+            checkpoint=lambda _update: None,
+            diagnostic_root=tmp_path,
+            failure_id=lambda phase, _state: phase,
+            state=SingleGpuUpdateState.initial(),
+            stage_budget=StageBudgetCheckpointState(0, 1),
+            cadence=CheckpointCadence(0, 0.0),
+        )
 
 
 def test_training_rejects_checkpoint_cadence_state_drift(tmp_path: Path) -> None:
@@ -168,6 +133,7 @@ def test_training_rejects_checkpoint_cadence_state_drift(tmp_path: Path) -> None
     with pytest.raises(ValueError, match="does not match trainer state"):
         run_single_gpu_training(
             cast(RuntimeConfig, config),
+            preflight=_accepted(tmp_path),
             runtime=cast(SingleGpuBatchRuntime, _Runtime()),
             module=module,
             optimizer=cast(Any, object()),
@@ -201,6 +167,7 @@ def test_mid_stage_resume_stops_at_original_absolute_budget(tmp_path: Path) -> N
 
     result = run_single_gpu_training(
         cast(RuntimeConfig, config),
+        preflight=_accepted(tmp_path),
         runtime=cast(SingleGpuBatchRuntime, _Runtime()),
         module=module,
         optimizer=_SgdAdapter(iter(module.parameters())),
@@ -246,6 +213,7 @@ def test_training_rejects_restored_stage_budget_drift(
     with pytest.raises(ValueError, match=message):
         run_single_gpu_training(
             cast(RuntimeConfig, config),
+            preflight=_accepted(tmp_path),
             runtime=cast(SingleGpuBatchRuntime, _Runtime()),
             module=module,
             optimizer=cast(Any, object()),
@@ -283,6 +251,7 @@ def test_runtime_publishes_exact_proposed_cadence_before_commit(
     cadence = CheckpointCadence(0, 0.0)
     result = run_single_gpu_training(
         cast(RuntimeConfig, config),
+        preflight=_accepted(tmp_path),
         runtime=cast(SingleGpuBatchRuntime, _Runtime()),
         module=module,
         optimizer=_SgdAdapter(iter(module.parameters())),
@@ -338,6 +307,7 @@ def test_runtime_failed_cadence_publication_keeps_restored_anchor(
     with pytest.raises(OSError, match="durable save failure"):
         run_single_gpu_training(
             cast(RuntimeConfig, config),
+            preflight=_accepted(tmp_path),
             runtime=cast(SingleGpuBatchRuntime, _Runtime()),
             module=module,
             optimizer=_SgdAdapter(iter(module.parameters())),
@@ -362,6 +332,7 @@ def test_runtime_requires_checkpointed_default_cuda_generator() -> None:
     from sakuramoon.conditioning.style_resampler import StyleResampler
     from sakuramoon.conditioning.text_mixer import TextConditioner
     from sakuramoon.model.dit import PackedDiT
+
     composite = TrainableComposite(
         dit=PackedDiT(
             depth=16,

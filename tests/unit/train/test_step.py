@@ -255,6 +255,29 @@ def test_failed_optimizer_attempt_is_counted_and_cannot_continue() -> None:
         step.finish_update()
 
 
+def test_post_step_zero_grad_failure_preserves_successful_mutation_state() -> None:
+    class _FailingCleanupOptimizer(_SgdAdapter):
+        def zero_grad(self, *, set_to_none: bool) -> None:
+            del set_to_none
+            raise RuntimeError("cleanup failed")
+
+    parameter = nn.Parameter(torch.tensor(0.0))
+    step = SingleGpuStep(
+        nn.ParameterList([parameter]),
+        _FailingCleanupOptimizer([parameter]),
+        accumulation_steps=1,
+        state=SingleGpuUpdateState.initial(),
+    )
+    step.backward((parameter - 1.0).square().reshape(1))
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        step.finish_update()
+
+    assert parameter.item() != 0.0
+    assert step.state == SingleGpuUpdateState(1, 1, 1)
+    with pytest.raises(RuntimeError, match="cannot continue"):
+        step.finish_update()
+
 def test_nonfinite_loss_aborts_attempt_and_clears_gradients() -> None:
     parameter = nn.Parameter(torch.tensor(0.0))
     optimizer = _SgdAdapter([parameter])

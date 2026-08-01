@@ -1,31 +1,52 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "T050",
   "targeted_cpu": {
-    "command": "uv run --frozen pytest -q tests/unit/train/test_step.py tests/unit/train/test_loop.py tests/unit/train/test_preflight_failures.py",
-    "passed": 23,
+    "command": "uv run --frozen pytest -q tests/unit/train/test_step.py tests/unit/train/test_loop.py tests/unit/train/test_preflight_failures.py tests/unit/train/test_runtime.py tests/unit/train/test_scheduler.py tests/unit/cli/test_train.py",
+    "passed": 53,
     "failed": 0,
-    "warnings": 3,
-    "duration_seconds": 4.01
+    "warnings": 17,
+    "duration_seconds": 16.76
   },
-  "full_cpu_suite": {
-    "command": "uv run --frozen pytest -q tests/unit tests/contracts",
-    "status": "passed",
-    "passed": 395,
+  "d025_boundary_regression": {
+    "command": "uv run --frozen pytest -q tests/unit/config/test_d025_data_assembly.py tests/unit/train/test_runtime.py tests/unit/cli/test_train.py",
+    "passed": 15,
     "failed": 0,
-    "warnings": 24,
-    "duration_seconds": 32.25
+    "warnings": 17,
+    "duration_seconds": 16.74,
+    "contract": "D025 ProductionPipelineFactory is the only loader-control source; T050 accepts only a preassembled TrainingBatch iterator"
   },
-  "ruff": "passed",
-  "strict_pyright": "passed",
+  "real_single_gpu_full_chain_smoke": {
+    "command": "CUDA_VISIBLE_DEVICES=0 uv run --frozen pytest -q tests/gpu/train/test_single_gpu_full_chain.py",
+    "hardware": "1x NVIDIA GeForce RTX 5090",
+    "driver": "580.105.08",
+    "cuda": "12.8",
+    "passed": 1,
+    "failed": 0,
+    "warnings": 17,
+    "duration_seconds": 37.68,
+    "coverage": "local Qwen and Mage-VAE, 16-layer PackedDiT, strict JLT loss, backward, FP32 clip, one TorchAO update"
+  },
+  "static": {
+    "ruff": "passed",
+    "strict_pyright": "passed"
+  },
   "traceability": {
-    "passed": true,
-    "requirements": 221,
-    "production_modules": 72,
-    "runtime_config_keys": 234
+    "unit_command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py",
+    "unit_passed": 40,
+    "unit_failed": 0,
+    "unit_duration_seconds": 75.91,
+    "live_command": "uv run --frozen python tools/verify_traceability.py --format json",
+    "live_passed": true,
+    "requirements": 235,
+    "source_nodes": 235,
+    "production_modules": 106,
+    "runtime_config_keys": 262
   },
-  "real_single_gpu_full_chain_smoke": "pending:production_config_blocked",
+  "production_cli": "blocked: strict config lacks explicit Text/Style constructor choices; no hard-coded fallback",
+  "production_nvme_preflight": "blocked: configured repository-relative paths resolve to NFSv3 rather than local NVMe",
   "formal_single_gpu_canary": "blocked:no_long_run",
   "ddp_nccl_four_gpu": "blocked:four_gpu_and_scope",
-  "independent_package_review": "pending:agent_launch_failure_continue_without_agents"
+  "independent_ai_review": "pending",
+  "independent_infra_review": "pending"
 }
