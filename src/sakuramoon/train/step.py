@@ -194,14 +194,15 @@ class SingleGpuStep:
         if self._device is not None and per_sample_loss.device != self._device:
             raise ValueError("all accumulated losses must share one device")
         if not bool(torch.isfinite(per_sample_loss).all().item()):
-            self._abort_pending_update()
-            raise FloatingPointError("per-sample loss is nonfinite")
+            error = FloatingPointError("per-sample loss is nonfinite")
+            self._abort_preserving(error)
+            raise error
 
         loss_sum = per_sample_loss.sum()
         try:
             loss_sum.backward()  # pyright: ignore[reportUnknownMemberType]
-        except Exception:
-            self._abort_pending_update()
+        except BaseException as error:
+            self._abort_preserving(error)
             raise
         self._loss_sum = (
             loss_sum.detach()
@@ -221,6 +222,15 @@ class SingleGpuStep:
         )
         self._failed = True
         self.optimizer.zero_grad(set_to_none=True)
+
+    def _abort_preserving(self, error: BaseException) -> None:
+        try:
+            self._abort_pending_update()
+        except BaseException as cleanup_error:  # noqa: BLE001
+            raise BaseExceptionGroup(
+                "training failure and gradient cleanup failure",
+                [error, cleanup_error],
+            ) from None
 
     def abort(self) -> None:
         """Poison an interrupted update and discard every pending gradient."""
@@ -252,13 +262,13 @@ class SingleGpuStep:
                 clip = clip_grad_norm_fp32(parameters, max_norm=1.0)
             with _record_phase(phase_timer, "optimizer"):
                 self.optimizer.step()
-        except Exception as error:
+        except BaseException as error:
             self._failed = True
             try:
                 with _record_phase(phase_timer, "zero_grad"):
                     self.optimizer.zero_grad(set_to_none=True)
-            except Exception as cleanup_error:  # noqa: BLE001 - preserve both failures
-                raise ExceptionGroup(
+            except BaseException as cleanup_error:  # noqa: BLE001
+                raise BaseExceptionGroup(
                     "update failed and gradient cleanup failed",
                     [error, cleanup_error],
                 ) from None
@@ -273,7 +283,7 @@ class SingleGpuStep:
         try:
             with _record_phase(phase_timer, "zero_grad"):
                 self.optimizer.zero_grad(set_to_none=True)
-        except Exception:
+        except BaseException:
             self._failed = True
             raise
 

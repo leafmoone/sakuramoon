@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,8 @@ import torch
 from torch import nn
 
 from sakuramoon.checkpoint.policy import CheckpointCadence, CheckpointReason
-from sakuramoon.train.loop import SingleGpuTrainingLoop
+from sakuramoon.telemetry.timers import PhaseTimer
+from sakuramoon.train.loop import SingleGpuTrainingLoop, SuccessfulLoopObservation
 from sakuramoon.train.step import SingleGpuUpdateState
 
 
@@ -55,6 +57,46 @@ def test_loop_drives_scheduler_and_checkpoint_only_by_successful_update(
     assert checkpoint_updates == [2]
     assert result.checkpoint_updates == (2,)
     assert not (tmp_path / "diagnostics").exists()
+
+
+def test_data_and_checkpoint_use_monotonic_wall_time_not_phase_timer(
+    tmp_path: Path,
+) -> None:
+    parameter = nn.Parameter(torch.tensor(1.0))
+    observations: list[SuccessfulLoopObservation] = []
+
+    def batches():
+        time.sleep(0.005)
+        yield torch.tensor(1.0)
+
+    def checkpoint(_update: int) -> None:
+        time.sleep(0.005)
+
+    loop = SingleGpuTrainingLoop[torch.Tensor](
+        module=nn.ParameterList([parameter]),
+        optimizer=_SgdAdapter([parameter]),
+        loss_fn=lambda batch: (parameter * batch).square().reshape(1),
+        accumulation_steps=1,
+        target_successful_updates=1,
+        checkpoint_every_successful_updates=1,
+        scheduler_step=lambda _update: None,
+        checkpoint=checkpoint,
+        diagnostic_root=tmp_path / "diagnostics",
+        failure_id=lambda phase, state: f"{phase}-{state.attempted_updates}",
+        state=SingleGpuUpdateState.initial(),
+        phase_timer=PhaseTimer(device=torch.device("cpu")),
+        successful_update_observer=observations.append,
+    )
+
+    loop.run(batches())
+
+    assert len(observations) == 1
+    observation = observations[0]
+    assert observation.phase_timer is not None
+    assert observation.data_wait_seconds >= 0.004
+    assert observation.checkpoint_seconds >= 0.004
+    assert "data" not in observation.phase_timer.recorded_phases
+    assert "checkpoint" not in observation.phase_timer.recorded_phases
 
 
 def test_loop_nonfinite_failure_writes_bundle_without_advancing_success(
@@ -243,7 +285,7 @@ def test_pre_decay_checkpoint_is_durable_before_scheduler_mutation(
     proposed: list[CheckpointCadence] = []
 
     def checkpoint_event(
-        _update: int,
+        _state: SingleGpuUpdateState,
         _reason: CheckpointReason,
         cadence: CheckpointCadence,
     ) -> None:

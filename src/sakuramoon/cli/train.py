@@ -1,9 +1,9 @@
 """Fail-closed single-GPU training entry point.
 
-The CLI deliberately does not accept workload overrides.  D025 owns production
-data assembly, but the strict config does not yet expose every Text/Style module
-constructor choice.  The command therefore cannot assemble a trainable module
-without inventing values and must remain closed until those fields are governed.
+The CLI deliberately does not accept workload overrides. D025 owns production data
+assembly. C002 has not yet bound the already-confirmed Text/Style decisions into
+strict production configuration and assembly, so the command remains fail-closed
+without promoting engineering-smoke values.
 """
 
 from __future__ import annotations
@@ -51,8 +51,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ):
             raise ConfigurationError("resume must name an absolute raw checkpoint directory")
         raise ConfigurationError(
-            "production train assembly requires explicit governed Text and Style "
-            "constructor fields; no hard-coded fallback is permitted"
+            "production train assembly requires the C002-governed Text and Style "
+            "configuration binding"
         )
     except (_ArgumentError, SystemExit):
         _emit({"error": "invalid_arguments", "ok": False})

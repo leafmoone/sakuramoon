@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 104
+registry_revision = 105
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -1022,8 +1022,8 @@ not_applicable_reason = "Reference code is excluded by repository policy and dir
 
 [[blockers]]
 id = "DECISION-DROPOUT-VALUES"
-kind = "user_decision"
-description = "All dropout probabilities except all_condition=0.10 remain explicitly undecided."
+kind = "resolved_user_decision"
+description = "Resolved by D016: every caption dropout probability is confirmed and strictly bound. This stable historical decision ID does not block T050 or C002."
 
 [[blockers]]
 id = "FOUR-GPU-AVAILABLE"
@@ -6236,7 +6236,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C12-006"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -6248,8 +6248,29 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:T050"
+implementation_paths = [
+    "src/sakuramoon/cli/train.py",
+    "src/sakuramoon/train/__init__.py",
+    "src/sakuramoon/train/loop.py",
+    "src/sakuramoon/train/preflight.py",
+    "src/sakuramoon/train/runtime.py",
+    "src/sakuramoon/train/scheduler.py",
+    "src/sakuramoon/train/step.py",
+    "tests/unit/config/test_d026_storage_config.py",
+    "tests/unit/train/test_loop.py",
+    "tests/unit/train/test_preflight_failures.py",
+    "tests/unit/train/test_runtime.py",
+    "tests/unit/train/test_scheduler.py",
+    "tests/unit/train/test_step.py",
+    "tests/gpu/train/test_single_gpu_full_chain.py",
+    "docs/model-architecture/progress/tasks/T050.md",
+    "docs/model-architecture/reviews/T050/implementation_report.md",
+    "docs/model-architecture/reviews/T050/test_report.json",
+    "docs/model-architecture/reviews/T050/ai_review.md",
+    "docs/model-architecture/reviews/T050/infra_review.md",
+    "docs/model-architecture/progress/traceability.toml",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""

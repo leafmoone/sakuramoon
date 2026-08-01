@@ -1,20 +1,106 @@
 from __future__ import annotations
 
+# pyright: reportPrivateUsage=false
 import copy
 import json
+import secrets
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import torch
 from pydantic import ValidationError
 
+import sakuramoon.data.production as production_module
+from sakuramoon.checkpoint.policy import CheckpointCadence, CheckpointReason
+from sakuramoon.checkpoint.schema import (
+    CheckpointIdentity,
+    CheckpointKind,
+    CheckpointManifest,
+    FileRecord,
+    GrowthCheckpointState,
+    RawCheckpointState,
+    StageBudgetCheckpointState,
+)
 from sakuramoon.cli import data_service as data_service_cli
 from sakuramoon.config.load import LoadedConfig
 from sakuramoon.config.schema import RuntimeConfig
+from sakuramoon.data.collate import TrainingBatch
+from sakuramoon.data.production import (
+    ConfiguredDataLoader,
+    ProductionBatchStreamIdentity,
+)
+from sakuramoon.data.service_protocol import DataServiceSessionIdentity
+from sakuramoon.model.growth import BASE_SLOT_IDS
 from sakuramoon.storage import StorageValidationError
 from sakuramoon.train import preflight as preflight_module
-from sakuramoon.train.preflight import build_single_gpu_preflight_checks
+from sakuramoon.train.preflight import (
+    RestoredSingleGpuCheckpoint,
+)
+from sakuramoon.train.preflight import (
+    _build_single_gpu_preflight_checks as build_single_gpu_preflight_checks,
+)
+from sakuramoon.train.step import SingleGpuUpdateState
+
+_HASH_A = "a" * 64
+_HASH_B = "b" * 64
+_HASH_C = "c" * 64
+_HASH_D = "d" * 64
+
+
+class _UnusedCheckpointPublisher:
+    def publish_preflight(
+        self, identity: CheckpointIdentity, state: RawCheckpointState
+    ) -> Path:
+        del identity, state
+        return Path("unused")
+
+    def publish_update(
+        self,
+        state: SingleGpuUpdateState,
+        reason: CheckpointReason,
+        cadence: CheckpointCadence,
+    ) -> Path:
+        del state, reason, cadence
+        return Path("unused")
+
+    def apply_verified_retention(
+        self,
+        checkpoint: Path,
+        manifest: CheckpointManifest,
+        state: RawCheckpointState,
+    ) -> None:
+        del checkpoint, manifest, state
+
+    def discard_preflight(self, checkpoint: Path) -> None:
+        del checkpoint
+
+
+def _restored_checkpoint(
+    module: torch.nn.Module, optimizer: object
+) -> RestoredSingleGpuCheckpoint:
+    restored = object.__new__(RestoredSingleGpuCheckpoint)
+    restored._manifest = CheckpointManifest(
+        CheckpointKind.RAW,
+        CheckpointIdentity("d026-unit", 0, _HASH_A, _HASH_B, _HASH_C),
+        (FileRecord("payload", 123456, _HASH_D),),
+    )
+    restored._module = module
+    restored._optimizer = optimizer
+    restored._owner_pid = preflight_module.os.getpid()
+    restored._path = Path("/test/d026-checkpoint")
+    restored._payload_bytes = 123456
+    restored._state = RawCheckpointState(
+        SingleGpuUpdateState.initial(),
+        GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
+        StageBudgetCheckpointState(0, 1),
+        CheckpointCadence(0, 0.0),
+    )
+    restored._token = secrets.token_hex(32)
+    preflight_module._RESTORED_CHECKPOINTS[restored._token] = restored
+    return restored
 
 
 def test_server_backed_storage_fields_are_explicit_and_small_cache_is_valid(
@@ -104,9 +190,11 @@ def test_training_preflight_calls_governed_storage_with_measured_checkpoint(
     config = RuntimeConfig.model_validate(valid_payload)
     resolved = tmp_path / "resolved.toml"
     resolved.write_text("[run]\n", encoding="utf-8")
-    loaded = cast(
-        LoadedConfig,
-        SimpleNamespace(config=config, resolved_toml=resolved.read_text(encoding="utf-8")),
+    loaded = LoadedConfig(
+        config,
+        (),
+        resolved.read_text(encoding="utf-8"),
+        _HASH_A,
     )
     observed: list[tuple[RuntimeConfig, Path, int]] = []
 
@@ -119,25 +207,47 @@ def test_training_preflight_calls_governed_storage_with_measured_checkpoint(
         observed.append((candidate, root, checkpoint_payload_bytes))
 
     monkeypatch.setattr(preflight_module, "require_training_storage", require_storage)
-    checks = build_single_gpu_preflight_checks(
+    module = torch.nn.Linear(1, 1)
+    optimizer = object()
+    restored = _restored_checkpoint(module, optimizer)
+    session = DataServiceSessionIdentity(config.data.manifest.sha256, 2)
+    data_client = SimpleNamespace(identity=session)
+    stream_identity = ProductionBatchStreamIdentity(
+        _HASH_A,
+        ConfiguredDataLoader.from_config(config),
+        config.data.manifest.sha256,
+        session.sha256,
+        _HASH_D,
+    )
+    batches = production_module._issue_batch_stream(
+        cast(Iterator[TrainingBatch], iter(())), stream_identity
+    )
+    qwen = object()
+    vae = object()
+    runtime = SimpleNamespace(qwen=qwen, vae=vae, composite=module)
+    plan = build_single_gpu_preflight_checks(
         loaded,
         repository_root=tmp_path,
         resolved_config_path=resolved,
-        data_client=cast(Any, object()),
-        qwen=object(),
-        vae=object(),
-        trainable_module=cast(Any, object()),
-        parameter_schema=lambda: None,
-        image_shapes=lambda: None,
-        text_shapes=lambda: None,
-        zero_update_loss=lambda: None,
-        optimizer_step=lambda: None,
-        sample=lambda: None,
-        checkpoint_round_trip=lambda: None,
-        checkpoint_payload_bytes=123456,
+        data_client=cast(Any, data_client),
+        batches=batches,
+        runtime=cast(Any, runtime),
+        qwen=qwen,
+        vae=vae,
+        trainable_module=module,
+        optimizer=optimizer,
+        restored_checkpoint=restored,
+        workload=preflight_module._issue_verified_preflight_workload(
+            {name: (lambda: None) for name in preflight_module._WORKLOAD_CHECKS},
+            config=config,
+            runtime=runtime,
+            trainable_module=module,
+            optimizer=optimizer,
+        ),
+        checkpoint_publisher=_UnusedCheckpointPublisher(),
     )
 
-    checks["storage_capacity"]()
+    dict(plan._checks)["storage_capacity"]()
 
     assert observed == [(config, tmp_path, 123456)]
 

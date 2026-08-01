@@ -278,6 +278,43 @@ def test_post_step_zero_grad_failure_preserves_successful_mutation_state() -> No
     with pytest.raises(RuntimeError, match="cannot continue"):
         step.finish_update()
 
+
+@pytest.mark.parametrize("failure", ["nonfinite", "backward"])
+def test_loss_failure_and_zero_grad_failure_are_both_preserved(failure: str) -> None:
+    class _FailingCleanupOptimizer(_SgdAdapter):
+        def zero_grad(self, *, set_to_none: bool) -> None:
+            del set_to_none
+            raise OSError("cleanup failed")
+
+    parameter = nn.Parameter(torch.tensor(1.0))
+    step = SingleGpuStep(
+        nn.ParameterList([parameter]),
+        _FailingCleanupOptimizer([parameter]),
+        accumulation_steps=1,
+        state=SingleGpuUpdateState.initial(),
+    )
+    if failure == "nonfinite":
+        loss = (parameter * torch.tensor(float("nan"))).reshape(1)
+    else:
+        loss = parameter.clone().reshape(1)
+
+        def fail_backward(_gradient: torch.Tensor) -> torch.Tensor:
+            raise RuntimeError("backward failed")
+
+        _hook = loss.register_hook(  # pyright: ignore[reportUnknownMemberType]
+            fail_backward
+        )
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        step.backward(loss)
+
+    expected = FloatingPointError if failure == "nonfinite" else RuntimeError
+    assert [type(error) for error in captured.value.exceptions] == [expected, OSError]
+    assert step.state == SingleGpuUpdateState(1, 0, 0)
+    with pytest.raises(RuntimeError, match="cannot continue"):
+        step.finish_update()
+
+
 def test_nonfinite_loss_aborts_attempt_and_clears_gradients() -> None:
     parameter = nn.Parameter(torch.tensor(0.0))
     optimizer = _SgdAdapter([parameter])

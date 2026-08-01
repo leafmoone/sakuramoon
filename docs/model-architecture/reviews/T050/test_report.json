@@ -2,51 +2,67 @@
   "schema_version": 2,
   "task_id": "T050",
   "targeted_cpu": {
-    "command": "uv run --frozen pytest -q tests/unit/train/test_step.py tests/unit/train/test_loop.py tests/unit/train/test_preflight_failures.py tests/unit/train/test_runtime.py tests/unit/train/test_scheduler.py tests/unit/cli/test_train.py",
-    "passed": 53,
+    "command": "uv run pytest -q tests/unit/train tests/unit/config/test_d026_storage_config.py --basetemp cache/T050-root-cpu-final-20260801",
+    "passed": 133,
     "failed": 0,
     "warnings": 17,
-    "duration_seconds": 16.76
+    "duration_seconds": 27.17
   },
   "d025_boundary_regression": {
-    "command": "uv run --frozen pytest -q tests/unit/config/test_d025_data_assembly.py tests/unit/train/test_runtime.py tests/unit/cli/test_train.py",
-    "passed": 15,
+    "command": "uv run pytest -q tests/unit/cli/test_train.py tests/unit/config/test_d025_data_assembly.py --basetemp cache/T050-root-adjacent-final-20260801",
+    "passed": 11,
     "failed": 0,
     "warnings": 17,
-    "duration_seconds": 16.74,
+    "duration_seconds": 53.28,
     "contract": "D025 ProductionPipelineFactory is the only loader-control source; T050 accepts only a preassembled TrainingBatch iterator"
   },
   "real_single_gpu_full_chain_smoke": {
-    "command": "CUDA_VISIBLE_DEVICES=0 uv run --frozen pytest -q tests/gpu/train/test_single_gpu_full_chain.py",
+    "command": "uv run pytest -q tests/gpu/train/test_single_gpu_full_chain.py --basetemp cache/T050-root-gpu-final-20260801",
     "hardware": "1x NVIDIA GeForce RTX 5090",
     "driver": "580.105.08",
     "cuda": "12.8",
-    "passed": 1,
+    "passed": 2,
     "failed": 0,
     "warnings": 17,
-    "duration_seconds": 37.68,
-    "coverage": "local Qwen and Mage-VAE, 16-layer PackedDiT, strict JLT loss, backward, FP32 clip, one TorchAO update"
+    "duration_seconds": 275.56,
+    "coverage": "local Qwen and Mage-VAE, 16-layer PackedDiT with resolved FA4 artifact binding, strict JLT loss, backward, FP32 clip, one TorchAO update, real AF_UNIX service, exact worker IDs {0,1}, two distinct child PIDs and both leases, durable RAW readback/retention, frozen encoders loaded before fresh RAW restore, active-shard replay, and next update"
+  },
+  "worker_lifecycle_race_diagnosis": {
+    "observed_failure": "1 passed, 1 failed in 220.38s; fresh checkpoint restore and update 2 succeeded, but only one tokenizer PID marker was observed",
+    "root_cause": "the fresh helper closed the stream immediately after the first returned batch, so the slower already-leased worker could be shut down before reaching tokenizer marker publication",
+    "remediation": "keep the stream open through update 2 and require exact worker IDs {0,1}, distinct non-parent PIDs, and both issued leases behind a bounded condition wait; do not consume or ACK an unused extra batch",
+    "post_fix_confirmation": "2 passed, 17 warnings in 217.34s",
+    "strengthened_confirmation": "2 passed, 17 warnings in 224.12s",
+    "final_frozen_confirmation": "2 passed, 17 warnings in 275.56s"
+  },
+  "service_readiness_timing_diagnosis": {
+    "observed_failure": "1 passed, 1 failed in 108.73s; the second test stopped before preflight because the spawned data service did not signal readiness within 15 seconds",
+    "scope": "no training update, checkpoint publication, fresh resume, or worker-marker assertion ran in the failed second test",
+    "remediation": "replace the boolean 15-second wait with a bounded 30-second progress loop that distinguishes child exit from startup timeout and deterministically stops or terminates an unready child",
+    "final_confirmation": "the complete two-test GPU file passed in 275.56s"
   },
   "static": {
     "ruff": "passed",
     "strict_pyright": "passed"
   },
   "traceability": {
-    "unit_command": "uv run --frozen pytest -q tests/unit/docs/test_verify_traceability.py",
+    "unit_command": "uv run pytest -q tests/unit/docs/test_verify_traceability.py --basetemp cache/T050-root-trace-final-20260801",
     "unit_passed": 40,
     "unit_failed": 0,
-    "unit_duration_seconds": 75.91,
-    "live_command": "uv run --frozen python tools/verify_traceability.py --format json",
+    "unit_duration_seconds": 79.21,
+    "live_command": "uv run python tools/verify_traceability.py --format json",
     "live_passed": true,
-    "requirements": 235,
-    "source_nodes": 235,
-    "production_modules": 106,
-    "runtime_config_keys": 262
+    "live_duration_seconds": 7.1,
+    "archive_files": 16,
+    "requirements": 237,
+    "source_nodes": 237,
+    "production_modules": 107,
+    "runtime_config_keys": 271
   },
-  "production_cli": "blocked: strict config lacks explicit Text/Style constructor choices; no hard-coded fallback",
-  "production_nvme_preflight": "blocked: configured repository-relative paths resolve to NFSv3 rather than local NVMe",
+  "production_cli": "blocked: C002 production config/overlay/assembly binding is not implemented; the Text/Style decisions are already confirmed and no smoke value is promoted",
+  "server_backed_storage": "passed for governed CPU/exact-filesystem probe and bounded 1GPU preflight; AF_UNIX IPC remains on the host-local runtime path",
   "formal_single_gpu_canary": "blocked:no_long_run",
   "ddp_nccl_four_gpu": "blocked:four_gpu_and_scope",
-  "independent_ai_review": "pending",
-  "independent_infra_review": "pending"
+  "independent_ai_review": "passed",
+  "independent_infra_review": "passed"
 }
