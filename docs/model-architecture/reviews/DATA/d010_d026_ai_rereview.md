@@ -2,6 +2,153 @@
 
 Reviewer: independent agent `/root/data_d025_d026_rereview`
 
+Review head: `4143a605d70491ab39365b8b2e3fc2017862ed4a`
+
+Scope: committed D010-D026 implementation, with a focused rereview of D010 remediation
+`da4c479` and D025 remediation `4143a60`. The rereview is limited to the four findings
+recorded at head `249bfe4`: governed factory issuance, dropout-independent two-worker
+PID evidence, six D010 manifest-CLI fixtures, and bounded SIGKILL readiness. Existing
+findings and pending production gates are retained as history. No production code,
+test, task, current decision, trace registry, or commit was changed by this reviewer.
+
+Overall verdict: **PASS for the committed CPU and previously recorded bounded 1GPU
+implementation scope**. All four rereview findings are closed by `da4c479` and
+`4143a60`. This does not close the immutable production manifest, full data scans,
+real governed parser GPU rerun, cold-cache performance, formal stage, or multi-GPU
+gates listed below.
+
+## Remediation rereview
+
+### Resolved High: D025 governed factory issuance
+
+The original finding proved that the public dataclass constructor could issue an
+accepted stream with arbitrary validation IDs and caller identity while the configured
+manifest was absent. At `4143a60`, the dataclass now has `init=False`; direct
+construction hard fails and `from_config()` first performs the configured canonical
+validation-manifest load before internally allocating the factory.
+
+Every loader, pipeline and stream issuance now requires exact object identity in a
+process-local weak registry plus the issuing PID. The targeted contract rejects the
+original missing-manifest/arbitrary-2,000-ID direct call, a copied-slot
+`object.__new__` forgery, and a pickle-deserialized copy. An additional independent
+fresh-child reproduction deserialized a valid parent factory and observed
+`child_pid=1961722`, `owner_pid=1961651`, followed by
+`production pipeline factory was not issued by from_config in this process`.
+
+The previous production-boundary bypass is closed within D025's stated authority
+model.
+
+### Resolved Medium: D010 manifest CLI fixtures
+
+The original rereview observed `6 failed, 1 passed` because the all-options-derived
+fixtures omitted D026's two required storage values. Commit `da4c479` supplies governed
+synthetic `storage.shared_mount_source` and `storage.minimum_free_gib` values without
+relaxing production schema validation. All seven local, remote, build, drift,
+no-clobber and redaction CLI cases now reach and pass their intended assertions.
+
+### Resolved Medium: D025 exact-two-worker evidence
+
+The original PID signal existed only in non-empty body tokens, so approved dropout
+could erase one worker's observation. At `4143a60`, the test tokenizer records the PID
+in the fixed 34-token system prefix present for every sample and reads the fixed first
+token. The real AF_UNIX/two-spawned-worker test passed once in the full D025 selector
+and four additional isolated runs, including three concurrent runs. Each run observed
+exactly two non-parent worker PIDs and normal per-shard ACKs.
+
+### Resolved Medium: D010 SIGKILL readiness
+
+The previous fixed five-second barrier expired during fresh imports on the approved
+NFS workspace. Commit `da4c479` raises only the destructive child readiness deadline
+to the fault driver's still-bounded 30-second value. The real child still writes a
+partial, signals readiness, receives SIGKILL, and the next process restarts from byte
+zero. It passed independently in 21.17 seconds; publication and restart semantics are
+unchanged.
+
+## Focused correctness conclusions
+
+- D023 uses one explicit `spawn` context for command queues, completion queue, and
+  DataLoader workers. Exact schema-v3 topology, parent-only state/cache mutation,
+  prepare-before-handoff, normal-exhaustion completion, worker exit, parent close,
+  full-active replay, and recovered-active reprepare ordering passed the bounded
+  rereview selector. The prior default-`fork` hang did not recur.
+- D024 keeps service ownership of manifest order, network/download/verification,
+  cache, mainset, active/completed/replay state, and lease identity. The trainer-side
+  consumer only handles service descriptors and completion ACKs. D021 trusted
+  `ShardRecord`, explicit metadata mapping, validation-before-processing, caption,
+  image, and collate contracts remain intact.
+- D025 now makes `from_config()` the only governed factory issuer. Direct,
+  `object.__new__`, deserialized and cross-PID copies cannot issue a loader, pipeline or
+  stream. Loader controls, manifest/service topology checks and the non-serializable,
+  process-local accepted stream remain intact. T050 must still require and close this
+  handle on every path.
+- D026 correctly makes persistent state/cache paths server-backed while keeping the
+  AF_UNIX socket and singleton lock on host-local `/run/sakuramoon`. Its storage schema,
+  exact mount identity, hard NFSv3 check, atomic probe, three-checkpoint capacity math,
+  and no-fallback failure semantics passed their targeted tests.
+
+## Per-task verdicts
+
+| Task | AI/model verdict | Current boundary |
+|---|---|---|
+| D010 | PASS (implemented CPU scope) | All seven manifest CLI contracts and the bounded real-SIGKILL restart contract pass after `da4c479`. Immutable production revision/inventory and live source evidence remain pending. |
+| D011 | PASS (implemented CPU scope) | Explicit mapping, trusted release, exact-2,000 selection and exclusion contracts pass; approximately 11M uniqueness, real bundle and full zero-leak scan remain pending. |
+| D012 | PASS (implemented CPU scope) | Manifest-bound state/cache semantics pass; D022-D024 govern later multi-active/service ownership. Production quota/replay audit remains pending. |
+| D013 | PASS (implemented CPU scope) | EXIF/RGB, 17 buckets, no-upscale, crop/retention and bounded scan semantics pass; full metadata and real 100k decode scans remain pending. |
+| D014 | PASS (implemented CPU scope) | Caption order, separators, deletion, Artist placement, structured indices and boundary truncation pass under D016 values; production distribution remains pending. |
+| D015 | PASS (implemented CPU scope) | Validation-before-processing, typed homogeneous collate and deterministic sample identity remain preserved by D021-D025. |
+| D016 | PASS (implemented CPU scope) | All twelve approved probabilities remain required exact TOML floats with no runtime default. |
+| D017 | PASS (implemented CPU scope) | Regenerable image report publication retains sibling-temp, file-fsync and atomic replace semantics. |
+| D018 | PASS (implemented CPU scope) | Fixed-memory deterministic P01/P50/P99 retention evidence remains correct. |
+| D019 | PASS (implemented CPU scope) | Candidate deletion IDs remain immutable, non-empty and trim-stable. |
+| D020 | PASS (implemented CPU scope) | Twelve independent dropout hits survive plan, serialization and collate; production 100k distribution remains pending. |
+| D021 | PASS (implemented CPU/recorded 1GPU scope) | Trusted record, explicit adapter/mapping, exclusion and batch release propagation remain intact; exact immutable production mapping remains pending. |
+| D022 | PASS (implemented CPU scope) | Schema v3 topology, bounded active set, persist-before-fetch, active protection, per-shard completion and recovery barrier pass. |
+| D023 | PASS (implemented CPU scope) | Explicit-spawn persistent two-worker remediation closes the previous hang and preserves replay/completion semantics. |
+| D024 | PASS (implemented CPU/existing bounded 1GPU scope) | Process-isolated service, mainset, consumer, ACK/replay and rotation semantics pass; production network/storage overlap remains pending. |
+| D025 | PASS (implemented CPU scope) | Governed `from_config()` issuance and direct/object-new/pickle/cross-PID rejection pass. Dropout-independent evidence repeatedly observes exactly two spawned worker PIDs; exact governed real-shard GPU rerun remains pending. |
+| D026 | PASS (implemented CPU scope) | Server-backed NFS and host-local IPC contracts pass targeted validation, and the D010 shared-schema fixture regression is closed by `da4c479`. |
+
+## Independent validation
+
+- Historical failing baseline at `249bfe4`: `383 passed, 8 failed, 5 warnings in
+  89.08s`, comprising exactly the four findings rereviewed above.
+- D025 complete targeted assembly/service/fault file: `9 passed in 27.38s`.
+- D025 exact two-worker AF_UNIX/spawn test: five total passes; four isolated reruns
+  completed in 7.21, 8.59, 8.67 and 8.53 seconds.
+- D010 seven manifest CLI cases plus real SIGKILL/restart: `8 passed, 17 warnings in
+  22.94s`; the isolated SIGKILL case passed in 21.17 seconds.
+- Fresh-child factory reproduction rejected a deserialized parent factory on the
+  actual PID boundary.
+- Trace contracts: `40 passed in 76.81s`; direct trace verification passed `237/237`
+  requirements/source nodes with zero errors.
+- Targeted Ruff passed. Targeted strict Pyright reported `0 errors, 0 warnings`.
+
+No network, GPU, production manifest, approximately 11M scan, 100k production scan,
+two-hour cold-cache run, long training, 1,000-step canary, formal stage, DDP/NCCL, or
+multi-GPU validation was run by this reviewer.
+
+## Remaining milestone gates
+
+- Immutable production manifest/source access, approximately 11M globally unique IDs,
+  exact production metadata/caption-availability mapping, exact 2,000-ID validation
+  bundle, and complete training zero-leak evidence.
+- Full 256/512 17-bucket scan, real 100,000-image post-EXIF dimension check, production
+  crop-retention/rejection distribution, and production caption/dropout/truncation
+  distribution including final empty-body rate.
+- Exact governed parser on a real shard with local Qwen/Mage and one RTX 5090 consumer.
+- Cold/warm-cache service overlap, two-hour cold-cache throughput, ready wait, bounded
+  RSS/no swap/quota, worker/queue/concurrency sweep and fully-cached control.
+- Formal stage, long-run, 1,000-step and every four-GPU/DDP/NCCL gate remain explicitly
+  pending or blocked; CPU or one-GPU evidence does not close them.
+
+---
+
+## Historical review retained verbatim
+
+# D010-D026 DATA package AI/model correctness rereview
+
+Reviewer: independent agent `/root/data_d025_d026_rereview`
+
 Review head: `249bfe4062aa7666bc0d036da3b0ec08295f5510`
 
 Scope: committed D010-D026 implementation, with focused source review of the D023

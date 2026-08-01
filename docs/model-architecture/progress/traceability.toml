@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 101
+registry_revision = 102
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -5358,6 +5358,8 @@ implementation_paths = [
     "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
     "docs/model-architecture/progress/tasks/D021.md",
     "docs/model-architecture/reviews/D021/test_report.json",
+    "docs/model-architecture/reviews/DATA/d010_d026_ai_rereview.md",
+    "docs/model-architecture/reviews/DATA/d010_d026_infra_rereview.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -5416,6 +5418,8 @@ implementation_paths = [
     "tests/unit/data/test_d026_storage_runtime.py",
     "docs/model-architecture/progress/tasks/D026.md",
     "docs/model-architecture/reviews/D026/test_report.json",
+    "docs/model-architecture/reviews/DATA/d010_d026_ai_rereview.md",
+    "docs/model-architecture/reviews/DATA/d010_d026_infra_rereview.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -9226,6 +9230,8 @@ implementation_paths = [
     "tests/unit/train/test_preflight_failures.py",
     "docs/model-architecture/progress/tasks/D026.md",
     "docs/model-architecture/reviews/D026/test_report.json",
+    "docs/model-architecture/reviews/DATA/d010_d026_ai_rereview.md",
+    "docs/model-architecture/reviews/DATA/d010_d026_infra_rereview.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -13051,6 +13057,8 @@ implementation_paths = [
     "tests/unit/train/test_preflight_failures.py",
     "docs/model-architecture/progress/tasks/D026.md",
     "docs/model-architecture/reviews/D026/test_report.json",
+    "docs/model-architecture/reviews/DATA/d010_d026_ai_rereview.md",
+    "docs/model-architecture/reviews/DATA/d010_d026_infra_rereview.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -13100,6 +13108,8 @@ implementation_paths = [
     "tests/unit/train/test_preflight_failures.py",
     "docs/model-architecture/progress/tasks/D026.md",
     "docs/model-architecture/reviews/D026/test_report.json",
+    "docs/model-architecture/reviews/DATA/d010_d026_ai_rereview.md",
+    "docs/model-architecture/reviews/DATA/d010_d026_infra_rereview.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
