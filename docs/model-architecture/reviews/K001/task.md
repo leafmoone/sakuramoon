@@ -11,5 +11,8 @@ loss, every parameter gradient, and one update. `fa4_benchmark.json` must retain
 historical results while recording current batched CUDA Event and per-call synchronized
 wall timing, 16-block entry-inclusive timing, allocated/reserved memory, and profiler
 copy/kernel/gap evidence. Performance dense SDPA must be per-sample and mask-free; an
-all-True mask is numerical-reference-only. The fixed-upstream-commit audit stays
-blocked until governed provenance exists.
+all-True mask is numerical-reference-only. The fixed-upstream-commit audit must verify
+the official tag-to-version rule, exact commit and tree, relevant source blobs,
+BSD-3-Clause license digest, and the static varlen/GQA/BF16/noncausal/autograd
+comparison. It must not infer repository provenance from the wheel hash, import or
+execute upstream code, or read/import/execute `reference/`.

@@ -25,6 +25,19 @@ FA4 kernels, 5 D2H and 5 H2D copies: exactly 16 kernels plus the two entry copie
 forward, with no boundary copy between blocks.
 
 Environment reproducibility is supplied by the locked `flash-attn-4==4.0.0b24` wheel
-and SHA-256. This does not identify a fixed upstream repository commit, so the
-requested upstream algorithm audit remains explicitly blocked rather than inferred
-from wheel metadata or an ungoverned source tree.
+and SHA-256. The separate governance layer now pins the official Dao-AILab tag
+`fa4-v4.0.0.beta24` to commit
+`849f660f73b176e5ad5670e7f822c7fa9f3eaf8b`, root tree
+`dbc07053f34000ba50274ad7fbb51ff5411f9ff0`, FA4 package subtree
+`ac02fb1b8e90985e7b88ff0916fa326f4e0d4227`, relevant source blobs, and the
+BSD-3-Clause license digest. Upstream `setuptools_scm` proves the tag normalizes to
+the locked distribution version. The fixed-source comparison covers the padding-free
+varlen interface, native divisible GQA, explicit packed GQA, BF16/CUDA/int32 contracts,
+noncausal execution, and autograd. The upstream checkout was never imported,
+executed, installed, or copied into production.
+
+Independent AI/model and Infra/license/reproducibility reviewers reproduced the
+governed source identity, source and license digests, locked distribution binding, and
+static algorithm contracts and returned PASS for the implemented CPU/single-GPU scope.
+Historical blocked evidence remains unchanged; the completed provenance remediation is
+recorded separately in the current lock, test report, reviews, and trace mappings.

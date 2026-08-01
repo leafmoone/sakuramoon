@@ -91,6 +91,23 @@
     "pyright_warnings": 0
   },
   "upstream_repository_commit_provenance": "blocked_not_governed",
+  "upstream_provenance_remediation": {
+    "repository": "https://github.com/Dao-AILab/flash-attention.git",
+    "release_tag": "fa4-v4.0.0.beta24",
+    "commit": "849f660f73b176e5ad5670e7f822c7fa9f3eaf8b",
+    "git_tree": "dbc07053f34000ba50274ad7fbb51ff5411f9ff0",
+    "fa4_subtree": "ac02fb1b8e90985e7b88ff0916fa326f4e0d4227",
+    "license": "BSD-3-Clause",
+    "license_sha256": "8c9ccb96c065e706135b6cbad279b721da6156e51f3a5f27c6b3329af9416d73",
+    "tag_to_locked_distribution_version_passed": true,
+    "four_column_static_comparison_passed": true,
+    "upstream_code_imported_or_executed": false,
+    "reference_directory_used": false,
+    "independent_ai_review": "pass",
+    "independent_ai_review_path": "docs/model-architecture/reviews/K001/ai_review.md",
+    "independent_infra_review": "pass",
+    "independent_infra_review_path": "docs/model-architecture/reviews/K001/infra_review.md"
+  },
   "independent_ai_review": "pass_implemented_scope_upstream_provenance_blocked",
   "independent_infra_review": "pass_implemented_scope_upstream_provenance_blocked"
 }

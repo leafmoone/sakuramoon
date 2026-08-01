@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "task_id": "K001",
+  "status": "verified_governed_upstream_commit_tree_license_and_static_comparison",
+  "upstream": {
+    "repository": "https://github.com/Dao-AILab/flash-attention.git",
+    "release_tag": "fa4-v4.0.0.beta24",
+    "commit": "849f660f73b176e5ad5670e7f822c7fa9f3eaf8b",
+    "git_tree": "dbc07053f34000ba50274ad7fbb51ff5411f9ff0",
+    "fa4_subtree": "ac02fb1b8e90985e7b88ff0916fa326f4e0d4227",
+    "package_path": "flash_attn/cute",
+    "license": "BSD-3-Clause",
+    "license_path": "flash_attn/cute/LICENSE",
+    "license_git_blob": "5860e4b33f3d9d85fc636137c559331d51783a5b",
+    "license_sha256": "8c9ccb96c065e706135b6cbad279b721da6156e51f3a5f27c6b3329af9416d73",
+    "authors_sha256": "4627841c206c9bf990d37cc2ecbfa778a632d85731aafb4ccb59238334d2821d"
+  },
+  "source_files": {
+    "flash_attn/cute/pyproject.toml": {
+      "git_blob": "174f7db046120d8598555d338ce83ba68d5748de",
+      "sha256": "1d73ea9937c404a0fb5948f4a3898c2fa671a490b40f90f4e9f229feb6b3dedc"
+    },
+    "flash_attn/cute/interface.py": {
+      "git_blob": "0300179f173bc9759a1524e66750cfd536b432af",
+      "sha256": "812a3fcc84ce0cd34401cd25c59f9dce5ef55a52b69a6e8659dca79155d8c40b"
+    },
+    "flash_attn/cute/flash_fwd.py": {
+      "git_blob": "7d1593d7412a29268f192d933f41c44b4c34c5c6",
+      "sha256": "7c50c12e46209270f47a2f687ea00788eb58026c9d13324fbe4382cf6426029d"
+    },
+    "flash_attn/cute/pack_gqa.py": {
+      "git_blob": "5b481b5e6fc4d7f2d0d3d49f30aeb856e123da7a",
+      "sha256": "82ad3a7c44ab4d7b0cffc248aebfedeeadacade8ae2eabb231fddf343e8755cd"
+    },
+    "flash_attn/cute/seqlen_info.py": {
+      "git_blob": "7110c8f2b783e033140ae03e64fbd0dc9b8bf760",
+      "sha256": "640d2433702635d68d4f0b94e9fa2d6b81da48b7f62056270b1b1fd480c72f30"
+    }
+  },
+  "distribution": {
+    "name": "flash-attn-4",
+    "version": "4.0.0b24",
+    "sdist_url": "https://files.pythonhosted.org/packages/32/74/1303dfd7a38d91c0e9717c8367b30cdf6d249fb1a42feabceeda1ed86fbf/flash_attn_4-4.0.0b24.tar.gz",
+    "sdist_sha256": "6c4b981ef433882871ded48317deaa18ea22f731ca4f8b9387804bfa2e8078e2",
+    "wheel_url": "https://files.pythonhosted.org/packages/e5/82/861caf5303cde9ba1499904d63be94b1464a4c0932215f2e77500e5387ab/flash_attn_4-4.0.0b24-py3-none-any.whl",
+    "wheel_sha256": "c1dcf0dfcf37c4496728547dcb3c1e66d7dcaa07cfedef0f26ccc4d74453951f",
+    "locked_in": "uv.lock"
+  },
+  "version_binding": {
+    "setuptools_scm_root": "../..",
+    "tag_regex": "^fa4-v(?P<version>.+)$",
+    "git_describe": "fa4-v4.0.0.beta24-0-g849f660",
+    "normalized_distribution_version": "4.0.0b24",
+    "tag_points_exactly_to_commit": true,
+    "distribution_metadata_repository_matches": true,
+    "distribution_metadata_license_matches": true
+  },
+  "remote_observation": {
+    "official_git_ls_remote_tag_matches_commit": true,
+    "checked_out_commit_matches": true,
+    "checked_out_tree_matches": true,
+    "checked_out_worktree_clean": true
+  },
+  "static_contracts": {
+    "direct_varlen_cu_seqlens_interface": "passed",
+    "native_divisible_gqa_without_kv_repeat": "passed",
+    "explicit_pack_gqa_true": "passed",
+    "noncausal_attention": "passed",
+    "cuda_bf16_and_int32_boundary_contract": "passed",
+    "forward_backward_and_parameter_update": "passed"
+  },
+  "runtime_dependency_added": false,
+  "upstream_code_imported_or_executed": false,
+  "reference_directory_read_imported_or_executed": false,
+  "local_model_or_data_identity_added": false,
+  "independent_ai_review": "pass",
+  "independent_ai_review_path": "docs/model-architecture/reviews/K001/ai_review.md",
+  "independent_infra_review": "pass",
+  "independent_infra_review_path": "docs/model-architecture/reviews/K001/infra_review.md"
+}

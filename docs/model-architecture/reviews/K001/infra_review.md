@@ -1,3 +1,127 @@
+# K001 independent Infra/license/reproducibility provenance rereview
+
+Reviewer: independent agent `/root/k001_infra_provenance_review`.
+
+Scope: the uncommitted K001 upstream-provenance remediation at
+`HEAD=4143a605d70491ab39365b8b2e3fc2017862ed4a`. This review covers the official
+tag/commit/tree identity, fixed source blobs and digests, BSD-3-Clause license,
+tag-to-distribution version binding, PyPI artifact binding, static upstream-to-local
+contract matrix, and trace/review reproducibility. It does not modify the implementation,
+task, traceability registry, benchmark, test report, AI review, or concurrent DATA,
+ENCODERS, and M037 review work.
+
+No `.env`, Notion MCP, or `reference/` content was read. No upstream checkout was
+imported, installed, or executed; the audit used a temporary bare Git object database
+and static archive reads only. No archived architecture file was modified.
+
+## Verdict
+
+**PASS.** The governed fixed-upstream provenance remediation is internally consistent
+and independently reproducible. The prior `K001-INFRA-003` blocker is resolved: the
+official FA4 tag is fixed to an exact commit, root tree, FA4 subtree, source blobs,
+license digest, and locked distribution artifacts. No Infra, license, or reproducibility
+finding remains in this remediation.
+
+This PASS closes only the K001 fixed-upstream provenance gap. It does not close the
+separate four-GPU DDP/NCCL, formal-stage, 1,000-step, endurance, production data, or
+quality gates.
+
+## Immutable upstream identity
+
+Official remote observation:
+
+- repository: `https://github.com/Dao-AILab/flash-attention.git`;
+- tag: `fa4-v4.0.0.beta24`;
+- `git ls-remote --refs`: tag resolves exactly to
+  `849f660f73b176e5ad5670e7f822c7fa9f3eaf8b`;
+- commit root tree: `dbc07053f34000ba50274ad7fbb51ff5411f9ff0`;
+- `flash_attn/cute` subtree: `ac02fb1b8e90985e7b88ff0916fa326f4e0d4227`;
+- `git describe --tags --long`: `fa4-v4.0.0.beta24-0-g849f660`.
+
+A depth-one fetch into a bare repository reproduced all three object identities. The
+five governed source blob IDs and SHA-256 digests in
+`upstream_provenance_lock.json` also reproduced exactly:
+
+| Fixed path | Git blob | SHA-256 result |
+|---|---|---|
+| `flash_attn/cute/pyproject.toml` | `174f7db046120d8598555d338ce83ba68d5748de` | `1d73ea9937c404a0fb5948f4a3898c2fa671a490b40f90f4e9f229feb6b3dedc` |
+| `flash_attn/cute/interface.py` | `0300179f173bc9759a1524e66750cfd536b432af` | `812a3fcc84ce0cd34401cd25c59f9dce5ef55a52b69a6e8659dca79155d8c40b` |
+| `flash_attn/cute/flash_fwd.py` | `7d1593d7412a29268f192d933f41c44b4c34c5c6` | `7c50c12e46209270f47a2f687ea00788eb58026c9d13324fbe4382cf6426029d` |
+| `flash_attn/cute/pack_gqa.py` | `5b481b5e6fc4d7f2d0d3d49f30aeb856e123da7a` | `82ad3a7c44ab4d7b0cffc248aebfedeeadacade8ae2eabb231fddf343e8755cd` |
+| `flash_attn/cute/seqlen_info.py` | `7110c8f2b783e033140ae03e64fbd0dc9b8bf760` | `640d2433702635d68d4f0b94e9fa2d6b81da48b7f62056270b1b1fd480c72f30` |
+
+The review did not rely on the lock's historical `checked_out_worktree_clean`
+observation. A bare object fetch has no worktree and independently establishes the
+immutable objects needed for this audit.
+
+## License and distribution binding
+
+The fixed `flash_attn/cute/LICENSE` is the complete BSD 3-Clause text. Its Git blob is
+`5860e4b33f3d9d85fc636137c559331d51783a5b`; its independently recomputed SHA-256 is
+`8c9ccb96c065e706135b6cbad279b721da6156e51f3a5f27c6b3329af9416d73`.
+The AUTHORS digest also matches the lock at
+`4627841c206c9bf990d37cc2ecbfa778a632d85731aafb4ccb59238334d2821d`.
+The license is compatible with the current use, and no upstream source was vendored or
+copied into SakuraMoon. Both locked distribution archives carry LICENSE and AUTHORS.
+
+The fixed upstream `pyproject.toml` names `flash-attn-4`, declares BSD 3-Clause, uses
+`setuptools_scm` with root `../..`, and restricts recognized tags with
+`^fa4-v(?P<version>.+)$`. The exact tag version `4.0.0.beta24` normalizes under the
+declared packaging rule to the locked `4.0.0b24` distribution version.
+
+Official PyPI JSON independently returned the same repository URLs, BSD license,
+version, filenames, URLs, and hashes recorded in the lock and `uv.lock`:
+
+- sdist SHA-256: `6c4b981ef433882871ded48317deaa18ea22f731ca4f8b9387804bfa2e8078e2`;
+- wheel SHA-256: `c1dcf0dfcf37c4496728547dcb3c1e66d7dcaa07cfedef0f26ccc4d74453951f`.
+
+Static reads of those downloaded, hash-verified archives provided an additional binding:
+LICENSE, AUTHORS, `interface.py`, `flash_fwd.py`, `pack_gqa.py`, and
+`seqlen_info.py` in both the official sdist and wheel are byte-identical to the fixed
+Git tag; the sdist `pyproject.toml` is also byte-identical. Thus the audit is not merely
+inferring repository provenance from a wheel version or wheel hash.
+
+## Static contract comparison
+
+The four-column `upstream_algorithm_matrix.md` is accurate for the governed source:
+
+- `flash_attn_varlen_func` accepts flat Q/K/V plus `cu_seqlens_q/k` and maximum
+  lengths, then dispatches through `FlashAttnVarlenFunc.apply` for autograd.
+- Upstream validates matching float dtypes, contiguous int32 sequence boundaries,
+  CUDA residency, and Q-head divisibility by KV heads. Its lower kernel boundary
+  restricts the production Q/K/V/O path to FP16 or BF16.
+- The upstream head ratio is derived without expanding K/V. `pack_gqa` is explicit,
+  and `flash_fwd.py` applies the packed Q/O layout while retaining native KV heads.
+- `causal` is an explicit interface argument whose default is false. SakuraMoon fixes
+  `causal=False`, `pack_gqa=True`, CUDA BF16 `[T,20,128]` Q and `[T,5,128]` K/V,
+  with no K/V repeat or silent dense fallback.
+- SakuraMoon performs Q/K normalization and 2D RoPE before the call, uses the same
+  accepted host identity for routing and FA4, and reuses one private accepted boundary
+  handle through all active blocks. This matches the matrix's locally governed
+  packed-entry extension.
+
+The upstream package contains the corresponding backward sources, while K001's existing
+real RTX 5090 output/loss/all-gradient/update evidence establishes runtime behavior.
+This provenance rereview did not rerun GPU work and does not broaden that evidence.
+
+## Independent verification
+
+- `uv run --frozen pytest -q --basetemp=cache/.pytest-K001-infra-provenance-review-20260801 tests/unit/docs/test_verify_traceability.py`
+  -> **40 passed** in 73.85 seconds.
+- `uv run --frozen python tools/verify_traceability.py --format json`
+  -> `ok=true`, **237 requirements**, **237 source nodes**, zero errors.
+- Targeted Ruff on the trace verifier and its tests -> **passed**.
+- Targeted Pyright on the trace verifier and its tests -> **0 errors, 0 warnings**.
+- `jq` parse of `upstream_provenance_lock.json`, `test_report.json`,
+  `fa4_benchmark.json`, and `timing.json` -> **passed**.
+- `git diff --check --cached` and `git diff --check` -> **passed**.
+- Tracked production/test/benchmark/config/tool import scan -> no `reference/` import.
+
+All temporary bare Git, sdist, wheel, and pytest directories used by this review were
+task-private and removed after verification. No commit was created by this reviewer.
+
+---
+
 # K001 independent Infra/performance rereview
 
 Verdict: **PASS for the accepted-boundary remediation and the recorded 1GPU
