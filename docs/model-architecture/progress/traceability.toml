@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 106
+registry_revision = 107
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -4945,6 +4945,24 @@ implementation_paths = [
     "tests/unit/cli/test_transition.py",
     "tests/gpu/checkpoint/test_growth_migration.py",
     "docs/model-architecture/progress/traceability.toml",
+    "config/base.toml",
+    "config/train_s0.toml",
+    "config/train_s1.toml",
+    "config/train_g1.toml",
+    "config/train_s2.toml",
+    "config/train_g2.toml",
+    "config/train_s3.toml",
+    "config/train_h1.toml",
+    "config/train_h2.toml",
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/config/assembly.py",
+    "tests/unit/config/test_c002_production_config.py",
+    "docs/model-architecture/progress/tasks/C002.md",
+    "docs/model-architecture/reviews/C002/implementation_report.md",
+    "docs/model-architecture/reviews/C002/test_report.json",
+    "docs/model-architecture/reviews/C002/stage_config_report.json",
+    "docs/model-architecture/reviews/C002/ai_review.md",
+    "docs/model-architecture/reviews/C002/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -5003,6 +5021,24 @@ implementation_paths = [
     "tests/unit/cli/test_transition.py",
     "tests/gpu/checkpoint/test_growth_migration.py",
     "docs/model-architecture/progress/traceability.toml",
+    "config/base.toml",
+    "config/train_s0.toml",
+    "config/train_s1.toml",
+    "config/train_g1.toml",
+    "config/train_s2.toml",
+    "config/train_g2.toml",
+    "config/train_s3.toml",
+    "config/train_h1.toml",
+    "config/train_h2.toml",
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/config/assembly.py",
+    "tests/unit/config/test_c002_production_config.py",
+    "docs/model-architecture/progress/tasks/C002.md",
+    "docs/model-architecture/reviews/C002/implementation_report.md",
+    "docs/model-architecture/reviews/C002/test_report.json",
+    "docs/model-architecture/reviews/C002/stage_config_report.json",
+    "docs/model-architecture/reviews/C002/ai_review.md",
+    "docs/model-architecture/reviews/C002/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -6642,6 +6678,14 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/progress/tasks/D016.md",
     "docs/model-architecture/reviews/D016/test_report.json",
+    "config/base.toml",
+    "tests/unit/config/test_c002_production_config.py",
+    "docs/model-architecture/progress/tasks/C002.md",
+    "docs/model-architecture/reviews/C002/implementation_report.md",
+    "docs/model-architecture/reviews/C002/test_report.json",
+    "docs/model-architecture/reviews/C002/stage_config_report.json",
+    "docs/model-architecture/reviews/C002/ai_review.md",
+    "docs/model-architecture/reviews/C002/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -11964,6 +12008,23 @@ implementation_paths = [
     "tests/unit/telemetry/test_wandb_sink.py",
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/reviews/T051/test_report.json",
+    "config/base.toml",
+    "config/train_s0.toml",
+    "config/train_s1.toml",
+    "config/train_g1.toml",
+    "config/train_s2.toml",
+    "config/train_g2.toml",
+    "config/train_s3.toml",
+    "config/train_h1.toml",
+    "config/train_h2.toml",
+    "src/sakuramoon/config/assembly.py",
+    "tests/unit/config/test_c002_production_config.py",
+    "docs/model-architecture/progress/tasks/C002.md",
+    "docs/model-architecture/reviews/C002/implementation_report.md",
+    "docs/model-architecture/reviews/C002/test_report.json",
+    "docs/model-architecture/reviews/C002/stage_config_report.json",
+    "docs/model-architecture/reviews/C002/ai_review.md",
+    "docs/model-architecture/reviews/C002/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -12028,6 +12089,15 @@ implementation_paths = [
     "docs/model-architecture/progress/tasks/M037.md",
     "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M037/test_report.json",
+    "config/base.toml",
+    "src/sakuramoon/config/assembly.py",
+    "tests/unit/config/test_c002_production_config.py",
+    "docs/model-architecture/progress/tasks/C002.md",
+    "docs/model-architecture/reviews/C002/implementation_report.md",
+    "docs/model-architecture/reviews/C002/test_report.json",
+    "docs/model-architecture/reviews/C002/stage_config_report.json",
+    "docs/model-architecture/reviews/C002/ai_review.md",
+    "docs/model-architecture/reviews/C002/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -12095,6 +12165,15 @@ implementation_paths = [
     "tests/gpu/telemetry/test_cuda_timer.py",
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/reviews/T051/test_report.json",
+    "config/base.toml",
+    "src/sakuramoon/config/assembly.py",
+    "tests/unit/config/test_c002_production_config.py",
+    "docs/model-architecture/progress/tasks/C002.md",
+    "docs/model-architecture/reviews/C002/implementation_report.md",
+    "docs/model-architecture/reviews/C002/test_report.json",
+    "docs/model-architecture/reviews/C002/stage_config_report.json",
+    "docs/model-architecture/reviews/C002/ai_review.md",
+    "docs/model-architecture/reviews/C002/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -12560,6 +12639,28 @@ implementation_paths = [
     "tests/unit/config/test_load.py",
     "tests/unit/config/test_eval_jobs.py",
     "docs/model-architecture/progress/traceability.toml",
+    "config/base.toml",
+    "config/train_s0.toml",
+    "config/train_s1.toml",
+    "config/train_g1.toml",
+    "config/train_s2.toml",
+    "config/train_g2.toml",
+    "config/train_s3.toml",
+    "config/train_h1.toml",
+    "config/train_h2.toml",
+    "config/eval.toml",
+    "config/sample.toml",
+    "src/sakuramoon/config/assembly.py",
+    "tests/contracts/config/test_runtime_contract.py",
+    "tests/unit/config/test_c002_production_config.py",
+    "tests/unit/config/test_load.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/progress/tasks/C002.md",
+    "docs/model-architecture/reviews/C002/implementation_report.md",
+    "docs/model-architecture/reviews/C002/test_report.json",
+    "docs/model-architecture/reviews/C002/stage_config_report.json",
+    "docs/model-architecture/reviews/C002/ai_review.md",
+    "docs/model-architecture/reviews/C002/infra_review.md",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -12571,6 +12672,7 @@ config_keys = [
     "timing.*",
     "profiling.*",
     "evaluation.*",
+    "extends",
 ]
 modules = [
     "src/sakuramoon/telemetry/**",

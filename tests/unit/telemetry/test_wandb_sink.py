@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from wandb.errors import AuthenticationError
 
 from sakuramoon.telemetry.metrics import DROPOUT_KEYS, TIMING_PHASES, TrainingMetric
 from sakuramoon.telemetry.wandb_sink import AsyncWandbSink, replay_retry_queue
@@ -47,6 +48,15 @@ class _FailingRun:
         raise ConnectionError("secret-shaped network diagnostic")
 
 
+class _ExceptionalRun:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def log(self, data: Mapping[str, int | float], *, step: int) -> None:
+        del data, step
+        raise self.error
+
+
 class _RecordingRun:
     def __init__(self) -> None:
         self.records: list[tuple[int, dict[str, int | float]]] = []
@@ -75,6 +85,29 @@ def test_network_failure_enters_durable_redacted_queue_and_replays(
     assert recovered.records[0][0] == 7
     assert recovered.records[0][1]["total_loss"] == 1.0
     assert not retry.exists()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(AuthenticationError("invalid credentials"), id="authentication"),
+        pytest.param(ValueError("remote protocol drift"), id="non_communication"),
+    ],
+)
+def test_nonretryable_remote_failure_surfaces_without_spill(
+    tmp_path: Path, error: Exception
+) -> None:
+    retry = tmp_path / "wandb-retry.jsonl"
+    sink = AsyncWandbSink(
+        _ExceptionalRun(error), retry_path=retry, queue_capacity=1
+    )
+    sink.submit(_metric())
+
+    with pytest.raises(RuntimeError, match="remote sink failed") as captured:
+        sink.close()
+
+    assert captured.value.__cause__ is error
+    assert retry.read_bytes() == b""
 
 
 def test_failed_replay_retains_complete_queue(tmp_path: Path) -> None:

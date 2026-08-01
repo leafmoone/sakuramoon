@@ -576,13 +576,14 @@ def test_preflight_runtime_check_rejects_checkpoint_drift_before_acceptance(
     config = cast(
         RuntimeConfig,
         SimpleNamespace(
-            run=SimpleNamespace(stage="S0"),
+            run=SimpleNamespace(intent="train", stage="S0"),
             stage=SimpleNamespace(
                 name="S0",
                 enabled=True,
                 world_size=1,
                 depth=16,
                 resolution=256,
+                activation_checkpoint_mode="none",
                 planned_updates=1,
             ),
             distributed=SimpleNamespace(backend="native", world_size=1),

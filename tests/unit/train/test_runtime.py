@@ -89,7 +89,7 @@ def _config(*, planned_updates: int) -> RuntimeConfig:
     return cast(
         RuntimeConfig,
         SimpleNamespace(
-            run=SimpleNamespace(stage="S0"),
+            run=SimpleNamespace(intent="train", stage="S0"),
             stage=SimpleNamespace(
                 name="S0",
                 enabled=True,
@@ -97,6 +97,7 @@ def _config(*, planned_updates: int) -> RuntimeConfig:
                 resolution=256,
                 world_size=1,
                 accumulation=1,
+                activation_checkpoint_mode="none",
                 planned_updates=planned_updates,
             ),
             growth=SimpleNamespace(enabled=False),
@@ -321,7 +322,7 @@ def _run(
 def test_single_gpu_config_requires_native_s0() -> None:
     require_single_gpu_config(_config(planned_updates=1))
     changed = SimpleNamespace(
-        run=SimpleNamespace(stage="S1"),
+        run=SimpleNamespace(intent="train", stage="S1"),
         stage=SimpleNamespace(world_size=4),
         distributed=SimpleNamespace(backend="ddp", world_size=4),
         failure=SimpleNamespace(allow_force_bypass=False),

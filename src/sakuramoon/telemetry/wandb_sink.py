@@ -19,6 +19,18 @@ class RemoteRun(Protocol):
     def log(self, data: Mapping[str, int | float], *, step: int) -> None: ...
 
 
+def is_retryable_remote_communication_error(error: BaseException) -> bool:
+    """Classify only communication outages as durable-retry candidates."""
+
+    try:
+        from wandb.errors import AuthenticationError, CommError
+    except ImportError:
+        return isinstance(error, ConnectionError)
+    if isinstance(error, AuthenticationError):
+        return False
+    return isinstance(error, (ConnectionError, CommError))
+
+
 def _retry_payload(metric: TrainingMetric, error: Exception) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -121,11 +133,15 @@ class AsyncWandbSink:
         )
         self._worker.start()
 
+    def _set_background_error(self, error: Exception) -> None:
+        if self._background_error is None:
+            self._background_error = error
+
     def _spill(self, metric: TrainingMetric, error: Exception) -> None:
         try:
             self.retry.write(_retry_payload(metric, error))
         except Exception as exc:  # noqa: BLE001 - background durability boundary
-            self._background_error = exc
+            self._set_background_error(exc)
 
     def _run(self) -> None:
         while True:
@@ -140,13 +156,16 @@ class AsyncWandbSink:
                         step=metric.successful_update,
                     )
                 except Exception as exc:  # noqa: BLE001 - network boundary
-                    self._spill(metric, exc)
+                    if is_retryable_remote_communication_error(exc):
+                        self._spill(metric, exc)
+                    else:
+                        self._set_background_error(exc)
             finally:
                 self._queue.task_done()
 
     def _check_health(self) -> None:
         if self._background_error is not None:
-            raise RuntimeError("W&B retry queue failed") from self._background_error
+            raise RuntimeError("W&B remote sink failed") from self._background_error
 
     def submit(self, metric: TrainingMetric) -> None:
         if self._closed:
@@ -179,4 +198,9 @@ class AsyncWandbSink:
         self.close()
 
 
-__all__ = ["AsyncWandbSink", "RemoteRun", "replay_retry_queue"]
+__all__ = [
+    "AsyncWandbSink",
+    "RemoteRun",
+    "is_retryable_remote_communication_error",
+    "replay_retry_queue",
+]

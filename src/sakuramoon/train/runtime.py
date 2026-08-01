@@ -531,15 +531,22 @@ def require_single_gpu_config(config: RuntimeConfig) -> None:
     """Reject every topology except the explicitly approved S0 single card."""
 
     if (
-        config.run.stage != "S0"
+        config.run.intent != "train"
+        or config.run.stage != "S0"
         or not config.stage.enabled
         or config.stage.world_size != 1
     ):
-        raise ValueError("the single-GPU runtime accepts only enabled S0 topology")
+        raise ValueError(
+            "the single-GPU runtime accepts only train-intent enabled S0 topology"
+        )
     if config.distributed.backend != "native" or config.distributed.world_size != 1:
         raise ValueError("single-GPU runtime requires native world_size=1")
     if config.failure.allow_force_bypass:
         raise ValueError("single-GPU runtime cannot enable preflight bypass")
+    if config.stage.activation_checkpoint_mode != "none":
+        raise ValueError(
+            "single-GPU runtime does not implement activation checkpointing"
+        )
 
 
 def require_single_gpu_checkpoint_binding(

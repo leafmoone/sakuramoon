@@ -229,7 +229,7 @@ sakuramoon/
 - **对应文档：** `C03–C12`、`OBS-*`。
 - **实现路径：** `config/base.toml`、八个 `train_*.toml`、`eval.toml`、`sample.toml`。
 - **动作：** 写入所有固定架构参数与详细注释；S0/S1/G1/S2/G2/S3 每次只改变一个主轴；H1/H2 `enabled=false`；batch/accumulation/checkpoint mode 等 benchmark 值显式存在。
-- **阻塞项：** 用户填写除 `all_condition=0.10` 外的全部 dropout。正式值缺失时 stage config 必须不可运行。
+- **当前边界：** 全部 dropout 与 Text/Style 决策均已锁定；C002 只负责 production config、overlays 与 assembly binding。S000 benchmark 值继续使用 loader 硬拒绝的显式 sentinel，不得以 synthetic validation identity 冒充生产 stage 放行值。
 - **验证：** 每个 overlay 解析后无隐式默认；diff checker 证明相邻 stage 只改变允许键；H1/H2 无法意外启动。
 - **完成证据：** 8 个 resolved hash、stage-diff report、逐键注释审查。
 - **GPU：** 无。

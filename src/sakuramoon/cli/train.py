@@ -1,9 +1,8 @@
 """Fail-closed single-GPU training entry point.
 
-The CLI deliberately does not accept workload overrides. D025 owns production data
-assembly. C002 has not yet bound the already-confirmed Text/Style decisions into
-strict production configuration and assembly, so the command remains fail-closed
-without promoting engineering-smoke values.
+The CLI deliberately does not accept workload overrides. C002 binds the confirmed
+trainable architecture and telemetry assembly contracts; the remaining production
+lifecycle is enabled only after the downstream T052-T054 and S000 gates are complete.
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from sakuramoon.config import ConfigurationError, load_config
+from sakuramoon.config.assembly import trainable_composite_spec
 from sakuramoon.train.runtime import require_single_gpu_config
 
 
@@ -50,9 +50,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             not args.resume.is_absolute() or not args.resume.is_dir()
         ):
             raise ConfigurationError("resume must name an absolute raw checkpoint directory")
+        trainable_composite_spec(loaded.config)
         raise ConfigurationError(
-            "production train assembly requires the C002-governed Text and Style "
-            "configuration binding"
+            "production train lifecycle remains gated by T052-T054 and S000"
         )
     except (_ArgumentError, SystemExit):
         _emit({"error": "invalid_arguments", "ok": False})

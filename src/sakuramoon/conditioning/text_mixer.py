@@ -29,7 +29,7 @@ class TextConditioner(nn.Module):
         layer_scale_init: float,
         projection_bias: bool,
     ) -> TextConditioner:
-        """Build the locked architecture while keeping undecided choices explicit."""
+        """Build the locked architecture from explicitly confirmed choices."""
         return cls(
             input_size=2048,
             adapter_size=1024,

@@ -1,0 +1,57 @@
+extends = ["base.toml"]
+
+[run]
+run_id = "g1-production"
+stage = "G1"
+seed = "REQUIRED_G1_SEED"
+
+[paths]
+run_dir = "runs/g1"
+checkpoint_dir = "checkpoints/g1"
+artifact_dir = "artifacts/g1"
+
+[distributed]
+backend = "ddp"
+world_size = 4
+frozen_encoders_outside_wrapper = true
+automatic_backend_fallback = false
+
+[checkpoint]
+slots = "BENCHMARK_G1_CHECKPOINT_SLOTS"
+
+[growth]
+enabled = true
+alpha_schedule = "half_cosine"
+alpha_fraction = 0.02
+min_updates = 1000
+max_updates = 5000
+random_new_slots = true
+copy_old_slots = false
+
+[stage]
+name = "G1"
+enabled = true
+predecessor = "S1"
+world_size = 4
+depth = 20
+resolution = 256
+local_batch = "BENCHMARK_G1_LOCAL_BATCH"
+accumulation = "BENCHMARK_G1_ACCUMULATION"
+global_batch = "BENCHMARK_G1_GLOBAL_BATCH"
+activation_checkpoint_mode = "BENCHMARK_G1_ACTIVATION_CHECKPOINT_MODE"
+planned_updates = "BENCHMARK_G1_PLANNED_UPDATES"
+planned_valid_samples = "BENCHMARK_G1_PLANNED_VALID_SAMPLES"
+planned_equivalent_data_passes = "BENCHMARK_G1_EQUIVALENT_DATA_PASSES"
+planned_dit_flops = "BENCHMARK_G1_DIT_FLOPS"
+planned_wall_time_hours = "BENCHMARK_G1_WALL_TIME_HOURS"
+manual_finalize = true
+automatic_transition = false
+
+[logging]
+local_jsonl_path = "artifacts/g1/metrics.jsonl"
+flush_every_updates = "BENCHMARK_G1_METRICS_FLUSH_UPDATES"
+async_remote = true
+noise_observation_boundary = 0.95
+
+[wandb]
+retry_jsonl_path = "artifacts/g1/wandb-retry.jsonl"

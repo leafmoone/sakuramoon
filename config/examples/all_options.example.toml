@@ -1,5 +1,6 @@
 # Documentation-only inventory of every C001 key. This file is intentionally
-# not runnable: undecided values use explicit sentinels rejected by the loader.
+# not runnable: unresolved external and benchmark inputs use explicit sentinels
+# rejected by the loader.
 # Units appear in key names or comments. Fixed values require an architecture
 # decision before they may change; benchmark values require measured evidence.
 
@@ -7,6 +8,7 @@ schema_version = 1 # fixed
 
 [run]
 run_id = "example-not-for-training"
+intent = "train" # train|eval|sample|template; template is disabled H1/H2 only
 stage = "S0" # S0|S1|G1|S2|G2|S3|H1|H2
 seed = 0 # integer >= 0
 
@@ -137,8 +139,15 @@ input_size = 2048 # fixed
 adapter_size = 1024 # fixed
 output_size = 2560 # fixed
 groups = 8 # fixed
+attention_heads = 16 # fixed
 bidirectional_attention_layers = 1 # fixed
 no_positional_encoding = true # fixed
+norm_eps = 0.000001 # fixed
+mix_gate_init = 0.0 # fixed
+layer_scale_init = 1.0 # fixed
+projection_bias = false # fixed
+linear_dtype = "bfloat16" # fixed
+sensitive_dtype = "float32" # fixed
 
 [model.style]
 query_count = 4 # fixed
@@ -147,6 +156,12 @@ hidden_size = 1024 # fixed
 mlp_intermediate_size = 2048 # fixed
 output_size = 2560 # fixed
 null_tokens_learned = true # fixed
+attention_heads = 16 # fixed
+norm_eps = 0.000001 # fixed
+init_std = 0.02 # fixed
+projection_bias = false # fixed
+linear_dtype = "bfloat16" # fixed
+sensitive_dtype = "float32" # fixed
 
 [model.packing]
 order = ["text", "style", "image"] # fixed
@@ -171,6 +186,7 @@ head_dim = 128 # fixed
 q_heads = 20 # fixed
 kv_heads = 5 # fixed
 intermediate_size = 6912 # fixed
+stable_slot_count = 24 # fixed canonical FQN slots
 patch_size = 1 # fixed
 attention_dropout = 0.0 # fixed
 mlp_dropout = 0.0 # fixed
@@ -293,7 +309,13 @@ depth = 16
 resolution = 256 # pixels, equivalent-area stage
 local_batch = "BENCHMARK_REQUIRED" # integer > 0
 accumulation = "BENCHMARK_REQUIRED" # integer > 0
+global_batch = "BENCHMARK_REQUIRED" # exact local_batch * accumulation * world_size
+activation_checkpoint_mode = "BENCHMARK_REQUIRED" # none|alternating|all
 planned_updates = "BENCHMARK_REQUIRED" # integer > 0
+planned_valid_samples = "BENCHMARK_REQUIRED" # exact global_batch * planned_updates
+planned_equivalent_data_passes = "BENCHMARK_REQUIRED" # TOML float > 0; exposure only
+planned_dit_flops = "BENCHMARK_REQUIRED" # TOML float > 0
+planned_wall_time_hours = "BENCHMARK_REQUIRED" # TOML float > 0
 manual_finalize = true # fixed
 automatic_transition = false # fixed
 
@@ -339,12 +361,19 @@ local_jsonl_path = "artifacts/example/metrics.jsonl"
 flush_every_updates = "BENCHMARK_REQUIRED" # integer > 0
 async_remote = true # fixed
 noise_observation_boundary = 0.95 # fixed; high t<0.95, low t>=0.95
+observer_queue_capacity = "BENCHMARK_REQUIRED" # integer 1..1024
+observer_event_timeout_seconds = "BENCHMARK_REQUIRED" # TOML float, (0,300] seconds
 
 [wandb]
 enabled = true
 project = "sakuramoon"
 entity = "REQUIRED_WANDB_ENTITY"
 offline_on_network_error = true # fixed; training semantics do not change
+retry_jsonl_path = "artifacts/example/wandb-retry.jsonl"
+queue_capacity = "BENCHMARK_REQUIRED" # integer 1..1024
+replay_retry_on_start = true # fixed; complete replay precedes new submissions
+finish_on_close = true # fixed; run closes after observer and remote drain
+resume_policy = "allow" # fixed; same run_id resumes or is created after an outage
 
 [timing]
 enabled = true
@@ -353,7 +382,9 @@ force_synchronize_each_phase = false # fixed
 phases = [
   "data", "qwen", "vae", "conditioning", "dit_forward", "loss",
   "backward", "ddp", "clip", "optimizer", "checkpoint", "evaluation",
-] # fixed set
+  "cache", "tar", "json", "caption", "tokenize", "decode", "exif",
+  "crop", "bucket", "h2d", "condition", "zero_grad", "sample",
+] # fixed ordered CORE + DETAILED vocabulary
 
 [evaluation]
 stage_end = true

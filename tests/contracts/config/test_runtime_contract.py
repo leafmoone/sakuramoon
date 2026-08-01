@@ -29,10 +29,23 @@ def test_public_contract_exposes_only_validated_runtime_objects() -> None:
     assert "require_secrets" not in inspect.signature(load_config).parameters
 
 
-def test_no_runtime_config_file_exists_outside_documentation_example() -> None:
-    runtime_toml = [
-        path
-        for path in (REPOSITORY_ROOT / "config").rglob("*.toml")
-        if path.name != "all_options.example.toml"
-    ]
-    assert runtime_toml == []
+def test_runtime_config_inventory_is_exact() -> None:
+    config_root = REPOSITORY_ROOT / "config"
+    observed = {
+        path.relative_to(config_root)
+        for path in config_root.rglob("*.toml")
+    }
+    assert observed == {
+        Path("base.toml"),
+        Path("eval.toml"),
+        Path("examples/all_options.example.toml"),
+        Path("sample.toml"),
+        Path("train_g1.toml"),
+        Path("train_g2.toml"),
+        Path("train_h1.toml"),
+        Path("train_h2.toml"),
+        Path("train_s0.toml"),
+        Path("train_s1.toml"),
+        Path("train_s2.toml"),
+        Path("train_s3.toml"),
+    }

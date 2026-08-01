@@ -1,0 +1,57 @@
+extends = ["base.toml"]
+
+[run]
+run_id = "s2-production"
+stage = "S2"
+seed = "REQUIRED_S2_SEED"
+
+[paths]
+run_dir = "runs/s2"
+checkpoint_dir = "checkpoints/s2"
+artifact_dir = "artifacts/s2"
+
+[distributed]
+backend = "ddp"
+world_size = 4
+frozen_encoders_outside_wrapper = true
+automatic_backend_fallback = false
+
+[checkpoint]
+slots = "BENCHMARK_S2_CHECKPOINT_SLOTS"
+
+[growth]
+enabled = false
+alpha_schedule = "half_cosine"
+alpha_fraction = 0.02
+min_updates = 1000
+max_updates = 5000
+random_new_slots = true
+copy_old_slots = false
+
+[stage]
+name = "S2"
+enabled = true
+predecessor = "G1"
+world_size = 4
+depth = 20
+resolution = 512
+local_batch = "BENCHMARK_S2_LOCAL_BATCH"
+accumulation = "BENCHMARK_S2_ACCUMULATION"
+global_batch = "BENCHMARK_S2_GLOBAL_BATCH"
+activation_checkpoint_mode = "BENCHMARK_S2_ACTIVATION_CHECKPOINT_MODE"
+planned_updates = "BENCHMARK_S2_PLANNED_UPDATES"
+planned_valid_samples = "BENCHMARK_S2_PLANNED_VALID_SAMPLES"
+planned_equivalent_data_passes = "BENCHMARK_S2_EQUIVALENT_DATA_PASSES"
+planned_dit_flops = "BENCHMARK_S2_DIT_FLOPS"
+planned_wall_time_hours = "BENCHMARK_S2_WALL_TIME_HOURS"
+manual_finalize = true
+automatic_transition = false
+
+[logging]
+local_jsonl_path = "artifacts/s2/metrics.jsonl"
+flush_every_updates = "BENCHMARK_S2_METRICS_FLUSH_UPDATES"
+async_remote = true
+noise_observation_boundary = 0.95
+
+[wandb]
+retry_jsonl_path = "artifacts/s2/wandb-retry.jsonl"

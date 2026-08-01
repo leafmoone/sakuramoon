@@ -344,6 +344,10 @@ def test_configured_loader_passes_only_exact_resolved_values(
     valid_payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     valid_payload["stage"]["local_batch"] = 7
+    valid_payload["stage"]["global_batch"] = 7
+    valid_payload["stage"]["planned_valid_samples"] = (
+        7 * valid_payload["stage"]["planned_updates"]
+    )
     valid_payload["data"]["cache"]["ready_batches_per_rank"] = 4
     valid_payload["data"]["loader"]["pin_memory"] = False
     valid_payload["data"]["loader"]["drop_last"] = False

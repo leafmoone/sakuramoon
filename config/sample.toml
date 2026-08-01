@@ -1,0 +1,21 @@
+# Bounded interactive sampling identity. Formal quality jobs must use eval.toml,
+# whose reference profile is fixed to Heun-50 plus final Euler (99 NFE).
+extends = ["train_s0.toml"]
+
+[run]
+run_id = "balanced-sampling"
+intent = "sample"
+
+[paths]
+run_dir = "runs/sample"
+checkpoint_dir = "checkpoints/sample"
+artifact_dir = "artifacts/sample"
+
+[sampling]
+profile = "balanced"
+
+[logging]
+local_jsonl_path = "artifacts/sample/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/sample/wandb-retry.jsonl"

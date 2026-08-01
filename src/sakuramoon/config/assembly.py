@@ -1,0 +1,432 @@
+"""Canonical model and telemetry assembly from resolved runtime configuration."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, Self, cast
+
+import torch
+
+from sakuramoon.checkpoint.artifact import (
+    build_trainable_composite,
+    export_trainable_composite,
+)
+from sakuramoon.config.schema import RuntimeConfig
+from sakuramoon.model.growth import active_slot_ids
+from sakuramoon.storage import repository_directory, repository_file_parent
+from sakuramoon.telemetry.metrics import (
+    CORE_TIMING_PHASES,
+    DETAILED_TIMING_PHASES,
+    TIMING_PHASES,
+    DurableJsonlSink,
+    MetricsPublisher,
+)
+from sakuramoon.telemetry.observer import (
+    AsyncTrainingMetricObserver,
+    UpdateMetricContext,
+)
+from sakuramoon.telemetry.timers import PhaseTimer
+from sakuramoon.telemetry.wandb_sink import (
+    AsyncWandbSink,
+    RemoteRun,
+    is_retryable_remote_communication_error,
+    replay_retry_queue,
+)
+from sakuramoon.train.step import TrainableComposite
+
+if TYPE_CHECKING:
+    from sakuramoon.train.runtime import SuccessfulTrainingObservation
+
+
+class ManagedRemoteRun(RemoteRun, Protocol):
+    """Remote run whose lifecycle is owned by the training telemetry assembly."""
+
+    def finish(self, exit_code: int | None = None) -> None: ...
+
+
+class RemoteRunFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        project: str,
+        entity: str,
+        run_id: str,
+        run_directory: Path,
+        resolved_sha256: str,
+        resume_policy: str,
+    ) -> ManagedRemoteRun: ...
+
+
+MetricContextProvider = Callable[
+    ["SuccessfulTrainingObservation"], UpdateMetricContext
+]
+
+
+class RemoteInitializationUnavailable(ConnectionError):
+    """W&B communication failed before the governed retry sink was available."""
+
+
+class RetryOnlyRemoteRun:
+    """Explicit network-outage target that routes every metric to durable retry."""
+
+    def log(self, data: object, *, step: int) -> None:
+        del data, step
+        raise RemoteInitializationUnavailable
+
+    def finish(self, exit_code: int | None = None) -> None:
+        del exit_code
+
+
+class _ResilientManagedRemoteRun:
+    def __init__(self, run: ManagedRemoteRun) -> None:
+        self.run = run
+
+    def log(self, data: Mapping[str, int | float], *, step: int) -> None:
+        self.run.log(data, step=step)
+
+    def finish(self, exit_code: int | None = None) -> None:
+        try:
+            self.run.finish(exit_code=exit_code)
+        except BaseException as error:
+            if not is_retryable_remote_communication_error(error):
+                raise
+
+
+def _require_managed_run(value: object) -> ManagedRemoteRun:
+    if value is None or not callable(getattr(value, "log", None)) or not callable(
+        getattr(value, "finish", None)
+    ):
+        raise TypeError("remote run factory must return callable log/finish methods")
+    return cast(ManagedRemoteRun, value)
+
+
+def initialize_wandb_run(
+    *,
+    project: str,
+    entity: str,
+    run_id: str,
+    run_directory: Path,
+    resolved_sha256: str,
+    resume_policy: str,
+) -> ManagedRemoteRun:
+    """Start or resume W&B, routing communication outages to durable retry."""
+
+    import wandb
+    from wandb.errors import AuthenticationError, CommError
+
+    if resume_policy != "allow":
+        raise ValueError("W&B resume policy must be allow")
+    try:
+        run = wandb.init(
+            project=project,
+            entity=entity,
+            id=run_id,
+            name=run_id,
+            dir=str(run_directory),
+            config={"resolved_config_sha256": resolved_sha256},
+            mode="online",
+            resume="allow",
+            reinit="create_new",
+            save_code=False,
+        )
+    except AuthenticationError:
+        raise
+    except (ConnectionError, CommError):
+        return RetryOnlyRemoteRun()
+    return _require_managed_run(run)
+
+
+def _raise_preserving(primary: BaseException, cleanup: list[BaseException]) -> NoReturn:
+    if cleanup:
+        raise BaseExceptionGroup(
+            "telemetry assembly and cleanup both failed", [primary, *cleanup]
+        ) from None
+    raise primary
+
+
+def _close_components(
+    components: tuple[tuple[str, Callable[[], None]], ...],
+) -> None:
+    errors: list[BaseException] = []
+    for _name, close in components:
+        try:
+            close()
+        except BaseException as error:  # noqa: BLE001 - lifecycle boundary
+            errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("telemetry components failed to close", errors)
+
+
+class TrainingTelemetryAssembly:
+    """Own observer, remote queue/run, and local sink in deterministic order."""
+
+    def __init__(
+        self,
+        *,
+        phase_timer: PhaseTimer,
+        observer: AsyncTrainingMetricObserver,
+        remote: AsyncWandbSink,
+        local: DurableJsonlSink,
+        run: ManagedRemoteRun,
+    ) -> None:
+        self.phase_timer = phase_timer
+        self.observer = observer
+        self.remote = remote
+        self.local = local
+        self.run = run
+        self._closed = False
+
+    def close(self, *, exit_code: int = 0) -> None:
+        if type(exit_code) is not int or exit_code not in {0, 1}:
+            raise ValueError("telemetry exit_code must be zero or one")
+        if self._closed:
+            return
+        self._closed = True
+        _close_components(
+            (
+                ("observer", self.observer.close),
+                ("remote", self.remote.close),
+                ("remote_run", lambda: self.run.finish(exit_code=exit_code)),
+                ("local", self.local.close),
+            )
+        )
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        _error_type: type[BaseException] | None,
+        error: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.close(exit_code=1 if error is not None else 0)
+        except BaseException as close_error:
+            if error is not None:
+                raise BaseExceptionGroup(
+                    "training and telemetry close both failed", [error, close_error]
+                ) from None
+            raise
+
+
+def _artifact_file(repository_root: Path, configured: str) -> Path:
+    parent = repository_file_parent(repository_root, configured)
+    return parent / Path(configured).name
+
+
+def _require_timing_phase_binding(config: RuntimeConfig) -> None:
+    expected = (*CORE_TIMING_PHASES, *DETAILED_TIMING_PHASES)
+    if len(expected) != len(TIMING_PHASES) or frozenset(expected) != TIMING_PHASES:
+        raise RuntimeError("telemetry timing vocabulary is internally inconsistent")
+    if config.timing.phases != expected:
+        raise ValueError(
+            "resolved timing phases do not match the telemetry timing vocabulary"
+        )
+
+
+def build_training_telemetry_from_config(
+    config: RuntimeConfig,
+    *,
+    repository_root: Path,
+    device: torch.device,
+    resolved_sha256: str,
+    context_provider: MetricContextProvider,
+    remote_run_factory: RemoteRunFactory = initialize_wandb_run,
+) -> TrainingTelemetryAssembly:
+    """Build the complete local-first telemetry lifecycle from strict config."""
+
+    if not isinstance(config, RuntimeConfig):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TypeError("resolved RuntimeConfig is required for telemetry assembly")
+    if config.run.intent != "train":
+        raise ValueError("training telemetry requires train intent")
+    if not config.wandb.enabled or not config.timing.enabled:
+        raise ValueError("production training requires W&B and timing enabled")
+    _require_timing_phase_binding(config)
+    if not callable(context_provider):
+        raise TypeError("metric context provider must be callable")
+    if re.fullmatch(r"[0-9a-f]{64}", resolved_sha256) is None:
+        raise ValueError("resolved config SHA-256 is invalid")
+
+    run_directory = repository_directory(repository_root, config.paths.run_dir)
+    local_path = _artifact_file(repository_root, config.logging.local_jsonl_path)
+    retry_path = _artifact_file(repository_root, config.wandb.retry_jsonl_path)
+    if local_path == retry_path:
+        raise ValueError("local metric and W&B retry paths must differ")
+
+    run: ManagedRemoteRun | None = None
+    local: DurableJsonlSink | None = None
+    remote: AsyncWandbSink | None = None
+    observer: AsyncTrainingMetricObserver | None = None
+    try:
+        run = _ResilientManagedRemoteRun(
+            _require_managed_run(
+                remote_run_factory(
+                    project=config.wandb.project,
+                    entity=config.wandb.entity,
+                    run_id=config.run.run_id,
+                    run_directory=run_directory,
+                    resolved_sha256=resolved_sha256,
+                    resume_policy=config.wandb.resume_policy,
+                )
+            )
+        )
+        try:
+            replay_retry_queue(run, retry_path)
+        except BaseException as replay_error:
+            if not is_retryable_remote_communication_error(replay_error):
+                raise
+        local = DurableJsonlSink(
+            local_path,
+            fsync_every_records=config.logging.flush_every_updates,
+        )
+        remote = AsyncWandbSink(
+            run,
+            retry_path=retry_path,
+            queue_capacity=config.wandb.queue_capacity,
+        )
+        observer = AsyncTrainingMetricObserver(
+            MetricsPublisher(local, remote),
+            context_provider=context_provider,
+            queue_capacity=config.logging.observer_queue_capacity,
+            event_timeout_seconds=config.logging.observer_event_timeout_seconds,
+        )
+        phase_timer = PhaseTimer(device=device)
+        return TrainingTelemetryAssembly(
+            phase_timer=phase_timer,
+            observer=observer,
+            remote=remote,
+            local=local,
+            run=run,
+        )
+    except BaseException as error:  # noqa: BLE001 - construction cleanup boundary
+        cleanup: list[BaseException] = []
+        components: list[Callable[[], None]] = []
+        if observer is not None:
+            components.append(observer.close)
+        if remote is not None:
+            components.append(remote.close)
+        if run is not None:
+            components.append(lambda: run.finish(exit_code=1))
+        if local is not None:
+            components.append(local.close)
+        for close in components:
+            try:
+                close()
+            except BaseException as close_error:  # noqa: BLE001 - construction boundary
+                cleanup.append(close_error)
+        _raise_preserving(error, cleanup)
+
+
+def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
+    """Bind every trainable constructor argument to one strict config field."""
+
+    if not isinstance(config, RuntimeConfig):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TypeError("resolved RuntimeConfig is required for production assembly")
+    model = config.model
+    dit = model.dit
+    rope = model.rope
+    condition = model.condition
+    head = model.head
+    text = model.text
+    style = model.style
+    backend = {
+        "fa4_varlen": "fa4_varlen",
+        "dense_sdpa_reference": "dense_sdpa",
+    }[config.kernels.attention_backend]
+    document: dict[str, object] = {
+        "class": "TrainableComposite",
+        "dit": {
+            "active_slot_ids": list(active_slot_ids(config.stage.depth)),
+            "aspect_dim": condition.aspect_dim,
+            "attention_backend": backend,
+            "attention_dropout": dit.attention_dropout,
+            "condition_hidden_size": condition.hidden_dim,
+            "depth": config.stage.depth,
+            "final_modulation_size": head.final_modulation_size,
+            "head_dim": dit.head_dim,
+            "hidden_size": dit.hidden_size,
+            "input_channels": config.assets.vae.latent_channels,
+            "intermediate_size": dit.intermediate_size,
+            "kv_heads": dit.kv_heads,
+            "linear_dtype": dit.activation_dtype,
+            "mlp_dropout": dit.mlp_dropout,
+            "modality_init_std": model.packing.modality_init_std,
+            "modulation_chunks": condition.block_modulation_chunks,
+            "norm_eps": dit.norm_eps,
+            "out_channels": head.out_channels,
+            "output_bias_zero_init": head.bias_zero_init,
+            "output_weight_zero_init": head.weight_zero_init,
+            "projection_bias": dit.projection_bias,
+            "q_heads": dit.q_heads,
+            "rope_nope_dim": rope.nope_dim,
+            "rope_position_scale": rope.position_scale,
+            "rope_theta": rope.theta,
+            "rope_x_dim": rope.x_dim,
+            "rope_y_dim": rope.y_dim,
+            "sensitive_dtype": dit.norm_accumulation,
+            "size_dim": condition.size_dim,
+            "stable_slot_count": dit.stable_slot_count,
+            "timestep_dim": condition.timestep_dim,
+        },
+        "text": {
+            "adapter_size": text.adapter_size,
+            "attention_heads": text.attention_heads,
+            "groups": text.groups,
+            "input_size": text.input_size,
+            "layer_scale_init": text.layer_scale_init,
+            "linear_dtype": text.linear_dtype,
+            "mix_gate_init": text.mix_gate_init,
+            "norm_eps": text.norm_eps,
+            "output_size": text.output_size,
+            "projection_bias": text.projection_bias,
+            "sensitive_dtype": text.sensitive_dtype,
+        },
+        "style": {
+            "attention_heads": style.attention_heads,
+            "hidden_size": style.hidden_size,
+            "init_std": style.init_std,
+            "input_size": style.input_size,
+            "intermediate_size": style.mlp_intermediate_size,
+            "linear_dtype": style.linear_dtype,
+            "norm_eps": style.norm_eps,
+            "output_size": style.output_size,
+            "projection_bias": style.projection_bias,
+            "query_count": style.query_count,
+            "sensitive_dtype": style.sensitive_dtype,
+        },
+    }
+    return document
+
+
+def build_trainable_composite_from_config(
+    config: RuntimeConfig,
+    *,
+    device: torch.device | str,
+) -> TrainableComposite:
+    """Construct and round-trip-check the exact config-bound trainable module."""
+
+    document = trainable_composite_spec(config)
+    module = build_trainable_composite(document, device=device)
+    observed: dict[str, Any] = export_trainable_composite(module)
+    if observed != document:
+        raise ValueError("assembled trainable composite differs from resolved config")
+    return module
+
+
+__all__ = [
+    "ManagedRemoteRun",
+    "MetricContextProvider",
+    "RemoteInitializationUnavailable",
+    "RemoteRunFactory",
+    "RetryOnlyRemoteRun",
+    "TrainingTelemetryAssembly",
+    "build_trainable_composite_from_config",
+    "build_training_telemetry_from_config",
+    "initialize_wandb_run",
+    "trainable_composite_spec",
+]

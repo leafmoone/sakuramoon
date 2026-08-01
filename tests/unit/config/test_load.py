@@ -15,19 +15,16 @@ def _write_toml(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(tomli_w.dumps(payload), encoding="utf-8")
 
 
-def test_recursive_merge_is_deterministic_and_replaces_arrays(
+def test_recursive_merge_is_deterministic(
     tmp_path: Path,
     valid_payload: dict[str, Any],
     secret_environment: dict[str, str],
 ) -> None:
     _write_toml(tmp_path / "base.toml", valid_payload)
-    reversed_phases = list(reversed(valid_payload["timing"]["phases"]))
-    overlay = {
-        "extends": ["base.toml"],
-        "run": {"run_id": "merged"},
-        "timing": {"phases": reversed_phases},
-    }
-    _write_toml(tmp_path / "overlay.toml", overlay)
+    _write_toml(
+        tmp_path / "overlay.toml",
+        {"extends": ["base.toml"], "run": {"run_id": "merged"}},
+    )
 
     first = load_config(
         Path("overlay.toml"),
@@ -41,10 +38,39 @@ def test_recursive_merge_is_deterministic_and_replaces_arrays(
     )
 
     assert first.config.run.run_id == "merged"
-    assert first.config.timing.phases == tuple(reversed_phases)
     assert first.resolved_toml == second.resolved_toml
     assert first.resolved_sha256 == second.resolved_sha256
     assert [item.path for item in first.inputs] == ["base.toml", "overlay.toml"]
+
+
+def test_recursive_merge_replaces_arrays_before_strict_validation(
+    tmp_path: Path,
+    valid_payload: dict[str, Any],
+    secret_environment: dict[str, str],
+) -> None:
+    _write_toml(tmp_path / "base.toml", valid_payload)
+    reversed_phases = list(reversed(valid_payload["timing"]["phases"]))
+    overlay = {
+        "extends": ["base.toml"],
+        "run": {"run_id": "merged"},
+        "timing": {"phases": reversed_phases},
+    }
+    _write_toml(tmp_path / "overlay.toml", overlay)
+
+    with pytest.raises(ConfigurationError, match="fixed ordered vocabulary") as first:
+        load_config(
+            Path("overlay.toml"),
+            config_root=tmp_path,
+            environment=secret_environment,
+        )
+    with pytest.raises(ConfigurationError) as second:
+        load_config(
+            Path("overlay.toml"),
+            config_root=tmp_path,
+            environment=secret_environment,
+        )
+
+    assert str(first.value) == str(second.value)
 
 
 @pytest.mark.parametrize(

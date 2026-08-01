@@ -1,0 +1,57 @@
+extends = ["base.toml"]
+
+[run]
+run_id = "g2-production"
+stage = "G2"
+seed = "REQUIRED_G2_SEED"
+
+[paths]
+run_dir = "runs/g2"
+checkpoint_dir = "checkpoints/g2"
+artifact_dir = "artifacts/g2"
+
+[distributed]
+backend = "ddp"
+world_size = 4
+frozen_encoders_outside_wrapper = true
+automatic_backend_fallback = false
+
+[checkpoint]
+slots = "BENCHMARK_G2_CHECKPOINT_SLOTS"
+
+[growth]
+enabled = true
+alpha_schedule = "half_cosine"
+alpha_fraction = 0.02
+min_updates = 1000
+max_updates = 5000
+random_new_slots = true
+copy_old_slots = false
+
+[stage]
+name = "G2"
+enabled = true
+predecessor = "S2"
+world_size = 4
+depth = 24
+resolution = 512
+local_batch = "BENCHMARK_G2_LOCAL_BATCH"
+accumulation = "BENCHMARK_G2_ACCUMULATION"
+global_batch = "BENCHMARK_G2_GLOBAL_BATCH"
+activation_checkpoint_mode = "BENCHMARK_G2_ACTIVATION_CHECKPOINT_MODE"
+planned_updates = "BENCHMARK_G2_PLANNED_UPDATES"
+planned_valid_samples = "BENCHMARK_G2_PLANNED_VALID_SAMPLES"
+planned_equivalent_data_passes = "BENCHMARK_G2_EQUIVALENT_DATA_PASSES"
+planned_dit_flops = "BENCHMARK_G2_DIT_FLOPS"
+planned_wall_time_hours = "BENCHMARK_G2_WALL_TIME_HOURS"
+manual_finalize = true
+automatic_transition = false
+
+[logging]
+local_jsonl_path = "artifacts/g2/metrics.jsonl"
+flush_every_updates = "BENCHMARK_G2_METRICS_FLUSH_UPDATES"
+async_remote = true
+noise_observation_boundary = 0.95
+
+[wandb]
+retry_jsonl_path = "artifacts/g2/wandb-retry.jsonl"

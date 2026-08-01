@@ -1,0 +1,365 @@
+# Canonical production base. Values prefixed REQUIRED_/BENCHMARK_ are explicit
+# S000 or immutable-input bindings; load_config rejects them until replaced by
+# measured/qualified values in a governed stage overlay.
+
+schema_version = 1
+
+[run]
+intent = "train"
+seed = "REQUIRED_STAGE_SEED"
+
+[paths]
+cache_dir = "cache/data"
+
+[storage]
+mode = "server_backed"
+shared_filesystem = "nfs"
+shared_mount_source = "REQUIRED_NFS_MOUNT_SOURCE"
+nfs_version = 3
+hard_mount = true
+minimum_free_gib = "BENCHMARK_MINIMUM_FREE_GIB"
+checkpoint_copies = 3
+atomic_publish_probe = true
+
+[security]
+modelscope_token_env = "MODELSCOPE_API_TOKEN"
+wandb_api_key_env = "WANDB_API_KEY"
+
+[assets.qwen]
+local_path = "model/qwen_3.5_2B"
+dtype = "bfloat16"
+frozen = true
+layers = 24
+hidden_size = 2048
+use_cache = false
+visual_path_enabled = false
+
+[assets.vae]
+local_path = "model/vae"
+dtype = "bfloat16"
+frozen = true
+latent_channels = 128
+downsample_factor = 16
+sample_posterior = false
+
+[data.source]
+repo_id = "leafmoone/webdataset_danbooru"
+revision = "REQUIRED_IMMUTABLE_REVISION"
+
+[data.manifest]
+path = "REQUIRED_TRAIN_MANIFEST_PATH"
+sha256 = "REQUIRED_TRAIN_MANIFEST_SHA256"
+
+[data.cache]
+low_watermark_gib = "BENCHMARK_CACHE_LOW_WATERMARK_GIB"
+high_watermark_gib = "BENCHMARK_CACHE_HIGH_WATERMARK_GIB"
+download_concurrency = "BENCHMARK_DOWNLOAD_CONCURRENCY"
+verified_shard_lookahead = "BENCHMARK_VERIFIED_SHARD_LOOKAHEAD"
+persistent_workers_per_rank = "BENCHMARK_PERSISTENT_WORKERS_PER_RANK"
+ready_batches_per_rank = "BENCHMARK_READY_BATCHES_PER_RANK"
+
+[data.service]
+socket_path = "/run/sakuramoon/data-service.sock"
+ownership_lock_path = "/run/sakuramoon/data-service.lock"
+mainset_path = "cache/data-service-mainset.json"
+request_timeout_seconds = "BENCHMARK_SERVICE_REQUEST_TIMEOUT_SECONDS"
+lease_channel_capacity = "BENCHMARK_LEASE_CHANNEL_CAPACITY"
+ack_channel_capacity = "BENCHMARK_ACK_CHANNEL_CAPACITY"
+
+[data.transport]
+connect_timeout_seconds = "BENCHMARK_CONNECT_TIMEOUT_SECONDS"
+read_timeout_seconds = "BENCHMARK_READ_TIMEOUT_SECONDS"
+max_retries = "BENCHMARK_TRANSPORT_MAX_RETRIES"
+retry_backoff_seconds = "BENCHMARK_RETRY_BACKOFF_SECONDS"
+stream_chunk_bytes = "BENCHMARK_STREAM_CHUNK_BYTES"
+
+[data.loader]
+pin_memory = true
+drop_last = true
+
+[data.validation]
+manifest_path = "REQUIRED_VALIDATION_MANIFEST_PATH"
+manifest_sha256 = "REQUIRED_VALIDATION_MANIFEST_SHA256"
+sample_count = 2000
+exclude_before_shuffle = true
+
+[data.image]
+exif_transpose = true
+color_mode = "RGB"
+no_upscale = true
+preserve_aspect_ratio = true
+allow_padding = false
+min_crop_retention = 0.8
+
+[data.buckets]
+base_area_px = 262144
+quantum_px = 32
+min_short_edge_px = 256
+max_aspect_ratio = 4.0
+shape_count = 17
+transpose_closed = true
+
+[caption]
+category_order = ["nsfw", "character", "copyright", "general", "nl"]
+tag_separator = ", "
+tag_nl_separator = "\n\n"
+text_condition_max = 512
+condition_buckets = [64, 128, 192, 256, 320, 384, 448, 512]
+qwen_dense_lengths = [98, 162, 226, 290, 354, 418, 482, 546]
+
+[caption.dropout]
+all_condition = 0.10
+general = 0.1
+artist = 0.1
+character = 0.2
+copyright = 0.1
+nsfw = 0.1
+candidate_source = 0.3
+
+[caption.dropout.nl]
+long_names = 0.3
+long_no_names = 0.3
+short_vibes = 0.3
+nl2 = 0.3
+nl3 = 0.3
+
+[model.text]
+hidden_state_blocks = [2, 4, 8, 12, 16, 20, 24]
+input_size = 2048
+adapter_size = 1024
+output_size = 2560
+groups = 8
+attention_heads = 16
+bidirectional_attention_layers = 1
+no_positional_encoding = true
+norm_eps = 0.000001
+mix_gate_init = 0.0
+layer_scale_init = 1.0
+projection_bias = false
+linear_dtype = "bfloat16"
+sensitive_dtype = "float32"
+
+[model.style]
+query_count = 4
+input_size = 2048
+hidden_size = 1024
+mlp_intermediate_size = 2048
+output_size = 2560
+null_tokens_learned = true
+attention_heads = 16
+norm_eps = 0.000001
+init_std = 0.02
+projection_bias = false
+linear_dtype = "bfloat16"
+sensitive_dtype = "float32"
+
+[model.packing]
+order = ["text", "style", "image"]
+style_tokens = 4
+remove_text_padding = true
+cross_sample_attention = false
+modality_init_std = 0.02
+
+[model.rope]
+head_dim = 128
+nope_dim = 32
+y_dim = 48
+x_dim = 48
+position_scale = 16.0
+theta = 1000.0
+cell_center = true
+area_normalized = true
+
+[model.dit]
+hidden_size = 2560
+head_dim = 128
+q_heads = 20
+kv_heads = 5
+intermediate_size = 6912
+stable_slot_count = 24
+patch_size = 1
+attention_dropout = 0.0
+mlp_dropout = 0.0
+projection_bias = false
+norm_eps = 0.000001
+norm_accumulation = "float32"
+activation_dtype = "bfloat16"
+
+[model.condition]
+timestep_dim = 256
+size_dim = 64
+aspect_dim = 64
+input_dim = 384
+hidden_dim = 1024
+block_modulation_chunks = 6
+shared_projection_zero_init = true
+per_block_bias_zero_init = true
+
+[model.head]
+final_modulation_size = 5120
+out_channels = 128
+prediction_type = "x"
+image_span_only = true
+weight_zero_init = true
+bias_zero_init = true
+
+[objective]
+prediction_type = "x"
+loss = "jlt_x_prediction_velocity_mse"
+target_velocity = "x_to_v(clean,state,t,t_eps)"
+endpoint_weighting = "inverse_square_clamped"
+interpolation = "z_t=t*x+(1-t)*epsilon"
+velocity_loss_dtype = "float32"
+reduction = "per_sample_then_global_sample_mean"
+
+[timestep]
+distribution = "jlt"
+p_mean = -0.8
+p_std = 0.8
+noise_scale = 1.0
+t_eps = 0.05
+
+[sampling]
+profile = "balanced"
+state_dtype = "float32"
+
+[sampling.profiles.preview]
+solver = "euler"
+steps = 28
+time_schedule = "linear"
+
+[sampling.profiles.balanced]
+solver = "heun_final_euler"
+steps = 25
+time_schedule = "linear"
+
+[sampling.profiles.reference]
+solver = "heun_final_euler"
+steps = 50
+time_schedule = "linear"
+
+[cfg]
+scale = 2.9
+full_interval = true
+rescale = false
+conversion_order = "each_x_to_v_then_cfg"
+
+[optimizer]
+name = "torchao_adamw8bit"
+lr = 0.00002
+betas = [0.9, 0.95]
+eps = 0.00000001
+block_size = 256
+bf16_stochastic_round = true
+matrix_weight_decay = 0.01
+sensitive_weight_decay = 0.0
+
+[scheduler]
+name = "wsd"
+warmup_updates = 2000
+stable_lr = 0.00002
+decay_lr = 0.000002
+automatic_decay = false
+
+[gradient]
+clip_norm = 1.0
+clip_dtype = "float32"
+global_sample_mean = true
+
+[checkpoint]
+kind = "raw"
+full_every_updates = 1000
+full_every_hours = 6.0
+atomic_complete_marker = true
+checksum_required = true
+canonical_fqn = true
+
+[kernels]
+attention_backend = "fa4_varlen"
+production_attention_backend = "fa4_varlen"
+reference_attention_backend = "dense_sdpa_reference"
+dtype = "bfloat16"
+native_gqa = true
+repeat_kv_heads = false
+silent_fallback = false
+
+[compile]
+regional_enabled = false
+minimum_end_to_end_gain_percent = 3.0
+automatic_enable = false
+
+[profiling]
+enabled = false
+schedule_updates = "BENCHMARK_PROFILING_SCHEDULE_UPDATES"
+record_shapes = true
+profile_memory = true
+
+[benchmark]
+kind = "candidate"
+warmup_updates = 100
+measured_updates = 500
+starting_successful_update = 899
+profile_trace_updates = "BENCHMARK_PROFILE_TRACE_UPDATES"
+same_workload_required = true
+nsight_compute_hotspot_only = true
+
+[failure]
+stop_on_nonfinite = true
+stop_on_oom = true
+stop_on_rank_divergence = true
+allow_force_bypass = false
+automatic_batch_change = false
+automatic_backend_change = false
+
+[logging]
+observer_queue_capacity = "BENCHMARK_METRIC_OBSERVER_QUEUE_CAPACITY"
+observer_event_timeout_seconds = "BENCHMARK_METRIC_EVENT_TIMEOUT_SECONDS"
+
+[wandb]
+enabled = true
+project = "sakuramoon"
+entity = "REQUIRED_WANDB_ENTITY"
+offline_on_network_error = true
+queue_capacity = "BENCHMARK_WANDB_QUEUE_CAPACITY"
+replay_retry_on_start = true
+finish_on_close = true
+resume_policy = "allow"
+
+[timing]
+enabled = true
+cuda_events = true
+force_synchronize_each_phase = false
+phases = [
+  "data", "qwen", "vae", "conditioning", "dit_forward", "loss",
+  "backward", "ddp", "clip", "optimizer", "checkpoint", "evaluation",
+  "cache", "tar", "json", "caption", "tokenize", "decode", "exif",
+  "crop", "bucket", "h2d", "condition", "zero_grad", "sample",
+]
+
+[evaluation]
+stage_end = true
+explicit_job = true
+prompt_manifest_path = "REQUIRED_PROMPT_MANIFEST_PATH"
+prompt_manifest_sha256 = "REQUIRED_PROMPT_MANIFEST_SHA256"
+gpu_index = "BENCHMARK_EVALUATION_GPU_INDEX"
+training_paused = "BENCHMARK_EVALUATION_TRAINING_PAUSED"
+
+[evaluation.sampling]
+profile = "reference"
+
+[evaluation.fid]
+enabled = true
+every_successful_updates = "BENCHMARK_FID_EVERY_SUCCESSFUL_UPDATES"
+trend_samples = "BENCHMARK_FID_TREND_SAMPLES"
+acceptance_samples = "BENCHMARK_FID_ACCEPTANCE_SAMPLES"
+feature_extractor = "REQUIRED_FID_FEATURE_EXTRACTOR"
+feature_extractor_version = "REQUIRED_FID_FEATURE_EXTRACTOR_VERSION"
+preprocess_sha256 = "REQUIRED_FID_PREPROCESS_SHA256"
+real_stats_sha256 = "REQUIRED_FID_REAL_STATS_SHA256"
+
+[evaluation.is]
+enabled = true
+every_successful_updates = "BENCHMARK_IS_EVERY_SUCCESSFUL_UPDATES"
+trend_samples = "BENCHMARK_IS_TREND_SAMPLES"
+acceptance_samples = "BENCHMARK_IS_ACCEPTANCE_SAMPLES"
+splits = "BENCHMARK_IS_SPLITS"

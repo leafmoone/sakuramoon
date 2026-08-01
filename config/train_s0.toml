@@ -1,0 +1,57 @@
+extends = ["base.toml"]
+
+[run]
+run_id = "s0-production"
+stage = "S0"
+seed = "REQUIRED_S0_SEED"
+
+[paths]
+run_dir = "runs/s0"
+checkpoint_dir = "checkpoints/s0"
+artifact_dir = "artifacts/s0"
+
+[distributed]
+backend = "native"
+world_size = 1
+frozen_encoders_outside_wrapper = true
+automatic_backend_fallback = false
+
+[checkpoint]
+slots = "BENCHMARK_S0_CHECKPOINT_SLOTS"
+
+[growth]
+enabled = false
+alpha_schedule = "half_cosine"
+alpha_fraction = 0.02
+min_updates = 1000
+max_updates = 5000
+random_new_slots = true
+copy_old_slots = false
+
+[stage]
+name = "S0"
+enabled = true
+predecessor = ""
+world_size = 1
+depth = 16
+resolution = 256
+local_batch = "BENCHMARK_S0_LOCAL_BATCH"
+accumulation = "BENCHMARK_S0_ACCUMULATION"
+global_batch = "BENCHMARK_S0_GLOBAL_BATCH"
+activation_checkpoint_mode = "BENCHMARK_S0_ACTIVATION_CHECKPOINT_MODE"
+planned_updates = "BENCHMARK_S0_PLANNED_UPDATES"
+planned_valid_samples = "BENCHMARK_S0_PLANNED_VALID_SAMPLES"
+planned_equivalent_data_passes = "BENCHMARK_S0_EQUIVALENT_DATA_PASSES"
+planned_dit_flops = "BENCHMARK_S0_DIT_FLOPS"
+planned_wall_time_hours = "BENCHMARK_S0_WALL_TIME_HOURS"
+manual_finalize = true
+automatic_transition = false
+
+[logging]
+local_jsonl_path = "artifacts/s0/metrics.jsonl"
+flush_every_updates = "BENCHMARK_S0_METRICS_FLUSH_UPDATES"
+async_remote = true
+noise_observation_boundary = 0.95
+
+[wandb]
+retry_jsonl_path = "artifacts/s0/wandb-retry.jsonl"

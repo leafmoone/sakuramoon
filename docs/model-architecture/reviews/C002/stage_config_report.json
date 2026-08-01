@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "task_id": "C002",
+  "hardware": "CPU",
+  "identity_scope": "synthetic_validation_only",
+  "production_release_status": "pending_S000_benchmarks_budgets_and_external_bindings",
+  "production_hashes_published": false,
+  "formal_stage_executed": false,
+  "synthetic_substitution_source": "tests/unit/config/conftest.py::SYNTHETIC_VALUES",
+  "resolved_hashes": {
+    "train_s0.toml": "459a8239feea68d629259df9568b532bc642a185aee89bb3f8328787717ac856",
+    "train_s1.toml": "df39be9cd930ba430a95cf597c201604e69c5f4ebd531422699f613bd1e50d3f",
+    "train_g1.toml": "09c070581457c092dcfaa109f244bf59c9c6cc81da0fef0603b3d332073c0037",
+    "train_s2.toml": "584ec308fc1a45607b10c176115cc05dba51a25174c09d4de4dab711b05adba4",
+    "train_g2.toml": "5367ec7063340fa6a212e54e08b39920fd75ccb16606110fdd09e224495b8dfc",
+    "train_s3.toml": "4e1bbebbf060c043f591c3c4b68445c0901c5f2368cde694ac2d365daf4e284d",
+    "train_h1.toml": "4addf773328b780158caf8f114887c292d558c77e71628ea8aec856f00dbd534",
+    "train_h2.toml": "3e92e53ca69e687b70176f0d86dccf2d136858173b2ff7d2320e20a5414296eb"
+  },
+  "all_hashes_distinct": true,
+  "adjacent_stage_diffs": [
+    {
+      "from": "train_s0.toml",
+      "to": "train_s1.toml",
+      "approved_main_axis": "world_size_1_to_4_and_native_to_ddp",
+      "changed_keys": [
+        "distributed.backend",
+        "distributed.world_size",
+        "logging.local_jsonl_path",
+        "paths.artifact_dir",
+        "paths.checkpoint_dir",
+        "paths.run_dir",
+        "run.run_id",
+        "run.stage",
+        "stage.global_batch",
+        "stage.name",
+        "stage.planned_valid_samples",
+        "stage.predecessor",
+        "stage.world_size",
+        "wandb.retry_jsonl_path"
+      ]
+    },
+    {
+      "from": "train_s1.toml",
+      "to": "train_g1.toml",
+      "approved_main_axis": "depth_16_to_20_with_growth_enabled",
+      "changed_keys": [
+        "growth.enabled",
+        "logging.local_jsonl_path",
+        "paths.artifact_dir",
+        "paths.checkpoint_dir",
+        "paths.run_dir",
+        "run.run_id",
+        "run.stage",
+        "stage.depth",
+        "stage.name",
+        "stage.predecessor",
+        "wandb.retry_jsonl_path"
+      ]
+    },
+    {
+      "from": "train_g1.toml",
+      "to": "train_s2.toml",
+      "approved_main_axis": "resolution_256_to_512_and_growth_completion",
+      "changed_keys": [
+        "growth.enabled",
+        "logging.local_jsonl_path",
+        "paths.artifact_dir",
+        "paths.checkpoint_dir",
+        "paths.run_dir",
+        "run.run_id",
+        "run.stage",
+        "stage.name",
+        "stage.predecessor",
+        "stage.resolution",
+        "wandb.retry_jsonl_path"
+      ]
+    },
+    {
+      "from": "train_s2.toml",
+      "to": "train_g2.toml",
+      "approved_main_axis": "depth_20_to_24_with_growth_enabled",
+      "changed_keys": [
+        "growth.enabled",
+        "logging.local_jsonl_path",
+        "paths.artifact_dir",
+        "paths.checkpoint_dir",
+        "paths.run_dir",
+        "run.run_id",
+        "run.stage",
+        "stage.depth",
+        "stage.name",
+        "stage.predecessor",
+        "wandb.retry_jsonl_path"
+      ]
+    },
+    {
+      "from": "train_g2.toml",
+      "to": "train_s3.toml",
+      "approved_main_axis": "growth_completion_at_24L_512",
+      "changed_keys": [
+        "growth.enabled",
+        "logging.local_jsonl_path",
+        "paths.artifact_dir",
+        "paths.checkpoint_dir",
+        "paths.run_dir",
+        "run.run_id",
+        "run.stage",
+        "stage.name",
+        "stage.predecessor",
+        "wandb.retry_jsonl_path"
+      ]
+    },
+    {
+      "from": "train_s3.toml",
+      "to": "train_h1.toml",
+      "approved_main_axis": "disabled_template_resolution_512_to_768",
+      "changed_keys": [
+        "logging.local_jsonl_path",
+        "paths.artifact_dir",
+        "paths.checkpoint_dir",
+        "paths.run_dir",
+        "run.intent",
+        "run.run_id",
+        "run.stage",
+        "stage.enabled",
+        "stage.name",
+        "stage.predecessor",
+        "stage.resolution",
+        "wandb.retry_jsonl_path"
+      ]
+    },
+    {
+      "from": "train_h1.toml",
+      "to": "train_h2.toml",
+      "approved_main_axis": "disabled_template_resolution_768_to_1024",
+      "changed_keys": [
+        "logging.local_jsonl_path",
+        "paths.artifact_dir",
+        "paths.checkpoint_dir",
+        "paths.run_dir",
+        "run.run_id",
+        "run.stage",
+        "stage.name",
+        "stage.predecessor",
+        "stage.resolution",
+        "wandb.retry_jsonl_path"
+      ]
+    }
+  ],
+  "h1_h2_enabled": false,
+  "c10_008_status": "planned",
+  "c10_009_status": "planned"
+}

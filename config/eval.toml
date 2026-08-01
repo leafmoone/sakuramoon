@@ -1,0 +1,21 @@
+# Checkpoint-driven formal evaluator identity. T052/S000 replace the explicit
+# external-stat and resource placeholders inherited from the production base.
+extends = ["train_s0.toml"]
+
+[run]
+run_id = "reference-evaluation"
+intent = "eval"
+
+[paths]
+run_dir = "runs/eval"
+checkpoint_dir = "checkpoints/eval"
+artifact_dir = "artifacts/eval"
+
+[sampling]
+profile = "reference"
+
+[logging]
+local_jsonl_path = "artifacts/eval/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/eval/wandb-retry.jsonl"

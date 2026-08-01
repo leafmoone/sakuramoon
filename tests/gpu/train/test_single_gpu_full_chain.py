@@ -127,11 +127,20 @@ def _config(
         "kernels.attention_backend": "fa4_varlen",
         "stage.local_batch": 1,
         "stage.accumulation": 1,
+        "stage.global_batch": 1,
+        "stage.activation_checkpoint_mode": "none",
         "stage.planned_updates": 10,
+        "stage.planned_valid_samples": 10,
+        "stage.planned_equivalent_data_passes": 1.0,
+        "stage.planned_dit_flops": 1.0,
+        "stage.planned_wall_time_hours": 1.0,
         "profiling.schedule_updates": 10,
         "benchmark.profile_trace_updates": 5,
         "logging.flush_every_updates": 1,
+        "logging.observer_queue_capacity": 2,
+        "logging.observer_event_timeout_seconds": 30.0,
         "wandb.entity": "synthetic-entity",
+        "wandb.queue_capacity": 2,
         "evaluation.fid.every_successful_updates": 10,
         "evaluation.fid.trend_samples": 100,
         "evaluation.fid.feature_extractor": "synthetic-locked-extractor",
@@ -150,6 +159,15 @@ def _config(
         values.update(overrides)
     for path, value in values.items():
         _set_path(payload, path, value)
+    global_batch = (
+        cast(int, payload["stage"]["local_batch"])
+        * cast(int, payload["stage"]["accumulation"])
+        * cast(int, payload["stage"]["world_size"])
+    )
+    payload["stage"]["global_batch"] = global_batch
+    payload["stage"]["planned_valid_samples"] = (
+        global_batch * cast(int, payload["stage"]["planned_updates"])
+    )
     return RuntimeConfig.model_validate(payload)
 
 

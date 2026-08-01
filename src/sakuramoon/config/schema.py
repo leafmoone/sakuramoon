@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import PurePosixPath
 from typing import Annotated, Literal, cast
 
 from pydantic import (
@@ -44,6 +45,35 @@ PositiveFloat = Annotated[ExactFloat, Field(gt=0.0)]
 NonNegativeFloat = Annotated[ExactFloat, Field(ge=0.0)]
 PositiveInt = Annotated[int, Field(gt=0)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
+BoundedQueueCapacity = Annotated[int, Field(ge=1, le=1024)]
+TelemetryEventTimeout = Annotated[ExactFloat, Field(gt=0.0, le=300.0)]
+FIXED_TIMING_PHASES = (
+    "data",
+    "qwen",
+    "vae",
+    "conditioning",
+    "dit_forward",
+    "loss",
+    "backward",
+    "ddp",
+    "clip",
+    "optimizer",
+    "checkpoint",
+    "evaluation",
+    "cache",
+    "tar",
+    "json",
+    "caption",
+    "tokenize",
+    "decode",
+    "exif",
+    "crop",
+    "bucket",
+    "h2d",
+    "condition",
+    "zero_grad",
+    "sample",
+)
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 Commit = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 SecretEnvName = Annotated[
@@ -82,6 +112,7 @@ class StrictModel(BaseModel):
 
 class RunConfig(StrictModel):
     run_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    intent: Literal["train", "eval", "sample", "template"]
     stage: Literal["S0", "S1", "G1", "S2", "G2", "S3", "H1", "H2"]
     seed: NonNegativeInt
 
@@ -308,8 +339,15 @@ class TextModelConfig(StrictModel):
     adapter_size: Literal[1024]
     output_size: Literal[2560]
     groups: Literal[8]
+    attention_heads: Literal[16]
     bidirectional_attention_layers: Literal[1]
     no_positional_encoding: Literal[True]
+    norm_eps: FixedNormEps
+    mix_gate_init: FixedZero
+    layer_scale_init: FixedOne
+    projection_bias: Literal[False]
+    linear_dtype: Literal["bfloat16"]
+    sensitive_dtype: Literal["float32"]
 
     @model_validator(mode="after")
     def validate_blocks(self) -> TextModelConfig:
@@ -327,6 +365,12 @@ class StyleModelConfig(StrictModel):
     mlp_intermediate_size: Literal[2048]
     output_size: Literal[2560]
     null_tokens_learned: Literal[True]
+    attention_heads: Literal[16]
+    norm_eps: FixedNormEps
+    init_std: FixedPointZeroTwo
+    projection_bias: Literal[False]
+    linear_dtype: Literal["bfloat16"]
+    sensitive_dtype: Literal["float32"]
 
 
 class PackingModelConfig(StrictModel):
@@ -360,6 +404,7 @@ class DitModelConfig(StrictModel):
     q_heads: Literal[20]
     kv_heads: Literal[5]
     intermediate_size: Literal[6912]
+    stable_slot_count: Literal[24]
     patch_size: Literal[1]
     attention_dropout: FixedZero
     mlp_dropout: FixedZero
@@ -581,7 +626,13 @@ class StageConfig(StrictModel):
     resolution: Literal[256, 512, 768, 1024]
     local_batch: PositiveInt
     accumulation: PositiveInt
+    global_batch: PositiveInt
+    activation_checkpoint_mode: Literal["none", "alternating", "all"]
     planned_updates: PositiveInt
+    planned_valid_samples: PositiveInt
+    planned_equivalent_data_passes: PositiveFloat
+    planned_dit_flops: PositiveFloat
+    planned_wall_time_hours: PositiveFloat
     manual_finalize: Literal[True]
     automatic_transition: Literal[False]
 
@@ -604,6 +655,16 @@ class StageConfig(StrictModel):
             )
         if self.name in {"H1", "H2"} and self.enabled:
             raise ValueError("H1/H2 must remain disabled until separately approved")
+        expected_global_batch = self.local_batch * self.accumulation * self.world_size
+        if self.global_batch != expected_global_batch:
+            raise ValueError(
+                "stage global_batch must equal local_batch * accumulation * world_size"
+            )
+        expected_valid_samples = self.global_batch * self.planned_updates
+        if self.planned_valid_samples != expected_valid_samples:
+            raise ValueError(
+                "stage planned_valid_samples must equal global_batch * planned_updates"
+            )
         return self
 
 
@@ -677,6 +738,8 @@ class LoggingConfig(StrictModel):
     flush_every_updates: PositiveInt
     async_remote: Literal[True]
     noise_observation_boundary: FixedPointNineFive
+    observer_queue_capacity: BoundedQueueCapacity
+    observer_event_timeout_seconds: TelemetryEventTimeout
 
 
 class WandbConfig(StrictModel):
@@ -684,6 +747,11 @@ class WandbConfig(StrictModel):
     project: Annotated[str, StringConstraints(min_length=1)]
     entity: Annotated[str, StringConstraints(min_length=1)]
     offline_on_network_error: Literal[True]
+    retry_jsonl_path: Annotated[str, StringConstraints(min_length=1)]
+    queue_capacity: BoundedQueueCapacity
+    replay_retry_on_start: Literal[True]
+    finish_on_close: Literal[True]
+    resume_policy: Literal["allow"]
 
 
 class TimingConfig(StrictModel):
@@ -694,23 +762,9 @@ class TimingConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_phases(self) -> TimingConfig:
-        required = {
-            "data",
-            "qwen",
-            "vae",
-            "conditioning",
-            "dit_forward",
-            "loss",
-            "backward",
-            "ddp",
-            "clip",
-            "optimizer",
-            "checkpoint",
-            "evaluation",
-        }
-        if set(self.phases) != required or len(self.phases) != len(required):
+        if self.phases != FIXED_TIMING_PHASES:
             raise ValueError(
-                "timing phases must contain each required phase exactly once"
+                "timing phases must exactly match the fixed ordered vocabulary"
             )
         return self
 
@@ -781,7 +835,12 @@ class RuntimeConfig(StrictModel):
     def validate_cross_table_contract(self) -> RuntimeConfig:
         if self.run.stage != self.stage.name:
             raise ValueError("run.stage and stage.name must match")
-        if not self.stage.enabled:
+        if self.run.intent == "template":
+            if self.stage.name not in {"H1", "H2"} or self.stage.enabled:
+                raise ValueError(
+                    "template intent is reserved for disabled H1/H2 configurations"
+                )
+        elif not self.stage.enabled:
             raise ValueError("selected stage must be enabled")
         expected_backend = "native" if self.stage.name == "S0" else "ddp"
         if self.distributed.backend != expected_backend:
@@ -790,6 +849,21 @@ class RuntimeConfig(StrictModel):
             raise ValueError("distributed and stage world_size must match")
         if self.growth.enabled != (self.stage.name in {"G1", "G2"}):
             raise ValueError("growth is enabled only for G1 and G2")
+        artifact_root = PurePosixPath(self.paths.artifact_dir)
+        metric_path = PurePosixPath(self.logging.local_jsonl_path)
+        retry_path = PurePosixPath(self.wandb.retry_jsonl_path)
+        for label, path in (
+            ("logging.local_jsonl_path", metric_path),
+            ("wandb.retry_jsonl_path", retry_path),
+        ):
+            if path.is_absolute() or ".." in path.parts or not path.name:
+                raise ValueError(f"{label} must be a repository-relative artifact file")
+            try:
+                path.relative_to(artifact_root)
+            except ValueError:
+                raise ValueError(f"{label} must be within paths.artifact_dir") from None
+        if metric_path == retry_path:
+            raise ValueError("local metric and W&B retry paths must differ")
         return self
 
 
