@@ -93,6 +93,17 @@ class PathsConfig(StrictModel):
     artifact_dir: Annotated[str, StringConstraints(min_length=1)]
 
 
+class StorageConfig(StrictModel):
+    mode: Literal["server_backed"]
+    shared_filesystem: Literal["nfs"]
+    shared_mount_source: Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+    nfs_version: Literal[3]
+    hard_mount: Literal[True]
+    minimum_free_gib: NonNegativeInt
+    checkpoint_copies: Literal[3]
+    atomic_publish_probe: Literal[True]
+
+
 class SecurityConfig(StrictModel):
     modelscope_token_env: SecretEnvName
     wandb_api_key_env: SecretEnvName
@@ -143,8 +154,8 @@ class DataManifestConfig(StrictModel):
 
 
 class DataCacheConfig(StrictModel):
-    low_watermark_gib: Annotated[int, Field(ge=300, lt=500)]
-    high_watermark_gib: Annotated[int, Field(gt=300, le=500)]
+    low_watermark_gib: Annotated[int, Field(ge=0, lt=500)]
+    high_watermark_gib: Annotated[int, Field(gt=0, le=500)]
     download_concurrency: PositiveInt
     verified_shard_lookahead: PositiveInt
     persistent_workers_per_rank: PositiveInt
@@ -158,7 +169,8 @@ class DataCacheConfig(StrictModel):
 
 
 class DataServiceConfig(StrictModel):
-    socket_path: Annotated[str, StringConstraints(min_length=1)]
+    socket_path: Literal["/run/sakuramoon/data-service.sock"]
+    ownership_lock_path: Literal["/run/sakuramoon/data-service.lock"]
     mainset_path: Annotated[str, StringConstraints(min_length=1)]
     request_timeout_seconds: Annotated[ExactFloat, Field(gt=0.0, le=300.0)]
     lease_channel_capacity: PositiveInt
@@ -738,6 +750,7 @@ class RuntimeConfig(StrictModel):
     schema_version: Literal[1]
     run: RunConfig
     paths: PathsConfig
+    storage: StorageConfig
     security: SecurityConfig
     assets: AssetsConfig
     data: DataConfig

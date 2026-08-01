@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 99
+registry_revision = 100
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -130,10 +130,26 @@ new_sha256 = "e9db19d69189886d49738dfd76ec4c12d077a2292d1302a99bf9f5e06f042179"
 changed_at = "2026-07-31"
 summary = "Add D024 mainset service and T044 service-decoupled checkpoint implementation and validation gates."
 
+[[changes]]
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+revision = 10
+previous_sha256 = "1688fab7bf76cc4e8a41b094b4560f623f0570179cc59d3a846451fa22357cfe"
+new_sha256 = "c50512393abf9fde7fb64396d7f7530cc51bfb172775d604488e8acc8a77a7cf"
+changed_at = "2026-08-01"
+summary = "Approve governed NFSv3 server-backed storage, explicit capacity probes, and host-local data-service IPC."
+
+[[changes]]
+source_path = "docs/model-architecture/current/open-items.md"
+revision = 8
+previous_sha256 = "e9db19d69189886d49738dfd76ec4c12d077a2292d1302a99bf9f5e06f042179"
+new_sha256 = "68343ca0523d25321562935246d8bc4f62f507cc0506ac1d21dfde4e397da479"
+changed_at = "2026-08-01"
+summary = "Replace the local-NVMe storage gate with D026 server-backed identity, capacity, publication, and runtime-path evidence."
+
 [[sources]]
 path = "docs/model-architecture/current/confirmed-decisions.md"
 kind = "confirmed"
-revision = 9
+revision = 10
 include_top_headings = [
     "0.",
     "1.",
@@ -154,13 +170,13 @@ include_top_headings = [
 excluded_top_headings = [
     "15.",
 ]
-sha256 = "1688fab7bf76cc4e8a41b094b4560f623f0570179cc59d3a846451fa22357cfe"
+sha256 = "c50512393abf9fde7fb64396d7f7530cc51bfb172775d604488e8acc8a77a7cf"
 initial_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
 
 [[sources]]
 path = "docs/model-architecture/current/open-items.md"
 kind = "open_items"
-revision = 7
+revision = 8
 include_top_headings = [
     "0.",
     "1.",
@@ -177,7 +193,7 @@ include_top_headings = [
 excluded_top_headings = [
     "11.",
 ]
-sha256 = "e9db19d69189886d49738dfd76ec4c12d077a2292d1302a99bf9f5e06f042179"
+sha256 = "68343ca0523d25321562935246d8bc4f62f507cc0506ac1d21dfde4e397da479"
 initial_sha256 = "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6"
 
 [[sources]]
@@ -606,6 +622,7 @@ owner_tasks = [
     "D022",
     "D023",
     "D024",
+    "D026",
     "T054",
 ]
 config_keys = [
@@ -654,6 +671,7 @@ owner_tasks = [
     "T050",
     "T053",
     "T054",
+    "D026",
     "S000",
     "S001",
     "S002",
@@ -5355,7 +5373,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "C11-002"
 kind = "requirement"
-status = "planned"
+status = "implemented"
 profile = "data"
 source_path = "docs/model-architecture/current/confirmed-decisions.md"
 heading_path = [
@@ -5367,23 +5385,40 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D026"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/storage.py",
+    "src/sakuramoon/data/cache.py",
+    "src/sakuramoon/data/service.py",
+    "src/sakuramoon/cli/data_service.py",
+    "src/sakuramoon/train/preflight.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/config/test_d026_storage_config.py",
+    "tests/unit/data/test_d026_storage_runtime.py",
+    "docs/model-architecture/progress/tasks/D026.md",
+    "docs/model-architecture/reviews/D026/test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
     "data.*",
-    "paths.cache*",
+    "paths.*",
+    "storage.*",
 ]
 modules = [
     "src/sakuramoon/data/**",
+    "src/sakuramoon/storage.py",
+    "src/sakuramoon/train/preflight.py",
 ]
 reference_modules = []
 tests = [
     "tests/**/data*",
     "tests/**/cache*",
+    "tests/unit/config/test_d026_storage_config.py",
+    "tests/unit/train/test_preflight_failures.py",
 ]
 benchmarks = [
     "benchmarks/data/**",
@@ -5391,6 +5426,7 @@ benchmarks = [
 artifacts = [
     "artifacts/data/**",
     "docs/model-architecture/reviews/D010/rollback_test_report.json",
+    "docs/model-architecture/reviews/D026/**",
 ]
 not_applicable_fields = [
     "reference_modules",
@@ -9139,7 +9175,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-051"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "training_system"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -9152,39 +9188,47 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
+implementation_commit_ref = "task:D026"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/storage.py",
+    "src/sakuramoon/data/service.py",
+    "src/sakuramoon/cli/data_service.py",
+    "src/sakuramoon/train/preflight.py",
+    "tests/unit/config/test_d026_storage_config.py",
+    "tests/unit/data/test_d026_storage_runtime.py",
+    "tests/unit/train/test_preflight_failures.py",
+    "docs/model-architecture/progress/tasks/D026.md",
+    "docs/model-architecture/reviews/D026/test_report.json",
+]
 evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
 config_keys = [
-    "optimizer.*",
-    "scheduler.*",
-    "gradient.*",
-    "distributed.*",
-    "checkpoint.*",
-    "failure.*",
+    "storage.*",
+    "paths.*",
+    "data.cache.*",
+    "data.service.*",
 ]
 modules = [
-    "src/sakuramoon/optim/**",
-    "src/sakuramoon/distributed/**",
-    "src/sakuramoon/checkpoint/**",
-    "src/sakuramoon/train/**",
+    "src/sakuramoon/storage.py",
+    "src/sakuramoon/data/service.py",
+    "src/sakuramoon/cli/data_service.py",
+    "src/sakuramoon/train/preflight.py",
 ]
 reference_modules = []
 tests = [
-    "tests/**/optim*",
-    "tests/**/distributed*",
-    "tests/**/checkpoint*",
-    "tests/fault_injection/**",
+    "tests/unit/config/test_d026_storage_config.py",
+    "tests/unit/data/test_d026_storage_runtime.py",
+    "tests/unit/data/test_d024_service.py",
+    "tests/unit/train/test_preflight_failures.py",
 ]
 benchmarks = [
     "benchmarks/training/**",
 ]
 artifacts = [
-    "artifacts/training/**",
-    "checkpoints/**",
+    "docs/model-architecture/reviews/D026/**",
 ]
 not_applicable_fields = [
     "reference_modules",
@@ -12954,3 +12998,102 @@ benchmarks = ["benchmarks/data/**"]
 artifacts = ["artifacts/data/**"]
 not_applicable_fields = ["reference_modules"]
 not_applicable_reason = "The production service performance requirement has no reference-code dependency."
+
+[[requirements]]
+id = "C12-013"
+kind = "requirement"
+status = "implemented"
+profile = "training_system"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = ["12. 优化器、并行、Checkpoint 与生产门槛"]
+node_kind = "list_item"
+source_fingerprint = "200134c97c45c0628073f8891f4a72482f16bc8f8d9d9080a189cd143802b836"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D026"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/storage.py",
+    "src/sakuramoon/data/service.py",
+    "src/sakuramoon/cli/data_service.py",
+    "src/sakuramoon/train/preflight.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/config/test_d026_storage_config.py",
+    "tests/unit/data/test_d026_storage_runtime.py",
+    "tests/unit/train/test_preflight_failures.py",
+    "docs/model-architecture/progress/tasks/D026.md",
+    "docs/model-architecture/reviews/D026/test_report.json",
+]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["storage.*", "paths.*", "data.cache.*", "data.service.*"]
+modules = [
+    "src/sakuramoon/storage.py",
+    "src/sakuramoon/data/service.py",
+    "src/sakuramoon/cli/data_service.py",
+    "src/sakuramoon/train/preflight.py",
+]
+reference_modules = []
+tests = [
+    "tests/unit/config/test_d026_storage_config.py",
+    "tests/unit/data/test_d026_storage_runtime.py",
+    "tests/unit/data/test_d024_service.py",
+    "tests/unit/train/test_preflight_failures.py",
+]
+benchmarks = ["benchmarks/data/**", "benchmarks/training/**"]
+artifacts = ["docs/model-architecture/reviews/D026/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The governed storage boundary has no reference-code dependency."
+
+[[requirements]]
+id = "OPEN-106"
+kind = "open_item"
+status = "implemented"
+profile = "data"
+source_path = "docs/model-architecture/current/open-items.md"
+heading_path = ["3. P0：数据、VAE 与输入协议", "3.3 独立数据供给 service 与 `mainset`"]
+node_kind = "list_item"
+source_fingerprint = "8bb201d8f85aa8f2a1dd0a923ceb921cb048de10aa92a12dbf751aff837d28f4"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "task:D026"
+implementation_paths = [
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/storage.py",
+    "src/sakuramoon/data/service.py",
+    "src/sakuramoon/cli/data_service.py",
+    "src/sakuramoon/train/preflight.py",
+    "tests/unit/config/test_d026_storage_config.py",
+    "tests/unit/data/test_d026_storage_runtime.py",
+    "tests/unit/train/test_preflight_failures.py",
+    "docs/model-architecture/progress/tasks/D026.md",
+    "docs/model-architecture/reviews/D026/test_report.json",
+]
+evidence_hardware = ""
+evidence_artifacts = []
+ai_review = ""
+infra_review = ""
+config_keys = ["storage.*", "paths.*", "data.cache.*", "data.service.*"]
+modules = [
+    "src/sakuramoon/storage.py",
+    "src/sakuramoon/data/service.py",
+    "src/sakuramoon/cli/data_service.py",
+    "src/sakuramoon/train/preflight.py",
+]
+reference_modules = []
+tests = [
+    "tests/unit/config/test_d026_storage_config.py",
+    "tests/unit/data/test_d026_storage_runtime.py",
+    "tests/unit/data/test_d024_service.py",
+    "tests/unit/train/test_preflight_failures.py",
+]
+benchmarks = ["benchmarks/data/**"]
+artifacts = ["docs/model-architecture/reviews/D026/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The governed storage boundary has no reference-code dependency."

@@ -11,11 +11,13 @@ REPOSITORY_ROOT = Path(__file__).parents[3]
 EXAMPLE_PATH = REPOSITORY_ROOT / "config/examples/all_options.example.toml"
 
 SYNTHETIC_VALUES: dict[str, object] = {
+    "storage.shared_mount_source": "server.example:/governed/export",
+    "storage.minimum_free_gib": 8,
     "data.source.revision": "c" * 40,
     "data.manifest.path": "synthetic/train-manifest.jsonl",
     "data.manifest.sha256": "3" * 64,
-    "data.cache.low_watermark_gib": 300,
-    "data.cache.high_watermark_gib": 400,
+    "data.cache.low_watermark_gib": 8,
+    "data.cache.high_watermark_gib": 16,
     "data.cache.download_concurrency": 2,
     "data.cache.verified_shard_lookahead": 2,
     "data.cache.persistent_workers_per_rank": 2,

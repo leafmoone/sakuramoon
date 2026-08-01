@@ -184,6 +184,9 @@ def repo_copy(tmp_path: Path) -> Path:
         "docs/model-architecture/progress/tasks/D025.md",
         "docs/model-architecture/reviews/D025/implementation_report.md",
         "docs/model-architecture/reviews/D025/test_report.json",
+        "docs/model-architecture/progress/tasks/D026.md",
+        "docs/model-architecture/reviews/D026/storage_probe.json",
+        "docs/model-architecture/reviews/D026/test_report.json",
         "docs/model-architecture/reviews/D014/timing.json",
         "docs/model-architecture/reviews/D014/ai_review.md",
         "docs/model-architecture/reviews/D014/infra_review.md",
@@ -290,7 +293,7 @@ def source_by_kind(data: dict[str, Any], kind: str) -> dict[str, Any]:
 def test_live_registry_and_source_coverage() -> None:
     report = vt.verify(ROOT)
     assert report.ok, report.errors
-    assert report.requirement_count == report.source_node_count == 235
+    assert report.requirement_count == report.source_node_count == 237
     assert report.archive_file_count == 16
     assert vt._required_review_paths("M034") == (
         "docs/model-architecture/reviews/DENSE/ai_review.md",
@@ -299,8 +302,8 @@ def test_live_registry_and_source_coverage() -> None:
 
     data = load_registry(ROOT)
     expected = {
-        "confirmed": (118, {f"{index}." for index in range(15)}),
-        "open_items": (105, {f"{index}." for index in range(11)}),
+        "confirmed": (119, {f"{index}." for index in range(15)}),
+        "open_items": (106, {f"{index}." for index in range(11)}),
         "observability": (12, {"可观测性与评估补充决定"}),
     }
     for kind, (count, heading_prefixes) in expected.items():

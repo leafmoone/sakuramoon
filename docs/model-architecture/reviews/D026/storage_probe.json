@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "task_id": "D026",
+  "captured_at": "2026-08-01",
+  "storage_mode": "server_backed",
+  "persistent_mount": {
+    "mount_point": "/root/shared-nvme",
+    "filesystem": "nfs",
+    "source": "cs1.vast1.bz1.paratera.com:/cs1/fs1/pvc-8eb5b2a2-c80d-4c40-b28a-800fbab13752",
+    "nfs_version": 3,
+    "hard_mount": true,
+    "atomic_publish_probe": "passed:write_file_fsync_replace_directory_fsync_readback_cleanup"
+  },
+  "capacity": {
+    "free_bytes": 383347851264,
+    "measured_raw_checkpoint_bytes": 5143055405,
+    "measured_checkpoint_source": "docs/model-architecture/reviews/T044/test_report.json",
+    "required_checkpoint_copies": 3,
+    "three_checkpoint_bytes": 15429166215,
+    "free_after_three_checkpoints_bytes": 367918685049,
+    "cache_and_reserve": "resolved config must remain explicit; preflight subtracts both without a default"
+  },
+  "runtime_mount": {
+    "directory": "/run/sakuramoon",
+    "mount_point": "/",
+    "filesystem": "fuse.fuse-overlayfs",
+    "source": "fuse-overlayfs",
+    "is_nfs": false,
+    "socket_path": "/run/sakuramoon/data-service.sock",
+    "ownership_lock_path": "/run/sakuramoon/data-service.lock"
+  },
+  "not_claimed": [
+    "production cache high-watermark before benchmark lock",
+    "two-hour cold-cache throughput",
+    "formal stage",
+    "multi-GPU or DDP/NCCL"
+  ]
+}

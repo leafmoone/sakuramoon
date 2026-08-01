@@ -369,6 +369,7 @@ class DataSupplyService:
         manifest: DatasetManifest,
         cache: ShardCache,
         mainset_path: Path,
+        ownership_lock_path: Path,
         identity: DataServiceSessionIdentity,
         limits: DataServiceLimits,
     ) -> None:
@@ -380,6 +381,16 @@ class DataSupplyService:
             raise DataServiceError("ACK capacity is smaller than worker topology")
         if limits.verified_shard_lookahead < identity.worker_count:
             raise DataServiceError("verified lookahead is smaller than worker topology")
+        if not ownership_lock_path.is_absolute():
+            raise DataServiceError("service ownership lock path must be absolute")
+        try:
+            ownership_lock_path.resolve(strict=False).relative_to(
+                cache.root.resolve(strict=False)
+            )
+        except ValueError:
+            pass
+        else:
+            raise DataServiceError("service ownership lock must be outside shared cache")
         self.manifest = manifest
         self.cache = cache
         self.identity = identity
@@ -387,6 +398,7 @@ class DataSupplyService:
         self.store = _MainsetStore(
             mainset_path, manifest, worker_count=identity.worker_count
         )
+        self.ownership_lock_path = ownership_lock_path
         self._mainset: PersistentMainset | None = None
         self._recovery_pending = set[str]()
         self._executor = ThreadPoolExecutor(
@@ -418,10 +430,17 @@ class DataSupplyService:
                 raise DataServiceError("data service lifecycle is invalid")
             self.store.path.parent.mkdir(parents=True, exist_ok=True)
             self.cache.root.mkdir(parents=True, exist_ok=True)
-            ownership_path = self.cache.root / ".sakuramoon-data-service.lock"
             ownership: BinaryIO | None = None
             try:
-                ownership = ownership_path.open("a+b")
+                self.ownership_lock_path.parent.mkdir(parents=True, exist_ok=True)
+                if self.ownership_lock_path.is_symlink():
+                    raise OSError
+                descriptor = os.open(
+                    self.ownership_lock_path,
+                    os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                    0o600,
+                )
+                ownership = os.fdopen(descriptor, "a+b")
                 fcntl.flock(ownership.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 if ownership is not None:

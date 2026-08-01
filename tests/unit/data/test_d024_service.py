@@ -114,6 +114,7 @@ def _service(
         manifest,
         cache,
         root / mainset_name,
+        (root / "runtime" / "data-service.lock").absolute(),
         identity or _identity(manifest),
         limits or DataServiceLimits(2, 3, 2, 2),
     )
@@ -469,7 +470,7 @@ def test_mainset_has_one_process_owner(tmp_path: Path) -> None:
         first.close()
 
 
-def test_mainset_lock_is_bound_to_shared_cache_not_mainset_path(
+def test_explicit_runtime_lock_is_shared_across_mainset_paths(
     tmp_path: Path,
 ) -> None:
     manifest, bodies = _manifest(2)

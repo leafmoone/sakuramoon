@@ -27,6 +27,7 @@ from sakuramoon.data.service import (
     DataSupplyService,
 )
 from sakuramoon.data.service_protocol import DataServiceSessionIdentity
+from sakuramoon.storage import StorageValidationError, require_data_service_storage
 
 
 class _ArgumentError(ValueError):
@@ -72,6 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if config.security.modelscope_token_env != MODELSCOPE_TOKEN_ENVIRONMENT:
             raise ConfigurationError("dataset credential variable is not approved")
         root = args.root.resolve(strict=True)
+        require_data_service_storage(config, root)
         manifest_path = _root_path(root, config.data.manifest.path)
         manifest = load_dataset_manifest(
             manifest_path,
@@ -98,6 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest,
             cache,
             _root_path(root, config.data.service.mainset_path),
+            Path(config.data.service.ownership_lock_path),
             identity,
             DataServiceLimits(
                 download_concurrency=config.data.cache.download_concurrency,
@@ -108,7 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         server = DataServiceServer(
             service,
-            _root_path(root, config.data.service.socket_path),
+            Path(config.data.service.socket_path),
             request_timeout_seconds=config.data.service.request_timeout_seconds,
         )
         stopped = threading.Event()
@@ -142,7 +145,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except DatasetManifestError:
         _emit({"error": "dataset_manifest_invalid", "ok": False})
         return 1
-    except (DataServiceError, ShardCacheError, DatasetTransportError):
+    except (
+        DataServiceError,
+        ShardCacheError,
+        DatasetTransportError,
+        StorageValidationError,
+    ):
         _emit({"error": "data_service_failed", "ok": False})
         return 1
 

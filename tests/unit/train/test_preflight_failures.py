@@ -117,19 +117,9 @@ def test_gpu_identity_requires_healthy_exact_nvidia_smi(
         preflight_module._nvidia_smi_identity()  # pyright: ignore[reportPrivateUsage]
 
 
-def test_nvme_identity_rejects_network_mount(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def network_mount(_path: Path) -> tuple[Path, str, str]:
-        return Path("/"), "nfs", "server:/workspace"
-
-    monkeypatch.setattr(
-        preflight_module,
-        "_mount_identity",
-        network_mount,
-    )
-    with pytest.raises(RuntimeError, match="local NVMe"):
-        preflight_module._require_nvme(tmp_path)  # pyright: ignore[reportPrivateUsage]
+def test_preflight_registry_requires_governed_storage_not_nvme_inference() -> None:
+    assert "storage_capacity" in PREFLIGHT_CHECKS
+    assert "nvme_capacity" not in PREFLIGHT_CHECKS
 
 
 def test_preflight_builder_requires_measured_checkpoint_size(tmp_path: Path) -> None:

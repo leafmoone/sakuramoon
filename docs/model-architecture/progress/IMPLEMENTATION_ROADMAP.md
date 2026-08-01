@@ -24,11 +24,11 @@
 | Qwen | `model/qwen_3.5_2B` 已下载；config 为 24L/2048 hidden | `T021` 从固定路径本地加载并验证；禁止下载、联网替换或 fallback |
 | VAE | `model/vae` 已下载；MageVAE，128 latent channels、downsample 16、posterior mean | `T020` 从固定路径本地加载并完成 round-trip/质量验收；禁止下载或 fallback |
 | 元数据 | `db/` 已准备，本地使用 | 不进 Git；仅在数据任务实际需要时按 schema 读取，不建立资产哈希清单 |
-| 存储 | 工作区为 400 GiB NFSv3，当前约 363 GiB 可用；无 checkpoint 预留 | 达到 300 GiB cache 低限，但不是已验证 NVMe；正式 preflight 继续硬阻塞 |
+| 存储 | 工作区为 400 GiB NFSv3；D026 探测时可用 383,347,851,264 bytes | 用户已批准显式 server-backed 模式；锁定 mount identity、原子发布、小型有界 cache、三份实测 checkpoint 余量和 `/run` 本地 IPC |
 | 参考工程 | `reference/` 仅供人工理解/对照，可完全不使用 | 根仓忽略；任何代码、测试、preflight、训练或运行时不得导入、执行或调用其中代码 |
 | 凭据 | `.env` 已写 `MODELSCOPE_API_TOKEN`，权限 600 | `.env` 永不进 Git；resolved config、日志和 W&B 必须脱敏 |
 
-目标配置仍要求 4×RTX 5090、14 vCPU、约 120 GiB host RAM 和足够 NVMe。正式四卡任务不得用当前单卡结果替代。
+目标配置仍要求 4×RTX 5090、14 vCPU、约 120 GiB host RAM 和足够的受治理 server-backed storage。正式四卡任务不得用当前单卡结果替代。
 
 ## 3. 本地文档和追踪规则
 
@@ -160,7 +160,7 @@ sakuramoon/
 
 | 表 | 关键内容 |
 |---|---|
-| `run/paths/security` | run/stage/seed、目录、secret env 名称、脱敏规则 |
+| `run/paths/storage/security` | run/stage/seed、目录、server-backed mount/runtime identity、容量、secret env 名称、脱敏规则 |
 | `assets.qwen/assets.vae` | 固定本地路径、dtype、冻结策略 |
 | `data.source/manifest/cache` | ModelScope dataset、revision、shard hash、LRU、worker、queue、恢复 |
 | `data.validation/image/buckets` | 2,000 验证隔离、EXIF、no-upscale、retention、17 image buckets |
@@ -276,6 +276,7 @@ sakuramoon/
 - **对应文档：** `C11` cache/LRU/at-least-once；`C12` 系统故障。
 - **实现路径：** `data/cache.py`、`data/state.py`、cache benchmark CLI。
 - **动作：** 单机唯一下载协调器、300–500 GiB 可配置 LRU、有界并发、checksum publish、completed/active shard state；完成 shard 不重读，active shard 从头重放。
+- **现行覆盖：** 本任务的 300–500 GiB 本地 cache 假设已被 D026 server-backed 决策取代；D012 历史实现与证据不回写。
 - **验证：** 并发 rank 请求同一 shard、cache eviction、磁盘写满、进程中断、坏 shard、恢复 replay 计数。
 - **性能门槛：** 冷缓存 2 小时数据供给≥12 samples/s、ready wait<2%、无 swap/无界 RSS；最终参数由 sweep 写回 TOML。
 - **完成证据：** cache profile、故障注入、replay audit。
@@ -370,10 +371,24 @@ sakuramoon/
 - **有界与空间控制：** 实际接通严格 TOML `data.cache.download_concurrency`，新增无默认值的 `data.cache.verified_shard_lookahead`；service 内部 in-flight download、verified-ready shard、lease output 与 ACK channel，以及 DataLoader worker input/ready batch/completion channel 分别有界。每个下载按 manifest bytes 预留空间，quota 同时计算 published shard、in-flight reservation 与 manifest-owned `.partial`；active lease 全部防 eviction，inactive lookahead 可按 LRU 淘汰，不得预下载整个 dataset。
 - **关键路径隔离：** trainer 和 DataLoader worker 禁止 import/call transport、`fetch_dataset_shard`、SHA、cache eviction 或 partial cleanup。已验证 cache hit 的重新校验、启动 orphan `.partial` 清理和所有完整文件扫描都只在 service 内完成；shard IPC 每个 lease/完成各一次，绝不按 sample/batch/update 往返。训练热路径只能在 lookahead 耗尽时等待 descriptor，不能同步执行任何下载/校验工作。
 - **配置清理：** 现有 `range_workers` 不得继续作为无效果的必填字段；本任务必须依据固定 revision 的真实 ModelScope 合同，要么在 service 内实现有界 Range/断点续传及精确重组校验，要么通过受治理配置变更删除该字段。两条路径都必须保持完整 tar 校验后才可发布 lease。
-- **性能门槛：** 启动成本与稳态分开报告；正式计时前先由 service 填满配置的 verified lookahead。稳态 cold-cache 并发下载必须达到数据供给 `>=12 samples/s`、ready wait `<2%`、无 swap/无界 RSS/quota 越界，并与相同 workload 的 fully-cached control 比较 trainer step p50/p95/p99、GPU active/idle 和 DataLoader batch latency；超出预先登记的 same-backend control 波动即不放行。若共享 CPU/NVMe 无法隔离到该门槛，必须调整并显式锁定 service CPU/I/O/concurrency 配置或使用独立存储，不能声称“零影响”。
-- **验证：** 用独立真实 service process 和可控慢 transport 证明 worker 消费 `A/B` 时 `C/D/E` 已 ready/in-flight，trainer 进程没有网络/SHA/cache stack；验证每轮全 manifest permutation、每 tar 恰好一次、持久化 ordinal、IPC 身份/容量、精确并发/lookahead/bytes 上界、active 不 eviction、inactive 可 eviction、cache hit、损坏/截断/中断/ENOSPC/orphan partial、service/trainer/worker 分别退出、ACK 丢失、recovered-active barrier、mainset 收尾与下一轮原子创建。另验证 trainer checkpoint/restart 不读取或改变 service cursor。随后做 bounded 真实网络/NVMe/1GPU overlap smoke；两小时冷缓存 sweep 在 Data 里程碑集中执行一次。
+- **性能门槛：** 启动成本与稳态分开报告；正式计时前先由 service 填满配置的 verified lookahead。稳态 cold-cache 并发下载必须达到数据供给 `>=12 samples/s`、ready wait `<2%`、无 swap/无界 RSS/quota 越界，并与相同 workload 的 fully-cached control 比较 trainer step p50/p95/p99、GPU active/idle 和 DataLoader batch latency；超出预先登记的 same-backend control 波动即不放行。若共享 CPU/server-backed storage 无法隔离到该门槛，必须调整并显式锁定 service CPU/I/O/concurrency 配置或使用独立存储，不能声称“零影响”。
+- **验证：** 用独立真实 service process 和可控慢 transport 证明 worker 消费 `A/B` 时 `C/D/E` 已 ready/in-flight，trainer 进程没有网络/SHA/cache stack；验证每轮全 manifest permutation、每 tar 恰好一次、持久化 ordinal、IPC 身份/容量、精确并发/lookahead/bytes 上界、active 不 eviction、inactive 可 eviction、cache hit、损坏/截断/中断/ENOSPC/orphan partial、service/trainer/worker 分别退出、ACK 丢失、recovered-active barrier、mainset 收尾与下一轮原子创建。另验证 trainer checkpoint/restart 不读取或改变 service cursor。随后做 bounded 真实网络/server-backed storage/1GPU overlap smoke；两小时冷缓存 sweep 在 Data 里程碑集中执行一次。
 - **完成边界：** D024 保持独立 task、diff、测试、trace、证据和原子 commit。D024 完成后只启动一个新的 DATA 包级 reviewer；D024 与该 reviewer 关闭前，`T044/T050` 不得关闭 production resume/data-to-train 接线，`S000` 不得锁定 production service/download/lookahead/worker/queue 参数。
-- **GPU：** service 本身仅 CPU/网络/NVMe；使用 1GPU consumer 做 bounded 隔离/吞吐 smoke，不做长跑或正式 stage。
+- **GPU：** service 本身仅 CPU/网络/server-backed storage；使用 1GPU consumer 做 bounded 隔离/吞吐 smoke，不做长跑或正式 stage。
+
+### D025：Governed production data assembly
+
+- **依赖：** D024 service client、D023 exact two-worker contract 与 D021 trusted shard/parser/collate boundary。
+- **动作：** 生产 factory 是 loader controls 与 parser/exclusion policy 的唯一来源；签发 process-local accepted batch-stream handle，绑定 resolved config、manifest/service session、worker topology 与精确 factory identity。普通 iterator 或调用者构造的 `TrainingBatch` 不能进入 production T050。
+- **验证：** callable spawn-serializability 硬失败；真实 AF_UNIX service → 两个 spawned workers → accepted stream；正常完成逐 lease ACK，提前 close/worker failure 保持未确认 lease active 并在 restart 从 shard 起点 replay。
+- **完成边界：** 独立 task/diff/test/evidence/commit；D023/D025/D026 完成后才启动新的 DATA package rereview。
+
+### D026：Governed server-backed storage and host-local IPC
+
+- **依赖：** 用户批准当前 NFSv3 server-backed 模式；复用 D024 persistent mainset/cache 与 T044 实测 raw checkpoint bytes，不修改其历史证据。
+- **动作：** 严格 `[storage]` 无默认配置锁定 NFS filesystem/source/version/hard mount、实际 reserve、三份 checkpoint 与 atomic probe；cache 取消 300 GiB 下限但保持显式 bounded high/low。AF_UNIX socket 与 singleton lock 固定在非 NFS 的 `/run/sakuramoon/`。
+- **验证：** 全部 persistent paths 同一 mount identity；同目录 write/file-fsync/replace/directory-fsync/readback；free space 覆盖 cache high-watermark + `3 × measured raw checkpoint` + reserve；身份、容量、probe、runtime path 漂移全部硬失败。
+- **完成边界：** targeted CPU 与当前真实 NFS probe；不运行长跑、正式 stage 或多卡。D026 结论并入新的 DATA package rereview。
 
 ## 9. Phase 2：冻结编码器与条件分支
 
@@ -551,7 +566,7 @@ sakuramoon/
 - **数据依赖：** D024、新的 DATA 包级复审和 T044 独立双审必须先关闭；正式 CLI 先完整恢复 checkpoint 中的训练/optimizer state，再从 resolved config 连接并鉴别已运行的 data service、构造轻量 data client、persistent workers 与 batch consumer。trainer 禁止读取/恢复 service cursor，禁止构造 transport/cache、直接加载 shard state 或保留测试专用内联下载组装。
 - **实现路径：** `train/step.py`、`loop.py`、`preflight.py`、`failures.py`、`cli/train.py`。
 - **动作：** 成功update作为唯一scheduler/growth/checkpoint计数；microbatch/accumulation；global finite检查和clip；stage预算；no-force preflight；nonfinite/OOM/schema/kernel/backend异常同步停止。
-- **preflight：** config/hash、资产、dataset revision、GPU/driver/NCCL/NVMe、冻结零梯度、parameter schema、17 image shapes、八文本shape、zero-update loss、optimizer step、sample、checkpoint round-trip。
+- **preflight：** config/hash、资产、dataset revision、GPU/driver/NCCL、server-backed mount/capacity/atomic publication 与 host-local IPC、冻结零梯度、parameter schema、17 image shapes、八文本shape、zero-update loss、optimizer step、sample、checkpoint round-trip。
 - **验证：** 不自动减batch、改accumulation、改backend、改world size、改LR、跳坏shard或从PMA恢复；异常写诊断包且不推进successful update。
 - **完成证据：** preflight_report.json、train-step golden、failure-state tests。
 - **GPU：** 1GPU完整；4GPU在S1 gate。
@@ -757,7 +772,7 @@ sakuramoon/
   ↓
 R001 → R002 → D001 → C001
                          ↓
-D010 → D011 → D012 → D013 → D014 → D015 → G001 → D016 → D020 → D021 → D022 → D023 → D024 → DATA package review
+D010 → D011 → D012 → D013 → D014 → D015 → G001 → D016 → D020 → D021 → D022 → D023 → D024 → D025 → D026 → DATA package review
                                                                                                       ↓
 T020 + T021 → T022 + T023 → T024
   ↓

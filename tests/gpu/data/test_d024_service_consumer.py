@@ -231,6 +231,7 @@ def _run_service_process(
         manifest,
         cache,
         root / "mainset.json",
+        (root / "runtime" / "data-service.lock").absolute(),
         identity,
         DataServiceLimits(2, 3, 2, 2),
     )

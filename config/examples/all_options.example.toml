@@ -16,6 +16,16 @@ cache_dir = "cache/data"
 checkpoint_dir = "checkpoints/example"
 artifact_dir = "artifacts/example"
 
+[storage]
+mode = "server_backed" # fixed explicit mode; no local-NVMe inference or fallback
+shared_filesystem = "nfs" # fixed for the approved server-backed mode
+shared_mount_source = "REQUIRED_NFS_MOUNT_SOURCE" # exact /proc/self/mountinfo source identity
+nfs_version = 3 # fixed to the governed deployment mount
+hard_mount = true # soft NFS mounts are rejected
+minimum_free_gib = "BENCHMARK_REQUIRED" # integer reserve after cache plus three raw checkpoints
+checkpoint_copies = 3 # fixed measured raw-checkpoint headroom
+atomic_publish_probe = true # fixed startup write/fsync/replace/readback probe
+
 [security]
 # Names only. Credential values must exist in the process environment and are
 # never serialized into resolved TOML or hashes.
@@ -48,15 +58,16 @@ path = "REQUIRED_TRAIN_MANIFEST_PATH"
 sha256 = "REQUIRED_IMMUTABLE_SHA256"
 
 [data.cache]
-low_watermark_gib = "BENCHMARK_REQUIRED" # integer, 300 <= low < high
-high_watermark_gib = "BENCHMARK_REQUIRED" # integer, low < high <= 500
+low_watermark_gib = "BENCHMARK_REQUIRED" # integer, 0 <= low < high; no implicit 300 GiB floor
+high_watermark_gib = "BENCHMARK_REQUIRED" # integer, low < high <= 500; explicit bounded server cache
 download_concurrency = "BENCHMARK_REQUIRED" # integer > 0
 verified_shard_lookahead = "BENCHMARK_REQUIRED" # integer > 0
 persistent_workers_per_rank = "BENCHMARK_REQUIRED" # integer > 0
 ready_batches_per_rank = "BENCHMARK_REQUIRED" # integer > 0
 
 [data.service]
-socket_path = "runs/example/data-service.sock"
+socket_path = "/run/sakuramoon/data-service.sock" # fixed host-local AF_UNIX endpoint; never on NFS
+ownership_lock_path = "/run/sakuramoon/data-service.lock" # fixed host-local singleton lock
 mainset_path = "cache/data-service-mainset.json" # service-owned; independent of trainer run/stage
 request_timeout_seconds = "BENCHMARK_REQUIRED" # TOML float, 0 < value <= 300
 lease_channel_capacity = "BENCHMARK_REQUIRED" # integer > 0

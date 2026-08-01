@@ -57,6 +57,7 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [ ] 按 `mainset` 顺序实现有界并发 download/verify/publish、verified lookahead、eviction lease 和本机 IPC；trainer 消费 `A/B` 时 service 准备 `C/D/E...`，所有 download/ready/lease/ACK、worker input/output、ready batch 与 completion channel 均有显式容量，active lease 不 eviction，磁盘预留和 quota 计入 published、in-flight 与 `.partial`。
 - [ ] 验证 normal-exhaustion completion ACK 才逐 tar 完成；worker/service/client/trainer exit、断连或 ACK 丢失保留 active 并从 tar 起点 replay。只有当前 `mainset` 全部 tar 已下载、验证、供给且所有 outstanding lease 完成后，才原子删除旧表并创建下一份全 manifest 随机 `mainset`；崩溃不得丢失旧表或提前供给下一轮。
 - [ ] T044 从 production raw checkpoint schema、manifest 和 resume API 中移除全部 data-service state；checkpoint 仍须完整保存并恢复 model、TorchAO optimizer、scheduler/growth、trainer counters、训练 RNG、optimizer-SR RNG、resolved config 与 identity。fresh-process next-update 正确性使用显式固定输入 batch，禁止要求或伪造 live tar/batch 连续性，并为既有含 data sidecar 的旧 raw schema 提供明确拒绝或受治理迁移合同。
+- [ ] D026 实现显式 server-backed storage：所有持久路径锁定同一 NFS source/version/hard-mount 身份，cache 使用无默认的小型有界配置，实际 free space 覆盖 cache high-watermark、三份实测 raw checkpoint 与显式 reserve；逐目录原子发布探测通过。AF_UNIX socket 与 singleton lock 固定在非 NFS 的 `/run/sakuramoon/`，身份、空间、探测或 runtime-path 漂移均硬失败且无 fallback。
 - [ ] 在真实独立 service、真实多进程 DataLoader 和 1GPU consumer 上完成 cold/warm-cache overlap、worker/service/trainer fault 与人工 checkpoint resume smoke；达到 `>=12 samples/s`、ready wait `<2%`、无 swap/无界 RSS/quota 越界，并证明下载/校验不会让 same-backend fully-cached trainer step p50/p95/p99 超出预登记波动。
 # 4. P0：模型 reference 与正确性
 ## 4.1 文本与 style
@@ -81,7 +82,7 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 ## 5.1 环境和 kernel preflight
 - [ ] 锁定 driver、CUDA、PyTorch、TorchAO、FA4/CuTeDSL、Triton、causal_conv1d、fla、ModelScope Hub、Safetensors 和 NCCL 版本。
 - [ ] 在 RTX 5090 实际执行 FA4 varlen BF16 20Q/5KV forward/backward、Qwen DeltaNet fast kernel 和 fused SwiGLU；仅 import 成功不算通过。
-- [ ] 检查 4×32GB GPU、NCCL P2P、14 vCPU、120 GB RAM、网络凭据与 NVMe quota；cache 高水位之外至少容纳 3 份实测 full raw checkpoint。
+- [ ] 检查 4×32GB GPU、NCCL P2P、14 vCPU、120 GB RAM 与网络凭据；存储按显式 server-backed 模式校验锁定 NFS 身份、hard mount、原子发布探测和实际 free space，cache 高水位与显式 reserve 之外至少容纳 3 份实测 full raw checkpoint，host-local IPC 路径不得位于 NFS。
 - [ ] resolved config 不得含 `REQUIRED_AFTER_BENCHMARK`、未知 key 或隐式默认回填；preflight 不提供绕过硬项的 force 开关。
 ## 5.2 TorchAO 和精度 canary
 - [ ] 逐 canonical FQN 审计 dtype、decay group、TorchAO state class/bytes、parameter order、step 与隔离 optimizer SR RNG。

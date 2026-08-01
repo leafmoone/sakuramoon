@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import shutil
 import subprocess
 import weakref
 from collections.abc import Callable, Mapping
@@ -19,6 +17,7 @@ from torch import nn
 from sakuramoon.assets import require_local_qwen, require_local_vae
 from sakuramoon.config.load import LoadedConfig
 from sakuramoon.data.collate import DataLeaseClient
+from sakuramoon.storage import require_training_storage
 from sakuramoon.train.runtime import require_single_gpu_config
 
 PREFLIGHT_CHECKS = (
@@ -26,7 +25,7 @@ PREFLIGHT_CHECKS = (
     "local_assets",
     "dataset_revision",
     "single_gpu_runtime",
-    "nvme_capacity",
+    "storage_capacity",
     "frozen_encoders",
     "parameter_schema",
     "image_shapes",
@@ -149,9 +148,6 @@ _COMPUTE_CAPABILITY = (12, 0)
 _MIN_GPU_MEMORY_MIB = 32_000
 _MIN_LOGICAL_CPUS = 14
 _MIN_RAM_BYTES = 120 * 1024**3
-_NVME_DEVICE = re.compile(r"/dev/nvme\d+n\d+(?:p\d+)?")
-
-
 class _CudaDeviceProperties(Protocol):
     name: str
     major: int
@@ -201,38 +197,6 @@ def _memory_identity() -> tuple[int, int]:
     if set(values) != {"MemTotal", "SwapTotal"}:
         raise RuntimeError("host memory identity is incomplete")
     return values["MemTotal"], values["SwapTotal"]
-
-
-def _mount_identity(path: Path) -> tuple[Path, str, str]:
-    resolved = path.resolve(strict=True)
-    candidates: list[tuple[Path, str, str]] = []
-    try:
-        lines = Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise RuntimeError("mount identity is unreadable") from exc
-    for line in lines:
-        before, separator, after = line.partition(" - ")
-        fields = before.split()
-        filesystem = after.split()
-        if not separator or len(fields) < 5 or len(filesystem) < 2:
-            raise RuntimeError("mount identity is malformed")
-        mount_point = Path(fields[4].replace("\\040", " "))
-        try:
-            resolved.relative_to(mount_point)
-        except ValueError:
-            continue
-        candidates.append((mount_point, filesystem[0], filesystem[1]))
-    if not candidates:
-        raise RuntimeError("configured path has no mount identity")
-    return max(candidates, key=lambda value: len(value[0].parts))
-
-
-def _require_nvme(path: Path) -> tuple[int, int]:
-    _mount_point, filesystem, source = _mount_identity(path)
-    if filesystem not in {"ext4", "xfs"} or _NVME_DEVICE.fullmatch(source) is None:
-        raise RuntimeError("configured training path is not on local NVMe")
-    stat = path.stat()
-    return stat.st_dev, shutil.disk_usage(path).free
 
 
 def build_single_gpu_preflight_checks(
@@ -318,35 +282,12 @@ def build_single_gpu_preflight_checks(
         ):
             raise RuntimeError("host CPU, RAM, or swap differs from the training floor")
 
-    def nvme_capacity() -> None:
-        free_by_device: dict[int, int] = {}
-        required_by_device: dict[int, int] = {}
-        for configured in (
-            loaded.config.paths.run_dir,
-            loaded.config.paths.cache_dir,
-            loaded.config.paths.checkpoint_dir,
-            loaded.config.paths.artifact_dir,
-        ):
-            path = repository_root / configured
-            path.mkdir(parents=True, exist_ok=True)
-            device, free = _require_nvme(path)
-            free_by_device[device] = min(free_by_device.get(device, free), free)
-            required_by_device.setdefault(device, 1)
-        cache = repository_root / loaded.config.paths.cache_dir
-        checkpoint = repository_root / loaded.config.paths.checkpoint_dir
-        cache_device = cache.stat().st_dev
-        checkpoint_device = checkpoint.stat().st_dev
-        required_by_device[cache_device] += (
-            loaded.config.data.cache.high_watermark_gib * 1024**3
+    def storage_capacity() -> None:
+        require_training_storage(
+            loaded.config,
+            repository_root,
+            checkpoint_payload_bytes=checkpoint_payload_bytes,
         )
-        required_by_device[checkpoint_device] += 3 * checkpoint_payload_bytes
-        if any(
-            free_by_device[device] < required
-            for device, required in required_by_device.items()
-        ):
-            raise RuntimeError(
-                "NVMe capacity cannot reserve cache and three raw checkpoints"
-            )
 
     def frozen_encoders() -> None:
         for encoder in (qwen, vae):
@@ -369,7 +310,7 @@ def build_single_gpu_preflight_checks(
         "local_assets": local_assets,
         "dataset_revision": dataset_revision,
         "single_gpu_runtime": single_gpu_runtime,
-        "nvme_capacity": nvme_capacity,
+        "storage_capacity": storage_capacity,
         "frozen_encoders": frozen_encoders,
         "parameter_schema": trainable_schema,
         "image_shapes": image_shapes,
