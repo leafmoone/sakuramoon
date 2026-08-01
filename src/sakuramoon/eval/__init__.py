@@ -6,9 +6,11 @@ from sakuramoon.eval.artifacts import (
     write_evaluation_artifact,
 )
 from sakuramoon.eval.manual_quality import (
+    ManualQualityArtifact,
     ManualQualityObservation,
     ManualQualityReport,
     summarize_manual_quality,
+    write_manual_quality_artifact,
 )
 from sakuramoon.eval.metrics import (
     FeatureStats,
@@ -47,6 +49,7 @@ __all__ = [
     "EvaluationJob",
     "FeatureStats",
     "InceptionScore",
+    "ManualQualityArtifact",
     "ManualQualityObservation",
     "ManualQualityReport",
     "PromptCase",
@@ -68,5 +71,6 @@ __all__ = [
     "summarize_manual_quality",
     "summarize_reconstruction_quality",
     "write_evaluation_artifact",
+    "write_manual_quality_artifact",
     "write_reconstruction_evaluation",
 ]

@@ -25,6 +25,10 @@ class EvaluationArtifact:
     automatic_release: bool = False
 
     def __post_init__(self) -> None:
+        if self.job.metric not in ("fid", "is"):
+            raise ValueError("scalar evaluation artifacts require a FID or IS job")
+        if self.job.job_id != self.job.content_addressed_id:
+            raise ValueError("evaluation artifact job ID is not content-addressed")
         if type(self.value) is not float or not math.isfinite(self.value):
             raise ValueError("evaluation metric value must be finite")
         if self.std is not None and (
@@ -37,9 +41,14 @@ class EvaluationArtifact:
             raise ValueError("only IS artifacts carry split standard deviation")
         if self.automatic_release is not False:
             raise ValueError("evaluation metrics cannot automatically release a checkpoint")
+        if not self.job.training_paused and self.cost.training_pause_seconds != 0.0:
+            raise ValueError(
+                "training pause cost must be zero when the job does not pause training"
+            )
 
     def as_mapping(self) -> dict[str, object]:
         return {
+            "artifact_kind": self.job.artifact_kind,
             "automatic_release": False,
             "cost": {
                 "gpu_seconds": self.cost.gpu_seconds,
@@ -83,14 +92,39 @@ def write_evaluation_artifact(path: Path, artifact: EvaluationArtifact) -> None:
 @dataclass(frozen=True, slots=True)
 class CheckpointMetricComparison:
     artifact_kind: ArtifactKind
-    values: tuple[tuple[CheckpointKind, float], ...]
+    artifacts: tuple[EvaluationArtifact, ...]
 
     def __post_init__(self) -> None:
-        kinds = tuple(kind for kind, _ in self.values)
-        if len(self.values) != 3 or set(kinds) != {"raw_latest", "pma10", "accepted"}:
+        if type(self.artifacts) is not tuple or any(
+            type(artifact) is not EvaluationArtifact for artifact in self.artifacts
+        ):
+            raise TypeError("comparison artifacts must be an immutable artifact tuple")
+        kinds = tuple(artifact.job.checkpoint.kind for artifact in self.artifacts)
+        if len(self.artifacts) != 3 or set(kinds) != {
+            "raw_latest",
+            "pma10",
+            "accepted",
+        }:
             raise ValueError("comparison requires raw latest, PMA-10, and accepted")
-        if any(type(value) is not float or not math.isfinite(value) for _, value in self.values):
-            raise ValueError("comparison values must be finite floats")
+        if any(
+            artifact.job.artifact_kind != self.artifact_kind
+            for artifact in self.artifacts
+        ):
+            raise ValueError("comparison artifact kinds must match")
+        identities = tuple(
+            artifact.job.comparison_mapping() for artifact in self.artifacts
+        )
+        if identities[1:] != identities[:-1]:
+            raise ValueError(
+                "comparison jobs must share metric, prompt, sampling, and extractor identity"
+            )
+
+    @property
+    def values(self) -> tuple[tuple[CheckpointKind, float], ...]:
+        return tuple(
+            (artifact.job.checkpoint.kind, artifact.value)
+            for artifact in self.artifacts
+        )
 
 
 __all__ = [

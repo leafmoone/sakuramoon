@@ -540,6 +540,7 @@ def canonical_reconstruction_evaluation_bytes(
     identity = evaluation.metric_identity
     report = evaluation.report
     payload = {
+        "artifact_kind": "vae_reconstruction",
         "cohort_manifest_sha256": evaluation.cohort_manifest_sha256,
         "metric_identity": {
             "lpips_implementation": identity.lpips_implementation,

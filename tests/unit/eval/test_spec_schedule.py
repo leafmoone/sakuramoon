@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import cast
 
 import pytest
 
@@ -51,12 +52,15 @@ def _config() -> EvaluationConfig:
 
 
 def _job() -> EvaluationJob:
-    return EvaluationJob(
-        job_id="eval-1",
-        checkpoint=CheckpointRef("checkpoint-1", "raw_latest", "1" * 64),
+    candidate = EvaluationJob(
+        job_id="eval-content-address-pending",
+        checkpoint=CheckpointRef("checkpoint-1", "raw_latest", "1" * 64, 10),
         metric="fid",
         artifact_kind="fid_trend",
+        prompt_manifest_path="prompts.json",
+        prompt_selection="ordered_prefix",
         prompt_manifest_sha256="2" * 64,
+        trigger_successful_update=10,
         sample_count=100,
         cfg_scale=2.9,
         sampling_profile="reference",
@@ -72,6 +76,7 @@ def _job() -> EvaluationJob:
         gpu_index=0,
         training_paused=True,
     )
+    return dataclasses.replace(candidate, job_id=candidate.content_addressed_id)
 
 
 def test_schedule_is_config_driven_by_successful_updates_and_stage_end() -> None:
@@ -109,6 +114,10 @@ def test_prompt_manifest_hash_is_deterministic_and_binds_every_field() -> None:
     assert manifest.canonical_bytes() == repeated.canonical_bytes()
     assert manifest.sha256 == repeated.sha256
     assert manifest.sha256 != changed.sha256
+    with pytest.raises(TypeError, match="immutable PromptCase tuple"):
+        PromptManifest(
+            cast(tuple[PromptCase, ...], [manifest.cases[0]])
+        )
 
 
 @pytest.mark.parametrize(
@@ -119,6 +128,8 @@ def test_prompt_manifest_hash_is_deterministic_and_binds_every_field() -> None:
         ({"solver": "euler"}, "inconsistent"),
         ({"solver_nfe": 50}, "inconsistent"),
         ({"artifact_kind": "is_trend"}, "inconsistent"),
+        ({"artifact_kind": "fid_unknown"}, "inconsistent"),
+        ({"prompt_selection": "random"}, "ordered manifest prefix"),
         ({"training_paused": 1}, "explicit"),
     ],
 )
@@ -126,4 +137,91 @@ def test_job_rejects_nonformal_or_mixed_identity(
     changes: dict[str, object], expected: str
 ) -> None:
     with pytest.raises((TypeError, ValueError), match=expected):
+        dataclasses.replace(_job(), **changes)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"checkpoint": CheckpointRef("checkpoint-1", "accepted", "1" * 64, 9)},
+        {"checkpoint": CheckpointRef("checkpoint-2", "raw_latest", "1" * 64, 10)},
+        {"checkpoint": CheckpointRef("checkpoint-1", "raw_latest", "6" * 64, 10)},
+        {"prompt_manifest_path": "other-prompts.json"},
+        {"prompt_manifest_sha256": "9" * 64},
+        {"sample_count": 101},
+        {"feature_extractor": "other-inception"},
+        {"feature_extractor_version": "2.0"},
+        {"preprocess_sha256": "8" * 64},
+        {"real_stats_sha256": "7" * 64},
+        {"is_splits": 5},
+        {"gpu_index": 1},
+        {"training_paused": False},
+    ],
+)
+def test_job_content_identity_binds_every_checkpoint_metric_and_resource_field(
+    changes: dict[str, object],
+) -> None:
+    baseline = _job()
+    changed = dataclasses.replace(baseline, **changes)
+
+    assert changed.identity_sha256 != baseline.identity_sha256
+
+
+def test_job_content_identity_binds_trigger_independently_of_older_accepted() -> None:
+    accepted = dataclasses.replace(
+        _job(),
+        checkpoint=CheckpointRef("checkpoint-accepted", "accepted", "1" * 64, 9),
+    )
+    changed = dataclasses.replace(accepted, trigger_successful_update=11)
+
+    assert changed.identity_sha256 != accepted.identity_sha256
+
+
+def test_is_job_requires_exactly_divisible_splits() -> None:
+    with pytest.raises(ValueError, match="exactly divisible"):
+        dataclasses.replace(
+            _job(),
+            metric="is",
+            artifact_kind="is_trend",
+            sample_count=101,
+            is_splits=10,
+        )
+
+
+def test_job_rejects_future_or_stale_raw_checkpoint_but_accepts_older_accepted() -> None:
+    with pytest.raises(ValueError, match="future checkpoint"):
+        dataclasses.replace(
+            _job(),
+            checkpoint=CheckpointRef("checkpoint-future", "accepted", "1" * 64, 11),
+        )
+    with pytest.raises(ValueError, match="raw latest checkpoint"):
+        dataclasses.replace(
+            _job(),
+            checkpoint=CheckpointRef("checkpoint-stale", "raw_latest", "1" * 64, 9),
+        )
+
+    accepted = dataclasses.replace(
+        _job(),
+        checkpoint=CheckpointRef("checkpoint-accepted", "accepted", "1" * 64, 9),
+    )
+    assert accepted.checkpoint.successful_update == 9
+    older = dataclasses.replace(
+        accepted,
+        checkpoint=CheckpointRef("checkpoint-accepted", "accepted", "1" * 64, 8),
+    )
+    assert older.identity_sha256 != accepted.identity_sha256
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"sample_count": 1},
+        {"feature_extractor": " "},
+        {"feature_extractor_version": " version-with-padding "},
+    ],
+)
+def test_job_rejects_impossible_sample_count_or_padded_extractor_identity(
+    changes: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
         dataclasses.replace(_job(), **changes)

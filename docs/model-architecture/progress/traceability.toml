@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 107
+registry_revision = 108
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -1023,7 +1023,7 @@ not_applicable_reason = "Reference code is excluded by repository policy and dir
 [[blockers]]
 id = "DECISION-DROPOUT-VALUES"
 kind = "resolved_user_decision"
-description = "Resolved by D016: every caption dropout probability is confirmed and strictly bound. This stable historical decision ID does not block T050 or C002."
+description = "Resolved by D016: every caption dropout probability is confirmed and strictly bound. This stable historical decision ID does not block T050, C002, or T052."
 
 [[blockers]]
 id = "FOUR-GPU-AVAILABLE"
@@ -12291,6 +12291,8 @@ implementation_paths = [
     "tests/gpu/eval/test_metric_pipeline.py",
     "tests/unit/eval/test_spec_schedule.py",
     "tests/unit/config/test_eval_jobs.py",
+    "docs/model-architecture/reviews/T052/remediation_report.md",
+    "docs/model-architecture/reviews/T052/remediation_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -12348,6 +12350,8 @@ implementation_paths = [
     "config/examples/all_options.example.toml",
     "src/sakuramoon/eval/schedule.py",
     "tests/unit/eval/test_spec_schedule.py",
+    "docs/model-architecture/reviews/T052/remediation_report.md",
+    "docs/model-architecture/reviews/T052/remediation_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -12406,6 +12410,8 @@ implementation_paths = [
     "src/sakuramoon/cli/eval.py",
     "tests/unit/eval/test_spec_schedule.py",
     "tests/unit/config/test_eval_jobs.py",
+    "docs/model-architecture/reviews/T052/remediation_report.md",
+    "docs/model-architecture/reviews/T052/remediation_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -12464,6 +12470,8 @@ implementation_paths = [
     "src/sakuramoon/eval/vae_reconstruction.py",
     "tests/unit/eval/test_artifacts_quality.py",
     "tests/unit/eval/test_vae_reconstruction.py",
+    "docs/model-architecture/reviews/T052/remediation_report.md",
+    "docs/model-architecture/reviews/T052/remediation_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -12520,6 +12528,8 @@ implementation_paths = [
     "src/sakuramoon/eval/artifacts.py",
     "src/sakuramoon/eval/manual_quality.py",
     "tests/unit/eval/test_artifacts_quality.py",
+    "docs/model-architecture/reviews/T052/remediation_report.md",
+    "docs/model-architecture/reviews/T052/remediation_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -12578,6 +12588,8 @@ implementation_paths = [
     "src/sakuramoon/cli/eval.py",
     "tests/unit/eval/test_artifacts_quality.py",
     "tests/unit/config/test_eval_jobs.py",
+    "docs/model-architecture/reviews/T052/remediation_report.md",
+    "docs/model-architecture/reviews/T052/remediation_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -12638,6 +12650,8 @@ implementation_paths = [
     "tests/unit/config/test_schema.py",
     "tests/unit/config/test_load.py",
     "tests/unit/config/test_eval_jobs.py",
+    "docs/model-architecture/reviews/T052/remediation_report.md",
+    "docs/model-architecture/reviews/T052/remediation_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
     "config/base.toml",
     "config/train_s0.toml",

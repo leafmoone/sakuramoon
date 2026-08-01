@@ -10,7 +10,11 @@ from sakuramoon.cli.benchmark import (
     write_comparison_report,
     write_trace_index,
 )
-from sakuramoon.cli.eval import build_evaluation_jobs, write_evaluation_job
+from sakuramoon.cli.eval import (
+    build_evaluation_jobs,
+    load_prompt_manifest,
+    write_evaluation_job,
+)
 from sakuramoon.cli.fault_injection import main as fault_injection_main
 
 __all__ = [
@@ -19,6 +23,7 @@ __all__ = [
     "build_evaluation_jobs",
     "comparison_policy",
     "fault_injection_main",
+    "load_prompt_manifest",
     "run_configured_benchmark",
     "write_benchmark_report",
     "write_benchmark_samples",

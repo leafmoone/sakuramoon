@@ -411,6 +411,7 @@ def test_evaluation_artifact_is_canonical_bound_and_replaceable(
     assert destination.read_bytes() == payload
     assert digest == hashlib.sha256(payload).hexdigest()
     document = json.loads(payload)
+    assert document["artifact_kind"] == "vae_reconstruction"
     assert document["cohort_manifest_sha256"] == manifest.sha256
     assert document["metric_identity"] == {
         "lpips_implementation": "synthetic-test-engine",

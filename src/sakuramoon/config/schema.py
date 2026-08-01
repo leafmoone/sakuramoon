@@ -779,6 +779,15 @@ class FidConfig(StrictModel):
     preprocess_sha256: Sha256
     real_stats_sha256: Sha256
 
+    @model_validator(mode="after")
+    def validate_extractor_identity(self) -> FidConfig:
+        if any(
+            value != value.strip()
+            for value in (self.feature_extractor, self.feature_extractor_version)
+        ):
+            raise ValueError("FID feature extractor identity must not contain padding")
+        return self
+
 
 class IsConfig(StrictModel):
     enabled: bool
@@ -798,6 +807,26 @@ class EvaluationConfig(StrictModel):
     sampling: EvaluationSamplingConfig
     fid: FidConfig
     is_: IsConfig = Field(alias="is")
+
+    @model_validator(mode="after")
+    def validate_evaluation_inputs(self) -> EvaluationConfig:
+        if self.prompt_manifest_path != self.prompt_manifest_path.strip():
+            raise ValueError("evaluation prompt manifest path must not contain padding")
+        if min(
+            self.fid.trend_samples,
+            self.fid.acceptance_samples,
+            self.is_.trend_samples,
+            self.is_.acceptance_samples,
+        ) < 2:
+            raise ValueError("FID/IS evaluation requires at least two samples")
+        if (
+            self.is_.trend_samples % self.is_.splits != 0
+            or self.is_.acceptance_samples % self.is_.splits != 0
+        ):
+            raise ValueError(
+                "IS trend and acceptance samples must be exactly divisible by splits"
+            )
+        return self
 
 
 class RuntimeConfig(StrictModel):
