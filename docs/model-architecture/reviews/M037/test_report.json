@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "M037",
-  "status": "targeted_validation_passed_independent_review_pending",
+  "status": "targeted_validation_and_independent_reviews_passed",
   "hardware": "CPU and one NVIDIA GeForce RTX 5090",
   "cpu_targeted": {
     "command": "uv run --frozen pytest -q tests/unit/objective/test_flow.py tests/unit/config/test_schema.py",
@@ -44,13 +44,14 @@
   "trace_contracts": "passed: 40 in 21.14s",
   "trace_verifier": "passed: requirements=222 source_nodes=222 archive_files=16 production_modules=98 runtime_config_keys=255",
   "diff_check": "passed",
-  "independent_review": "pending:Dense remediation AI/Infra review",
+  "independent_review": "passed:AI/model and Infra/performance",
+  "independent_ai_review_path": "docs/model-architecture/reviews/M037/ai_review.md",
+  "independent_infra_review_path": "docs/model-architecture/reviews/M037/infra_review.md",
   "gpu_used": true,
   "ddp_nccl_used": false,
   "training_long_run_used": false,
   "timing_artifact_created": false,
   "pending": [
-    "independent Dense remediation AI/model and Infra/performance review",
     "T050 real data/Qwen/VAE/DiT/loss/checkpoint engineering smoke",
     "T041 multi-GPU DDP/NCCL and global-mean validation",
     "formal stage canaries and training long runs"

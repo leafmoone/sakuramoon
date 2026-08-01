@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 103
+registry_revision = 104
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -4698,6 +4698,8 @@ implementation_paths = [
     "docs/model-architecture/progress/tasks/M037.md",
     "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M037/test_report.json",
+    "docs/model-architecture/reviews/M037/ai_review.md",
+    "docs/model-architecture/reviews/M037/infra_review.md",
 ]
 evidence_hardware = "1GPU"
 evidence_artifacts = [
@@ -4706,6 +4708,8 @@ evidence_artifacts = [
     "docs/model-architecture/reviews/M035/test_report.json",
     "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M037/test_report.json",
+    "docs/model-architecture/reviews/M037/ai_review.md",
+    "docs/model-architecture/reviews/M037/infra_review.md",
 ]
 ai_review = "docs/model-architecture/reviews/DENSE/ai_review.md"
 infra_review = "docs/model-architecture/reviews/DENSE/infra_review.md"
@@ -4733,6 +4737,8 @@ artifacts = [
     "docs/model-architecture/reviews/M035/test_report.json",
     "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M037/test_report.json",
+    "docs/model-architecture/reviews/M037/ai_review.md",
+    "docs/model-architecture/reviews/M037/infra_review.md",
     "artifacts/objective/**",
 ]
 not_applicable_fields = [
@@ -9128,7 +9134,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-048"
 kind = "open_item"
-status = "implemented"
+status = "verified"
 profile = "objective"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -9155,11 +9161,19 @@ implementation_paths = [
     "docs/model-architecture/progress/tasks/M037.md",
     "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M037/test_report.json",
+    "docs/model-architecture/reviews/M037/ai_review.md",
+    "docs/model-architecture/reviews/M037/infra_review.md",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+evidence_hardware = "1GPU"
+evidence_artifacts = [
+    "docs/model-architecture/reviews/M033/remediation_test_report.json",
+    "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
+    "docs/model-architecture/reviews/M037/test_report.json",
+    "docs/model-architecture/reviews/M037/ai_review.md",
+    "docs/model-architecture/reviews/M037/infra_review.md",
+]
+ai_review = "docs/model-architecture/reviews/DENSE/ai_review.md"
+infra_review = "docs/model-architecture/reviews/DENSE/infra_review.md"
 config_keys = [
     "objective.*",
     "timestep.*",
@@ -9181,6 +9195,8 @@ artifacts = [
     "docs/model-architecture/reviews/M033/remediation_test_report.json",
     "docs/model-architecture/reviews/M037/upstream_algorithm_matrix.md",
     "docs/model-architecture/reviews/M037/test_report.json",
+    "docs/model-architecture/reviews/M037/ai_review.md",
+    "docs/model-architecture/reviews/M037/infra_review.md",
     "artifacts/objective/**",
 ]
 not_applicable_fields = [
