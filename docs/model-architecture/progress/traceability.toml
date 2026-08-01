@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 108
+registry_revision = 109
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -10357,6 +10357,8 @@ implementation_paths = [
     "tests/unit/telemetry/test_profiler.py",
     "docs/model-architecture/progress/tasks/T053.md",
     "docs/model-architecture/reviews/T053/test_report.json",
+    "docs/model-architecture/reviews/T053/remediation_report.md",
+    "docs/model-architecture/reviews/T053/remediation_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
@@ -10425,6 +10427,8 @@ implementation_paths = [
     "tests/gpu/telemetry/test_benchmark_harness.py",
     "docs/model-architecture/progress/tasks/T053.md",
     "docs/model-architecture/reviews/T053/test_report.json",
+    "docs/model-architecture/reviews/T053/remediation_report.md",
+    "docs/model-architecture/reviews/T053/remediation_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""
