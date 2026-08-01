@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
+import stat
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -38,10 +40,14 @@ def _validate_retry_payload(payload: object) -> tuple[int, dict[str, int | float
     }:
         raise ValueError("retry record schema is invalid")
     successful_update = mapping["successful_update"]
-    if mapping["schema_version"] != 1 or type(successful_update) is not int:
+    if (
+        mapping["schema_version"] != 1
+        or type(successful_update) is not int
+        or successful_update <= 0
+    ):
         raise ValueError("retry record identity is invalid")
     error_type = mapping["error_type"]
-    if not isinstance(error_type, str) or not error_type:
+    if not isinstance(error_type, str) or not error_type.isidentifier():
         raise ValueError("retry error type is invalid")
     metrics_value = mapping["metrics"]
     if not isinstance(metrics_value, dict):
@@ -49,9 +55,15 @@ def _validate_retry_payload(payload: object) -> tuple[int, dict[str, int | float
     metrics = cast(dict[object, object], metrics_value)
     numeric: dict[str, int | float] = {}
     for key, value in metrics.items():
-        if not isinstance(key, str) or type(value) not in {int, float}:
+        if (
+            not isinstance(key, str)
+            or type(value) not in {int, float}
+            or (type(value) is float and not math.isfinite(value))
+        ):
             raise ValueError("retry metric field is invalid")
         numeric[key] = cast(int | float, value)
+    if numeric.get("successful_update") != successful_update:
+        raise ValueError("retry metric identity is invalid")
     return successful_update, numeric
 
 
@@ -62,8 +74,11 @@ def replay_retry_queue(run: RemoteRun, path: Path) -> int:
         raise ValueError("retry queue must be a regular file")
     if not path.exists():
         return 0
-    if not path.is_file():
+    metadata = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode):
         raise ValueError("retry queue must be a regular file")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise PermissionError("retry queue must use mode 0600")
     records = [
         _validate_retry_payload(cast(object, json.loads(line)))
         for line in path.read_text(encoding="utf-8").splitlines()

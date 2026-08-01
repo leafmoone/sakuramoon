@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 105
+registry_revision = 106
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -11957,8 +11957,10 @@ implementation_commit_ref = "task:T051"
 implementation_paths = [
     "src/sakuramoon/telemetry/__init__.py",
     "src/sakuramoon/telemetry/metrics.py",
+    "src/sakuramoon/telemetry/observer.py",
     "src/sakuramoon/telemetry/wandb_sink.py",
     "tests/unit/telemetry/test_metrics.py",
+    "tests/unit/telemetry/test_observer.py",
     "tests/unit/telemetry/test_wandb_sink.py",
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/reviews/T051/test_report.json",
@@ -12015,8 +12017,10 @@ superseded_by = ""
 implementation_commit_ref = "task:T051"
 implementation_paths = [
     "src/sakuramoon/telemetry/metrics.py",
+    "src/sakuramoon/telemetry/observer.py",
     "src/sakuramoon/objective/flow.py",
     "tests/unit/telemetry/test_metrics.py",
+    "tests/unit/telemetry/test_observer.py",
     "tests/unit/objective/test_flow.py",
     "docs/model-architecture/progress/traceability.toml",
     "docs/model-architecture/reviews/T051/test_report.json",
@@ -12083,8 +12087,10 @@ superseded_by = ""
 implementation_commit_ref = "task:T051"
 implementation_paths = [
     "src/sakuramoon/telemetry/metrics.py",
+    "src/sakuramoon/telemetry/observer.py",
     "src/sakuramoon/telemetry/timers.py",
     "src/sakuramoon/telemetry/nvtx.py",
+    "tests/unit/telemetry/test_observer.py",
     "tests/unit/telemetry/test_timers_nvtx.py",
     "tests/gpu/telemetry/test_cuda_timer.py",
     "docs/model-architecture/progress/traceability.toml",

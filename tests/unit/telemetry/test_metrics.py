@@ -7,6 +7,8 @@ import pytest
 
 from sakuramoon.telemetry.metrics import (
     DROPOUT_KEYS,
+    TIMING_PHASES,
+    TRAINING_METRIC_SCHEMA_VERSION,
     DurableJsonlSink,
     MetricsPublisher,
     TrainingMetric,
@@ -20,6 +22,8 @@ def _metric(**changes: object) -> TrainingMetric:
         "total_loss": 1.0,
         "high_noise_loss": 1.2,
         "low_noise_loss": 0.8,
+        "high_noise_sample_count": 3,
+        "low_noise_sample_count": 1,
         "pre_clip_grad_norm": 2.0,
         "post_clip_grad_norm": 1.0,
         "clip_fraction": 0.5,
@@ -39,7 +43,11 @@ def _metric(**changes: object) -> TrainingMetric:
         "ready_queue_wait_seconds": 0.01,
         "nonfinite_count": 0,
         "dropout_hits": dict.fromkeys(DROPOUT_KEYS, 0),
-        "phase_seconds": {"data": 0.1, "dit_forward": 0.2},
+        "phase_seconds": {
+            **dict.fromkeys(TIMING_PHASES, 0.0),
+            "data": 0.1,
+            "dit_forward": 0.2,
+        },
     }
     values.update(changes)
     return TrainingMetric(**values)  # pyright: ignore[reportArgumentType]
@@ -51,8 +59,12 @@ def _metric(**changes: object) -> TrainingMetric:
         ({"total_loss": float("nan")}, "finite"),
         ({"clip_fraction": 1.1}, "exceed"),
         ({"dropout_hits": {"general": 1}}, "every fixed dropout"),
-        ({"phase_seconds": {"unknown": 0.1}}, "unknown timing"),
+        ({"phase_seconds": {"unknown": 0.1}}, "every fixed timing"),
         ({"effective_batch": True}, "integer"),
+        ({"high_noise_sample_count": 4}, "must equal effective batch"),
+        ({"gpu_memory_reserved_bytes": 512}, "reserved GPU memory"),
+        ({"post_clip_grad_norm": 3.0}, "post-clip gradient norm"),
+        ({"timestep_min": -0.1}, "below its minimum"),
     ],
 )
 def test_metric_schema_rejects_invalid_or_incomplete_records(
@@ -65,12 +77,19 @@ def test_metric_schema_rejects_invalid_or_incomplete_records(
 def test_metric_payload_is_fixed_numeric_and_contains_detailed_counts() -> None:
     metric = _metric(
         dropout_hits={key: index % 2 for index, key in enumerate(DROPOUT_KEYS)},
-        phase_seconds={"cache": 0.1, "qwen": 0.2, "zero_grad": 0.01},
+        phase_seconds={
+            **dict.fromkeys(TIMING_PHASES, 0.0),
+            "cache": 0.1,
+            "qwen": 0.2,
+            "zero_grad": 0.01,
+        },
     )
 
     local = metric.as_json_mapping()
     remote = metric.as_wandb_mapping()
 
+    assert local["schema_version"] == TRAINING_METRIC_SCHEMA_VERSION
+    assert local["high_noise_sample_count"] == 3
     assert set(local["dropout_hits"]) == set(DROPOUT_KEYS)  # type: ignore[arg-type]
     assert remote["phase_seconds/cache"] == 0.1
     assert remote["dropout_hits/artist"] in {0, 1}
@@ -112,3 +131,12 @@ def test_jsonl_sink_rejects_symlink_and_fsyncs_tail_on_close(tmp_path: Path) -> 
     with DurableJsonlSink(path, fsync_every_records=2) as sink:
         sink.write({"successful_update": 1})
     assert json.loads(path.read_text()) == {"successful_update": 1}
+
+
+def test_jsonl_sink_rejects_insecure_existing_file(tmp_path: Path) -> None:
+    path = tmp_path / "metrics.jsonl"
+    path.write_text("", encoding="utf-8")
+    path.chmod(0o644)
+
+    with pytest.raises(PermissionError, match="0600"):
+        DurableJsonlSink(path, fsync_every_records=1)

@@ -4,11 +4,18 @@ from sakuramoon.telemetry.metrics import (
     CORE_TIMING_PHASES,
     DETAILED_TIMING_PHASES,
     DROPOUT_KEYS,
+    TIMING_PHASES,
+    TRAINING_METRIC_SCHEMA_VERSION,
     DurableJsonlSink,
     MetricsPublisher,
     TrainingMetric,
 )
 from sakuramoon.telemetry.nvtx import nvtx_range
+from sakuramoon.telemetry.observer import (
+    AsyncTrainingMetricObserver,
+    UpdateMetricContext,
+    build_training_metric,
+)
 from sakuramoon.telemetry.profiler import (
     BenchmarkIdentity,
     BenchmarkObservation,
@@ -35,6 +42,9 @@ __all__ = [
     "CORE_TIMING_PHASES",
     "DETAILED_TIMING_PHASES",
     "DROPOUT_KEYS",
+    "TIMING_PHASES",
+    "TRAINING_METRIC_SCHEMA_VERSION",
+    "AsyncTrainingMetricObserver",
     "AsyncWandbSink",
     "BenchmarkIdentity",
     "BenchmarkObservation",
@@ -51,6 +61,8 @@ __all__ = [
     "StepPayload",
     "TraceMetrics",
     "TrainingMetric",
+    "UpdateMetricContext",
+    "build_training_metric",
     "canonical_workload_artifact_bytes",
     "nvtx_range",
     "replay_retry_queue",

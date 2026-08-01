@@ -1,6 +1,21 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "T051",
+  "post_t050_adapter_cpu": {
+    "command": "uv run --frozen pytest -q tests/unit/telemetry/test_metrics.py tests/unit/telemetry/test_timers_nvtx.py tests/unit/telemetry/test_wandb_sink.py tests/unit/telemetry/test_observer.py --basetemp cache/T051-root-permission-focused-20260801",
+    "passed": 34,
+    "failed": 0,
+    "warnings": 17,
+    "duration_seconds": 8.94,
+    "coverage": "fixed metric schema v2, exact T050 observation aggregation, clip norm relation, negative timestep rejection, empty noise-bucket counts, bounded async event-query publication, accepted-queue draining after first failure, local-first durability, private retry-file validation before parsing, retry redaction/replay, CPU timing, and balanced NVTX"
+  },
+  "telemetry_cpu_regression": {
+    "command": "uv run --frozen pytest -q tests/unit/telemetry --basetemp cache/T051-root-permission-remediation-20260801",
+    "passed": 58,
+    "failed": 0,
+    "warnings": 17,
+    "duration_seconds": 14.45
+  },
   "targeted_cpu": {
     "command": "uv run --frozen pytest -q tests/unit/telemetry",
     "passed": 14,
@@ -23,14 +38,32 @@
     "duration_seconds": 32.72
   },
   "ruff": "passed",
-  "strict_pyright": "passed",
+  "strict_pyright": "passed: 0 errors, 0 warnings, 0 informations",
+  "diff_check": "passed",
   "traceability": {
     "passed": true,
-    "requirements": 221,
-    "production_modules": 77,
-    "runtime_config_keys": 234
+    "requirements": 237,
+    "production_modules": 103,
+    "runtime_config_keys": 271
+  },
+  "traceability_unit": {
+    "command": "/root/shared-nvme/sakuramoon/.venv/bin/python -m pytest -q tests/unit/docs/test_verify_traceability.py --basetemp cache/T051-isolated-trace-unit-20260801 (HEAD b50915f plus indexed T051 isolation)",
+    "passed": 40,
+    "failed": 0,
+    "duration_seconds": 73.89
   },
   "timing_overhead_percent": 0.8057407532119587,
+  "gpu_rerun": "not_run:cpu_only_scope; prior RTX 5090 CUDA-event and overhead evidence retained",
   "four_gpu_overhead": "blocked:four_gpu_scope",
-  "independent_package_review": "pending:continue_without_agents"
+  "production_assembly": "pending:C002 must bind durable paths/cadence, W&B lifecycle, and explicit metric context provider",
+  "trace_delta": {
+    "status": "passed:registry_revision_106; canonical unit 40 passed; live verifier ok",
+    "stable_requirement_ids": ["OBS-002", "OBS-003", "OBS-004"],
+    "add_implementation_paths": [
+      "src/sakuramoon/telemetry/observer.py",
+      "tests/unit/telemetry/test_observer.py"
+    ]
+  },
+  "post_commit_remediation_review": "passed:independent reviewer requirements applied; root isolated focused/full/static gates passed",
+  "independent_package_review": "pending:training_utilities_package_review"
 }

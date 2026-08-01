@@ -43,6 +43,7 @@ DETAILED_TIMING_PHASES = (
     "sample",
 )
 TIMING_PHASES = frozenset((*CORE_TIMING_PHASES, *DETAILED_TIMING_PHASES))
+TRAINING_METRIC_SCHEMA_VERSION = 2
 DROPOUT_KEYS = (
     "all_condition",
     "nsfw",
@@ -81,6 +82,8 @@ class TrainingMetric:
     total_loss: float
     high_noise_loss: float
     low_noise_loss: float
+    high_noise_sample_count: int
+    low_noise_sample_count: int
     pre_clip_grad_norm: float
     post_clip_grad_norm: float
     clip_fraction: float
@@ -106,7 +109,9 @@ class TrainingMetric:
         _nonnegative_int("successful_update", self.successful_update, positive=True)
         _nonnegative_int("recorded_at_unix_ns", self.recorded_at_unix_ns, positive=True)
         for name in ("total_loss", "high_noise_loss", "low_noise_loss"):
-            _finite_float(name, getattr(self, name))
+            _finite_float(name, getattr(self, name), minimum=0.0)
+        for name in ("high_noise_sample_count", "low_noise_sample_count"):
+            _nonnegative_int(name, getattr(self, name))
         for name in (
             "pre_clip_grad_norm",
             "post_clip_grad_norm",
@@ -122,6 +127,8 @@ class TrainingMetric:
         _finite_float("clip_fraction", self.clip_fraction, minimum=0.0)
         if self.clip_fraction > 1.0:
             raise ValueError("clip_fraction must not exceed one")
+        if self.post_clip_grad_norm > self.pre_clip_grad_norm:
+            raise ValueError("post-clip gradient norm must not exceed pre-clip norm")
         if not (
             self.timestep_min <= self.timestep_mean <= self.timestep_max <= 1.0
         ):
@@ -139,19 +146,35 @@ class TrainingMetric:
             _nonnegative_int(
                 name,
                 getattr(self, name),
-                positive=name in {"effective_batch", "image_tokens", "text_tokens"},
+                positive=name
+                in {"effective_batch", "image_tokens", "text_tokens", "dit_flops"},
             )
+        if (
+            self.high_noise_sample_count + self.low_noise_sample_count
+            != self.effective_batch
+        ):
+            raise ValueError("noise bucket sample counts must equal effective batch")
+        if self.high_noise_sample_count == 0 and self.high_noise_loss != 0.0:
+            raise ValueError("empty high-noise bucket loss must be zero")
+        if self.low_noise_sample_count == 0 and self.low_noise_loss != 0.0:
+            raise ValueError("empty low-noise bucket loss must be zero")
+        if self.gpu_memory_reserved_bytes < self.gpu_memory_allocated_bytes:
+            raise ValueError("reserved GPU memory must cover allocated GPU memory")
         if set(self.dropout_hits) != set(DROPOUT_KEYS):
             raise ValueError("dropout_hits must contain every fixed dropout key")
         for key, value in self.dropout_hits.items():
             _nonnegative_int(f"dropout_hits.{key}", value)
             if value > self.effective_batch:
                 raise ValueError("dropout hit count exceeds effective batch")
-        if not self.phase_seconds:
-            raise ValueError("phase_seconds must not be empty")
-        unknown_phases = sorted(set(self.phase_seconds) - TIMING_PHASES)
-        if unknown_phases:
-            raise ValueError(f"unknown timing phases: {unknown_phases}")
+        required_phases: set[str] = set(TIMING_PHASES)
+        actual_phases = set(self.phase_seconds)
+        if actual_phases != required_phases:
+            missing = sorted(required_phases - actual_phases)
+            unknown = sorted(actual_phases - required_phases)
+            raise ValueError(
+                "phase_seconds must contain every fixed timing phase; "
+                f"missing={missing}, unknown={unknown}"
+            )
         for phase, duration in self.phase_seconds.items():
             _finite_float(f"phase_seconds.{phase}", duration, minimum=0.0)
         object.__setattr__(
@@ -163,12 +186,14 @@ class TrainingMetric:
 
     def as_json_mapping(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": TRAINING_METRIC_SCHEMA_VERSION,
             "successful_update": self.successful_update,
             "recorded_at_unix_ns": self.recorded_at_unix_ns,
             "total_loss": self.total_loss,
             "high_noise_loss": self.high_noise_loss,
             "low_noise_loss": self.low_noise_loss,
+            "high_noise_sample_count": self.high_noise_sample_count,
+            "low_noise_sample_count": self.low_noise_sample_count,
             "pre_clip_grad_norm": self.pre_clip_grad_norm,
             "post_clip_grad_norm": self.post_clip_grad_norm,
             "clip_fraction": self.clip_fraction,
@@ -222,6 +247,9 @@ class DurableJsonlSink:
         if not stat.S_ISREG(metadata.st_mode):
             os.close(self._fd)
             raise ValueError("JSONL destination must be a regular file")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            os.close(self._fd)
+            raise PermissionError("JSONL destination must use mode 0600")
         if not existed:
             directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -295,6 +323,7 @@ __all__ = [
     "DETAILED_TIMING_PHASES",
     "DROPOUT_KEYS",
     "TIMING_PHASES",
+    "TRAINING_METRIC_SCHEMA_VERSION",
     "DurableJsonlSink",
     "MetricsPublisher",
     "TrainingMetric",
