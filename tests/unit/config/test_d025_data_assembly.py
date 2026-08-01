@@ -7,6 +7,7 @@ import json
 import multiprocessing as mp
 import multiprocessing.reduction
 import os
+import pickle
 import tarfile
 import threading
 from collections.abc import Iterator
@@ -54,7 +55,7 @@ class _Tokenizer:
     def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
         assert not add_special_tokens
         if text == SYSTEM_PREFIX:
-            return list(range(100, 134))
+            return [os.getpid(), *range(101, 134)]
         if text == MAIN_SUFFIX:
             return list(range(200, 205))
         return [] if not text else [os.getpid()]
@@ -500,6 +501,58 @@ def test_factory_hard_fails_manifest_drift_unpickleable_fields_and_plain_streams
         require_accepted_production_batch_stream(iter(()))
 
 
+def test_factory_rejects_direct_construction_and_object_new_forgery(
+    valid_payload: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    ungoverned_payload = copy.deepcopy(valid_payload)
+    missing_manifest = tmp_path / "missing-validation.jsonl"
+    ungoverned_payload["data"]["validation"]["manifest_path"] = str(
+        missing_manifest
+    )
+    ungoverned_payload["data"]["validation"]["manifest_sha256"] = "f" * 64
+    ungoverned_config = RuntimeConfig.model_validate(ungoverned_payload)
+    assert not missing_manifest.exists()
+    with pytest.raises(ProductionDataError, match="issued by from_config"):
+        ProductionPipelineFactory(
+            config=ungoverned_config,
+            validation_ids=frozenset(range(9_000_001, 9_002_001)),
+            tokenizer=_Tokenizer(),
+            framing=FramingContract(34, 5, 0),
+            rejection_observer=_observe_rejection,
+            pass_index=0,
+            factory_identity="f" * 64,
+        )
+
+    manifest, _bodies = _dataset()
+    factory = _production_factory(valid_payload, tmp_path, manifest)
+    client = _Client(
+        worker_count=2,
+        manifest_sha256=factory.config.data.manifest.sha256,
+    )
+
+    forged = object.__new__(ProductionPipelineFactory)
+    for field in (
+        "config",
+        "validation_ids",
+        "tokenizer",
+        "framing",
+        "rejection_observer",
+        "pass_index",
+        "factory_identity",
+        "_owner_pid",
+    ):
+        object.__setattr__(forged, field, getattr(factory, field))
+    with pytest.raises(ProductionDataError, match="issued by from_config"):
+        forged.batches(client)
+
+    deserialized = pickle.loads(
+        multiprocessing.reduction.ForkingPickler.dumps(factory)
+    )
+    with pytest.raises(ProductionDataError, match="issued by from_config"):
+        deserialized.batches(client)
+
+
 def test_accepted_stream_is_factory_issued_process_local_and_not_pickleable(
     valid_payload: dict[str, Any],
     tmp_path: Path,
@@ -573,13 +626,12 @@ def test_real_service_factory_runs_two_spawned_workers_and_acks_each_lease(
         stream = factory.batches(client)
         batches = tuple(stream)
 
-        worker_pids: set[int] = set()
-        for batch in batches:
-            token_ids = cast(
-                list[int],
-                batch.input_ids.flatten().tolist(),  # pyright: ignore[reportUnknownMemberType]
+        worker_pids = {
+            int(
+                batch.input_ids[0, 0].item()  # pyright: ignore[reportUnknownMemberType]
             )
-            worker_pids.update(token for token in token_ids if token > 1000)
+            for batch in batches
+        }
         assert len(worker_pids) == 2
         assert os.getpid() not in worker_pids
         assert sorted(int(batch.sample_ids[0]) for batch in batches) == [

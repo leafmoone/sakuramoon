@@ -355,7 +355,7 @@ class _PreleasedClient:
         self._delegate.acknowledge(descriptor)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
 class ProductionPipelineFactory:
     config: RuntimeConfig
     validation_ids: frozenset[int]
@@ -364,8 +364,15 @@ class ProductionPipelineFactory:
     rejection_observer: RejectionObserver
     pass_index: int
     factory_identity: str
+    _owner_pid: int
 
-    def __post_init__(self) -> None:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise ProductionDataError(
+            "production pipeline factories must be issued by from_config"
+        )
+
+    def _validate_fields(self) -> None:
         if (
             not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
                 self.config, RuntimeConfig
@@ -388,6 +395,22 @@ class ProductionPipelineFactory:
             raise ProductionDataError("production pipeline factory fields are invalid")
         _require_spawn_serializable(self, "production pipeline factory")
 
+    def _require_governed_issuance(self) -> None:
+        try:
+            factory_identity = self.factory_identity
+            owner_pid = self._owner_pid
+        except AttributeError as error:
+            raise ProductionDataError(
+                "production pipeline factory was not issued by from_config"
+            ) from error
+        if (
+            os.getpid() != owner_pid
+            or _GOVERNED_FACTORIES.get(factory_identity) is not self
+        ):
+            raise ProductionDataError(
+                "production pipeline factory was not issued by from_config in this process"
+            )
+
     @classmethod
     def from_config(
         cls,
@@ -399,12 +422,17 @@ class ProductionPipelineFactory:
         rejection_observer: Callable[[str], None],
         pass_index: int,
     ) -> ProductionPipelineFactory:
-        if (
-            not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
-                repository_root, Path
+        if cls is not ProductionPipelineFactory:
+            raise ProductionDataError(
+                "production pipeline factories must use the governed concrete class"
             )
-            or not repository_root.is_absolute()
+        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            config, RuntimeConfig
         ):
+            raise ProductionDataError("resolved RuntimeConfig is required")
+        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            repository_root, Path
+        ) or not repository_root.is_absolute():
             raise ProductionDataError("repository_root must be an absolute path")
         configured_path = Path(config.data.validation.manifest_path)
         manifest_path = (
@@ -417,23 +445,32 @@ class ProductionPipelineFactory:
             expected_sha256=config.data.validation.manifest_sha256,
             expected_count=config.data.validation.sample_count,
         )
-        return cls(
-            config=config,
-            validation_ids=validation_ids,
-            tokenizer=tokenizer,
-            framing=framing,
-            rejection_observer=cast(RejectionObserver, rejection_observer),
-            pass_index=pass_index,
-            factory_identity=secrets.token_hex(32),
+        factory = object.__new__(cls)
+        object.__setattr__(factory, "config", config)
+        object.__setattr__(factory, "validation_ids", validation_ids)
+        object.__setattr__(factory, "tokenizer", tokenizer)
+        object.__setattr__(factory, "framing", framing)
+        object.__setattr__(
+            factory,
+            "rejection_observer",
+            cast(RejectionObserver, rejection_observer),
         )
+        object.__setattr__(factory, "pass_index", pass_index)
+        object.__setattr__(factory, "factory_identity", secrets.token_hex(32))
+        object.__setattr__(factory, "_owner_pid", os.getpid())
+        factory._validate_fields()
+        _GOVERNED_FACTORIES[factory.factory_identity] = factory
+        return factory
 
     @property
     def loader(self) -> ConfiguredDataLoader:
+        self._require_governed_issuance()
         return ConfiguredDataLoader.from_config(self.config)
 
     def pipeline_for_lease(
         self, descriptor: ShardLeaseDescriptor
     ) -> WebDatasetPipeline:
+        self._require_governed_issuance()
         dropout = self.config.caption.dropout
         probabilities = CaptionDropoutProbabilities(
             nsfw=dropout.nsfw,
@@ -477,6 +514,7 @@ class ProductionPipelineFactory:
     def batches(self, client: DataLeaseClient) -> AcceptedProductionBatchStream:
         """Consume service leases using only the five resolved loader controls."""
 
+        self._require_governed_issuance()
         loader = self.loader
         loader.require_identity(client)
         if client.identity.manifest_sha256 != self.config.data.manifest.sha256:
@@ -502,6 +540,11 @@ class ProductionPipelineFactory:
             ),
             identity,
         )
+
+
+_GOVERNED_FACTORIES: weakref.WeakValueDictionary[
+    str, ProductionPipelineFactory
+] = weakref.WeakValueDictionary()
 
 
 __all__ = [
