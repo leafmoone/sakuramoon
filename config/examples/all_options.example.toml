@@ -69,6 +69,10 @@ max_retries = "BENCHMARK_REQUIRED" # integer, 0 <= value <= 10
 retry_backoff_seconds = "BENCHMARK_REQUIRED" # TOML float, 0 <= value <= 60
 stream_chunk_bytes = "BENCHMARK_REQUIRED" # integer, 65536 <= value <= 16777216
 
+[data.loader]
+pin_memory = true # explicit boolean; no runtime default
+drop_last = true # explicit boolean; no runtime default
+
 [data.validation]
 manifest_path = "REQUIRED_VALIDATION_MANIFEST_PATH"
 manifest_sha256 = "REQUIRED_IMMUTABLE_SHA256"

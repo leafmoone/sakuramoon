@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "task_id": "D025",
+  "status": "cpu_implementation_passed_independent_review_pending",
+  "hardware": "CPU",
+  "targeted_production_and_config_passed": 8,
+  "adjacent_data_and_config_passed": 349,
+  "adjacent_data_fault_passed": 6,
+  "adjacent_data_fault_environmental_failure": {
+    "test": "test_real_sigkill_leaves_partial_and_next_process_restarts_from_byte_zero",
+    "attempts": 2,
+    "failure": "existing child process did not reach its fixed five-second pre-injection readiness barrier under concurrent load",
+    "d025_code_reached": false
+  },
+  "ruff": "passed",
+  "pyright": "passed: 0 errors, 0 warnings",
+  "traceability": "passed: requirements=235, source_nodes=235, archive_files=16, production_modules=106, runtime_config_keys=262",
+  "production_import_excludes_service_owned_modules": "passed",
+  "real_shard_gpu": "not rerun; existing D021 RTX 5090 evidence used an equivalent test-only parser, and that test now imports the governed production parser",
+  "pending_or_blocked": [
+    "independent D025 DATA remediation review",
+    "immutable production manifest and approximately 11M-ID scan",
+    "production caption-availability mapping scan",
+    "cold-cache network/NVMe throughput and ready-wait acceptance",
+    "long run, DDP/NCCL, multi-GPU, and formal stage evidence"
+  ]
+}

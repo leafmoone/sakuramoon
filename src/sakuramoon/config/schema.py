@@ -173,6 +173,11 @@ class DataTransportConfig(StrictModel):
     stream_chunk_bytes: Annotated[int, Field(ge=65536, le=16777216)]
 
 
+class DataLoaderConfig(StrictModel):
+    pin_memory: bool
+    drop_last: bool
+
+
 class DataValidationConfig(StrictModel):
     manifest_path: Annotated[str, StringConstraints(min_length=1)]
     manifest_sha256: Sha256
@@ -204,6 +209,7 @@ class DataConfig(StrictModel):
     cache: DataCacheConfig
     service: DataServiceConfig
     transport: DataTransportConfig
+    loader: DataLoaderConfig
     validation: DataValidationConfig
     image: DataImageConfig
     buckets: DataBucketsConfig

@@ -17,6 +17,7 @@ from typing import BinaryIO, cast
 from sakuramoon.data.metadata import MetadataRecord, scan_duplicate_ids
 
 VALIDATION_SAMPLE_COUNT = 2000
+_MAX_VALIDATION_MANIFEST_BYTES = 4 * 1024 * 1024
 AspectBucketResolver = Callable[[int, int], str]
 
 
@@ -30,6 +31,10 @@ class ValidationPublicationError(RuntimeError):
 
 class ValidationBundleExistsError(ValidationPublicationError):
     """The requested validation bundle path already exists."""
+
+
+class ValidationManifestError(ValidationSelectionError):
+    """A configured validation manifest is not the canonical locked selection."""
 
 
 @dataclass(frozen=True, order=True)
@@ -254,6 +259,104 @@ def validation_manifest_bytes(selection: ValidationSelection) -> bytes:
         }
         lines.append(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     return ("\n".join(lines) + "\n").encode()
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    document: dict[str, object] = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValidationManifestError(
+                "validation manifest JSON objects cannot contain duplicate keys"
+            )
+        document[key] = value
+    return document
+
+
+def load_validation_manifest_ids(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_count: int,
+) -> frozenset[int]:
+    """Load the exact canonical 2,000-ID exclusion set from governed JSONL."""
+
+    if (
+        not isinstance(path, Path)  # pyright: ignore[reportUnnecessaryIsInstance]
+        or path.is_symlink()
+        or not path.is_file()
+        or type(expected_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+        or type(expected_count) is not int
+        or expected_count != VALIDATION_SAMPLE_COUNT
+    ):
+        raise ValidationManifestError("validation manifest settings are invalid")
+    try:
+        if path.stat().st_size > _MAX_VALIDATION_MANIFEST_BYTES:
+            raise ValidationManifestError("validation manifest exceeds its byte bound")
+        payload = path.read_bytes()
+    except OSError:
+        raise ValidationManifestError("validation manifest could not be read") from None
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise ValidationManifestError(
+            "validation manifest SHA-256 does not match config"
+        )
+    if not payload or not payload.endswith(b"\n"):
+        raise ValidationManifestError(
+            "validation manifest must be non-empty canonical JSONL"
+        )
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValidationManifestError("validation manifest is not UTF-8") from None
+    lines = text.splitlines()
+    if len(lines) != expected_count or any(not line for line in lines):
+        raise ValidationManifestError(
+            "validation manifest must contain exactly 2,000 non-empty rows"
+        )
+
+    ids: list[int] = []
+    required = {"aspect_bucket", "caption_available", "id", "release"}
+    for line in lines:
+        try:
+            value = json.loads(line, object_pairs_hook=_unique_json_object)
+        except (json.JSONDecodeError, ValidationManifestError):
+            raise ValidationManifestError(
+                "validation manifest contains invalid JSON"
+            ) from None
+        if not isinstance(value, dict):
+            raise ValidationManifestError(
+                "validation manifest rows must contain exactly the governed fields"
+            )
+        document = cast(dict[str, object], value)
+        if set(document) != required:
+            raise ValidationManifestError(
+                "validation manifest rows must contain exactly the governed fields"
+            )
+        sample_id = document["id"]
+        release = document["release"]
+        aspect_bucket = document["aspect_bucket"]
+        caption_available = document["caption_available"]
+        if (
+            type(sample_id) is not int
+            or sample_id <= 0
+            or type(release) is not str
+            or not release
+            or release != release.strip()
+            or type(aspect_bucket) is not str
+            or not aspect_bucket
+            or aspect_bucket != aspect_bucket.strip()
+            or type(caption_available) is not bool
+        ):
+            raise ValidationManifestError("validation manifest row values are invalid")
+        canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        if line != canonical:
+            raise ValidationManifestError("validation manifest JSONL is not canonical")
+        ids.append(sample_id)
+    if ids != sorted(ids) or len(ids) != len(set(ids)):
+        raise ValidationManifestError(
+            "validation manifest IDs must be sorted and globally unique"
+        )
+    return frozenset(ids)
 
 
 class _HashingWriter:

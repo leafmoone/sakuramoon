@@ -6,7 +6,6 @@ import os
 import tarfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
 
 import pytest
 import torch
@@ -19,12 +18,16 @@ from sakuramoon.data.caption import (
     CaptionFields,
     NlCandidates,
     NlDropoutProbabilities,
-    Tag,
 )
 from sakuramoon.data.collate import collate_samples
 from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.metadata import MetadataFieldMapping
 from sakuramoon.data.pipeline import WebDatasetPipeline
+from sakuramoon.data.production import (
+    PRODUCTION_METADATA_FIELDS,
+    adapt_modelscope_metadata,
+    parse_modelscope_caption_fields,
+)
 from sakuramoon.data.serialize import FramingContract
 from sakuramoon.encoders.mage_vae import load_local_mage_vae
 from sakuramoon.encoders.qwen import load_local_qwen
@@ -55,79 +58,6 @@ def _identity_metadata(
     raw: Mapping[str, object],
 ) -> Mapping[str, object]:
     return raw
-
-
-def _nested_mapping(raw: Mapping[str, object], key: str) -> Mapping[str, object]:
-    value = raw.get(key)
-    if not isinstance(value, Mapping):
-        raise TypeError(f"real metadata {key} must be an object")
-    mapping = cast(Mapping[object, object], value)
-    if not all(isinstance(item, str) for item in mapping):
-        raise AssertionError(f"real metadata {key} keys must be strings")
-    return cast(Mapping[str, object], mapping)
-
-
-def _real_metadata_adapter(
-    raw: Mapping[str, object],
-) -> Mapping[str, object]:
-    image = _nested_mapping(raw, "image")
-    captions = _nested_mapping(raw, "captions")
-    multicaptions = _nested_mapping(raw, "multicaptions")
-    caption_available = any(
-        isinstance(value, str) and bool(value.strip())
-        for value in (*captions.values(), *multicaptions.values())
-    )
-    return {
-        "id": raw.get("id"),
-        "width": image.get("width"),
-        "height": image.get("height"),
-        "caption_available": caption_available,
-    }
-
-
-def _real_tags(raw: Mapping[str, object], key: str) -> tuple[Tag, ...]:
-    tags = _nested_mapping(raw, "tags").get(key)
-    if not isinstance(tags, list):
-        raise TypeError(f"real metadata tags.{key} must be a list")
-    tag_items = cast(list[object], tags)
-    if not all(isinstance(item, str) for item in tag_items):
-        raise TypeError(f"real metadata tags.{key} must be strings")
-    return tuple(Tag(text=item, canonical=item) for item in cast(list[str], tag_items))
-
-
-def _real_caption_fields(raw: Mapping[str, object]) -> CaptionFields:
-    nsfw = raw.get("nsfw")
-    if not isinstance(nsfw, str):
-        raise TypeError("real metadata nsfw must be a string")
-    captions = _nested_mapping(raw, "captions")
-    multicaptions = _nested_mapping(raw, "multicaptions")
-    dropout = _nested_mapping(raw, "dropout")
-    candidate_tags = dropout.get("candidate_tags")
-    if not isinstance(candidate_tags, list):
-        raise TypeError("real metadata candidate tags must be a list")
-    candidate_items = cast(list[object], candidate_tags)
-    if not all(isinstance(item, str) for item in candidate_items):
-        raise TypeError("real metadata candidate tags must be strings")
-
-    def optional_text(mapping: Mapping[str, object], key: str) -> str | None:
-        value = mapping.get(key)
-        return value if isinstance(value, str) and value.strip() else None
-
-    return CaptionFields(
-        nsfw=(Tag(nsfw, nsfw),),
-        character=_real_tags(raw, "character"),
-        copyright=_real_tags(raw, "copyright"),
-        general=_real_tags(raw, "general"),
-        artists=_real_tags(raw, "artist"),
-        candidate_tags=frozenset(cast(list[str], candidate_items)),
-        nl=NlCandidates(
-            None,
-            None,
-            optional_text(multicaptions, "vibes"),
-            optional_text(captions, "nl2"),
-            optional_text(captions, "nl3"),
-        ),
-    )
 
 
 def _write_shard(path: Path) -> None:
@@ -244,20 +174,15 @@ def test_real_modelscope_shard_pipeline_qwen_and_mage() -> None:
                 samples=1,
             ),
         ),
-        metadata_adapter=_real_metadata_adapter,
-        metadata_fields=MetadataFieldMapping(
-            id_field="id",
-            width_field="width",
-            height_field="height",
-            caption_available_field="caption_available",
-        ),
+        metadata_adapter=adapt_modelscope_metadata,
+        metadata_fields=PRODUCTION_METADATA_FIELDS,
         validation_ids=frozenset(),
         buckets=buckets,
         min_crop_retention=0.8,
         probabilities=probabilities,
         tokenizer=qwen.tokenizer,
         framing=FramingContract(34, 5, 248044),
-        caption_fields_parser=_real_caption_fields,
+        caption_fields_parser=parse_modelscope_caption_fields,
         rejection_observer=rejections.append,
         base_seed=7,
         stage="S0",

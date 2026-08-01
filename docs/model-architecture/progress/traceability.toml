@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 98
+registry_revision = 99
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -5441,6 +5441,15 @@ implementation_paths = [
     "tests/fault_injection/test_d023_worker_faults.py",
     "docs/model-architecture/progress/tasks/D023.md",
     "docs/model-architecture/reviews/D023/test_report.json",
+    "src/sakuramoon/data/production.py",
+    "src/sakuramoon/data/__init__.py",
+    "src/sakuramoon/config/schema.py",
+    "config/examples/all_options.example.toml",
+    "tests/unit/config/test_d025_data_assembly.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D025.md",
+    "docs/model-architecture/reviews/D025/implementation_report.md",
+    "docs/model-architecture/reviews/D025/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -5510,6 +5519,14 @@ implementation_paths = [
     "docs/model-architecture/reviews/D015/timing.json",
     "docs/model-architecture/reviews/D015/ai_review.md",
     "docs/model-architecture/reviews/D015/infra_review.md",
+    "src/sakuramoon/data/production.py",
+    "src/sakuramoon/data/__init__.py",
+    "tests/unit/data/test_production.py",
+    "tests/gpu/data/test_pipeline_encoders.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D025.md",
+    "docs/model-architecture/reviews/D025/implementation_report.md",
+    "docs/model-architecture/reviews/D025/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
@@ -5712,6 +5729,15 @@ implementation_paths = [
     "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
     "docs/model-architecture/progress/tasks/D021.md",
     "docs/model-architecture/reviews/D021/test_report.json",
+    "src/sakuramoon/data/validation.py",
+    "src/sakuramoon/data/production.py",
+    "src/sakuramoon/data/__init__.py",
+    "tests/unit/data/test_production.py",
+    "tests/unit/config/test_d025_data_assembly.py",
+    "docs/model-architecture/progress/traceability.toml",
+    "docs/model-architecture/progress/tasks/D025.md",
+    "docs/model-architecture/reviews/D025/implementation_report.md",
+    "docs/model-architecture/reviews/D025/test_report.json",
 ]
 evidence_hardware = ""
 evidence_artifacts = []
