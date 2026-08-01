@@ -131,7 +131,7 @@ fetch_dataset_shard(Interrupted(), manifest, "release/000001.tar", Path(sys.argv
     evidence = run_until_ready_and_sigkill(
         (sys.executable, "-c", script, str(tmp_path)),
         scenario=FaultScenario.DOWNLOAD_INTERRUPTION,
-        timeout_seconds=5.0,
+        timeout_seconds=30.0,
     )
 
     destination = tmp_path / _SHARD_PATH

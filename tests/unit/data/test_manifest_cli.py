@@ -31,6 +31,8 @@ CONTENT = b"synthetic-cli-shard"
 REVISION = "c" * 40
 EXAMPLE_PATH = Path(__file__).parents[3] / "config/examples/all_options.example.toml"
 SYNTHETIC_VALUES: dict[str, object] = {
+    "storage.shared_mount_source": "server.example:/governed/export",
+    "storage.minimum_free_gib": 8,
     "data.source.revision": REVISION,
     "data.manifest.path": "synthetic/train-manifest.jsonl",
     "data.manifest.sha256": "3" * 64,
