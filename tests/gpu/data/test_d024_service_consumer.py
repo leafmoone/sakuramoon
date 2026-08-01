@@ -70,6 +70,14 @@ def _caption(_value: Mapping[str, object]) -> CaptionFields:
     )
 
 
+def _metadata(value: Mapping[str, object]) -> Mapping[str, object]:
+    return value
+
+
+def _observe_rejection(_reason: str) -> None:
+    return None
+
+
 def _pipeline(path: Path, record: ShardRecord) -> WebDatasetPipeline:
     nl = NlDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0)
     probabilities = CaptionDropoutProbabilities(
@@ -84,7 +92,7 @@ def _pipeline(path: Path, record: ShardRecord) -> WebDatasetPipeline:
     return WebDatasetPipeline(
         shard_paths=(path,),
         shard_records=(record,),
-        metadata_adapter=lambda value: value,
+        metadata_adapter=_metadata,
         metadata_fields=fields,
         validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
@@ -93,7 +101,7 @@ def _pipeline(path: Path, record: ShardRecord) -> WebDatasetPipeline:
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         caption_fields_parser=_caption,
-        rejection_observer=lambda _reason: None,
+        rejection_observer=_observe_rejection,
         base_seed=9,
         stage="S0",
         pass_index=0,

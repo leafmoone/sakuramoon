@@ -31,11 +31,14 @@ if TYPE_CHECKING:
     )
     from sakuramoon.data.production import (
         PRODUCTION_METADATA_FIELDS,
+        AcceptedProductionBatchStream,
         ConfiguredDataLoader,
+        ProductionBatchStreamIdentity,
         ProductionDataError,
         ProductionPipelineFactory,
         adapt_modelscope_metadata,
         parse_modelscope_caption_fields,
+        require_accepted_production_batch_stream,
     )
     from sakuramoon.data.validation import (
         VALIDATION_SAMPLE_COUNT,
@@ -52,6 +55,10 @@ if TYPE_CHECKING:
     )
 
 _EXPORTS = {
+    "AcceptedProductionBatchStream": (
+        "sakuramoon.data.production",
+        "AcceptedProductionBatchStream",
+    ),
     "VALIDATION_SAMPLE_COUNT": (
         "sakuramoon.data.validation",
         "VALIDATION_SAMPLE_COUNT",
@@ -81,6 +88,10 @@ _EXPORTS = {
         "ModelScopeDatasetTransport",
     ),
     "ProductionDataError": ("sakuramoon.data.production", "ProductionDataError"),
+    "ProductionBatchStreamIdentity": (
+        "sakuramoon.data.production",
+        "ProductionBatchStreamIdentity",
+    ),
     "ProductionPipelineFactory": (
         "sakuramoon.data.production",
         "ProductionPipelineFactory",
@@ -121,6 +132,10 @@ _EXPORTS = {
         "sakuramoon.data.production",
         "parse_modelscope_caption_fields",
     ),
+    "require_accepted_production_batch_stream": (
+        "sakuramoon.data.production",
+        "require_accepted_production_batch_stream",
+    ),
     "scan_duplicate_ids": ("sakuramoon.data.metadata", "scan_duplicate_ids"),
     "select_validation_records": (
         "sakuramoon.data.validation",
@@ -139,6 +154,7 @@ _EXPORTS = {
 __all__ = [
     "PRODUCTION_METADATA_FIELDS",
     "VALIDATION_SAMPLE_COUNT",
+    "AcceptedProductionBatchStream",
     "ConfiguredDataLoader",
     "DatasetAuthenticationError",
     "DatasetManifest",
@@ -150,6 +166,7 @@ __all__ = [
     "MetadataError",
     "MetadataRecord",
     "ModelScopeDatasetTransport",
+    "ProductionBatchStreamIdentity",
     "ProductionDataError",
     "ProductionPipelineFactory",
     "ShardIntegrityError",
@@ -167,6 +184,7 @@ __all__ = [
     "load_validation_manifest_ids",
     "parse_metadata",
     "parse_modelscope_caption_fields",
+    "require_accepted_production_batch_stream",
     "scan_duplicate_ids",
     "select_validation_records",
     "validate_remote_manifest",

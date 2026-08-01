@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import multiprocessing.reduction
+import os
+import secrets
+import weakref
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Never, SupportsIndex, cast
 
+from sakuramoon.config.resolve import resolved_config_sha256
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.buckets import generate_base_buckets, scale_buckets
 from sakuramoon.data.caption import (
@@ -38,6 +43,17 @@ PRODUCTION_METADATA_FIELDS = MetadataFieldMapping(
     height_field="height",
     caption_available_field="caption_available",
 )
+
+
+def _require_spawn_serializable(value: object, name: str) -> None:
+    """Exercise the exact pickler used to launch spawned DataLoader workers."""
+
+    try:
+        multiprocessing.reduction.ForkingPickler.dumps(value)
+    except Exception as error:
+        raise ProductionDataError(
+            f"{name} must be serializable by the explicit spawn context"
+        ) from error
 
 
 def _nested_mapping(raw: Mapping[str, object], key: str) -> Mapping[str, object]:
@@ -168,6 +184,156 @@ class ConfiguredDataLoader:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ProductionBatchStreamIdentity:
+    """Immutable identities accepted at the production data-to-train boundary."""
+
+    resolved_config_sha256: str
+    loader: ConfiguredDataLoader
+    manifest_sha256: str
+    service_session_sha256: str
+    factory_identity: str
+
+    def __post_init__(self) -> None:
+        digests = (
+            self.resolved_config_sha256,
+            self.manifest_sha256,
+            self.service_session_sha256,
+            self.factory_identity,
+        )
+        if (
+            any(
+                type(value) is not str
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+                for value in digests
+            )
+            or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+                self.loader, ConfiguredDataLoader
+            )
+        ):
+            raise ProductionDataError("production batch stream identity is invalid")
+
+
+class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
+    """Factory-issued process-local handle around the production batch iterator."""
+
+    __slots__ = (
+        "__weakref__",
+        "_closed",
+        "_identity",
+        "_iterator",
+        "_owner_pid",
+        "_token",
+    )
+
+    def __init__(
+        self,
+        iterator: Iterator[TrainingBatch],
+        identity: ProductionBatchStreamIdentity,
+        *,
+        token: str,
+        authority: object,
+    ) -> None:
+        if authority is not _STREAM_AUTHORITY:
+            raise ProductionDataError(
+                "production batch streams must be issued by the production factory"
+            )
+        self._iterator = iterator
+        self._identity = identity
+        self._token = token
+        self._owner_pid = os.getpid()
+        self._closed = False
+
+    def _require_live(self) -> None:
+        if os.getpid() != self._owner_pid:
+            raise ProductionDataError(
+                "production batch stream cannot cross a process boundary"
+            )
+        if self._closed or _ACCEPTED_STREAMS.get(self._token) is not self:
+            raise ProductionDataError(
+                "production batch stream is closed or was not factory-issued"
+            )
+
+    @property
+    def identity(self) -> ProductionBatchStreamIdentity:
+        self._require_live()
+        return self._identity
+
+    def __iter__(self) -> AcceptedProductionBatchStream:
+        self._require_live()
+        return self
+
+    def __next__(self) -> TrainingBatch:
+        self._require_live()
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            self._closed = True
+            _ACCEPTED_STREAMS.pop(self._token, None)
+            raise
+        except BaseException:
+            # Retire acceptance immediately, but leave close() responsible for
+            # deterministic cleanup of the owned iterator in the caller's finally.
+            _ACCEPTED_STREAMS.pop(self._token, None)
+            raise
+
+    def close(self) -> None:
+        if os.getpid() != self._owner_pid:
+            raise ProductionDataError(
+                "production batch stream cannot cross a process boundary"
+            )
+        if self._closed:
+            return
+        try:
+            close = getattr(self._iterator, "close", None)
+            if callable(close):
+                close()
+        finally:
+            self._closed = True
+            _ACCEPTED_STREAMS.pop(self._token, None)
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Never:
+        del protocol
+        raise ProductionDataError(
+            "production batch stream is process-local and cannot be serialized"
+        )
+
+
+_STREAM_AUTHORITY = object()
+_ACCEPTED_STREAMS: weakref.WeakValueDictionary[
+    str, AcceptedProductionBatchStream
+] = weakref.WeakValueDictionary()
+
+
+def _issue_batch_stream(
+    iterator: Iterator[TrainingBatch],
+    identity: ProductionBatchStreamIdentity,
+) -> AcceptedProductionBatchStream:
+    token = secrets.token_hex(32)
+    stream = AcceptedProductionBatchStream(
+        iterator,
+        identity,
+        token=token,
+        authority=_STREAM_AUTHORITY,
+    )
+    _ACCEPTED_STREAMS[token] = stream
+    return stream
+
+
+def require_accepted_production_batch_stream(
+    value: object,
+) -> AcceptedProductionBatchStream:
+    """Reject plain iterators and caller-built batches at the production boundary."""
+
+    if not isinstance(value, AcceptedProductionBatchStream):
+        raise ProductionDataError(
+            "a factory-issued production batch stream is required"
+        )
+    value._require_live()  # pyright: ignore[reportPrivateUsage]
+    return value
+
+
 class _PreleasedClient:
     def __init__(
         self, delegate: DataLeaseClient, descriptor: ShardLeaseDescriptor
@@ -197,6 +363,7 @@ class ProductionPipelineFactory:
     framing: FramingContract
     rejection_observer: RejectionObserver
     pass_index: int
+    factory_identity: str
 
     def __post_init__(self) -> None:
         if (
@@ -211,8 +378,15 @@ class ProductionPipelineFactory:
             or not callable(self.rejection_observer)
             or type(self.pass_index) is not int
             or self.pass_index < 0
+            or type(self.factory_identity) is not str
+            or len(self.factory_identity) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.factory_identity
+            )
         ):
             raise ProductionDataError("production pipeline factory fields are invalid")
+        _require_spawn_serializable(self, "production pipeline factory")
 
     @classmethod
     def from_config(
@@ -250,6 +424,7 @@ class ProductionPipelineFactory:
             framing=framing,
             rejection_observer=cast(RejectionObserver, rejection_observer),
             pass_index=pass_index,
+            factory_identity=secrets.token_hex(32),
         )
 
     @property
@@ -279,7 +454,7 @@ class ProductionPipelineFactory:
             generate_base_buckets(self.config.data.buckets),
             self.config.stage.resolution,
         )
-        return WebDatasetPipeline(
+        pipeline = WebDatasetPipeline(
             shard_paths=(descriptor.local_path,),
             shard_records=(descriptor.record,),
             metadata_adapter=adapt_modelscope_metadata,
@@ -296,28 +471,47 @@ class ProductionPipelineFactory:
             stage=self.config.stage.name,
             pass_index=self.pass_index,
         )
+        _require_spawn_serializable(pipeline, "production pipeline")
+        return pipeline
 
-    def batches(self, client: DataLeaseClient) -> Iterator[TrainingBatch]:
+    def batches(self, client: DataLeaseClient) -> AcceptedProductionBatchStream:
         """Consume service leases using only the five resolved loader controls."""
 
         loader = self.loader
         loader.require_identity(client)
+        if client.identity.manifest_sha256 != self.config.data.manifest.sha256:
+            raise ProductionDataError(
+                "resolved manifest identity does not match the data service session"
+            )
+        identity = ProductionBatchStreamIdentity(
+            resolved_config_sha256=resolved_config_sha256(self.config),
+            loader=loader,
+            manifest_sha256=self.config.data.manifest.sha256,
+            service_session_sha256=client.identity.sha256,
+            factory_identity=self.factory_identity,
+        )
         if client.health():
-            return iter(())
+            return _issue_batch_stream(iter(()), identity)
         descriptor = client.lease(0)
         if descriptor is None:
-            return iter(())
-        return loader.batches(
-            self.pipeline_for_lease(descriptor),
-            _PreleasedClient(client, descriptor),
+            return _issue_batch_stream(iter(()), identity)
+        return _issue_batch_stream(
+            loader.batches(
+                self.pipeline_for_lease(descriptor),
+                _PreleasedClient(client, descriptor),
+            ),
+            identity,
         )
 
 
 __all__ = [
     "PRODUCTION_METADATA_FIELDS",
+    "AcceptedProductionBatchStream",
     "ConfiguredDataLoader",
+    "ProductionBatchStreamIdentity",
     "ProductionDataError",
     "ProductionPipelineFactory",
     "adapt_modelscope_metadata",
     "parse_modelscope_caption_fields",
+    "require_accepted_production_batch_stream",
 ]

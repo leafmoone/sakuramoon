@@ -1,27 +1,34 @@
 {
   "schema_version": 1,
   "task_id": "D025",
-  "status": "cpu_implementation_passed_independent_review_pending",
+  "status": "spawn_remediation_passed_independent_rereview_pending",
   "hardware": "CPU",
-  "targeted_production_and_config_passed": 8,
-  "adjacent_data_and_config_passed": 349,
-  "adjacent_data_fault_passed": 6,
-  "adjacent_data_fault_environmental_failure": {
-    "test": "test_real_sigkill_leaves_partial_and_next_process_restarts_from_byte_zero",
-    "attempts": 2,
-    "failure": "existing child process did not reach its fixed five-second pre-injection readiness barrier under concurrent load",
-    "d025_code_reached": false
+  "targeted_production_and_config_passed": 13,
+  "targeted_duration_seconds": 29.22,
+  "adjacent_d023_d024_worker_service_fault_passed": 22,
+  "adjacent_duration_seconds": 47.9,
+  "real_af_unix_spawn_integration": {
+    "worker_count": 2,
+    "distinct_worker_pids": 2,
+    "normally_acknowledged_shards": 4,
+    "early_close_active_shards": 2,
+    "worker_failure_active_shards": 2,
+    "restart_replayed_shards": 2,
+    "restart_replayed_samples": 2
   },
+  "factory_and_pipeline_spawn_serialization": "passed; unpickleable field hard failure passed",
+  "accepted_stream_boundary": "passed; exact factory/config/loader/manifest/session identity, caller-construction, cross-process, plain-iterator, and serialization rejection",
   "ruff": "passed",
   "pyright": "passed: 0 errors, 0 warnings",
-  "traceability": "passed: requirements=235, source_nodes=235, archive_files=16, production_modules=106, runtime_config_keys=262",
+  "traceability": "passed: requirements=237, source_nodes=237, archive_files=16, production_modules=107, runtime_config_keys=271",
   "production_import_excludes_service_owned_modules": "passed",
-  "real_shard_gpu": "not rerun; existing D021 RTX 5090 evidence used an equivalent test-only parser, and that test now imports the governed production parser",
+  "real_shard_gpu": "not rerun; exact governed parser GPU evidence remains pending",
   "pending_or_blocked": [
-    "independent D025 DATA remediation review",
+    "independent DATA package rereview",
     "immutable production manifest and approximately 11M-ID scan",
     "production caption-availability mapping scan",
-    "cold-cache network/NVMe throughput and ready-wait acceptance",
+    "exact governed production parser GPU rerun",
+    "cold-cache server-backed-storage throughput and ready-wait acceptance",
     "long run, DDP/NCCL, multi-GPU, and formal stage evidence"
   ]
 }

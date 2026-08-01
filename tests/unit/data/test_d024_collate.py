@@ -65,6 +65,10 @@ def _caption(_value: Mapping[str, object]) -> CaptionFields:
     )
 
 
+def _observe_rejection(_reason: str) -> None:
+    return None
+
+
 def _probabilities() -> CaptionDropoutProbabilities:
     nl = NlDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0)
     return CaptionDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, nl)
@@ -117,7 +121,7 @@ def _pipeline(
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         caption_fields_parser=_caption,
-        rejection_observer=lambda _reason: None,
+        rejection_observer=_observe_rejection,
         base_seed=9,
         stage="S0",
         pass_index=0,
