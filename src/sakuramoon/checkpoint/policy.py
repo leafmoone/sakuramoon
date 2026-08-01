@@ -3,110 +3,21 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import shutil
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 
 from sakuramoon.checkpoint.schema import (
+    FORCED_CHECKPOINT_REASONS,
+    CheckpointCadence,
     CheckpointError,
     CheckpointIdentity,
     CheckpointKind,
     CheckpointManifest,
+    CheckpointReason,
     manifest_from_dict,
 )
-
-
-class CheckpointReason(StrEnum):
-    UPDATE_CADENCE = "update-cadence"
-    WALL_CADENCE = "wall-cadence"
-    STAGE_FINALIZE = "stage-finalize"
-    PRE_GROWTH = "pre-growth"
-    POST_GROWTH = "post-growth"
-    RAMP_MIDPOINT = "ramp-midpoint"
-    RAMP_END = "ramp-end"
-    PRE_DECAY = "pre-decay"
-
-
-FORCED_CHECKPOINT_REASONS = frozenset(
-    {
-        CheckpointReason.STAGE_FINALIZE,
-        CheckpointReason.PRE_GROWTH,
-        CheckpointReason.POST_GROWTH,
-        CheckpointReason.RAMP_MIDPOINT,
-        CheckpointReason.RAMP_END,
-        CheckpointReason.PRE_DECAY,
-    }
-)
-
-
-@dataclass(frozen=True, slots=True)
-class CheckpointCadence:
-    """Track the last durable raw checkpoint without advancing on failed saves."""
-
-    last_successful_update: int
-    last_monotonic_seconds: float
-    every_successful_updates: int = 1000
-    every_hours: float = 6.0
-
-    def __post_init__(self) -> None:
-        if (
-            type(self.last_successful_update) is not int
-            or self.last_successful_update < 0
-            or type(self.last_monotonic_seconds) is not float
-            or not math.isfinite(self.last_monotonic_seconds)
-            or self.last_monotonic_seconds < 0.0
-            or type(self.every_successful_updates) is not int
-            or self.every_successful_updates != 1000
-            or type(self.every_hours) is not float
-            or self.every_hours != 6.0
-        ):
-            raise ValueError("checkpoint cadence differs from the locked policy")
-
-    def due(
-        self,
-        *,
-        successful_update: int,
-        monotonic_seconds: float,
-        forced: CheckpointReason | None = None,
-    ) -> CheckpointReason | None:
-        if (
-            type(successful_update) is not int
-            or successful_update < self.last_successful_update
-            or type(monotonic_seconds) is not float
-            or not math.isfinite(monotonic_seconds)
-            or monotonic_seconds < self.last_monotonic_seconds
-        ):
-            raise ValueError("checkpoint cadence input is invalid")
-        if forced is not None:
-            if forced not in FORCED_CHECKPOINT_REASONS:
-                raise ValueError("checkpoint reason is not a forced checkpoint")
-            return forced
-        if (
-            successful_update > self.last_successful_update
-            and successful_update % self.every_successful_updates == 0
-        ):
-            return CheckpointReason.UPDATE_CADENCE
-        if monotonic_seconds - self.last_monotonic_seconds >= self.every_hours * 3600.0:
-            return CheckpointReason.WALL_CADENCE
-        return None
-
-    def committed(
-        self,
-        *,
-        successful_update: int,
-        monotonic_seconds: float,
-        reason: CheckpointReason,
-    ) -> CheckpointCadence:
-        if reason != self.due(
-            successful_update=successful_update,
-            monotonic_seconds=monotonic_seconds,
-            forced=reason if reason in FORCED_CHECKPOINT_REASONS else None,
-        ):
-            raise ValueError("committed checkpoint reason differs from the due reason")
-        return CheckpointCadence(successful_update, monotonic_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +32,10 @@ class RawRetentionPlan:
         paths = self.keep + self.remove
         if (
             not self.root.is_absolute()
-            or any(type(value) is not str or not value for value in self.accepted_checkpoint_ids)
+            or any(
+                type(value) is not str or not value
+                for value in self.accepted_checkpoint_ids
+            )
             or len(paths) != len(set(paths))
             or tuple(path for path, _ in self.identities) != tuple(sorted(paths))
             or len(self.identities) != len(paths)
@@ -146,9 +60,7 @@ def _retention_manifest(path: Path) -> CheckpointManifest:
         raise CheckpointError("retention checkpoint metadata is unreadable") from None
     if manifest.kind is not CheckpointKind.RAW:
         raise CheckpointError("retention checkpoint is not raw")
-    expected_name = (
-        f"ckpt_{manifest.identity.update}_{manifest.identity.checkpoint_id}"
-    )
+    expected_name = f"ckpt_{manifest.identity.update}_{manifest.identity.checkpoint_id}"
     if path.name != expected_name:
         raise CheckpointError("retention checkpoint name differs from its identity")
 
@@ -238,9 +150,7 @@ def apply_raw_retention(
 ) -> None:
     """Apply a previously resolved plan, revalidating every deletion target."""
 
-    current = plan_raw_retention(
-        root, accepted_checkpoint_ids=accepted_checkpoint_ids
-    )
+    current = plan_raw_retention(root, accepted_checkpoint_ids=accepted_checkpoint_ids)
     if current != plan:
         raise ValueError("retention plan is stale or was not produced for this policy")
     resolved_root = current.root

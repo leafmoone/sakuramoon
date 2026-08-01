@@ -7,6 +7,7 @@ import pytest
 import torch
 from torch import nn
 
+from sakuramoon.checkpoint.policy import CheckpointCadence, CheckpointReason
 from sakuramoon.train.loop import SingleGpuTrainingLoop
 from sakuramoon.train.step import SingleGpuUpdateState
 
@@ -199,3 +200,76 @@ def test_diagnostic_publication_failure_preserves_training_error(
         FileExistsError,
     ]
     assert loop.state == SingleGpuUpdateState(1, 0, 0)
+
+
+def test_loop_emits_wall_cadence_event_only_after_successful_update(
+    tmp_path: Path,
+) -> None:
+    parameter = nn.Parameter(torch.tensor(1.0))
+    optimizer = _SgdAdapter([parameter])
+    events: list[tuple[int, CheckpointReason]] = []
+    legacy_checkpoints: list[int] = []
+    loop = SingleGpuTrainingLoop[torch.Tensor](
+        module=nn.ParameterList([parameter]),
+        optimizer=optimizer,
+        loss_fn=lambda batch: (parameter * batch).square().reshape(1),
+        accumulation_steps=1,
+        target_successful_updates=1,
+        checkpoint_every_successful_updates=1000,
+        scheduler_step=lambda update: None,
+        checkpoint=legacy_checkpoints.append,
+        diagnostic_root=tmp_path / "diagnostics",
+        failure_id=lambda phase, state: f"{phase}-{state.successful_updates}",
+        state=SingleGpuUpdateState.initial(),
+        cadence=CheckpointCadence(0, 0.0),
+        clock=lambda: 6.0 * 3600.0,
+        checkpoint_event=lambda update, reason: events.append((update, reason)),
+    )
+
+    result = loop.run((torch.tensor(1.0),))
+
+    assert result.state == SingleGpuUpdateState(1, 1, 1)
+    assert result.checkpoint_updates == (1,)
+    assert result.cadence == CheckpointCadence(1, 6.0 * 3600.0)
+    assert events == [(1, CheckpointReason.WALL_CADENCE)]
+    assert legacy_checkpoints == []
+
+
+def test_pre_decay_checkpoint_is_durable_before_scheduler_mutation(
+    tmp_path: Path,
+) -> None:
+    parameter = nn.Parameter(torch.tensor(1.0))
+    order: list[str] = []
+    proposed: list[CheckpointCadence] = []
+
+    def checkpoint_event(
+        _update: int,
+        _reason: CheckpointReason,
+        cadence: CheckpointCadence,
+    ) -> None:
+        order.append("checkpoint")
+        proposed.append(cadence)
+
+    loop = SingleGpuTrainingLoop[torch.Tensor](
+        module=nn.ParameterList([parameter]),
+        optimizer=_SgdAdapter([parameter]),
+        loss_fn=lambda batch: (parameter * batch).square().reshape(1),
+        accumulation_steps=1,
+        target_successful_updates=1,
+        checkpoint_every_successful_updates=1000,
+        scheduler_step=lambda _update: order.append("scheduler"),
+        checkpoint=lambda _update: None,
+        diagnostic_root=tmp_path / "diagnostics",
+        failure_id=lambda phase, state: f"{phase}-{state.successful_updates}",
+        state=SingleGpuUpdateState.initial(),
+        cadence=CheckpointCadence(0, 100.0),
+        clock=lambda: 101.0,
+        forced_checkpoint=lambda _update: CheckpointReason.PRE_DECAY,
+        checkpoint_cadence_event=checkpoint_event,
+    )
+
+    result = loop.run((torch.tensor(1.0),))
+
+    assert order == ["checkpoint", "scheduler"]
+    assert proposed == [CheckpointCadence(1, 101.0)]
+    assert result.cadence == proposed[0]

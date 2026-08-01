@@ -26,6 +26,7 @@ from sakuramoon.checkpoint.schema import (
     CheckpointSaveResult,
     GrowthCheckpointState,
     RawCheckpointState,
+    StageBudgetCheckpointState,
 )
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "GrowthCheckpointState",
     "RawCheckpointState",
     "RawRetentionPlan",
+    "StageBudgetCheckpointState",
     "apply_raw_retention",
     "discover_complete_checkpoints",
     "load_inference_artifact",

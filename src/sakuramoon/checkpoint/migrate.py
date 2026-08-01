@@ -21,6 +21,7 @@ from sakuramoon.checkpoint.load import (
     read_checkpoint_manifest,
 )
 from sakuramoon.checkpoint.schema import (
+    CheckpointCadence,
     CheckpointError,
     CheckpointIdentity,
     CheckpointKind,
@@ -77,6 +78,8 @@ def migrate_loaded_growth(
     target_module: TrainableComposite,
     target_optimizer: IsolatedAdamW8bit,
     request: StageTransitionRequest,
+    *,
+    checkpoint_cadence: CheckpointCadence,
 ) -> tuple[RawCheckpointState, GrowthMigrationReport]:
     source_depth = _depth(source_module)
     target_depth = _depth(target_module)
@@ -98,7 +101,11 @@ def migrate_loaded_growth(
         tuple((spec.name, spec.parameter) for spec in target_optimizer.audit.specs),
     )
     source_optimizer.audit_state()
-    target_state = transition_checkpoint_state(source_state, request)
+    target_state = transition_checkpoint_state(
+        source_state,
+        request,
+        checkpoint_cadence=checkpoint_cadence,
+    )
 
     source_tensors = source_module.state_dict()
     target_tensors = target_module.state_dict()
@@ -164,6 +171,8 @@ def load_and_migrate_growth(
     target_module: TrainableComposite,
     target_optimizer: IsolatedAdamW8bit,
     request: StageTransitionRequest,
+    *,
+    checkpoint_cadence: CheckpointCadence,
 ) -> tuple[RawCheckpointState, GrowthMigrationReport]:
     if (
         checkpoint.resolve(strict=True)
@@ -197,6 +206,7 @@ def load_and_migrate_growth(
         target_module,
         target_optimizer,
         request,
+        checkpoint_cadence=checkpoint_cadence,
     )
 
 

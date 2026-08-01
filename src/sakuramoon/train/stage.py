@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from sakuramoon.checkpoint.schema import GrowthCheckpointState, RawCheckpointState
+from sakuramoon.checkpoint.schema import (
+    CheckpointCadence,
+    CheckpointReason,
+    GrowthCheckpointState,
+    RawCheckpointState,
+    StageBudgetCheckpointState,
+)
 from sakuramoon.model.growth import (
     active_slot_ids,
     growth_ramp_updates,
@@ -40,6 +46,22 @@ class ForcedCheckpoint(StrEnum):
     POST_TRANSITION = "post-transition"
     RAMP_MIDPOINT = "ramp-midpoint"
     RAMP_END = "ramp-end"
+
+
+_FORCED_CHECKPOINT_REASONS: dict[ForcedCheckpoint, CheckpointReason] = {
+    ForcedCheckpoint.PRE_TRANSITION: CheckpointReason.PRE_TRANSITION,
+    ForcedCheckpoint.POST_TRANSITION: CheckpointReason.POST_TRANSITION,
+    ForcedCheckpoint.RAMP_MIDPOINT: CheckpointReason.RAMP_MIDPOINT,
+    ForcedCheckpoint.RAMP_END: CheckpointReason.RAMP_END,
+}
+
+
+def checkpoint_reason(forced: ForcedCheckpoint) -> CheckpointReason:
+    """Map a T043 transition event to the scheduler's exact enum type."""
+
+    if type(forced) is not ForcedCheckpoint:
+        raise TypeError("forced checkpoint must use the T043 enum")
+    return _FORCED_CHECKPOINT_REASONS[forced]
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,12 +215,22 @@ def validate_checkpoint_stage(state: RawCheckpointState, expected: StageSpec) ->
 def transition_checkpoint_state(
     source: RawCheckpointState,
     request: StageTransitionRequest,
+    *,
+    checkpoint_cadence: CheckpointCadence,
 ) -> RawCheckpointState:
     source_spec = stage_spec(request.source_stage)
     target_spec = stage_spec(request.target_stage)
     validate_checkpoint_stage(source, source_spec)
     if source.growth.alpha != 1.0:
         raise ValueError("a stage transition requires a completed growth ramp")
+    if (
+        checkpoint_cadence.last_successful_update
+        != source.trainer.successful_updates
+        or checkpoint_cadence.last_wall_clock_unix_seconds
+        < source.checkpoint_cadence.last_wall_clock_unix_seconds
+    ):
+        raise ValueError("transition checkpoint cadence is inconsistent with the source")
+    stage_start = source.trainer.successful_updates
     return RawCheckpointState(
         trainer=source.trainer,
         growth=GrowthCheckpointState(
@@ -212,6 +244,11 @@ def transition_checkpoint_state(
             ),
             ramp_updates=request.ramp_updates if request.is_growth else None,
         ),
+        stage_budget=StageBudgetCheckpointState(
+            start_successful_update=stage_start,
+            terminal_successful_update=stage_start + request.planned_updates,
+        ),
+        checkpoint_cadence=checkpoint_cadence,
     )
 
 
@@ -222,6 +259,7 @@ __all__ = [
     "StageReadiness",
     "StageSpec",
     "StageTransitionRequest",
+    "checkpoint_reason",
     "stage_spec",
     "transition_checkpoint_state",
     "validate_checkpoint_stage",

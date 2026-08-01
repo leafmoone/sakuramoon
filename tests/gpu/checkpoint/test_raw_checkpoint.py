@@ -18,10 +18,12 @@ from safetensors.torch import (
 from torch import nn
 
 from sakuramoon.checkpoint import (
+    CheckpointCadence,
     CheckpointIdentity,
     CheckpointKind,
     GrowthCheckpointState,
     RawCheckpointState,
+    StageBudgetCheckpointState,
     load_inference_artifact,
     load_model_directory,
     load_model_only,
@@ -49,7 +51,9 @@ _RESOLVED_CONFIG = b'[run]\nname = "t044-gpu"\n'
 _CONFIG_SHA256 = hashlib.sha256(_RESOLVED_CONFIG).hexdigest()
 
 
-def _identity(checkpoint_id: str, update: int, schema_sha256: str) -> CheckpointIdentity:
+def _identity(
+    checkpoint_id: str, update: int, schema_sha256: str
+) -> CheckpointIdentity:
     return CheckpointIdentity(
         checkpoint_id=checkpoint_id,
         update=update,
@@ -62,9 +66,9 @@ def _identity(checkpoint_id: str, update: int, schema_sha256: str) -> Checkpoint
 def _raw_state(update: int) -> RawCheckpointState:
     return RawCheckpointState(
         trainer=SingleGpuUpdateState(update, update, update * 4),
-        growth=GrowthCheckpointState(
-            BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
-        ),
+        growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
+        stage_budget=StageBudgetCheckpointState(0, 1000),
+        checkpoint_cadence=CheckpointCadence(update, 1_800_000_000.0 + update),
     )
 
 
@@ -191,13 +195,9 @@ def _fixed_batch_step(
         .reshape(2, 5, 7, 256)
         .to(torch.bfloat16)
     )
-    main_indices = torch.tensor(
-        [[0, 1, 2], [0, 1, 2]], device=device, dtype=torch.long
-    )
+    main_indices = torch.tensor([[0, 1, 2], [0, 1, 2]], device=device, dtype=torch.long)
     main_mask = torch.ones((2, 3), device=device, dtype=torch.bool)
-    artist_indices = torch.tensor(
-        [[3, 4], [0, 0]], device=device, dtype=torch.long
-    )
+    artist_indices = torch.tensor([[3, 4], [0, 0]], device=device, dtype=torch.long)
     artist_mask = torch.tensor(
         [[True, True], [False, False]], device=device, dtype=torch.bool
     )
@@ -329,7 +329,11 @@ def _fresh_process_worker(checkpoint: str, output_root: str) -> None:
     _update(module, optimizer)
     output_identity = _identity("fresh-output", 2, optimizer.audit.schema_sha256)
     save_raw_checkpoint(
-        Path(output_root), output_identity, module, optimizer, _raw_state(2),
+        Path(output_root),
+        output_identity,
+        module,
+        optimizer,
+        _raw_state(2),
         resolved_config=_RESOLVED_CONFIG,
     )
     save_file(draws, str(Path(output_root) / "fresh-draws.safetensors"))
@@ -361,7 +365,9 @@ def _fixed_batch_resume_worker(checkpoint: str, output_root: str) -> None:
     )
 
 
-def test_real_torchao_raw_checkpoint_safe_load_matches_next_update(tmp_path: Path) -> None:
+def test_real_torchao_raw_checkpoint_safe_load_matches_next_update(
+    tmp_path: Path,
+) -> None:
     random.seed(1210)
     np.random.seed(1211)
     torch.manual_seed(1212)  # pyright: ignore[reportUnknownMemberType]
@@ -372,11 +378,15 @@ def test_real_torchao_raw_checkpoint_safe_load_matches_next_update(tmp_path: Pat
     state = _raw_state(1)
     checkpoint_parameter = next(source.parameters()).detach().cpu().clone()
     result = save_raw_checkpoint(
-        tmp_path, identity, source, source_optimizer, state,
+        tmp_path,
+        identity,
+        source,
+        source_optimizer,
+        state,
         resolved_config=_RESOLVED_CONFIG,
     )
     raw_manifest = json.loads((result.path / "manifest.json").read_bytes())
-    assert raw_manifest["schema_version"] == 2
+    assert raw_manifest["schema_version"] == 3
     assert (result.path / "resolved_config.toml").read_bytes() == _RESOLVED_CONFIG
     assert not (result.path / "train_state/data_state.json").exists()
 
@@ -388,7 +398,8 @@ def test_real_torchao_raw_checkpoint_safe_load_matches_next_update(tmp_path: Pat
     )
     _update(source, source_optimizer)
     expected_model = {
-        name: tensor.detach().cpu().clone() for name, tensor in source.state_dict().items()
+        name: tensor.detach().cpu().clone()
+        for name, tensor in source.state_dict().items()
     }
     expected_sr = source_optimizer.sr_rng.state.clone()
 
@@ -464,10 +475,14 @@ def test_lazy_and_lagging_optimizer_state_round_trips(tmp_path: Path) -> None:
     source = _compact_composite()
     source_optimizer = _optimizer(source, 1221)
     primary = next(
-        spec for spec in source_optimizer.audit.specs if spec.name == "dit.input_projection.weight"
+        spec
+        for spec in source_optimizer.audit.specs
+        if spec.name == "dit.input_projection.weight"
     )
     conditional = next(
-        spec for spec in source_optimizer.audit.specs if spec.name == "style.null_tokens"
+        spec
+        for spec in source_optimizer.audit.specs
+        if spec.name == "style.null_tokens"
     )
     for spec in (primary, conditional):
         spec.parameter.grad = torch.ones_like(spec.parameter)
@@ -478,7 +493,11 @@ def test_lazy_and_lagging_optimizer_state_round_trips(tmp_path: Path) -> None:
     source_optimizer.zero_grad(set_to_none=True)
     identity = _identity("lazy", 2, source_optimizer.audit.schema_sha256)
     result = save_raw_checkpoint(
-        tmp_path, identity, source, source_optimizer, _raw_state(2),
+        tmp_path,
+        identity,
+        source,
+        source_optimizer,
+        _raw_state(2),
         resolved_config=_RESOLVED_CONFIG,
     )
 
@@ -503,9 +522,7 @@ def test_lazy_and_lagging_optimizer_state_round_trips(tmp_path: Path) -> None:
     for source_parameter, restored_parameter in zip(
         source.parameters(), restored.parameters(), strict=True
     ):
-        torch.testing.assert_close(
-            source_parameter, restored_parameter, atol=0, rtol=0
-        )
+        torch.testing.assert_close(source_parameter, restored_parameter, atol=0, rtol=0)
     assert restored_optimizer.audit_state() == source_optimizer.audit_state()
 
 
@@ -532,7 +549,11 @@ def test_raw_sidecar_failure_precedes_all_state_changes(
     _update(source, source_optimizer)
     identity = _identity("fault", 1, source_optimizer.audit.schema_sha256)
     complete = save_raw_checkpoint(
-        tmp_path / "source", identity, source, source_optimizer, _raw_state(1),
+        tmp_path / "source",
+        identity,
+        source,
+        source_optimizer,
+        _raw_state(1),
         resolved_config=_RESOLVED_CONFIG,
     ).path
     damaged = tmp_path / "damaged" / complete.name
@@ -555,9 +576,7 @@ def test_raw_sidecar_failure_precedes_all_state_changes(
             }
         )
         files.sort(key=lambda record: cast(str, record["path"]))
-        manifest_path.write_text(
-            json.dumps(manifest, sort_keys=True), encoding="utf-8"
-        )
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     else:
         body = bytearray(target_path.read_bytes())
         body[-1] ^= 1
@@ -565,7 +584,9 @@ def test_raw_sidecar_failure_precedes_all_state_changes(
 
     target = _compact_composite()
     target_optimizer = _optimizer(target, 1223)
-    parameters_before = tuple(parameter.detach().clone() for parameter in target.parameters())
+    parameters_before = tuple(
+        parameter.detach().clone() for parameter in target.parameters()
+    )
     rng_before = capture_rank_rng()
     with pytest.raises(
         CheckpointError,
@@ -576,7 +597,9 @@ def test_raw_sidecar_failure_precedes_all_state_changes(
     assert not target_optimizer.optimizer.state
     assert all(
         torch.equal(parameter, before)
-        for parameter, before in zip(target.parameters(), parameters_before, strict=True)
+        for parameter, before in zip(
+            target.parameters(), parameters_before, strict=True
+        )
     )
     rng_after = capture_rank_rng()
     assert all(torch.equal(rng_before[key], rng_after[key]) for key in rng_before)
@@ -591,13 +614,22 @@ def test_fresh_process_resume_matches_next_update(tmp_path: Path) -> None:
     _update(source, source_optimizer)
     identity = _identity("fresh-input", 1, source_optimizer.audit.schema_sha256)
     checkpoint = save_raw_checkpoint(
-        tmp_path / "input", identity, source, source_optimizer, _raw_state(1),
+        tmp_path / "input",
+        identity,
+        source,
+        source_optimizer,
+        _raw_state(1),
         resolved_config=_RESOLVED_CONFIG,
     ).path
     expected_metadata = {"numpy": float(np.random.random()), "python": random.random()}
-    expected_draws = {"torch_cpu": torch.rand(3), "torch_cuda": torch.rand(3, device="cuda")}
+    expected_draws = {
+        "torch_cpu": torch.rand(3),
+        "torch_cuda": torch.rand(3, device="cuda"),
+    }
     _update(source, source_optimizer)
-    expected_model = tuple(parameter.detach().cpu().clone() for parameter in source.parameters())
+    expected_model = tuple(
+        parameter.detach().cpu().clone() for parameter in source.parameters()
+    )
     expected_audit = source_optimizer.audit_state()
     expected_sr = source_optimizer.sr_rng.state.clone()
     del source_optimizer, source
@@ -614,12 +646,18 @@ def test_fresh_process_resume_matches_next_update(tmp_path: Path) -> None:
     draws = load_file(tmp_path / "output/fresh-draws.safetensors", device="cpu")
     metadata = json.loads((tmp_path / "output/fresh-draws.json").read_bytes())
     assert metadata == expected_metadata
-    torch.testing.assert_close(draws["torch_cpu"], expected_draws["torch_cpu"], atol=0, rtol=0)
-    torch.testing.assert_close(draws["torch_cuda"], expected_draws["torch_cuda"].cpu(), atol=0, rtol=0)
+    torch.testing.assert_close(
+        draws["torch_cpu"], expected_draws["torch_cpu"], atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        draws["torch_cuda"], expected_draws["torch_cuda"].cpu(), atol=0, rtol=0
+    )
 
     restored = _compact_composite()
     restored_optimizer = _optimizer(restored, 1234)
-    output_identity = _identity("fresh-output", 2, restored_optimizer.audit.schema_sha256)
+    output_identity = _identity(
+        "fresh-output", 2, restored_optimizer.audit.schema_sha256
+    )
     load_raw_checkpoint(
         tmp_path / "output/ckpt_2_fresh-output",
         restored,
@@ -642,9 +680,7 @@ def test_service_decoupled_resume_matches_fixed_external_batch(
     _enable_fixed_batch_gradient_paths(source)
     source_optimizer = _optimizer(source, 1243)
     _fixed_batch_step(source, source_optimizer)
-    input_identity = _identity(
-        "fixed-input", 1, source_optimizer.audit.schema_sha256
-    )
+    input_identity = _identity("fixed-input", 1, source_optimizer.audit.schema_sha256)
     checkpoint = save_raw_checkpoint(
         tmp_path / "fixed-input",
         input_identity,
@@ -653,9 +689,7 @@ def test_service_decoupled_resume_matches_fixed_external_batch(
         _raw_state(1),
         resolved_config=_RESOLVED_CONFIG,
     ).path
-    expected_tensors, expected_metadata = _fixed_batch_step(
-        source, source_optimizer
-    )
+    expected_tensors, expected_metadata = _fixed_batch_step(source, source_optimizer)
 
     context = multiprocessing.get_context("spawn")
     process = context.Process(
@@ -678,9 +712,7 @@ def test_service_decoupled_resume_matches_fixed_external_batch(
         tuple(source.named_parameters())
     )
     for name, expected in expected_tensors.items():
-        torch.testing.assert_close(
-            actual_tensors[name], expected, atol=0, rtol=0
-        )
+        torch.testing.assert_close(actual_tensors[name], expected, atol=0, rtol=0)
 
     restored = _compact_composite()
     restored_optimizer = _optimizer(restored, 1244)
@@ -726,7 +758,9 @@ def test_pma10_real_composite_loads_as_fresh_inference_artifact(
         raw_sources.append(
             save_raw_checkpoint(
                 tmp_path,
-                _identity(f"pma-source-{update:02d}", update, optimizer.audit.schema_sha256),
+                _identity(
+                    f"pma-source-{update:02d}", update, optimizer.audit.schema_sha256
+                ),
                 source,
                 optimizer,
                 _raw_state(update),
@@ -756,7 +790,11 @@ def test_fault_recovery_selector_requires_exact_complete_raw_parent(
     _update(module, optimizer)
     identity = _identity("fault-parent", 1, optimizer.audit.schema_sha256)
     checkpoint = save_raw_checkpoint(
-        tmp_path, identity, module, optimizer, _raw_state(1),
+        tmp_path,
+        identity,
+        module,
+        optimizer,
+        _raw_state(1),
         resolved_config=_RESOLVED_CONFIG,
     ).path
 

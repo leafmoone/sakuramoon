@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from sakuramoon.checkpoint.schema import (
+    CheckpointCadence,
     CheckpointError,
     CheckpointIdentity,
     CheckpointKind,
@@ -16,6 +17,7 @@ from sakuramoon.checkpoint.schema import (
     FileRecord,
     GrowthCheckpointState,
     RawCheckpointState,
+    StageBudgetCheckpointState,
     manifest_to_dict,
     raw_state_to_dict,
 )
@@ -114,6 +116,8 @@ def _checkpoint(
                 None,
                 None,
             ),
+            stage_budget=StageBudgetCheckpointState(0, 1000),
+            checkpoint_cadence=CheckpointCadence(42, 1_800_000_042.0),
         )
         train_state = checkpoint / "train_state"
         train_state.mkdir()

@@ -9,9 +9,11 @@ import pytest
 import torch
 
 from sakuramoon.checkpoint import (
+    CheckpointCadence,
     CheckpointIdentity,
     GrowthCheckpointState,
     RawCheckpointState,
+    StageBudgetCheckpointState,
     load_raw_checkpoint,
     save_raw_checkpoint,
 )
@@ -119,9 +121,9 @@ def test_full_s0_composite_raw_save_and_restore(tmp_path: Path) -> None:
     )
     state = RawCheckpointState(
         trainer=SingleGpuUpdateState(1, 1, 1),
-        growth=GrowthCheckpointState(
-            BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
-        ),
+        growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
+        stage_budget=StageBudgetCheckpointState(0, 1000),
+        checkpoint_cadence=CheckpointCadence(1, 1_800_000_001.0),
     )
     representative = next(
         spec for spec in optimizer.audit.specs if spec.parameter.numel() <= 1024
@@ -130,7 +132,11 @@ def test_full_s0_composite_raw_save_and_restore(tmp_path: Path) -> None:
 
     save_start = time.perf_counter()
     result = save_raw_checkpoint(
-        tmp_path, identity, module, optimizer, state,
+        tmp_path,
+        identity,
+        module,
+        optimizer,
+        state,
         resolved_config=_RESOLVED_CONFIG,
     )
     save_seconds = time.perf_counter() - save_start

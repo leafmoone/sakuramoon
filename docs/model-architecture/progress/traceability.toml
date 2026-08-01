@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 97
+registry_revision = 98
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -6177,7 +6177,27 @@ superseded_by = ""
 implementation_commit_ref = "task:T042"
 implementation_paths = [
     "src/sakuramoon/checkpoint/policy.py",
+    "src/sakuramoon/checkpoint/migrate.py",
+    "src/sakuramoon/checkpoint/schema.py",
+    "src/sakuramoon/train/stage.py",
+    "src/sakuramoon/train/loop.py",
+    "src/sakuramoon/train/scheduler.py",
+    "src/sakuramoon/train/runtime.py",
     "tests/unit/checkpoint/test_pma_policy.py",
+    "tests/unit/checkpoint/test_checkpoint.py",
+    "tests/gpu/checkpoint/test_growth_migration.py",
+    "tests/unit/train/test_stage.py",
+    "tests/unit/train/test_scheduler.py",
+    "tests/unit/train/test_loop.py",
+    "tests/unit/train/test_runtime.py",
+    "tests/unit/cli/test_transition.py",
+    "tests/unit/docs/test_verify_traceability.py",
+    "docs/model-architecture/progress/tasks/T045.md",
+    "docs/model-architecture/reviews/T045/implementation_report.md",
+    "docs/model-architecture/reviews/T045/test_report.json",
+    "docs/model-architecture/reviews/T045/ai_review.md",
+    "docs/model-architecture/reviews/T045/infra_review.md",
+    "docs/model-architecture/reviews/T045/review_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""

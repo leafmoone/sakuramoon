@@ -8,9 +8,11 @@ import pytest
 import torch
 
 from sakuramoon.checkpoint import (
+    CheckpointCadence,
     CheckpointIdentity,
     GrowthCheckpointState,
     RawCheckpointState,
+    StageBudgetCheckpointState,
     load_raw_checkpoint,
     save_raw_checkpoint,
 )
@@ -115,7 +117,9 @@ def _optimizer(module: TrainableComposite, seed: int) -> IsolatedAdamW8bit:
     )
 
 
-def _identity(name: str, update: int, optimizer: IsolatedAdamW8bit) -> CheckpointIdentity:
+def _identity(
+    name: str, update: int, optimizer: IsolatedAdamW8bit
+) -> CheckpointIdentity:
     return CheckpointIdentity(
         checkpoint_id=name,
         update=update,
@@ -137,6 +141,8 @@ def _source_state(depth: int, stage: str) -> RawCheckpointState:
             None,
             None,
         ),
+        stage_budget=StageBudgetCheckpointState(0, 50_001),
+        checkpoint_cadence=CheckpointCadence(1, 1_800_000_001.0),
     )
 
 
@@ -155,10 +161,15 @@ def _assert_loaded_growth_point(
         state,
         trainer=SingleGpuUpdateState(update, update, state.trainer.effective_samples),
         growth=replace(state.growth, alpha=alpha),
+        checkpoint_cadence=CheckpointCadence(update, 1_800_000_001.0 + elapsed_updates),
     )
     identity = _identity(f"alpha-{elapsed_updates}", update, optimizer)
     result = save_raw_checkpoint(
-        root, identity, module, optimizer, point,
+        root,
+        identity,
+        module,
+        optimizer,
+        point,
         resolved_config=_RESOLVED_CONFIG,
     )
     restored = _composite(target_depth)
@@ -169,13 +180,13 @@ def _assert_loaded_growth_point(
         update + 1
     )
     assert restored_optimizer.audit_state() == optimizer.audit_state()
-    for left, right in zip(
-        restored.parameters(), module.parameters(), strict=True
-    ):
+    for left, right in zip(restored.parameters(), module.parameters(), strict=True):
         torch.testing.assert_close(left, right, atol=0, rtol=0)
 
 
-def _assert_optimizer_state_equal(left: dict[object, object], right: dict[object, object]) -> None:
+def _assert_optimizer_state_equal(
+    left: dict[object, object], right: dict[object, object]
+) -> None:
     assert set(left) == set(right)
     for key, left_value in left.items():
         right_value = right[key]
@@ -218,7 +229,9 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
     )
     source_specs = {spec.name: spec for spec in source_optimizer.audit.specs}
     for name in initialized_names:
-        source_specs[name].parameter.grad = torch.ones_like(source_specs[name].parameter)
+        source_specs[name].parameter.grad = torch.ones_like(
+            source_specs[name].parameter
+        )
     source_optimizer.step()
     source_optimizer.zero_grad(set_to_none=True)
     source_identity = _identity("source", 1, source_optimizer)
@@ -231,7 +244,8 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
         resolved_config=_RESOLVED_CONFIG,
     ).path
     source_parameters = {
-        name: parameter.detach().clone() for name, parameter in source.named_parameters()
+        name: parameter.detach().clone()
+        for name, parameter in source.named_parameters()
     }
     source_audit = {spec.name: spec for spec in source_optimizer.audit_state()}
     source_sr = source_optimizer.sr_rng.state.clone()
@@ -275,10 +289,13 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
                     1,
                     1000,
                 ),
+                stage_budget=StageBudgetCheckpointState(1, 50_001),
+                checkpoint_cadence=CheckpointCadence(501, 1_800_000_501.0),
             ),
             rejected_target,
             rejected_optimizer,
             request,
+            checkpoint_cadence=CheckpointCadence(501, 1_800_000_502.0),
         )
     assert not rejected_optimizer.optimizer.state
     assert torch.equal(rejected_optimizer.sr_rng.state, rejected_sr)
@@ -293,6 +310,7 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
         target,
         target_optimizer,
         request,
+        checkpoint_cadence=CheckpointCadence(1, 1_800_000_002.0),
     )
 
     assert report.source_depth == source_depth
@@ -319,10 +337,16 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
         _assert_optimizer_state_equal(
             source_optimizer.optimizer.state[source_specs[name].parameter],
             target_optimizer.optimizer.state[
-                {spec.name: spec for spec in target_optimizer.audit.specs}[name].parameter
+                {spec.name: spec for spec in target_optimizer.audit.specs}[
+                    name
+                ].parameter
             ],
         )
-    assert all(not target_audit[name].initialized for name in target_audit if any(name.startswith(prefix) for prefix in prefixes))
+    assert all(
+        not target_audit[name].initialized
+        for name in target_audit
+        if any(name.startswith(prefix) for prefix in prefixes)
+    )
     assert torch.equal(target_optimizer.sr_rng.state, source_sr)
 
     _assert_loaded_growth_point(
@@ -374,6 +398,7 @@ def test_growth_migration_rejects_optimizer_owned_by_another_module(
             target,
             target_optimizer,
             request,
+            checkpoint_cadence=CheckpointCadence(1, 1_800_000_002.0),
         )
 
     _assert_unchanged(target, target_optimizer, parameters, sr_state)
@@ -403,6 +428,7 @@ def test_growth_migration_rejects_new_slot_prefix_collision(tmp_path: Path) -> N
             target,
             target_optimizer,
             request,
+            checkpoint_cadence=CheckpointCadence(1, 1_800_000_002.0),
         )
 
     _assert_unchanged(target, target_optimizer, parameters, sr_state)

@@ -14,9 +14,11 @@ import torch
 from torch import nn
 
 from sakuramoon.checkpoint import (
+    CheckpointCadence,
     CheckpointIdentity,
     CheckpointKind,
     GrowthCheckpointState,
+    StageBudgetCheckpointState,
     discover_complete_checkpoints,
     load_model_directory,
     load_model_only,
@@ -125,14 +127,33 @@ def _identity(checkpoint_id: str = "unit", update: int = 12) -> CheckpointIdenti
     )
 
 
+def _raw_state(
+    *,
+    attempted_updates: int = 3,
+    successful_updates: int = 2,
+    effective_samples: int = 11,
+    wall_clock_unix_seconds: float = 1_800_000_000.0,
+) -> RawCheckpointState:
+    return RawCheckpointState(
+        trainer=SingleGpuUpdateState(
+            attempted_updates, successful_updates, effective_samples
+        ),
+        growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
+        stage_budget=StageBudgetCheckpointState(0, 1000),
+        checkpoint_cadence=CheckpointCadence(
+            successful_updates, wall_clock_unix_seconds
+        ),
+    )
+
+
 def test_model_only_round_trip_uses_deterministic_fqn_shards(tmp_path: Path) -> None:
     source = _tiny_composite()
     expected = {name: tensor.clone() for name, tensor in source.state_dict().items()}
     shard_limit = 6 * 1024**2
-    result = save_model_only(
-        tmp_path, _identity(), source, max_shard_bytes=shard_limit
+    result = save_model_only(tmp_path, _identity(), source, max_shard_bytes=shard_limit)
+    index = json.loads(
+        (result.path / "model/model.safetensors.index.json").read_bytes()
     )
-    index = json.loads((result.path / "model/model.safetensors.index.json").read_bytes())
 
     assert result.path.name == "model_12_unit"
     assert list(index["weight_map"]) == sorted(expected)
@@ -288,12 +309,7 @@ def test_rank_rng_rejects_state_that_cannot_be_restored() -> None:
 
 
 def test_raw_training_state_is_strict_and_round_trips() -> None:
-    state = RawCheckpointState(
-        trainer=SingleGpuUpdateState(3, 2, 11),
-        growth=GrowthCheckpointState(
-            BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
-        ),
-    )
+    state = _raw_state()
     documents = raw_state_to_dict(state)
 
     assert raw_state_from_dicts(*documents) == state
@@ -309,10 +325,7 @@ def test_raw_training_state_is_strict_and_round_trips() -> None:
 
 
 def test_raw_state_rejects_legacy_data_document() -> None:
-    state = RawCheckpointState(
-        trainer=SingleGpuUpdateState(3, 2, 11),
-        growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
-    )
+    state = _raw_state()
     trainer, growth = raw_state_to_dict(state)
     legacy_data: dict[str, object] = {
         "active": None,
@@ -351,7 +364,9 @@ def test_invalid_identity_and_shard_limit_are_rejected(tmp_path: Path) -> None:
         save_model_only(tmp_path, _identity(), _tiny_composite(), max_shard_bytes=8)
 
     with pytest.raises(ValueError, match="shard"):
-        save_model_only(tmp_path, _identity("header"), _tiny_composite(), max_shard_bytes=64)
+        save_model_only(
+            tmp_path, _identity("header"), _tiny_composite(), max_shard_bytes=64
+        )
 
     with pytest.raises(ValueError, match="parameter schema"):
         save_model_only(
@@ -421,7 +436,25 @@ def test_growth_state_rejects_alpha_that_differs_from_persisted_progress() -> No
     with pytest.raises(ValueError, match="differs from persisted ramp progress"):
         RawCheckpointState(
             trainer=SingleGpuUpdateState(501, 501, 1),
-            growth=GrowthCheckpointState(
-                BASE_SLOT_IDS, 0.25, "G1", 4, 256, 1, 1000
-            ),
+            growth=GrowthCheckpointState(BASE_SLOT_IDS, 0.25, "G1", 4, 256, 1, 1000),
+            stage_budget=StageBudgetCheckpointState(1, 2001),
+            checkpoint_cadence=CheckpointCadence(501, 1_800_000_000.0),
+        )
+
+
+def test_raw_state_rejects_uncommitted_cadence_and_invalid_stage_budget() -> None:
+    with pytest.raises(ValueError, match="cadence is not committed"):
+        RawCheckpointState(
+            trainer=SingleGpuUpdateState(3, 2, 11),
+            growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
+            stage_budget=StageBudgetCheckpointState(0, 1000),
+            checkpoint_cadence=CheckpointCadence(1, 1_800_000_000.0),
+        )
+
+    with pytest.raises(ValueError, match="outside the persisted stage budget"):
+        RawCheckpointState(
+            trainer=SingleGpuUpdateState(3, 2, 11),
+            growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
+            stage_budget=StageBudgetCheckpointState(3, 1000),
+            checkpoint_cadence=CheckpointCadence(2, 1_800_000_000.0),
         )

@@ -56,7 +56,9 @@ def _records(root: Path) -> tuple[FileRecord, ...]:
     )
 
 
-def _refresh_manifest(root: Path, *, identity: CheckpointIdentity | None = None) -> None:
+def _refresh_manifest(
+    root: Path, *, identity: CheckpointIdentity | None = None
+) -> None:
     existing = json.loads((root / "manifest.json").read_bytes())
     manifest = CheckpointManifest(
         CheckpointKind.RAW,
@@ -76,7 +78,7 @@ def _identity(update: int, checkpoint_id: str) -> CheckpointIdentity:
     )
 
 
-_RESOLVED_CONFIG = b"[run]\nname = \"unit\"\n"
+_RESOLVED_CONFIG = b'[run]\nname = "unit"\n'
 
 
 def _raw_fixture(root: Path, update: int, value: float) -> Path:
@@ -126,8 +128,18 @@ def _raw_fixture(root: Path, update: int, value: float) -> Path:
         _json_bytes(
             {
                 "attempted_updates": update,
+                "checkpoint_cadence": {
+                    "every_hours": 6.0,
+                    "every_successful_updates": 1000,
+                    "last_successful_update": update,
+                    "last_wall_clock_unix_seconds": 1_800_000_000.0 + update,
+                },
                 "effective_samples": update,
-                "schema_version": 2,
+                "schema_version": 3,
+                "stage_budget": {
+                    "start_successful_update": 0,
+                    "terminal_successful_update": 1000,
+                },
                 "successful_updates": update,
             }
         )
@@ -140,7 +152,7 @@ def _raw_fixture(root: Path, update: int, value: float) -> Path:
                 "ramp_start_successful_update": None,
                 "ramp_updates": None,
                 "resolution": 256,
-                "schema_version": 2,
+                "schema_version": 3,
                 "stage": "S0",
                 "world_size": 1,
             }
@@ -158,7 +170,9 @@ def _raw_fixture(root: Path, update: int, value: float) -> Path:
 
 
 def test_pma10_streams_simple_mean_and_release_is_non_resumable(tmp_path: Path) -> None:
-    sources = tuple(_raw_fixture(tmp_path, index, float(index)) for index in range(1, 11))
+    sources = tuple(
+        _raw_fixture(tmp_path, index, float(index)) for index in range(1, 11)
+    )
 
     pma = save_pma10(tmp_path, _identity(10, "pma-window"), sources)
     averaged = load_file(
@@ -178,7 +192,9 @@ def test_pma10_streams_simple_mean_and_release_is_non_resumable(tmp_path: Path) 
 def test_pma_rejects_wrong_window_order_topology_and_missing_sidecars(
     tmp_path: Path,
 ) -> None:
-    sources = tuple(_raw_fixture(tmp_path, index, float(index)) for index in range(1, 11))
+    sources = tuple(
+        _raw_fixture(tmp_path, index, float(index)) for index in range(1, 11)
+    )
     with pytest.raises(ValueError, match="exactly ten"):
         save_pma10(tmp_path, _identity(9, "short"), sources[:-1])
     with pytest.raises(ValueError, match="strictly increasing"):
@@ -195,10 +211,13 @@ def test_pma_rejects_wrong_window_order_topology_and_missing_sidecars(
         save_pma10(tmp_path, _identity(10, "missing-sidecar"), sources)
 
 
-def test_raw_v1_manifest_is_rejected_before_pma_reads_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_schema", [1, 2])
+def test_legacy_raw_manifest_is_rejected_before_pma_reads_state(
+    tmp_path: Path, legacy_schema: int
+) -> None:
     source = _raw_fixture(tmp_path, 1, 1.0)
     manifest = json.loads((source / "manifest.json").read_bytes())
-    manifest["schema_version"] = 1
+    manifest["schema_version"] = legacy_schema
     (source / "manifest.json").write_bytes(_json_bytes(manifest))
 
     with pytest.raises(CheckpointError, match="legacy raw checkpoint schema"):
@@ -254,7 +273,7 @@ def test_raw_resolved_config_is_fail_closed(tmp_path: Path, mutation: str) -> No
         config.write_bytes(b"[run\n")
         _refresh_manifest(source)
     else:
-        config.write_bytes(b"[run]\nname = \"different\"\n")
+        config.write_bytes(b'[run]\nname = "different"\n')
         _refresh_manifest(source)
 
     with pytest.raises(CheckpointError, match="(?:payload|resolved config)"):
@@ -262,31 +281,63 @@ def test_raw_resolved_config_is_fail_closed(tmp_path: Path, mutation: str) -> No
 
 
 def test_checkpoint_cadence_advances_only_after_matching_commit() -> None:
-    cadence = CheckpointCadence(0, 100.0)
-    assert cadence.due(successful_update=999, monotonic_seconds=101.0) is None
-    assert cadence.due(successful_update=1000, monotonic_seconds=101.0) is (
-        CheckpointReason.UPDATE_CADENCE
+    cadence = CheckpointCadence(0, 1_800_000_000.0)
+    assert (
+        cadence.due(successful_update=999, wall_clock_unix_seconds=1_800_000_001.0)
+        is None
     )
+    assert cadence.due(
+        successful_update=1000, wall_clock_unix_seconds=1_800_000_001.0
+    ) is (CheckpointReason.UPDATE_CADENCE)
     with pytest.raises(ValueError, match="reason"):
         cadence.committed(
             successful_update=1000,
-            monotonic_seconds=101.0,
+            wall_clock_unix_seconds=1_800_000_001.0,
             reason=CheckpointReason.WALL_CADENCE,
         )
     cadence = cadence.committed(
         successful_update=1000,
-        monotonic_seconds=101.0,
+        wall_clock_unix_seconds=1_800_000_001.0,
         reason=CheckpointReason.UPDATE_CADENCE,
     )
-    assert cadence.due(
-        successful_update=1001,
-        monotonic_seconds=101.0 + 6.0 * 3600.0,
-    ) is CheckpointReason.WALL_CADENCE
-    assert cadence.due(
-        successful_update=1001,
-        monotonic_seconds=102.0,
-        forced=CheckpointReason.PRE_DECAY,
-    ) is CheckpointReason.PRE_DECAY
+    assert (
+        cadence.due(
+            successful_update=1001,
+            wall_clock_unix_seconds=1_800_000_001.0 + 6.0 * 3600.0,
+        )
+        is CheckpointReason.WALL_CADENCE
+    )
+    assert (
+        cadence.due(
+            successful_update=1001,
+            wall_clock_unix_seconds=1_800_000_002.0,
+            forced=CheckpointReason.PRE_DECAY,
+        )
+        is CheckpointReason.PRE_DECAY
+    )
+
+
+def test_checkpoint_cadence_survives_restart_and_rejects_wall_clock_rollback() -> None:
+    cadence = CheckpointCadence(20, 1_800_000_000.0)
+    restored = CheckpointCadence(
+        cadence.last_successful_update,
+        cadence.last_wall_clock_unix_seconds,
+        cadence.every_successful_updates,
+        cadence.every_hours,
+    )
+
+    assert (
+        restored.due(
+            successful_update=21,
+            wall_clock_unix_seconds=1_800_000_000.0 + 6.0 * 3600.0,
+        )
+        is CheckpointReason.WALL_CADENCE
+    )
+    with pytest.raises(ValueError, match="cadence input"):
+        restored.due(
+            successful_update=21,
+            wall_clock_unix_seconds=1_799_999_999.0,
+        )
 
 
 def test_raw_retention_keeps_two_rolling_and_every_accepted(tmp_path: Path) -> None:
@@ -316,13 +367,9 @@ def test_raw_retention_rejects_forged_or_stale_plan(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="stale|policy"):
-        apply_raw_retention(
-            tmp_path, forged, accepted_checkpoint_ids=accepted
-        )
+        apply_raw_retention(tmp_path, forged, accepted_checkpoint_ids=accepted)
     with pytest.raises(ValueError, match="stale|policy"):
-        apply_raw_retention(
-            tmp_path, plan, accepted_checkpoint_ids=frozenset()
-        )
+        apply_raw_retention(tmp_path, plan, accepted_checkpoint_ids=frozenset())
     assert all(path.exists() for path in paths)
 
     manifest_path = paths[0] / "manifest.json"
@@ -330,9 +377,7 @@ def test_raw_retention_rejects_forged_or_stale_plan(tmp_path: Path) -> None:
     manifest["identity"]["update"] = 100
     manifest_path.write_bytes(_json_bytes(manifest))
     with pytest.raises(ValueError, match="stale|policy"):
-        apply_raw_retention(
-            tmp_path, plan, accepted_checkpoint_ids=accepted
-        )
+        apply_raw_retention(tmp_path, plan, accepted_checkpoint_ids=accepted)
     assert all(path.exists() for path in paths)
 
 

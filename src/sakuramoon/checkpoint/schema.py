@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -12,7 +13,7 @@ from sakuramoon.model.growth import ACTIVE_SLOT_IDS, half_cosine_growth_alpha
 from sakuramoon.train.step import SingleGpuUpdateState
 
 SCHEMA_VERSION = 1
-RAW_SCHEMA_VERSION = 2
+RAW_SCHEMA_VERSION = 3
 MAX_MODEL_SHARD_BYTES = 2 * 1024**3
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _CHECKPOINT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -27,6 +28,108 @@ class CheckpointKind(StrEnum):
     MODEL_ONLY = "model-only"
     PMA = "pma"
     RELEASE = "release"
+
+
+class CheckpointReason(StrEnum):
+    UPDATE_CADENCE = "update-cadence"
+    WALL_CADENCE = "wall-cadence"
+    STAGE_FINALIZE = "stage-finalize"
+    PRE_TRANSITION = "pre-transition"
+    POST_TRANSITION = "post-transition"
+    PRE_GROWTH = "pre-growth"
+    POST_GROWTH = "post-growth"
+    RAMP_MIDPOINT = "ramp-midpoint"
+    RAMP_END = "ramp-end"
+    PRE_DECAY = "pre-decay"
+
+
+FORCED_CHECKPOINT_REASONS = frozenset(
+    {
+        CheckpointReason.STAGE_FINALIZE,
+        CheckpointReason.PRE_TRANSITION,
+        CheckpointReason.POST_TRANSITION,
+        CheckpointReason.PRE_GROWTH,
+        CheckpointReason.POST_GROWTH,
+        CheckpointReason.RAMP_MIDPOINT,
+        CheckpointReason.RAMP_END,
+        CheckpointReason.PRE_DECAY,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointCadence:
+    """Durable checkpoint anchors expressed in Unix wall-clock seconds."""
+
+    last_successful_update: int
+    last_wall_clock_unix_seconds: float
+    every_successful_updates: int = 1000
+    every_hours: float = 6.0
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.last_successful_update) is not int
+            or self.last_successful_update < 0
+            or type(self.last_wall_clock_unix_seconds) is not float
+            or not math.isfinite(self.last_wall_clock_unix_seconds)
+            or self.last_wall_clock_unix_seconds < 0.0
+            or type(self.every_successful_updates) is not int
+            or self.every_successful_updates != 1000
+            or type(self.every_hours) is not float
+            or self.every_hours != 6.0
+        ):
+            raise ValueError("checkpoint cadence differs from the locked policy")
+
+    def due(
+        self,
+        *,
+        successful_update: int,
+        wall_clock_unix_seconds: float,
+        forced: CheckpointReason | None = None,
+    ) -> CheckpointReason | None:
+        if (
+            type(successful_update) is not int
+            or successful_update < self.last_successful_update
+            or type(wall_clock_unix_seconds) is not float
+            or not math.isfinite(wall_clock_unix_seconds)
+            or wall_clock_unix_seconds < self.last_wall_clock_unix_seconds
+        ):
+            raise ValueError("checkpoint cadence input is invalid")
+        if forced is not None:
+            if forced not in FORCED_CHECKPOINT_REASONS:
+                raise ValueError("checkpoint reason is not a forced checkpoint")
+            return forced
+        if (
+            successful_update > self.last_successful_update
+            and successful_update % self.every_successful_updates == 0
+        ):
+            return CheckpointReason.UPDATE_CADENCE
+        if (
+            wall_clock_unix_seconds - self.last_wall_clock_unix_seconds
+            >= self.every_hours * 3600.0
+        ):
+            return CheckpointReason.WALL_CADENCE
+        return None
+
+    def committed(
+        self,
+        *,
+        successful_update: int,
+        wall_clock_unix_seconds: float,
+        reason: CheckpointReason,
+    ) -> CheckpointCadence:
+        if reason != self.due(
+            successful_update=successful_update,
+            wall_clock_unix_seconds=wall_clock_unix_seconds,
+            forced=reason if reason in FORCED_CHECKPOINT_REASONS else None,
+        ):
+            raise ValueError("committed checkpoint reason differs from the due reason")
+        return CheckpointCadence(
+            successful_update,
+            wall_clock_unix_seconds,
+            self.every_successful_updates,
+            self.every_hours,
+        )
 
 
 def _require_hash(name: str, value: str) -> None:
@@ -64,7 +167,9 @@ class GrowthCheckpointState:
 
     def __post_init__(self) -> None:
         if self.active_slot_ids not in ACTIVE_SLOT_IDS.values():
-            raise ValueError("growth active_slot_ids must be a canonical 16/20/24 slot set")
+            raise ValueError(
+                "growth active_slot_ids must be a canonical 16/20/24 slot set"
+            )
         if type(self.alpha) is not float or not 0.0 <= self.alpha <= 1.0:
             raise ValueError("growth alpha must be a float in [0, 1]")
         if not self.stage or type(self.stage) is not str:
@@ -76,7 +181,9 @@ class GrowthCheckpointState:
         has_start = self.ramp_start_successful_update is not None
         has_updates = self.ramp_updates is not None
         if has_start != has_updates:
-            raise ValueError("growth ramp origin and duration must both be present or absent")
+            raise ValueError(
+                "growth ramp origin and duration must both be present or absent"
+            )
         if has_start:
             if (
                 type(self.ramp_start_successful_update) is not int
@@ -90,9 +197,26 @@ class GrowthCheckpointState:
 
 
 @dataclass(frozen=True, slots=True)
+class StageBudgetCheckpointState:
+    start_successful_update: int
+    terminal_successful_update: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.start_successful_update) is not int
+            or self.start_successful_update < 0
+            or type(self.terminal_successful_update) is not int
+            or self.terminal_successful_update <= self.start_successful_update
+        ):
+            raise ValueError("checkpoint stage budget is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class RawCheckpointState:
     trainer: SingleGpuUpdateState
     growth: GrowthCheckpointState
+    stage_budget: StageBudgetCheckpointState
+    checkpoint_cadence: CheckpointCadence
 
     def __post_init__(self) -> None:
         if (
@@ -101,17 +225,48 @@ class RawCheckpointState:
             or type(self.trainer.effective_samples) is not int
         ):
             raise ValueError("checkpoint trainer state is inconsistent")
+        if type(self.stage_budget) is not StageBudgetCheckpointState:
+            raise TypeError("checkpoint stage budget has an invalid type")
+        if type(self.checkpoint_cadence) is not CheckpointCadence:
+            raise TypeError("checkpoint cadence has an invalid type")
+        if not (
+            self.stage_budget.start_successful_update
+            <= self.trainer.successful_updates
+            <= self.stage_budget.terminal_successful_update
+        ):
+            raise ValueError("checkpoint update is outside the persisted stage budget")
+        if (
+            self.checkpoint_cadence.last_successful_update
+            != self.trainer.successful_updates
+        ):
+            raise ValueError(
+                "checkpoint cadence is not committed at the checkpoint update"
+            )
         growth = self.growth
         if growth.ramp_start_successful_update is not None:
+            if (
+                growth.ramp_start_successful_update
+                != self.stage_budget.start_successful_update
+            ):
+                raise ValueError(
+                    "growth ramp origin differs from the persisted stage start"
+                )
             if self.trainer.successful_updates < growth.ramp_start_successful_update:
                 raise ValueError("checkpoint update precedes growth ramp origin")
             assert growth.ramp_updates is not None
+            if (
+                growth.ramp_start_successful_update + growth.ramp_updates
+                > self.stage_budget.terminal_successful_update
+            ):
+                raise ValueError("growth ramp exceeds the persisted stage budget")
             expected_alpha = half_cosine_growth_alpha(
                 self.trainer.successful_updates - growth.ramp_start_successful_update,
                 growth.ramp_updates,
             )
             if growth.alpha != expected_alpha:
-                raise ValueError("checkpoint growth alpha differs from persisted ramp progress")
+                raise ValueError(
+                    "checkpoint growth alpha differs from persisted ramp progress"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +298,9 @@ class CheckpointManifest:
     def __post_init__(self) -> None:
         paths = tuple(record.path for record in self.files)
         if not paths or paths != tuple(sorted(set(paths))):
-            raise ValueError("checkpoint manifest files must be nonempty, sorted and unique")
+            raise ValueError(
+                "checkpoint manifest files must be nonempty, sorted and unique"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +390,9 @@ def identity_from_dict(value: object) -> CheckpointIdentity:
 
 def manifest_from_dict(value: object) -> CheckpointManifest:
     document = _mapping(value, "checkpoint manifest")
-    _exact_keys(document, {"schema_version", "kind", "identity", "files"}, "checkpoint manifest")
+    _exact_keys(
+        document, {"schema_version", "kind", "identity", "files"}, "checkpoint manifest"
+    )
     try:
         kind = CheckpointKind(document["kind"])
     except (TypeError, ValueError):
@@ -253,7 +412,9 @@ def manifest_from_dict(value: object) -> CheckpointManifest:
         for raw_record in cast(list[object], raw_files):
             record = _mapping(raw_record, "checkpoint file record")
             _exact_keys(record, {"path", "size", "sha256"}, "checkpoint file record")
-            if not isinstance(record["path"], str) or not isinstance(record["sha256"], str):
+            if not isinstance(record["path"], str) or not isinstance(
+                record["sha256"], str
+            ):
                 raise TypeError
             records.append(
                 FileRecord(
@@ -276,8 +437,20 @@ def raw_state_to_dict(
 ) -> tuple[dict[str, object], dict[str, object]]:
     trainer: dict[str, object] = {
         "attempted_updates": state.trainer.attempted_updates,
+        "checkpoint_cadence": {
+            "every_hours": state.checkpoint_cadence.every_hours,
+            "every_successful_updates": state.checkpoint_cadence.every_successful_updates,
+            "last_successful_update": state.checkpoint_cadence.last_successful_update,
+            "last_wall_clock_unix_seconds": (
+                state.checkpoint_cadence.last_wall_clock_unix_seconds
+            ),
+        },
         "effective_samples": state.trainer.effective_samples,
         "schema_version": RAW_SCHEMA_VERSION,
+        "stage_budget": {
+            "start_successful_update": state.stage_budget.start_successful_update,
+            "terminal_successful_update": state.stage_budget.terminal_successful_update,
+        },
         "successful_updates": state.trainer.successful_updates,
     }
     growth: dict[str, object] = {
@@ -298,7 +471,18 @@ def raw_state_from_dicts(
 ) -> RawCheckpointState:
     trainer = _mapping(trainer_value, "trainer state")
     growth = _mapping(growth_value, "growth state")
-    _exact_keys(trainer, {"schema_version", "attempted_updates", "successful_updates", "effective_samples"}, "trainer state")
+    _exact_keys(
+        trainer,
+        {
+            "schema_version",
+            "attempted_updates",
+            "successful_updates",
+            "effective_samples",
+            "stage_budget",
+            "checkpoint_cadence",
+        },
+        "trainer state",
+    )
     _exact_keys(
         growth,
         {
@@ -318,6 +502,23 @@ def raw_state_from_dicts(
         for document in (trainer, growth)
     ):
         raise CheckpointError("checkpoint state schema version is unsupported")
+    stage_budget = _mapping(trainer["stage_budget"], "checkpoint stage budget")
+    _exact_keys(
+        stage_budget,
+        {"start_successful_update", "terminal_successful_update"},
+        "checkpoint stage budget",
+    )
+    cadence = _mapping(trainer["checkpoint_cadence"], "checkpoint cadence")
+    _exact_keys(
+        cadence,
+        {
+            "last_successful_update",
+            "last_wall_clock_unix_seconds",
+            "every_successful_updates",
+            "every_hours",
+        },
+        "checkpoint cadence",
+    )
     slots = growth["active_slot_ids"]
     if not isinstance(slots, list) or not all(
         type(item) is int for item in cast(list[object], slots)
@@ -339,22 +540,36 @@ def raw_state_from_dicts(
                 ramp_start_successful_update=growth["ramp_start_successful_update"],
                 ramp_updates=growth["ramp_updates"],
             ),
+            stage_budget=StageBudgetCheckpointState(
+                start_successful_update=stage_budget["start_successful_update"],
+                terminal_successful_update=stage_budget["terminal_successful_update"],
+            ),
+            checkpoint_cadence=CheckpointCadence(
+                last_successful_update=cadence["last_successful_update"],
+                last_wall_clock_unix_seconds=cadence["last_wall_clock_unix_seconds"],
+                every_successful_updates=cadence["every_successful_updates"],
+                every_hours=cadence["every_hours"],
+            ),
         )
     except (TypeError, ValueError):
         raise CheckpointError("checkpoint training state is invalid") from None
 
 
 __all__ = [
+    "FORCED_CHECKPOINT_REASONS",
     "MAX_MODEL_SHARD_BYTES",
     "RAW_SCHEMA_VERSION",
+    "CheckpointCadence",
     "CheckpointError",
     "CheckpointIdentity",
     "CheckpointKind",
     "CheckpointManifest",
+    "CheckpointReason",
     "CheckpointSaveResult",
     "FileRecord",
     "GrowthCheckpointState",
     "RawCheckpointState",
+    "StageBudgetCheckpointState",
     "identity_from_dict",
     "identity_to_dict",
     "manifest_from_dict",

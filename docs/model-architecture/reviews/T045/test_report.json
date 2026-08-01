@@ -1,0 +1,23 @@
+{
+  "task_id": "T045",
+  "status": "implementation-tests-passed-review-passed",
+  "scope": "CPU checkpoint schema/cadence/round-trip and adjacent PMA/retention",
+  "commands": [
+    "uv run pytest -q tests/unit/checkpoint --basetemp=docs/model-architecture/reviews/T045/.pytest-unit -p no:cacheprovider",
+    "uv run pytest -q tests/unit/checkpoint tests/unit/train/test_stage.py tests/unit/train/test_scheduler.py tests/unit/train/test_loop.py tests/unit/train/test_runtime.py tests/unit/cli/test_transition.py --basetemp=docs/model-architecture/reviews/T045/.pytest-integrated -p no:cacheprovider",
+    "uv run ruff check src/sakuramoon/checkpoint tests/unit/checkpoint tests/gpu/checkpoint",
+    "uv run pyright src/sakuramoon/checkpoint tests/unit/checkpoint tests/gpu/checkpoint",
+    "git diff --check"
+  ],
+  "results": {
+    "pytest": "46 checkpoint tests; 90 integrated CPU tests passed; 25 targeted RTX 5090 checkpoint tests passed",
+    "ruff": "passed",
+    "pyright": "0 errors, 0 warnings",
+    "git_diff_check": "passed",
+    "traceability": "passed: requirements=235, source_nodes=235, archive_files=16, production_modules=106, runtime_config_keys=262"
+  },
+  "hardware": "CPU",
+  "gpu_tests": "25 targeted RTX 5090 checkpoint tests passed; NVML initialization warning",
+  "formal_stage": "not run",
+  "multi_gpu": "blocked"
+}
