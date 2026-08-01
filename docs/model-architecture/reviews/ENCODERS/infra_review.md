@@ -1,5 +1,24 @@
 # Encoders/Conditioning package Infra/performance review
 
+## Current remediation closure
+
+Reviewer: independent agent `/root/encoders_remediation_rereview` at implementation
+head `4143a605d70491ab39365b8b2e3fc2017862ed4a`.
+
+Current verdict: **PASS for T020-T024 Infra/performance correctness in the implemented
+CPU and single-RTX-5090 scope.** The independent rereview confirmed bounded real
+Mage/Qwen execution, no second Qwen forward, no T022/T023 CUDA scalar sync, one T024
+entry D2H/H2D pair with no per-block D2H, and flat varlen packing. Targeted validation
+passed 134 CPU and 23 real GPU tests; Ruff and strict Pyright passed. Full results are
+in `t020_t024_infra_rereview.md`.
+
+Production metric/latent scans, end-to-end throughput, formal stage, 1,000-step,
+DDP/NCCL, multi-GPU, and long-run gates remain pending.
+
+---
+
+## Historical package review retained below
+
 Reviewer: independent agent `/root/encoders_package_review`
 
 Scope: `T020-T024` CPU/one-GPU durability, synchronization, boundedness, and current

@@ -1,5 +1,25 @@
 # Encoders/Conditioning package AI/model correctness review
 
+## Current remediation closure
+
+Reviewer: independent agent `/root/encoders_remediation_rereview` at implementation
+head `4143a605d70491ab39365b8b2e3fc2017862ed4a`.
+
+Current verdict: **PASS for T020-T024 AI/model correctness in the implemented CPU and
+single-RTX-5090 scope.** The independent rereview reproduced the governed Mage source,
+same-forward raw block-24 capture, T022/T023 no-host-sync routing, and T024 single-entry
+accepted-boundary identity. Targeted validation passed 134 CPU and 23 real GPU tests;
+Ruff and strict Pyright passed. Full details and retained pending boundaries are in
+`t020_t024_ai_rereview.md`.
+
+T020 production LPIPS/SSIM engine identity, 2,000-image/manual acceptance, and
+50k-100k latent statistics remain pending. T050 owns production constructor binding.
+No formal stage, 1,000-step, DDP/NCCL, multi-GPU, or long-run gate is closed here.
+
+---
+
+## Historical package review retained below
+
 Reviewer: independent agent `/root/encoders_package_review`
 
 Scope: `T020-T024` CPU/one-GPU implementation, contracts, task evidence, and the
