@@ -143,3 +143,142 @@ configuration bindings and non-TOML S0 blockers, the capacity sweep, formal eval
 S001, formal stage work, and all four-GPU gates remain outside this PASS and retain
 their prior blocked/pending status. Synthetic or bounded evidence is still
 engineering-only.
+
+## Final independent Infra/performance review (2026-08-02)
+
+Reviewer authority: fresh independent `s000_infra_reviewer_final`. This review inspected the
+post-remediation production launcher, data-service bootstrap, checkpoint retention,
+telemetry, evaluator execution and current handoff evidence. It ran CPU/static checks
+only and did not modify implementation, use a GPU, stage files, or create commits.
+
+### Verdict
+
+BLOCKED pending two operational data-contract corrections and one evaluator publication
+correction. The real bounded single-GPU lifecycle and fresh-process RAW resume evidence
+remain valid engineering evidence, but the current tree does not yet satisfy its fixed
+manifest/validation and atomic no-clobber contracts for a production handoff.
+
+### Findings
+
+1. **[HIGH] `S000-INFRA-003`: an existing operational manifest is coupled back to the
+   mutable upstream listing.** `ensure_dataset_manifest()` loads an existing manifest
+   and then unconditionally lists `master` and requires exact path/size/digest equality
+   (`src/sakuramoon/data/modelscope.py:319-322`). An unrelated tar addition upstream
+   therefore prevents every later data-service restart, despite the governing C11
+   contract that an existing operational manifest is not refreshed and that no immutable
+   revision is required. Existing manifests must be validated locally and used as the
+   operational snapshot; remote enumeration belongs only to missing-manifest
+   initialization. Per-shard size/digest verification during download remains required.
+
+2. **[HIGH] `S000-INFRA-004`: validation selection is still algorithmic rather than the
+   fixed two-tar decision.** `select_validation_shards()` ranks the whole manifest by a
+   hash of seed, manifest identity and path, while `validate_selection_manifest()`
+   requires every persisted selection to equal that recomputation
+   (`src/sakuramoon/data/validation.py:246-283`). The canonical decision fixes
+   `shard-000509.tar` and `shard-000060.tar`; rebuilding a missing manifest/selection
+   after upstream `master` changes can silently choose another pair or reject the fixed
+   pair. Selection construction must fetch exactly those two records from the operational
+   manifest and fail explicitly if either path is absent.
+
+3. **[MEDIUM] `S000-INFRA-005`: evaluator final publication does not provide atomic
+   no-clobber at the rename edge.** `AtomicEvaluationPublisher.commit()` checks the final
+   path and then calls ordinary `os.rename()` in a separate operation
+   (`src/sakuramoon/eval/publisher.py:144-147`). A destination empty directory created
+   between those operations can be replaced by POSIX rename, so the promised no-clobber
+   property is not atomic. Use a no-replace primitive for the final directory transition
+   and add a race-injection test; summary, `COMPLETE`, tree fsync and parent-directory
+   fsync ordering should remain unchanged.
+
+### Confirmed behavior
+
+- W&B and ModelScope environment-variable presence is checked by strict config loading
+  before CUDA selection or model construction; no credential value was read or logged.
+- The production lifecycle accepts only fresh start or an exact canonical absolute RAW
+  `COMPLETE` path. RAW restore and full binding precede the data-service connection, and
+  the configured S0 batch contract is local batch 2, accumulation 4, global batch 8.
+- The real first-update and fresh-process N-to-N+1 evidence covers data service, local
+  Qwen/VAE, 16-layer DiT, loss, backward, FP32 clip, TorchAO update, telemetry and RAW
+  publication. It remains explicitly bounded engineering evidence.
+- Evaluator storage preflight, checkpoint/overall timing, separate publication timing,
+  reference Heun-50/99-NFE metadata, extractor/real-stat fail-closed blockers and
+  engineering-only classification remain consistent after the earlier remediations.
+
+### Independent checks
+
+- Evaluator-focused CPU selector: 60 passed.
+- Manifest/validation/train/checkpoint CPU selector: 115 passed.
+- Additional T054/training/fault CPU selector: 66 passed.
+- Scoped Ruff passed; affected-path Pyright reported 0 errors.
+- No traceability verifier, GPU workload, formal evaluator, S001 stage, DDP/NCCL or long
+  run was executed.
+
+### Evidence boundary
+
+Formal FID/IS remains blocked by intentionally absent extractor, preprocess, real-stat
+and sample-count bindings. The capacity rows and single-update timings are engineering
+selection evidence, not steady-state throughput or a maximum batch result. S001 has not
+started, and every multi-GPU gate remains pending.
+
+## Final Infra remediation rereview (2026-08-02)
+
+Reviewer authority: the same independent `s000_infra_reviewer_final` that reported
+`S000-INFRA-003`, `S000-INFRA-004`, and `S000-INFRA-005`. This append-only rereview
+inspected the targeted remediation and ran CPU/static checks only. It did not modify
+implementation, use a GPU, stage files, create commits, or change the T054 review.
+
+### Verdict
+
+PASS for all three requested Infra remediations. `S000-INFRA-003`,
+`S000-INFRA-004`, and `S000-INFRA-005` are RESOLVED. No new Infra finding was
+identified in the remediated scope.
+
+### Finding disposition
+
+1. **`S000-INFRA-003` RESOLVED.** Existing operational manifests are now loaded and
+   strictly validated only from the local file, with no call to the mutable `master`
+   listing (`src/sakuramoon/data/modelscope.py:305-320`). Remote enumeration occurs only
+   when the manifest is absent; a concurrent initialization winner is also adopted by
+   strict local load rather than by relisting (`modelscope.py:321-331`). The explicit
+   manifest CLI retains separate local and remote-validation modes. Tests bind zero
+   listing calls and unchanged bytes when `initialize` encounters an existing snapshot
+   whose remote listing has drifted.
+
+2. **`S000-INFRA-004` RESOLVED.** The validation contract now fixes the complete paths
+   `data/2_2026.1/shard-000509.tar` and
+   `data/2_2026.1/shard-000060.tar` in canonical order
+   (`src/sakuramoon/data/validation.py:26-31`). Construction fetches exactly those two
+   manifest records and hard-fails when either is absent (`validation.py:250-271`), while
+   the selection type and reload validation reject any different paths, records, order,
+   manifest identity, or seed (`validation.py:59-72,274-288`). This removes dependence
+   on whole-manifest hash ranking while preserving the internal selection identity and
+   per-shard download integrity fields.
+
+3. **`S000-INFRA-005` RESOLVED.** The actual NFSv3 target rejects
+   `renameat2(RENAME_NOREPLACE)` with `EINVAL`, so the final implementation uses an
+   executable same-filesystem commit-marker protocol instead of falling back to an
+   overwrite-capable rename. It first atomically reserves the final directory with
+   no-clobber `mkdir`, hard-links staged payloads into it without replacement, fsyncs
+   every destination directory, removes staged payload names, and hard-links the already
+   fsynced `COMPLETE` file last (`src/sakuramoon/eval/publisher.py:67-115,189-197`). A
+   concurrent final owner is preserved and receives no writes. Any failure before the
+   final hard link leaves a visible but permanently uncommitted directory with no
+   `COMPLETE`; consumers must treat `COMPLETE`, not final-directory existence, as the
+   atomic publication boundary.
+
+### Independent checks
+
+- Complete data unit suite: 268 passed, 1 multiprocessing warning.
+- Complete evaluator unit suite: 144 passed, 17 dependency warnings.
+- Scoped Ruff passed; scoped Pyright reported 0 errors, 0 warnings, 0 informations.
+- `git diff --check HEAD` passed before this append.
+- An independent probe on the configured NFSv3 mount verified nested payload and
+  `COMPLETE` durability, successful staging cleanup, no `COMPLETE` after an injected
+  pre-commit failure, and preservation of a concurrently owned final directory. Its
+  temporary directory was automatically removed.
+
+### Evidence boundary
+
+This PASS closes only the three implementation findings. The retained single-update,
+resume, capacity-row and bounded evaluator results remain engineering-only. Formal
+FID/IS still requires its explicit extractor, preprocess, real-stat and sample bindings;
+S001 has not started, and formal-stage, long-run and multi-GPU gates remain pending.

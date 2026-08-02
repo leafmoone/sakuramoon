@@ -210,3 +210,115 @@ stand in for formal stage-end evidence.
 - PMA/release checkpoint policy suite: 20 passed, 17 warnings.
 - Ruff on evaluator implementation, CLI, and evaluator tests: passed.
 - Pyright on evaluator implementation, CLI, and evaluator tests: 0 errors, 0 warnings.
+
+## S001 handoff-readiness independent review (2026-08-02)
+
+Reviewer authority: independent `s000_ai_reviewer_final`, reviewing the current S000
+production/evaluator/configuration worktree above base
+`03085bdc6e633a7c7f1c54f54ca98ab1e712200c`. This section is append-only and does not
+replace any prior finding or disposition. The reviewer ran CPU/static checks only and
+did not modify implementation or configuration.
+
+### Verdict
+
+BLOCKED. The production/evaluator chains are otherwise coherent, but the fixed
+validation population is not implemented and two governed scheduler values cannot be
+revised through TOML as promised. S001 must not be started while either finding is
+open.
+
+### Findings
+
+- **S000-AI-005 (blocking): validation selects the wrong shards.** The canonical
+  population is exactly `shard-000509.tar` and `shard-000060.tar`, containing 2,099
+  image+JSON pairs. `src/sakuramoon/data/validation.py:246-265` instead hashes seed,
+  mutable operational-manifest identity and every shard path, then selects the first
+  two ranked records. A missing selection can therefore initialize a different pair,
+  and both training exclusion and evaluator prompts follow that incorrect pair.
+  `tests/unit/data/test_validation.py:282-296` verifies the hash-selection behavior
+  rather than the two governed paths. Selection and reload validation must require the
+  exact two records and fail clearly when either is absent or ambiguous.
+- **S000-AI-006 (blocking): warmup length and maximum LR are not TOML-revisable.** The
+  current `1,000` and `2e-5` values are correct, and the successful-update arithmetic
+  reaches `2e-5` on update 1,000 and remains constant. However,
+  `src/sakuramoon/config/schema.py:95,611-615` constrains both values to one literal,
+  while `src/sakuramoon/train/production.py:304-319` independently rejects any other
+  values. `tests/unit/config/test_schema.py:425-444` codifies that rejection. This
+  conflicts with the governed contract that these values come from TOML and can be
+  revised there before rerunning preflight. Strict positive bounds, optimizer/max-LR
+  consistency and the selected constant-after-warmup mode should remain fail-closed;
+  the current numeric values must not be duplicated as runtime acceptance gates.
+
+### Accepted model-correctness scope
+
+- Current accumulation `4`, local batch `2`, global batch `8`, planned updates `1,000`,
+  checkpoint cadence `1,000`, RAW retention `2`, and metrics fsync cadence `1` are
+  explicit TOML values. Accumulation is a positive schema value and the global-batch
+  identity is cross-validated; it is not hardcoded in the training loop.
+- Exact absolute RAW `COMPLETE` restore validates config/dependency/parameter schema,
+  scheduler state, optimizer state and checkpoint cadence before connecting to the
+  data service. No latest, PMA, model-only or fallback resume path was found.
+- Typed validation captions preserve tag, Artist and NL identities. Reference
+  generation uses per-case FP32 Gaussian noise, x-to-v before CFG, linear Heun-50 with
+  final Euler and 99 NFE. Streaming CPU-float64 FID and split IS aggregation match the
+  one-shot definitions.
+- Formal stage-end remains fail-closed on exact current raw/PMA plus accepted lineage
+  and explicit local extractor/preprocess/real-stat identities. The retained bounded
+  run is correctly classified `synthetic_bounded_engineering_only` and cannot release
+  a checkpoint.
+
+### CPU/static evidence
+
+- Evaluator/config/validation/production selector: 265 passed, 17 warnings.
+- Scoped Ruff: passed.
+- Scoped Pyright: 0 errors, 0 warnings.
+- `git diff --check`: passed before this report append.
+- No GPU, formal stage, multi-GPU, long-run or S001 command was run by the reviewer.
+
+## S000-AI-005/006 remediation rereview (2026-08-02)
+
+Reviewer authority: the same independent `s000_ai_reviewer_final`. This section
+appends to the handoff-readiness review above and preserves both original findings.
+The reviewer did not modify implementation/configuration, run GPU work or commit.
+
+### Verdict
+
+PASS for both requested remediations. `S000-AI-005` and `S000-AI-006` are RESOLVED,
+and no new AI/model-correctness finding was identified in the affected scope. The AI
+gate raised by the preceding review no longer blocks S001 handoff; this conclusion
+does not replace the independent Infra verdict or authorize the reviewer to start
+training.
+
+### Finding status
+
+- **S000-AI-005: RESOLVED.** `VALIDATION_SHARD_PATHS` now records the exact
+  operational paths `data/2_2026.1/shard-000509.tar` and
+  `data/2_2026.1/shard-000060.tar` in governed order. `ValidationSelection` rejects
+  any other paths or order, while `select_validation_shards` resolves those exact
+  records from the operational manifest and hard-fails if either is missing. Existing
+  selection reload still rebinds every record and the complete expected selection to
+  the current manifest. The reviewer parsed the current operational manifest
+  read-only and observed exactly the two governed paths. Focused tests cover reordered
+  manifests, a missing fixed shard, canonical selection publication/reload, complete
+  tar preparation, service exclusion and validation-prompt consumers.
+- **S000-AI-006: RESOLVED.** Optimizer LR and scheduler maximum LR are strict positive
+  TOML floats, warmup length is a strict positive TOML integer, and the cross-table
+  validator requires both LR values to match. Production independently checks the
+  positive finite values, equality, and the selected linear-warmup/constant mode but
+  contains no `1,000` or `2e-5` acceptance gate. Tests exercise a non-default
+  `warmup_updates=250`/`max_lr=1e-5` schema and a non-default four-update runtime
+  schedule. A separate read-only config check retained the current accumulation `4`,
+  then successfully validated accumulation `2` with its derived global batch plus a
+  seven-update warmup and `1e-5` LR. Accumulation continues to flow from TOML into
+  preflight and the production training loop.
+
+### CPU/static evidence
+
+- Focused validation/service/config/production/evaluator selector: 227 passed,
+  17 warnings.
+- Current production config plus alternate scheduler/accumulation schema check:
+  passed.
+- Current operational-manifest fixed-path selection check: passed.
+- Scoped Ruff: passed.
+- Scoped Pyright: 0 errors, 0 warnings.
+- `git diff --check`: passed before this report append.
+- No GPU, formal stage, multi-GPU, long-run or S001 command was run by the reviewer.

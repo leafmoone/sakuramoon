@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 116
+registry_revision = 117
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -146,10 +146,34 @@ new_sha256 = "68343ca0523d25321562935246d8bc4f62f507cc0506ac1d21dfde4e397da479"
 changed_at = "2026-08-01"
 summary = "Replace the local-NVMe storage gate with D026 server-backed identity, capacity, publication, and runtime-path evidence."
 
+[[changes]]
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+revision = 11
+previous_sha256 = "c50512393abf9fde7fb64396d7f7530cc51bfb172775d604488e8acc8a77a7cf"
+new_sha256 = "67f100d265504a1ec34471f97ad1664b361ddeede8f02d9e547067433fcec6e4"
+changed_at = "2026-08-02"
+summary = "Bind the user-selected S0 TOML, automatic operational manifest initialization, two-tar validation set, checkpoint retention, and constant post-warmup schedule."
+
+[[changes]]
+source_path = "docs/model-architecture/current/open-items.md"
+revision = 9
+previous_sha256 = "68343ca0523d25321562935246d8bc4f62f507cc0506ac1d21dfde4e397da479"
+new_sha256 = "1636bac99f053c65a3941e1d34a37166a1acfbc4f889aebcc778922eff4367c3"
+changed_at = "2026-08-02"
+summary = "Close S0 manifest/config/service/checkpoint readiness while retaining formal validation-consumption, steady-state, later-stage, and evaluator gates."
+
+[[changes]]
+source_path = "docs/model-architecture/current/observability-and-evaluation.md"
+revision = 4
+previous_sha256 = "b6ed7cf68d0ee480921d40b9f7a210965b6c2ed1a7ff3b23d7a951d062add1e5"
+new_sha256 = "f5587b8eaec534b1452ce22cbeb611f98a9621d0d279335f72db806d249e1f7b"
+changed_at = "2026-08-02"
+summary = "Bind per-update S0 metrics durability and checkpoint-driven evaluator behavior without user-supplied identity hashes or formal FID/IS claims."
+
 [[sources]]
 path = "docs/model-architecture/current/confirmed-decisions.md"
 kind = "confirmed"
-revision = 10
+revision = 11
 include_top_headings = [
     "0.",
     "1.",
@@ -170,13 +194,13 @@ include_top_headings = [
 excluded_top_headings = [
     "15.",
 ]
-sha256 = "c50512393abf9fde7fb64396d7f7530cc51bfb172775d604488e8acc8a77a7cf"
+sha256 = "67f100d265504a1ec34471f97ad1664b361ddeede8f02d9e547067433fcec6e4"
 initial_sha256 = "899d93cd6c65271faf4f76581349d3e5bcc3faccef7753885780e98118035bbb"
 
 [[sources]]
 path = "docs/model-architecture/current/open-items.md"
 kind = "open_items"
-revision = 8
+revision = 9
 include_top_headings = [
     "0.",
     "1.",
@@ -193,18 +217,18 @@ include_top_headings = [
 excluded_top_headings = [
     "11.",
 ]
-sha256 = "68343ca0523d25321562935246d8bc4f62f507cc0506ac1d21dfde4e397da479"
+sha256 = "1636bac99f053c65a3941e1d34a37166a1acfbc4f889aebcc778922eff4367c3"
 initial_sha256 = "fa62704d2f4193388ab121dfd93b1aa2f08f49be18c2906d51da8c81179187c6"
 
 [[sources]]
 path = "docs/model-architecture/current/observability-and-evaluation.md"
 kind = "observability"
-revision = 3
+revision = 4
 include_top_headings = [
     "可观测性与评估补充决定",
 ]
 excluded_top_headings = []
-sha256 = "b6ed7cf68d0ee480921d40b9f7a210965b6c2ed1a7ff3b23d7a951d062add1e5"
+sha256 = "f5587b8eaec534b1452ce22cbeb611f98a9621d0d279335f72db806d249e1f7b"
 initial_sha256 = "9a8b4fd39c5e5bf76a343f1b02e3507abddc27e98e34946a0fd0f1e98be64201"
 
 [[profiles]]
@@ -5508,9 +5532,12 @@ implementation_paths = [
     "docs/model-architecture/reviews/D021/test_report.json",
     "docs/model-architecture/reviews/DATA/d010_d026_ai_rereview.md",
     "docs/model-architecture/reviews/DATA/d010_d026_infra_rereview.md",
+    "config/base.toml",
+    "config/train_s0.toml",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json",
 ]
 evidence_hardware = ""
-evidence_artifacts = []
+evidence_artifacts = ["docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json"]
 ai_review = ""
 infra_review = ""
 config_keys = [
@@ -5945,9 +5972,13 @@ implementation_paths = [
     "docs/model-architecture/progress/tasks/D025.md",
     "docs/model-architecture/reviews/D025/implementation_report.md",
     "docs/model-architecture/reviews/D025/test_report.json",
+    "data/validation-selection.json",
+    "config/base.toml",
+    "tests/unit/eval/test_validation_prompts.py",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json",
 ]
 evidence_hardware = ""
-evidence_artifacts = []
+evidence_artifacts = ["docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json"]
 ai_review = ""
 infra_review = ""
 config_keys = [
@@ -6318,10 +6349,16 @@ implementation_paths = [
     "docs/model-architecture/progress/tasks/S000.md",
     "docs/model-architecture/reviews/S000/production_readiness_report.md",
     "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
+    "config/train_s0.toml",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_report.md",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = "1GPU"
-evidence_artifacts = ["docs/model-architecture/reviews/S000/production_readiness_test_report.json"]
+evidence_artifacts = [
+    "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json",
+]
 ai_review = ""
 infra_review = ""
 config_keys = [
@@ -6464,10 +6501,13 @@ implementation_paths = [
     "docs/model-architecture/reviews/T045/ai_review.md",
     "docs/model-architecture/reviews/T045/infra_review.md",
     "docs/model-architecture/reviews/T045/review_report.json",
+    "config/train_s0.toml",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_report.md",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
+evidence_hardware = "1GPU"
+evidence_artifacts = ["docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json"]
 ai_review = ""
 infra_review = ""
 config_keys = [
@@ -8059,7 +8099,7 @@ not_applicable_reason = "This mapping dimension does not apply to this requireme
 [[requirements]]
 id = "OPEN-023"
 kind = "open_item"
-status = "planned"
+status = "implemented"
 profile = "data"
 source_path = "docs/model-architecture/current/open-items.md"
 heading_path = [
@@ -8072,10 +8112,20 @@ source_occurrence = 0
 blocked_by = []
 alias_of = ""
 superseded_by = ""
-implementation_commit_ref = ""
-implementation_paths = []
-evidence_hardware = ""
-evidence_artifacts = []
+implementation_commit_ref = "0fd2b64aa76f5e56e6b9a9f6d5bcc7ac10672e3d"
+implementation_paths = [
+    "config/base.toml",
+    "config/train_s0.toml",
+    "src/sakuramoon/data/manifest.py",
+    "src/sakuramoon/data/modelscope.py",
+    "src/sakuramoon/cli/manifest.py",
+    "tests/unit/data/test_dataset_manifest.py",
+    "tests/unit/data/test_manifest_cli.py",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_report.md",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json",
+]
+evidence_hardware = "CPU"
+evidence_artifacts = ["docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json"]
 ai_review = ""
 infra_review = ""
 config_keys = [
@@ -12055,7 +12105,10 @@ implementation_paths = [
     "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
 ]
 evidence_hardware = "1GPU"
-evidence_artifacts = ["docs/model-architecture/reviews/S000/production_readiness_test_report.json"]
+evidence_artifacts = [
+    "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json",
+]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -12347,7 +12400,10 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = "1GPU"
-evidence_artifacts = ["docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json"]
+evidence_artifacts = [
+    "docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json",
+    "docs/model-architecture/reviews/T052/bounded_evaluator_remediation_test_report.json",
+]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -12414,7 +12470,10 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = "1GPU"
-evidence_artifacts = ["docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json"]
+evidence_artifacts = [
+    "docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json",
+    "docs/model-architecture/reviews/T052/bounded_evaluator_remediation_test_report.json",
+]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -12482,7 +12541,10 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = "1GPU"
-evidence_artifacts = ["docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json"]
+evidence_artifacts = [
+    "docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json",
+    "docs/model-architecture/reviews/T052/bounded_evaluator_remediation_test_report.json",
+]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -12552,7 +12614,10 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = "1GPU"
-evidence_artifacts = ["docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json"]
+evidence_artifacts = [
+    "docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json",
+    "docs/model-architecture/reviews/T052/bounded_evaluator_remediation_test_report.json",
+]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -12619,7 +12684,10 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = "1GPU"
-evidence_artifacts = ["docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json"]
+evidence_artifacts = [
+    "docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json",
+    "docs/model-architecture/reviews/T052/bounded_evaluator_remediation_test_report.json",
+]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -12687,7 +12755,10 @@ implementation_paths = [
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = "1GPU"
-evidence_artifacts = ["docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json"]
+evidence_artifacts = [
+    "docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json",
+    "docs/model-architecture/reviews/T052/bounded_evaluator_remediation_test_report.json",
+]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -12777,7 +12848,10 @@ implementation_paths = [
     "docs/model-architecture/reviews/C002/infra_review.md",
 ]
 evidence_hardware = "1GPU"
-evidence_artifacts = ["docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json"]
+evidence_artifacts = [
+    "docs/model-architecture/reviews/T052/checkpoint_evaluator_test_report.json",
+    "docs/model-architecture/reviews/T052/bounded_evaluator_remediation_test_report.json",
+]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -13468,6 +13542,99 @@ benchmarks = ["benchmarks/data/**", "benchmarks/training/**"]
 artifacts = ["docs/model-architecture/reviews/D026/**"]
 not_applicable_fields = ["reference_modules"]
 not_applicable_reason = "The governed storage boundary has no reference-code dependency."
+
+[[requirements]]
+id = "C12-014"
+kind = "requirement"
+status = "verified"
+profile = "training_system"
+source_path = "docs/model-architecture/current/confirmed-decisions.md"
+heading_path = ["12. 优化器、并行、Checkpoint 与生产门槛"]
+node_kind = "list_item"
+source_fingerprint = "89be3cf8e909d2afbb7fa0009ddff33acb96c52d3591d9d9182f2cecdfe6433f"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "0fd2b64aa76f5e56e6b9a9f6d5bcc7ac10672e3d"
+implementation_paths = [
+    "config/base.toml",
+    "config/train_s0.toml",
+    "src/sakuramoon/config/schema.py",
+    "src/sakuramoon/config/readiness.py",
+    "src/sakuramoon/data/modelscope.py",
+    "src/sakuramoon/data/validation.py",
+    "src/sakuramoon/cli/data_service.py",
+    "src/sakuramoon/cli/manifest.py",
+    "src/sakuramoon/train/preflight.py",
+    "src/sakuramoon/train/production.py",
+    "tests/unit/config/test_c002_production_config.py",
+    "tests/unit/config/test_readiness.py",
+    "tests/unit/data/test_manifest_cli.py",
+    "tests/unit/data/test_modelscope.py",
+    "tests/unit/data/test_validation.py",
+    "tests/unit/train/test_preflight_failures.py",
+    "tests/unit/train/test_production.py",
+    "tests/gpu/train/test_single_gpu_full_chain.py",
+    "docs/model-architecture/progress/tasks/S000.md",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_report.md",
+    "docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json",
+]
+evidence_hardware = "1GPU"
+evidence_artifacts = ["docs/model-architecture/reviews/S000/s001_handoff_readiness_test_report.json"]
+ai_review = "docs/model-architecture/reviews/S000/ai_review.md"
+infra_review = "docs/model-architecture/reviews/S000/infra_review.md"
+config_keys = ["run.seed", "distributed.*", "stage.*", "scheduler.*", "checkpoint.*", "logging.*", "data.manifest.*", "data.validation.*"]
+modules = ["src/sakuramoon/config/**", "src/sakuramoon/train/**", "src/sakuramoon/checkpoint/**", "src/sakuramoon/data/**", "src/sakuramoon/cli/data_service.py", "src/sakuramoon/cli/manifest.py"]
+reference_modules = []
+tests = ["tests/unit/config/**", "tests/unit/data/**", "tests/unit/train/**", "tests/gpu/train/test_single_gpu_full_chain.py"]
+benchmarks = ["config/engineering_capacity_s000*.toml"]
+artifacts = ["artifacts/s0-engineering-capacity/**", "artifacts/s0-engineering-resume/**", "checkpoints/s0-engineering-resume/**"]
+not_applicable_fields = ["reference_modules"]
+not_applicable_reason = "The S0 TOML and production lifecycle have no reference-code dependency."
+
+[[requirements]]
+id = "OBS-013"
+kind = "requirement"
+status = "verified"
+profile = "observability"
+source_path = "docs/model-architecture/current/observability-and-evaluation.md"
+heading_path = ["可观测性与评估补充决定", "FID 与 IS"]
+node_kind = "list_item"
+source_fingerprint = "c6700d2c8bc3e81ac944f7899960b963340c02053b6dec7c2ffcd5be78eaeb53"
+source_occurrence = 0
+blocked_by = []
+alias_of = ""
+superseded_by = ""
+implementation_commit_ref = "d62fe751d73d57ad07c19dd08f316a7c790dd1e2"
+implementation_paths = [
+    "config/engineering_eval_s000.toml",
+    "src/sakuramoon/eval/validation.py",
+    "src/sakuramoon/eval/jobs.py",
+    "src/sakuramoon/eval/runner.py",
+    "src/sakuramoon/eval/timing.py",
+    "src/sakuramoon/eval/publisher.py",
+    "src/sakuramoon/cli/eval.py",
+    "tests/unit/eval/test_validation_prompts.py",
+    "tests/unit/eval/test_timing.py",
+    "tests/unit/eval/test_runner.py",
+    "tests/unit/eval/test_extractor_publisher.py",
+    "docs/model-architecture/progress/tasks/T052.md",
+    "docs/model-architecture/reviews/T052/bounded_evaluator_remediation_report.md",
+    "docs/model-architecture/reviews/T052/bounded_evaluator_remediation_test_report.json",
+]
+evidence_hardware = "1GPU"
+evidence_artifacts = ["docs/model-architecture/reviews/T052/bounded_evaluator_remediation_test_report.json"]
+ai_review = "docs/model-architecture/reviews/S000/ai_review.md"
+infra_review = "docs/model-architecture/reviews/S000/infra_review.md"
+config_keys = ["evaluation.*", "data.validation.*", "run.seed"]
+modules = ["src/sakuramoon/eval/**", "src/sakuramoon/cli/eval.py"]
+reference_modules = []
+tests = ["tests/unit/eval/**"]
+benchmarks = []
+artifacts = ["artifacts/s0-engineering-eval-bounded/**"]
+not_applicable_fields = ["reference_modules", "benchmarks"]
+not_applicable_reason = "The bounded evaluator validates behavior and publication, not a performance benchmark or reference implementation."
 
 [[requirements]]
 id = "OPEN-106"

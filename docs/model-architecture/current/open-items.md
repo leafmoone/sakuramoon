@@ -39,8 +39,8 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [x] S0 单卡原生、S1 起 DDP、TorchAO AdamW8bit、raw checkpoint 分层和生产吞吐/显存门槛。
 # 3. P0：数据、VAE 与输入协议
 ## 3.1 Manifest、验证隔离和数据扫描
-- [ ] 生成不可变训练 manifest，记录 repo/revision/path/release/bytes/SHA-256/samples，并验证约 11M 个逻辑 `id` 全局唯一。
-- [ ] 生成恰好 2,000 个唯一 id 的 `validation_manifest.jsonl` 与独立 validation shard；完整训练 dry run 中这些 id 的消费计数必须为 0。
+- [x] 生产 data service 在 `data/dataset-manifest.json` 缺失时从 ModelScope `leafmoone/webdataset_danbooru` 当前 `master` tar 列表自动初始化 operational manifest；用户无需提供 immutable revision 或 manifest SHA-256，已存在 manifest 默认不自动刷新。
+- [ ] validation 已固定为 `shard-000509.tar` 与 `shard-000060.tar` 的 2,099 个 image+JSON 对并写入 `data/validation-selection.json`；仍需在用户手工启动的 S001 段证明训练消费计数为 0。
 - [ ] 对全部 metadata 执行 256/512 的 17-bucket 分配扫描，报告每桶样本数、eligible、no-upscale reject、retention reject 与 retention 分位数。
 - [ ] 对至少前 100k 实际解码样本核对 EXIF 后尺寸；`dimension_mismatch>0.1%` 时暂停正式训练。
 - [ ] 固化 caption serializer golden cases：tags-only、NL-only、tags+NL、empty、candidate 命中、所有 dropout、截断和 suffix 保留。
@@ -52,12 +52,12 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [ ] 对 50k–100k 个训练 crop 统计 latent 全局/逐通道 mean/std、P1/P50/P99、绝对最大值与 BF16 安全性。
 - [ ] 验证同一 seed/pass/id 的 crop 完全可复现，crop offset 和源尺寸绝不进入模型输入。
 ## 3.3 独立数据供给 service 与 `mainset`
-- [ ] D024 实现独立启动/存活的单机唯一 data service，使 ModelScope 网络、token 解析、`.partial`、bytes/SHA-256、原子发布、cache/LRU/eviction 和 active/completed/replay state 全部只存在于 service；用进程边界与调用栈测试证明 trainer/DataLoader workers 没有这些路径，service 不可用时硬失败且无内联 fallback。
-- [ ] service 为每轮持久化一张 `mainset`：严格绑定 immutable training manifest，包含全部 tar path 且每个恰好一次，记录新的 shuffle identity、精确 ordinal 顺序和逐行状态；验证 trainer、checkpoint、stage/resolution/model growth、worker topology 与 resume 都不能传入或改写 tar order/cursor。
-- [ ] 按 `mainset` 顺序实现有界并发 download/verify/publish、verified lookahead、eviction lease 和本机 IPC；trainer 消费 `A/B` 时 service 准备 `C/D/E...`，所有 download/ready/lease/ACK、worker input/output、ready batch 与 completion channel 均有显式容量，active lease 不 eviction，磁盘预留和 quota 计入 published、in-flight 与 `.partial`。
-- [ ] 验证 normal-exhaustion completion ACK 才逐 tar 完成；worker/service/client/trainer exit、断连或 ACK 丢失保留 active 并从 tar 起点 replay。只有当前 `mainset` 全部 tar 已下载、验证、供给且所有 outstanding lease 完成后，才原子删除旧表并创建下一份全 manifest 随机 `mainset`；崩溃不得丢失旧表或提前供给下一轮。
-- [ ] T044 从 production raw checkpoint schema、manifest 和 resume API 中移除全部 data-service state；checkpoint 仍须完整保存并恢复 model、TorchAO optimizer、scheduler/growth、trainer counters、训练 RNG、optimizer-SR RNG、resolved config 与 identity。fresh-process next-update 正确性使用显式固定输入 batch，禁止要求或伪造 live tar/batch 连续性，并为既有含 data sidecar 的旧 raw schema 提供明确拒绝或受治理迁移合同。
-- [ ] D026 实现显式 server-backed storage：所有持久路径锁定同一 NFS source/version/hard-mount 身份，cache 使用无默认的小型有界配置，实际 free space 覆盖 cache high-watermark、三份实测 raw checkpoint 与显式 reserve；逐目录原子发布探测通过。AF_UNIX socket 与 singleton lock 固定在非 NFS 的 `/run/sakuramoon/`，身份、空间、探测或 runtime-path 漂移均硬失败且无 fallback。
+- [x] D024 已实现独立启动/存活的单机唯一 data service；ModelScope 网络、token 解析、`.partial`、完整性检查、原子发布、cache/LRU/eviction 和 active/completed/replay state 全部只存在于 service，service 不可用时 trainer 硬失败且无内联 fallback。
+- [x] service 每轮从当前 operational manifest 持久化一张 `mainset`，包含全部 tar path 且每个恰好一次；trainer、checkpoint、stage/resolution/model growth、worker topology 与 resume 都不能传入或改写 tar order/cursor。
+- [x] `mainset` 下载/发布、verified lookahead、eviction lease、本机 IPC、worker input/output、ready batch 与 completion channel 已有显式容量；S0 当前容量值只从 TOML 读取。
+- [x] normal-exhaustion completion ACK、异常保持 active、tar 起点 replay、全部 lease 结束后才轮换下一 `mainset` 的 CPU/单卡工程合同已验证；正式长跑仍由下项验收。
+- [x] T044 已从 production raw checkpoint schema、manifest 和 resume API 移除全部 data-service state，并通过固定输入与真实 service 的 fresh-process N-to-N+1 恢复验证。
+- [x] D026 已实现显式 server-backed storage、NFS source/version/hard-mount、原子发布探测、host-local `/run/sakuramoon/` IPC 和空间合同；S0 使用 cache 64 GiB high watermark、2 retained + 1 publishing checkpoint copy 与 50 GiB reserve。
 - [ ] 在真实独立 service、真实多进程 DataLoader 和 1GPU consumer 上完成 cold/warm-cache overlap、worker/service/trainer fault 与人工 checkpoint resume smoke；达到 `>=12 samples/s`、ready wait `<2%`、无 swap/无界 RSS/quota 越界，并证明下载/校验不会让 same-backend fully-cached trainer step p50/p95/p99 超出预登记波动。
 # 4. P0：模型 reference 与正确性
 ## 4.1 文本与 style
@@ -83,7 +83,7 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [ ] 锁定 driver、CUDA、PyTorch、TorchAO、FA4/CuTeDSL、Triton、causal_conv1d、fla、ModelScope Hub、Safetensors 和 NCCL 版本。
 - [ ] 在 RTX 5090 实际执行 FA4 varlen BF16 20Q/5KV forward/backward、Qwen DeltaNet fast kernel 和 fused SwiGLU；仅 import 成功不算通过。
 - [ ] 检查 4×32GB GPU、NCCL P2P、14 vCPU、120 GB RAM 与网络凭据；存储按显式 server-backed 模式校验锁定 NFS 身份、hard mount、原子发布探测和实际 free space，cache 高水位与显式 reserve 之外至少容纳 3 份实测 full raw checkpoint，host-local IPC 路径不得位于 NFS。
-- [ ] resolved config 不得含 `REQUIRED_AFTER_BENCHMARK`、未知 key 或隐式默认回填；preflight 不提供绕过硬项的 force 开关。
+- [x] `train_s0.toml` 已无 `REQUIRED_*`/`BENCHMARK_*`、未知 key 或训练语义默认回填，preflight 无 force 开关；后续 stage overlays 与正式 `eval.toml` 的未决 bindings 继续独立硬失败。
 ## 5.2 TorchAO 和精度 canary
 - [ ] 逐 canonical FQN 审计 dtype、decay group、TorchAO state class/bytes、parameter order、step 与隔离 optimizer SR RNG。
 - [ ] 完成 1,000-step FP32-parameter reference 对 mixed BF16/FP32 + stochastic rounding；validation loss EMA 回退≤3%，无 NaN/Inf或状态分叉。
@@ -91,13 +91,13 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [ ] 验证 strict global sample mean 与单卡合并 batch reference 一致，FP32 global clip=1.0。
 ## 5.3 Raw checkpoint
 - [x] T042 历史 schema 已实现 canonical-FQN sharded Safetensors model、完整 optimizer sidecar、trainer/data/growth/RNG state、checksum、manifest、临时目录和 COMPLETE；其中 data state 是已被 D024/T044 取代的旧生产合同，历史实现与证据保留，去除工作由 3.3 的新条款关闭。
-- [x] T042 已在其历史范围完成 save→fresh process load→next step 与缺失/损坏 sidecar 硬失败；D024/T044 仍须按 3.3 使用固定外部 batch 复验训练/优化器恢复，并明确排除 live-data continuity。
+- [x] T042 已在其历史范围完成 save→fresh process load→next step 与缺失/损坏 sidecar 硬失败；D024/T044 已按 3.3 使用固定外部 batch及真实 service 复验训练/优化器恢复，并明确排除 live-data continuity。
 - [ ] 普通 resume 只接受相同 topology；transition 只接受配置列明的唯一前序。模型目录去掉续训 sidecar 后仍能独立推理。
 - [ ] raw、model-only snapshot、PMA 与 release artifact 使用不同 kind/目录；PMA 绝不作为 resume 或 growth 输入。
 # 6. P1：目标机 Benchmark 与显式 Stage 配置
 ## 6.1 数据路径
 - [ ] 冷缓存连续 2 小时达到≥12 samples/s，ready-queue wait\<2%，无 host swap、无界内存或缓存 quota 越界。
-- [ ] 比较每 rank 1/2/3 workers、多个有界 queue depth、下载并发、Range workers、300–500 GiB quota 高低水位并锁定最小稳定配置。
+- [ ] 已完成 1/2/3 workers × local batch 1/2 的六格单-update工程 sweep，并选择 workers=2、ready batches=2、download concurrency=2、lookahead=3、cache 32/64 GiB 作为当前 S0 TOML；仍需冷/热缓存长窗口验证后才能称为稳定最优配置。
 - [ ] 分段记录 cache wait、tar read、JSON/caption、tokenize、decode、EXIF、resize/crop、bucket wait、H2D、Qwen、VAE 与 queue depth。
 ## 6.2 训练路径
 - [ ] 对 16/20/24层与 256/512 的真实路径分别 benchmark local batch、global batch、accumulation、checkpoint none/alternating/all。
@@ -106,8 +106,8 @@ Here is the result of "view" for the Page with URL https://app.notion.com/p/3aca
 - [ ] regional compile 默认关闭；仅在正确性、DDP、resume 通过且稳态端到端提升≥3%时启用。
 - [ ] 报告 step p50/p95/p99、GPU active/idle、kernel launch/gap、DDP wait、optimizer、host/pinned RAM 和 checkpoint 摊销开销。
 ## 6.3 Stage overlays 与预算
-- [ ] 生成 base + S0/S1/G1/S2/G2/S3 六份显式 overlays，以及默认禁用的 H1/H2 模板和 resolved-config hash。
-- [ ] benchmark 后填写每 stage 的 valid samples/equivalent data passes、DiT FLOPs、successful updates、batch/accumulation、checkpoint slots 和 wall-time 预测；equivalent data passes 只由样本暴露量换算，不对应、重置或选择 service `mainset` 代次。
+- [ ] base + stage overlays 与默认禁用的 H1/H2 模板已存在；S0 已填实并可加载，S1 及以后仍需各自四卡 benchmark 后解除 placeholder。
+- [ ] S0 当前填写 planned updates 1,000、local batch 2、accumulation 4、global batch 8、RAW slots 2；actual DiT FLOPs、等效数据遍数和 wall-time 只在正式运行后记录，不用单-update工程结果推断。后续 stages 仍待 benchmark。
 - [ ] 实现 drain/finalize、`stage_ready` report 和 transition preflight；训练程序不得自动改变 world size、深度、分辨率、LR 或数据混合。
 - [x] 已取代：transition 不再以新的 stage/pass/seed 重置 tar 顺序；固定验证集保持不变，独立 service 继续当前持久化 `mainset`，该替代合同由 3.3 的 D024 项实现和验证。
 # 7. P1：深度增长、恢复与故障注入

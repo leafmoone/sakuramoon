@@ -150,15 +150,15 @@ Describe the image by detailing the color, shape, size, texture, quantity, text,
 - `irepa.enabled=false`；H1 768 与 H2 1024 默认禁用，只能从已接受的 512 raw checkpoint 手工启动。
 来源：<mention-page url="https://app.notion.com/p/3abae967ecf28103be8feea5e27f21e1"/> · <mention-page url="https://app.notion.com/p/3abae967ecf2816da90ccbee372b27c4"/>
 # 11. 数据、缓存与验证隔离
-- 唯一远端数据源为 ModelScope `leafmoone/webdataset_danbooru`；manifest 固定不可变 revision、path、release、bytes、SHA-256 与 samples。
-- 整 shard 下载到受治理的 server-backed NFS 后校验再发布；单机只有一个下载/cache 协调器。cache 高低水位保持显式、无默认且有界，不再要求 300–500 GiB 本地 NVMe 大缓存；具体小缓存容量与并发由冷/热缓存 benchmark 锁定，禁止静默扩容或退回本地路径。
-- 初始每 GPU 2 个 persistent workers、每 rank 2 个有界 ready batches；最终值通过 1/2/3 worker 和 queue-depth sweep 选择。
+- 唯一远端数据源为 ModelScope `leafmoone/webdataset_danbooru`，当前使用可变分支选择器 `master`。`data/dataset-manifest.json` 缺失时，data service 必须先从当前远端 tar 列表原子初始化 operational manifest；已存在时默认不刷新。用户不提供 immutable revision、manifest SHA-256 或本地资产 hash；manifest ID 与上游提供的 tar 摘要只作为程序内部清单/下载完整性字段。
+- 整 shard 下载到受治理的 server-backed NFS 后校验再发布；单机只有一个下载/cache 协调器。S0 当前 cache 低/高水位为 32/64 GiB、下载并发为 2、verified lookahead 为 3，均只从 TOML 读取并可由后续显式配置修订；禁止静默扩容或退回本地路径。
+- S0 当前使用每 rank 2 个 persistent workers 和 2 个有界 ready batches；1/2/3 worker × local batch 1/2 的六格单-update sweep 仅作为工程选择依据，不作为稳态吞吐结论。
 - CPU 负责 JSON、验证排除、dropout、caption、tokenize、单次 decode、EXIF、resize/crop 和 bucket 路由；每 rank 在线运行冻结 Qwen/Mage-VAE，默认与 DiT 在同一 GPU 串行。
 - 不建立跨 batch 的 text embedding、latent 或 activation cache；当前也不重新对 11M 数据去重。
 - 恢复语义为 shard-level at-least-once：完成 shard 不重读，活跃 shard 从头重放；不序列化预取队列和 shuffle buffer。
-- 训练验证集恰好 2,000 个全局唯一 `id`，按 `release × aspect bucket × caption availability` 分层抽取，独立 validation shard；在进入 shuffle buffer 前排除，训练消费必须为零。
-- **独立 service ownership：**单机唯一 data service 是网络、下载、`.partial`、bytes/SHA-256 校验、原子发布、cache catalog、LRU/eviction、tar 顺序以及 active/completed/replay 状态的唯一 owner。它独立启动、独立存活；trainer 不得启动、停止或以内联实现替代它，DataLoader workers 只读 service 已验证并租约保护的 tar。AF_UNIX socket 与 singleton ownership lock 固定放在 host-local `/run/sakuramoon/`，不得放到 NFS；该 IPC 只支持同一主机，跨主机部署必须另立受治理的 network IPC 决策。
-- **持久化 `mainset`：**service 每轮从锁定 training manifest 取出全部 tar path，每个恰好一次，生成新的随机排列并把 `mainset_id`、manifest identity、shuffle identity、精确 ordinal 顺序和逐行状态持久化到表。tar 顺序只由 service 决定；trainer、checkpoint、stage、worker topology 和 resume 请求都不得携带或覆盖 tar cursor/order。
+- validation 固定使用 `shard-000509.tar` 与 `shard-000060.tar` 两个完整 tar，合计 2,099 个 image+JSON 对；`data/validation-selection.json` 记录该集合。训练路径必须在进入 shuffle/batch 前按该选择排除，正式训练消费必须为零。
+- **独立 service ownership：**单机唯一 data service 是网络、下载、`.partial`、上游 bytes/digest 完整性检查、原子发布、cache catalog、LRU/eviction、tar 顺序以及 active/completed/replay 状态的唯一 owner。它独立启动、独立存活；trainer 不得启动、停止或以内联实现替代它，DataLoader workers 只读 service 已验证并租约保护的 tar。AF_UNIX socket 与 singleton ownership lock 固定放在 host-local `/run/sakuramoon/`，不得放到 NFS；该 IPC 只支持同一主机，跨主机部署必须另立受治理的 network IPC 决策。
+- **持久化 `mainset`：**service 每轮从当前 operational manifest 取出全部 tar path，每个恰好一次，生成新的随机排列并把 `mainset_id`、manifest identity、shuffle identity、精确 ordinal 顺序和逐行状态持久化到表。tar 顺序只由 service 决定；trainer、checkpoint、stage、worker topology 和 resume 请求都不得携带或覆盖 tar cursor/order。
 - **并发供给：**service 严格按当前 `mainset` ordinal 下载、完整校验和发布，在 trainer 消费 `A/B` 时以有界并发准备后续 `C/D/E...`，并通过有界本机 IPC 只发已验证 `ShardRecord + absolute local path + lease identity`。trainer 与 DataLoader workers 禁止执行网络、SHA、cache scan、partial cleanup 或 eviction；lookahead、download、verified-ready、lease、ACK、worker input/output、ready batch 和 completion channel 全部有界。
 - **完成、故障与轮换：**只有 DataLoader worker 正常耗尽 tar 且 service 收到匹配 lease 的 completion ACK 后，该行才完成；worker/service/client/trainer 异常、断连、提前终止或 ACK 缺失时保持 active，并在 service 恢复后从 tar 起点 replay。当前 `mainset` 的全部 tar 都已按序下载、验证、供给且所有已发 lease 正常完成后，service 才可原子关闭并删除旧表、创建覆盖完整 manifest 的下一份新随机 `mainset`；仅下载完成但仍有 outstanding lease 时不得删表或向下一轮供给。
 - **训练解耦：**trainer 只消费 service 当前提供的数据，不保存、解释或恢复 `mainset`/shard 位置。训练 checkpoint 恢复、人工暂停续训、模型增长和分辨率切换均不要求数据连续，也不要求恢复前后的下一批来自同一 tar；validation exclusion、trusted metadata mapping、caption/image/collate 合同继续逐样本成立。
@@ -169,12 +169,13 @@ Describe the image by detailing the color, shape, size, texture, quantity, text,
 - 单个 TorchAO AdamW8bit：`lr=2e-5`、`betas=(0.9,0.95)`、`eps=1e-8`、`block_size=256`、`bf16_stochastic_round=true`。
 - 大矩阵 parameter/gradient 使用 BF16；RMSNorm、门控、标量、style/null tokens、condition 与小 head 等敏感参数使用 FP32。矩阵 weight decay=0.01，敏感参数不 decay；FP32 global norm clip=1.0。
 - 所有 rank 共享隔离的 optimizer stochastic-round RNG，训练 RNG 各自独立；每步验证 model、moments、per-parameter step 与 SR state 不分叉。
-- WSD scheduler：首次 S0 进行 2,000 个成功 updates warmup，随后跨 stages 保持 2e-5；最终由用户单独启动 cosine decay 至 2e-6。
+- S0 scheduler 为 successful update 1..1,000 从 0 线性 warmup 至 `2e-5`，之后保持 `2e-5` 不变；warmup 长度、最大 LR 和 after-warmup 模式都只从 TOML 读取。
 - T042 已实现的 raw checkpoint schema 曾使用 canonical-FQN sharded Safetensors model、完整 TorchAO optimizer sidecar和独立 trainer/data/growth/RNG state；其中 data state 及其 resume 绑定已被下方 service-decoupled checkpoint 决定取代。T042 历史 artifact 与证据不回写，D024/T044 未关闭前该旧 schema 不得用于生产 resume。
-- full raw checkpoint 每 1,000 successful updates 或 6 小时先到者保存；stage finalize、增长关键点和 pre-decay 强制保存。模型目录删除续训 sidecar 后仍须可独立推理。
+- full raw checkpoint 每 1,000 successful updates 保存；S0 滚动保留最近 2 份 RAW，发布中额外预留 1 份空间，因此 storage preflight 使用 3 份 checkpoint copies。周期和保留数量只从 TOML 读取；stage finalize 与增长关键点仍强制保存。模型目录删除续训 sidecar 后仍须可独立推理。
+- S0 当前显式训练值为 seed 44、单卡、local batch 2、accumulation 4、global batch 8、planned updates 1,000；这些值是 `train_s0.toml` 的当前内容，不是运行时代码默认，后续可直接修订 TOML 并重新 preflight。
 - 数据供给必须≥12 samples/s 且 ready-queue wait\<2%；完整四卡 20/24层 512 训练必须≥6 samples/s。低于 4 停止，4–6 只允许优化，不得长期生产。
 - 每卡峰值显存≤27.2 GB，并满足目标 local/global batch；不得 OOM、host swap、nonfinite 自动续跑或任一 rank 状态分叉。
-- **server-backed storage preflight：**生产启动必须显式选择 `server_backed`，校验所有持久路径解析到配置锁定的 NFS filesystem/source/version 与 hard-mount 身份，并在该挂载上通过同目录 write、file `fsync`、`os.replace`、directory `fsync` 和 readback 探测。实际 free space 必须覆盖显式 cache high-watermark、三份实测 full raw checkpoint 和显式保留空间；socket/ownership lock 必须解析到非 NFS 的 `/run/sakuramoon/`。任一身份、原子发布、空间或 runtime-path 检查失败都硬停止，不提供 NVMe 名称推断、跳过开关或静默 fallback。
+- **server-backed storage preflight：**生产启动必须显式选择 `server_backed`，校验所有持久路径解析到配置锁定的 NFS filesystem/source/version 与 hard-mount 身份，并在该挂载上通过同目录 write、file `fsync`、`os.replace`、directory `fsync` 和 readback 探测。实际 free space 必须覆盖显式 cache high-watermark、3 份实测 full raw checkpoint 和当前 TOML 的 50 GiB reserve；socket/ownership lock 必须解析到非 NFS 的 `/run/sakuramoon/`。任一身份、原子发布、空间或 runtime-path 检查失败都硬停止，不提供 NVMe 名称推断、跳过开关或静默 fallback。
 - 低中风险实现按里程碑包统一完成 AI/模型正确性与 Infra/性能审查；kernel、optimizer、DDP、checkpoint、growth/transition、训练 step、故障注入和正式 stage canary 保持逐任务独立双审。证据按风险提供，普通 CPU 任务不要求独立 timing artifact，before/after 只用于真实性能变更。
 - **service-decoupled raw checkpoint：**生产 raw checkpoint 只恢复 model parameters、完整 TorchAO optimizer state、scheduler/growth state、trainer 与 successful-update/sample counters、训练 RNG、optimizer-SR RNG、resolved config 和 checkpoint identity，并继续使用 checksum/manifest/临时目录/`COMPLETE` 原子提交；它明确不包含 `mainset_id`、tar ordinal/cursor、active/completed/replay、cache/lease、prefetch/queue 或其他 data-service state。fresh-process resume 必须先完整恢复上述训练与优化器状态，再连接 service 并消费 service 当前提供的 tar；live-data continuity 和同一 next batch 不属于 resume 正确性合同。
 来源：<mention-page url="https://app.notion.com/p/3abae967ecf281ebadadd176e1b492db"/>
@@ -202,6 +203,7 @@ Artist 只走 style 分支、在线 segment metadata、无第二次 Qwen/离线 
 - 2026-07-31：用户将仅用于日志聚合的 high/low-noise 观测边界从 `t=0.5` 修订为 `t=0.95`；严格 JLT loss、clamp 与最大权重 400 不变。
 - 2026-07-31：用户将数据下载/校验/cache/order/state 完全移入独立 service；service 以持久化全 manifest `mainset` 循环随机供给。raw checkpoint 仅恢复模型、优化器和训练状态，不恢复数据位置或连续性。
 - 2026-08-01：用户批准当前 NFSv3 挂载作为显式 server-backed storage；取消 `ext4/xfs + /dev/nvme*` 与 300–500 GiB 本地 cache 硬编码，改为锁定 NFS 身份、实际空间、受治理小缓存、三份实测 checkpoint 余量和 host-local `/run` IPC。
+- 2026-08-02：用户锁定 S0 当前 seed/batch/accumulation、1,000-step 线性 warmup 后恒定、每 1,000 update 保存、RAW 保留 2、50 GiB reserve，并明确这些均为可直接修改的 TOML 值；数据 manifest 改为缺失时从 ModelScope `master` 自动初始化，validation 固定为两个 tar 的 2,099 对，不要求用户提供数据或评估 SHA-256。
 - 会话证据：Codex 会话导出附件 `pasted-text.txt`；原组件页保留讨论过程和外部参考。
 ## Notion 原始组件
 - <mention-page url="https://app.notion.com/p/3aaae967ecf281ba8f73fac2f9e4c4f3"/>

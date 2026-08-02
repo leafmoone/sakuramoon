@@ -229,7 +229,7 @@ sakuramoon/
 - **对应文档：** `C03–C12`、`OBS-*`。
 - **实现路径：** `config/base.toml`、八个 `train_*.toml`、`eval.toml`、`sample.toml`。
 - **动作：** 写入所有固定架构参数与详细注释；S0/S1/G1/S2/G2/S3 每次只改变一个主轴；H1/H2 `enabled=false`；batch/accumulation/checkpoint mode 等 benchmark 值显式存在。
-- **当前边界：** 全部 dropout 与 Text/Style 决策均已锁定；C002 只负责 production config、overlays 与 assembly binding。S000 benchmark 值继续使用 loader 硬拒绝的显式 sentinel，不得以 synthetic validation identity 冒充生产 stage 放行值。
+- **当前边界：** 全部 dropout 与 Text/Style 决策均已锁定；C002 production config、overlays 与 assembly binding 已完成。S0 的当前值已由用户决定并写入 `train_s0.toml`；S1 以后及正式 evaluator 的未决值继续使用 loader 硬拒绝的显式 sentinel。
 - **验证：** 每个 overlay 解析后无隐式默认；diff checker 证明相邻 stage 只改变允许键；H1/H2 无法意外启动。
 - **完成证据：** 8 个 resolved hash、stage-diff report、逐键注释审查。
 - **GPU：** 无。
@@ -363,14 +363,14 @@ sakuramoon/
 ### D024：Process-isolated dataset supply service
 
 - **依赖与覆盖边界：** 复用 D010 完整 shard 校验/原子发布、D012 LRU、D022 schema-v3 active/completed/replay 基础语义和 D023 persistent worker completion 合同。D024 只替换生产 ownership：训练父进程不再拥有 cache、tar 顺序或 shard state，改由单机唯一独立 data service 持有；不得回写 D022/D023 历史证据，也不得改变 trusted `ShardRecord`、validation exclusion、caption/image/collate 或 whole-shard at-least-once 语义。
-- **独立进程：** 新增独立启动、独立存活的 data-service CLI/process。它独占 ModelScope 网络、token 解析、`.partial`、bytes/SHA-256、fsync/原子发布、cache catalog、LRU/eviction、`mainset` 和 active/completed/replay state。trainer 不得 spawn、restart、stop 或以内联路径替代该 service；service 不可用时 preflight/训练硬失败，禁止退回训练进程或 DataLoader worker 下载。
-- **`mainset` 合同：** service 每轮从 immutable training manifest 读取全部 tar path，每个恰好一次，生成新的随机排列并原子持久化 `mainset_id`、manifest identity、shuffle identity、精确 ordinal 顺序和逐行状态。只有 service 能推进或恢复 cursor；trainer、checkpoint、stage、resolution/model growth、worker topology 和 resume 请求都不得携带、选择或改写 tar order/position。
+- **独立进程：** 新增独立启动、独立存活的 data-service CLI/process。它独占 ModelScope 网络、token 解析、`.partial`、上游完整性检查、fsync/原子发布、cache catalog、LRU/eviction、`mainset` 和 active/completed/replay state。trainer 不得 spawn、restart、stop 或以内联路径替代该 service；service 不可用时 preflight/训练硬失败，禁止退回训练进程或 DataLoader worker 下载。
+- **`mainset` 合同：** operational manifest 缺失时 service 先从 ModelScope 当前 `master` tar 列表原子初始化；已存在时默认不刷新。每轮读取全部 tar path，每个恰好一次，生成新的随机排列并原子持久化 `mainset_id`、manifest identity、shuffle identity、精确 ordinal 顺序和逐行状态。只有 service 能推进或恢复 cursor；trainer、checkpoint、stage、resolution/model growth、worker topology 和 resume 请求都不得携带、选择或改写 tar order/position。
 - **供给协议：** service 严格按当前 `mainset` ordinal 下载、校验、原子发布并租约保护 tar；在 worker 消费 active `A/B` 时并发准备后续 `C/D/E...`，内部保持有界 verified lookahead。它通过本机有界 IPC 向轻量 client 只发已经完整验证的 immutable `ShardRecord + absolute local path + lease identity`；训练侧只按 service 给出的顺序消费，不枚举、选择、下载、哈希、扫描或清理 shard。
 - **完成与轮换：** DataLoader worker 只读本地 tar、产生 batch 和 ordered done；父进程 client 只转发 normal-exhaustion completion ACK，不解释或修改 state。service 收到匹配 lease/worker identity 的 ACK 后才逐 tar complete；worker/service/client/trainer 异常、断连、中断或 ACK 缺失时保持 active，service restart 从 tar 起点 replay。只有当前 `mainset` 的全部 tar 已下载、验证、按序供给且所有 outstanding lease 正常完成后，service 才可原子关闭并删除旧表、创建下一份完整 manifest 随机 `mainset`；仅下载完但仍有 lease 时不得删表或供给下一轮。
 - **checkpoint 解耦：** service state 独立持久化且绝不快照、复制或引用到 raw checkpoint。trainer resume 只恢复训练与 optimizer state，然后连接 service 并消费 service 当前给出的 tar；人工暂停/续训、stage、分辨率和模型增长都不要求恢复数据位置、同一 tar 或同一 next batch。production checkpoint schema 的独立 remediation 由 T044 关闭，D024 不修改 T042 历史证据。
 - **有界与空间控制：** 实际接通严格 TOML `data.cache.download_concurrency`，新增无默认值的 `data.cache.verified_shard_lookahead`；service 内部 in-flight download、verified-ready shard、lease output 与 ACK channel，以及 DataLoader worker input/ready batch/completion channel 分别有界。每个下载按 manifest bytes 预留空间，quota 同时计算 published shard、in-flight reservation 与 manifest-owned `.partial`；active lease 全部防 eviction，inactive lookahead 可按 LRU 淘汰，不得预下载整个 dataset。
 - **关键路径隔离：** trainer 和 DataLoader worker 禁止 import/call transport、`fetch_dataset_shard`、SHA、cache eviction 或 partial cleanup。已验证 cache hit 的重新校验、启动 orphan `.partial` 清理和所有完整文件扫描都只在 service 内完成；shard IPC 每个 lease/完成各一次，绝不按 sample/batch/update 往返。训练热路径只能在 lookahead 耗尽时等待 descriptor，不能同步执行任何下载/校验工作。
-- **配置清理：** 现有 `range_workers` 不得继续作为无效果的必填字段；本任务必须依据固定 revision 的真实 ModelScope 合同，要么在 service 内实现有界 Range/断点续传及精确重组校验，要么通过受治理配置变更删除该字段。两条路径都必须保持完整 tar 校验后才可发布 lease。
+- **配置清理：** 已删除无效果的 `range_workers`；ModelScope retry/backoff、stream chunk、download concurrency 与 lookahead 均为显式 TOML。完整 tar 通过上游清单事实校验后才可发布 lease，但不要求用户提供 immutable revision 或 SHA。
 - **性能门槛：** 启动成本与稳态分开报告；正式计时前先由 service 填满配置的 verified lookahead。稳态 cold-cache 并发下载必须达到数据供给 `>=12 samples/s`、ready wait `<2%`、无 swap/无界 RSS/quota 越界，并与相同 workload 的 fully-cached control 比较 trainer step p50/p95/p99、GPU active/idle 和 DataLoader batch latency；超出预先登记的 same-backend control 波动即不放行。若共享 CPU/server-backed storage 无法隔离到该门槛，必须调整并显式锁定 service CPU/I/O/concurrency 配置或使用独立存储，不能声称“零影响”。
 - **验证：** 用独立真实 service process 和可控慢 transport 证明 worker 消费 `A/B` 时 `C/D/E` 已 ready/in-flight，trainer 进程没有网络/SHA/cache stack；验证每轮全 manifest permutation、每 tar 恰好一次、持久化 ordinal、IPC 身份/容量、精确并发/lookahead/bytes 上界、active 不 eviction、inactive 可 eviction、cache hit、损坏/截断/中断/ENOSPC/orphan partial、service/trainer/worker 分别退出、ACK 丢失、recovered-active barrier、mainset 收尾与下一轮原子创建。另验证 trainer checkpoint/restart 不读取或改变 service cursor。随后做 bounded 真实网络/server-backed storage/1GPU overlap smoke；两小时冷缓存 sweep 在 Data 里程碑集中执行一次。
 - **完成边界：** D024 保持独立 task、diff、测试、trace、证据和原子 commit。D024 完成后只启动一个新的 DATA 包级 reviewer；D024 与该 reviewer 关闭前，`T044/T050` 不得关闭 production resume/data-to-train 接线，`S000` 不得锁定 production service/download/lookahead/worker/queue 参数。
@@ -532,7 +532,7 @@ sakuramoon/
 - **对应文档：** `C12-E/F`。
 - **实现路径：** `checkpoint/schema.py`、`save.py`、`load.py`、`pma.py`。
 - **历史完成范围：** canonical-FQN sharded Safetensors model；完整TorchAO optimizer sidecar；trainer/data/growth/RNG state；checksum/manifest/temp dir/原子commit/`COMPLETE`；raw/model-only/PMA/release分kind。该实现与证据保持不回写，其中 data-state sidecar 已被 D024/T044 新决定取代，不能直接作为后续 production schema。
-- **周期：** 每1,000 successful updates或6小时先到者；finalize、pre/post growth、ramp中点/结束、pre-decay强制保存；保留最近2份滚动raw与所有accepted stage raw。
+- **周期：** 当前 S0 每1,000 successful updates保存；finalize、pre/post growth、ramp中点/结束强制保存；保留最近2份滚动RAW，发布中额外计1份storage copy。周期与slots只从TOML读取。
 - **验证：** save→fresh process load→next step对齐uninterrupted；缺失/bitflip/错误ID/dependency hash在forward前失败；checkpoint失败保留上一完整点；model-only不依赖续训sidecar。
 - **审查：** 独立AI + Infra reviewers。
 - **完成证据：** round-trip diff、故障矩阵、disk/timing报告。
@@ -566,7 +566,7 @@ sakuramoon/
 - **数据依赖：** D024、新的 DATA 包级复审和 T044 独立双审必须先关闭；正式 CLI 先完整恢复 checkpoint 中的训练/optimizer state，再从 resolved config 连接并鉴别已运行的 data service、构造轻量 data client、persistent workers 与 batch consumer。trainer 禁止读取/恢复 service cursor，禁止构造 transport/cache、直接加载 shard state 或保留测试专用内联下载组装。
 - **实现路径：** `train/step.py`、`loop.py`、`preflight.py`、`failures.py`、`cli/train.py`。
 - **动作：** 成功update作为唯一scheduler/growth/checkpoint计数；microbatch/accumulation；global finite检查和clip；stage预算；no-force preflight；nonfinite/OOM/schema/kernel/backend异常同步停止。
-- **preflight：** config/hash、资产、dataset revision、GPU/driver/NCCL、server-backed mount/capacity/atomic publication 与 host-local IPC、冻结零梯度、parameter schema、17 image shapes、八文本shape、zero-update loss、optimizer step、sample、checkpoint round-trip。
+- **preflight：** resolved config identity、本地资产、operational manifest/validation selection、单GPU topology、server-backed mount/capacity/atomic publication 与 host-local IPC、冻结零梯度、parameter schema、zero-update、首update和checkpoint/resume合同；四卡 NCCL 门槛留给S1。
 - **验证：** 不自动减batch、改accumulation、改backend、改world size、改LR、跳坏shard或从PMA恢复；异常写诊断包且不推进successful update。
 - **完成证据：** preflight_report.json、train-step golden、failure-state tests。
 - **GPU：** 1GPU完整；4GPU在S1 gate。
@@ -711,14 +711,14 @@ sakuramoon/
 
 - **对应文档：** `C10-D/E`、`C12-F`。
 - **依赖：** `T053` benchmark harness完成，dropout已决定；本任务先为 eager `S001` 启动冻结单卡配置，不等待 `P060-P067`。regional compile 若缺少四卡证据仍保持关闭。
-- **动作：** 为S0/S1/G1/S2/G2/S3填写local/global batch、accumulation、checkpoint mode、valid samples/equivalent data passes、actual DiT FLOPs、successful updates、checkpoint slots和wall-time预测；equivalent data passes 只按样本暴露量换算，不对应或重置 service `mainset` 代次；H1/H2继续disabled。
-- **验证：** 相邻stage只变一个主轴；transition前序唯一；配置无placeholder、隐式默认或未知key；每个resolved config有hash。
-- **完成证据：** stage budget表、resolved configs、容量审查。
-- **GPU：** 1GPU填S0；S1以后必须4GPU benchmark。
+- **动作：** S0 当前填写 seed 44、local/global batch 2/8、accumulation 4、planned updates 1,000、linear-warmup-constant scheduler、RAW cadence/slots 1,000/2、metrics fsync 1及显式data/storage容量；这些值可直接修改TOML并重新preflight。S1以后仍等待各自四卡benchmark，H1/H2继续disabled。
+- **验证：** `train_s0.toml` 无placeholder、隐式训练语义默认或未知key；生产CLI只接受fresh或精确绝对RAW COMPLETE；六格单-update容量工程矩阵和fresh-process N-to-N+1通过。
+- **完成证据：** S0 resolved config、bounded容量表、RAW恢复报告和独立AI/Infra审查；单-update值不作为稳态吞吐或正式容量结论。
+- **GPU：** S0手工启动准备完成；S1以后必须4GPU benchmark。
 
 ### S001：S0 单卡 16L/256 canary
 
-- **进入门槛：** 全部P0 contract、Qwen/VAE、dense/FA4、optimizer 1,000-step canary、单卡checkpoint/fault tests通过。
+- **进入门槛：** 当前S0 strict config/preflight、真实data/Qwen/VAE/16L dense eager链、TorchAO首update、单卡RAW fresh-process恢复和bounded fault tests通过；正式FA4/1,000-update/耐久门槛在S001内继续验证，不能用工程smoke提前关闭。
 - **执行：** 用户手工启动 eager zero-update、首个 successful update 和有界稳定窗口；用户选择 update `N` 的 `COMPLETE` raw checkpoint并手工停止。`P060-P067` 完成后只提供验收结果，由用户决定是否以及何时手工从同一 checkpoint 的 update `N+1` 恢复，再继续到累计200 updates、累计1,000 successful updates和耐久窗口。全程保持真实在线数据/Qwen/VAE/DiT/optimizer，优化测试产生的 update 不计入正式训练。
 - **验收：** loss/grad/clip稳定；无NaN/OOM/swap；checkpoint fresh-load next-step对齐；数据/验证隔离；W&B与本地metrics一致；用户手工批准S0。
 - **证据：** stage report、AI/Infra review、固定sample、timing/profile、accepted raw checkpoint。

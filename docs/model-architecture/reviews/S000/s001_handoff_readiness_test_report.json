@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "task_id": "S000",
+  "base_commit": "03085bdc6e633a7c7f1c54f54ca98ab1e712200c",
+  "classification": "synthetic_bounded_engineering_only",
+  "s001_started": false,
+  "formal_fid_is_executed": false,
+  "resolved_config_sha256": "f92da9eae4cfab8aaba9dc1cc715f85e29a9187b81300546f39e2c244e6eb62a",
+  "resolved_config_identity_note": "internally generated from redacted resolved config; not a user-supplied asset or data checksum",
+  "s0_config": {
+    "seed": 44,
+    "world_size": 1,
+    "local_batch": 2,
+    "accumulation": 4,
+    "global_batch": 8,
+    "planned_updates": 1000,
+    "scheduler": "linear_warmup_constant",
+    "warmup_updates": 1000,
+    "max_lr": 0.00002,
+    "checkpoint_every_successful_updates": 1000,
+    "raw_retention_slots": 2,
+    "storage_checkpoint_copies": 3,
+    "metrics_flush_every_updates": 1
+  },
+  "validation": {
+    "shards": [
+      "data/2_2026.1/shard-000509.tar",
+      "data/2_2026.1/shard-000060.tar"
+    ],
+    "image_json_pairs": 2099
+  },
+  "capacity_sweep": {
+    "classification": "six independent one-update engineering observations",
+    "selected": "w2-b2",
+    "steady_state_claimed": false,
+    "rows": [
+      {"id": "w1-b1", "samples_per_second": 2.34048949699487, "ready_wait_seconds": 0.314834462, "gpu_memory_reserved_bytes": 12169773056},
+      {"id": "w1-b2", "samples_per_second": 2.4671776249095334, "ready_wait_seconds": 1.962168862, "gpu_memory_reserved_bytes": 16661872640},
+      {"id": "w2-b1", "samples_per_second": 2.2472802333112853, "ready_wait_seconds": 0.372826582, "gpu_memory_reserved_bytes": 12169773056},
+      {"id": "w2-b2", "samples_per_second": 3.9147265259983484, "ready_wait_seconds": 0.745924935, "gpu_memory_reserved_bytes": 17483956224},
+      {"id": "w3-b1", "samples_per_second": 2.226535306850289, "ready_wait_seconds": 0.406371876, "gpu_memory_reserved_bytes": 12169773056},
+      {"id": "w3-b2", "samples_per_second": 3.8693062025643465, "ready_wait_seconds": 0.76740243, "gpu_memory_reserved_bytes": 17483956224}
+    ]
+  },
+  "fresh_process_resume": {
+    "status": "passed",
+    "initial_successful_update": 1,
+    "final_successful_update": 2,
+    "raw_1": "checkpoints/s0-engineering-resume/w2-b1/ckpt_1_raw-1-update-cadence-8544056930b1",
+    "raw_2": "checkpoints/s0-engineering-resume/w2-b1/ckpt_2_raw-2-stage-finalize-c51db97eee56",
+    "metrics_updates": [1, 2],
+    "retained_raw_count": 2
+  },
+  "bounded_evaluator": {
+    "status": "passed",
+    "plan_id": "evaluation-508d6ccb19d4bbcd362ee637",
+    "output": "artifacts/s0-engineering-eval-bounded/evaluation-508d6ccb19d4bbcd362ee637",
+    "generated_images": 2,
+    "artifact_count": 1,
+    "automatic_release": false
+  },
+  "formal_evaluator_preflight": {
+    "status": "blocked_expected",
+    "exit_code": 2,
+    "unresolved_bindings": 13,
+    "download_attempted": false
+  },
+  "cpu_static": {
+    "core_passed": 652,
+    "train_passed": 175,
+    "evaluator_passed": 143,
+    "ruff": "passed",
+    "affected_path_pyright": "0 errors, 0 warnings, 0 informations",
+    "full_pyright_baseline": "2 unrelated existing errors at tests/unit/telemetry/test_profiler.py:366",
+    "git_diff_check": "passed"
+  },
+  "post_review_remediation": {
+    "resolved_findings": [
+      "S000-AI-005",
+      "S000-AI-006",
+      "S000-INFRA-003",
+      "S000-INFRA-004",
+      "S000-INFRA-005"
+    ],
+    "existing_manifest_remote_relisted": false,
+    "scheduler_values_toml_reconfigurable": true,
+    "resolved_config_sha256_unchanged": true,
+    "publication_protocol": "nfs_atomic_mkdir_hardlink_complete_last",
+    "nfs_commit_crash_race_probe": "passed",
+    "main_focused_passed": 255,
+    "main_train_passed": 153,
+    "manifest_snapshot_selector_passed": 12,
+    "ai_reviewer_passed": 227,
+    "infra_data_passed": 268,
+    "infra_evaluator_passed": 144,
+    "ai_review": "docs/model-architecture/reviews/S000/ai_review.md",
+    "infra_review": "docs/model-architecture/reviews/S000/infra_review.md"
+  }
+}
