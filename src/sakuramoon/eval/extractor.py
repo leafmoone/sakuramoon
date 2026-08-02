@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import torch
 from safetensors.torch import (
@@ -38,6 +39,147 @@ class VerifiedLocalFile:
             or self.size <= 0
         ):
             raise ValueError("verified evaluator file identity is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RealStatsProvenance:
+    selection_id: str
+    manifest_id: str
+    prompt_manifest_sha256: str
+    preprocess_sha256: str
+    feature_extractor: str
+    feature_extractor_version: str
+    feature_extractor_sha256: str
+    real_stats_sha256: str
+    sample_count: int
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("selection_id", self.selection_id),
+            ("manifest_id", self.manifest_id),
+            ("prompt_manifest_sha256", self.prompt_manifest_sha256),
+            ("preprocess_sha256", self.preprocess_sha256),
+            ("feature_extractor_sha256", self.feature_extractor_sha256),
+            ("real_stats_sha256", self.real_stats_sha256),
+        ):
+            if len(value) != 64 or any(
+                character not in "0123456789abcdef" for character in value
+            ):
+                raise ValueError(f"{name} must be a lowercase SHA-256")
+        if any(
+            type(value) is not str or not value or value != value.strip()
+            for value in (self.feature_extractor, self.feature_extractor_version)
+        ):
+            raise ValueError("real-stat extractor identity is invalid")
+        if type(self.sample_count) is not int or self.sample_count < 2:
+            raise ValueError("real-stat sample count must be at least two")
+
+    def canonical_bytes(self) -> bytes:
+        return (
+            json.dumps(
+                {
+                    "feature_extractor": self.feature_extractor,
+                    "feature_extractor_sha256": self.feature_extractor_sha256,
+                    "feature_extractor_version": self.feature_extractor_version,
+                    "manifest_id": self.manifest_id,
+                    "preprocess_sha256": self.preprocess_sha256,
+                    "prompt_manifest_sha256": self.prompt_manifest_sha256,
+                    "real_stats_sha256": self.real_stats_sha256,
+                    "sample_count": self.sample_count,
+                    "schema_version": 1,
+                    "selection_id": self.selection_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+
+
+def real_stats_provenance_path(real_stats_path: Path) -> Path:
+    return real_stats_path.with_name(f"{real_stats_path.name}.metadata.json")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ExtractorContractError("real-stat metadata contains duplicate keys")
+        result[key] = value
+    return result
+
+
+def load_real_stats_provenance(
+    metadata_file: VerifiedLocalFile,
+    *,
+    real_stats_file: VerifiedLocalFile,
+    selection_id: str,
+    manifest_id: str,
+    prompt_manifest_sha256: str,
+    preprocess_file: VerifiedLocalFile,
+    feature_extractor: str,
+    feature_extractor_version: str,
+    extractor_file: VerifiedLocalFile,
+    stats_count: int,
+) -> RealStatsProvenance:
+    """Verify canonical real-stat metadata against every governed source identity."""
+
+    try:
+        document = json.loads(
+            _verified_bytes(metadata_file), object_pairs_hook=_unique_json_object
+        )
+        if type(document) is not dict:
+            raise TypeError
+        values = cast(dict[str, object], document)
+        if set(values) != {
+            "feature_extractor",
+            "feature_extractor_sha256",
+            "feature_extractor_version",
+            "manifest_id",
+            "preprocess_sha256",
+            "prompt_manifest_sha256",
+            "real_stats_sha256",
+            "sample_count",
+            "schema_version",
+            "selection_id",
+        } or values["schema_version"] != 1:
+            raise ValueError
+        provenance = RealStatsProvenance(
+            selection_id=cast(str, values["selection_id"]),
+            manifest_id=cast(str, values["manifest_id"]),
+            prompt_manifest_sha256=cast(str, values["prompt_manifest_sha256"]),
+            preprocess_sha256=cast(str, values["preprocess_sha256"]),
+            feature_extractor=cast(str, values["feature_extractor"]),
+            feature_extractor_version=cast(
+                str, values["feature_extractor_version"]
+            ),
+            feature_extractor_sha256=cast(
+                str, values["feature_extractor_sha256"]
+            ),
+            real_stats_sha256=cast(str, values["real_stats_sha256"]),
+            sample_count=cast(int, values["sample_count"]),
+        )
+    except ExtractorContractError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        raise ExtractorContractError("real-stat metadata is invalid") from None
+    if provenance.canonical_bytes() != _verified_bytes(metadata_file):
+        raise ExtractorContractError("real-stat metadata is not canonical")
+    if (
+        provenance.selection_id != selection_id
+        or provenance.manifest_id != manifest_id
+        or provenance.prompt_manifest_sha256 != prompt_manifest_sha256
+        or provenance.preprocess_sha256 != preprocess_file.sha256
+        or provenance.feature_extractor != feature_extractor
+        or provenance.feature_extractor_version != feature_extractor_version
+        or provenance.feature_extractor_sha256 != extractor_file.sha256
+        or provenance.real_stats_sha256 != real_stats_file.sha256
+        or provenance.sample_count != stats_count
+    ):
+        raise ExtractorContractError(
+            "real-stat metadata differs from validation or extractor identity"
+        )
+    return provenance
 
 
 class _TensorModule(Protocol):
@@ -86,16 +228,10 @@ def _read_local_file(path: Path) -> tuple[bytes, str]:
     return payload, digest.hexdigest()
 
 
-def verify_local_file(path: Path, expected_sha256: str) -> VerifiedLocalFile:
-    """Verify one explicit absolute regular file without following symlinks."""
+def verify_local_file(path: Path) -> VerifiedLocalFile:
+    """Inspect one explicit absolute regular file without following symlinks."""
 
-    if len(expected_sha256) != 64 or any(
-        character not in "0123456789abcdef" for character in expected_sha256
-    ):
-        raise ExtractorContractError("evaluator identity SHA-256 is invalid")
     payload, observed = _read_local_file(path)
-    if observed != expected_sha256:
-        raise ExtractorContractError("evaluator identity SHA-256 mismatch")
     return VerifiedLocalFile(path=path, sha256=observed, size=len(payload))
 
 
@@ -216,8 +352,11 @@ class TorchScriptFeatureExtractor:
 
 __all__ = [
     "ExtractorContractError",
+    "RealStatsProvenance",
     "TorchScriptFeatureExtractor",
     "VerifiedLocalFile",
     "load_real_feature_stats",
+    "load_real_stats_provenance",
+    "real_stats_provenance_path",
     "verify_local_file",
 ]

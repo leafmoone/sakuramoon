@@ -7,45 +7,48 @@ import pytest
 
 from sakuramoon.config.schema import (
     EvaluationConfig,
+    EvaluationEnabledConfig,
+    EvaluationExtractorEnabledConfig,
     EvaluationSamplingConfig,
-    FidConfig,
-    IsConfig,
-    ManualQualityConfig,
+    FidEnabledConfig,
+    IsEnabledConfig,
+    ManualQualityEnabledConfig,
 )
+from sakuramoon.data.caption import CaptionDropoutHits, CaptionPlan, Tag
 from sakuramoon.eval.schedule import scheduled_evaluations
 from sakuramoon.eval.spec import (
     CheckpointRef,
     EvaluationJob,
     PromptCase,
     PromptManifest,
+    caption_plan_prompt_text,
 )
 
 
 def _config() -> EvaluationConfig:
-    return EvaluationConfig(
+    return EvaluationEnabledConfig(
+        enabled=True,
         stage_end=True,
         explicit_job=True,
-        prompt_manifest_path="prompts.json",
-        prompt_manifest_sha256="1" * 64,
         gpu_index=0,
         training_paused=True,
         sampling=EvaluationSamplingConfig(profile="reference"),
-        fid=FidConfig(
+        extractor=EvaluationExtractorEnabledConfig(
+            enabled=True,
+            feature_extractor="locked-inception",
+            feature_extractor_version="1.0",
+            feature_extractor_path="extractor.pt",
+            preprocess_path="preprocess.pt",
+        ),
+        fid=FidEnabledConfig(
             enabled=True,
             every_successful_updates=10,
             trend_samples=100,
             acceptance_samples=50000,
-            feature_extractor="locked-inception",
-            feature_extractor_version="1.0",
-            feature_extractor_path="extractor.pt",
-            feature_extractor_sha256="6" * 64,
-            preprocess_path="preprocess.pt",
-            preprocess_sha256="2" * 64,
             real_stats_path="real-stats.safetensors",
-            real_stats_sha256="5" * 64,
         ),
         **{
-            "is": IsConfig(
+            "is": IsEnabledConfig(
                 enabled=True,
                 every_successful_updates=20,
                 trend_samples=200,
@@ -53,7 +56,7 @@ def _config() -> EvaluationConfig:
                 splits=10,
             )
         },
-        manual_quality=ManualQualityConfig(enabled=True, samples=100),
+        manual_quality=ManualQualityEnabledConfig(enabled=True, samples=100),
         batch_size=10,
         output_reserve_gib=8,
     )
@@ -67,8 +70,12 @@ def _job() -> EvaluationJob:
         ),
         metric="fid",
         artifact_kind="fid_trend",
-        prompt_manifest_path="prompts.json",
-        prompt_selection="ordered_prefix",
+        validation_selection_path="validation-selection.json",
+        validation_selection_id="7" * 64,
+        validation_manifest_id="8" * 64,
+        validation_shard_root="validation-shards",
+        validation_seed=44,
+        prompt_selection="validation_bucketed_prefix",
         prompt_manifest_sha256="2" * 64,
         trigger_successful_update=10,
         sample_count=100,
@@ -87,7 +94,9 @@ def _job() -> EvaluationJob:
         preprocess_sha256="3" * 64,
         real_stats_path="real-stats.safetensors",
         real_stats_sha256="4" * 64,
-        is_splits=10,
+        real_stats_metadata_path="real-stats.safetensors.metadata.json",
+        real_stats_metadata_sha256="6" * 64,
+        is_splits=None,
         gpu_index=0,
         training_paused=True,
     )
@@ -137,6 +146,60 @@ def test_prompt_manifest_hash_is_deterministic_and_binds_every_field() -> None:
         PromptCase("p3", "portrait", ("artist one, artist two",), 1, 256, 256)
 
 
+def test_structured_caption_plan_round_trips_without_dropout() -> None:
+    no_dropout = CaptionDropoutHits(
+        all_condition=False,
+        nsfw=False,
+        character=False,
+        copyright=False,
+        general=False,
+        artist=False,
+        candidate_source=False,
+        long_names=False,
+        long_no_names=False,
+        short_vibes=False,
+        nl2=False,
+        nl3=False,
+    )
+    caption = CaptionPlan(
+        nsfw=(Tag("safe", "safe"),),
+        character=(Tag("alice", "alice"),),
+        copyright=(),
+        general=(Tag("blue_hair", "blue_hair"),),
+        artists=(Tag("artist_name", "artist_name"),),
+        nl_text=None,
+        selected_nl=None,
+        all_condition_dropped=False,
+        dropout_hits=no_dropout,
+    )
+    manifest = PromptManifest(
+        (
+            PromptCase(
+                "structured-1",
+                caption_plan_prompt_text(caption),
+                (),
+                44,
+                256,
+                256,
+                caption,
+            ),
+        )
+    )
+
+    restored = PromptManifest.from_canonical_bytes(manifest.canonical_bytes())
+
+    assert restored == manifest
+    assert restored.cases[0].caption_plan == caption
+    with pytest.raises(ValueError, match="structured evaluator"):
+        dataclasses.replace(
+            manifest.cases[0],
+            caption_plan=dataclasses.replace(
+                caption,
+                dropout_hits=dataclasses.replace(no_dropout, general=True),
+            ),
+        )
+
+
 @pytest.mark.parametrize(
     ("changes", "expected"),
     [
@@ -146,7 +209,7 @@ def test_prompt_manifest_hash_is_deterministic_and_binds_every_field() -> None:
         ({"solver_nfe": 50}, "inconsistent"),
         ({"artifact_kind": "is_trend"}, "inconsistent"),
         ({"artifact_kind": "fid_unknown"}, "inconsistent"),
-        ({"prompt_selection": "random"}, "ordered manifest prefix"),
+        ({"prompt_selection": "random"}, "bucketed validation prefix"),
         ({"training_paused": 1}, "explicit"),
     ],
 )
@@ -175,7 +238,8 @@ def test_job_rejects_nonformal_or_mixed_identity(
                 "checkpoint-1", "raw", "raw", "strict_jlt", "6" * 64, 10
             )
         },
-        {"prompt_manifest_path": "other-prompts.json"},
+        {"validation_selection_path": "other-selection.json"},
+        {"validation_selection_id": "9" * 64},
         {"prompt_manifest_sha256": "9" * 64},
         {"sample_count": 110},
         {"batch_size": 20},
@@ -183,7 +247,6 @@ def test_job_rejects_nonformal_or_mixed_identity(
         {"feature_extractor_version": "2.0"},
         {"preprocess_sha256": "8" * 64},
         {"real_stats_sha256": "7" * 64},
-        {"is_splits": 5},
         {"gpu_index": 1},
         {"training_paused": False},
     ],
@@ -221,6 +284,10 @@ def test_is_job_requires_exactly_divisible_splits() -> None:
             metric="is",
             artifact_kind="is_trend",
             sample_count=101,
+            real_stats_path=None,
+            real_stats_sha256=None,
+            real_stats_metadata_path=None,
+            real_stats_metadata_sha256=None,
             is_splits=10,
         )
 

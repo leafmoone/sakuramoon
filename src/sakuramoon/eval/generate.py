@@ -94,6 +94,8 @@ def _conditional_plan(case: PromptCase) -> CaptionPlan:
         raise GenerationContractError(
             "prompt condition semantics are not governed for production evaluation"
         )
+    if case.caption_plan is not None:
+        return case.caption_plan
     return CaptionPlan(
         nsfw=(),
         character=(),

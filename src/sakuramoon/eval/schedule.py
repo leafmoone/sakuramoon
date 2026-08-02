@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from sakuramoon.config.schema import EvaluationConfig
+from sakuramoon.config.schema import (
+    EvaluationConfig,
+    EvaluationEnabledConfig,
+    FidEnabledConfig,
+    IsEnabledConfig,
+)
 
 EvaluationRunKind = Literal["trend", "formal"]
 
@@ -28,10 +33,17 @@ def scheduled_evaluations(
         raise ValueError("successful update must be positive")
     if type(stage_end) is not bool:
         raise TypeError("stage_end must be explicit")
+    if not isinstance(config, EvaluationEnabledConfig):
+        return ()
     requests: list[ScheduledEvaluation] = []
-    for name, metric in (("fid", config.fid), ("is", config.is_)):
-        if not metric.enabled:
+    metrics = (
+        ("fid", config.fid) if isinstance(config.fid, FidEnabledConfig) else None,
+        ("is", config.is_) if isinstance(config.is_, IsEnabledConfig) else None,
+    )
+    for selected in metrics:
+        if selected is None:
             continue
+        name, metric = selected
         if stage_end:
             requests.append(
                 ScheduledEvaluation(

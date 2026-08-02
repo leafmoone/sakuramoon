@@ -10,7 +10,7 @@ import tomllib
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePath
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 import torch
 
@@ -27,20 +27,43 @@ from sakuramoon.checkpoint.schema import (
     identity_from_dict,
 )
 from sakuramoon.config.load import LoadedConfig
-from sakuramoon.config.schema import ObjectiveConfig
+from sakuramoon.config.schema import (
+    EvaluationEnabledConfig,
+    EvaluationExtractorEnabledConfig,
+    FidEnabledConfig,
+    ObjectiveConfig,
+    RuntimeConfig,
+)
+from sakuramoon.data.buckets import BucketError
+from sakuramoon.data.manifest import DatasetManifestError, load_dataset_manifest
+from sakuramoon.data.production import parse_modelscope_caption_fields
+from sakuramoon.data.validation import (
+    ValidationPromptError,
+    ValidationSelection,
+    ValidationSelectionError,
+    canonical_validation_selection_bytes,
+    load_validation_prompt_samples,
+    load_validation_selection,
+)
 from sakuramoon.eval.artifacts import (
     CheckpointMetricComparison,
     EvaluationArtifact,
 )
 from sakuramoon.eval.extractor import (
     ExtractorContractError,
+    RealStatsProvenance,
     TorchScriptFeatureExtractor,
     VerifiedLocalFile,
     load_real_feature_stats,
+    load_real_stats_provenance,
+    real_stats_provenance_path,
     verify_local_file,
 )
 from sakuramoon.eval.generate import CheckpointGenerator, GeneratedBatch
-from sakuramoon.eval.jobs import build_evaluation_jobs, load_prompt_manifest
+from sakuramoon.eval.jobs import (
+    EvaluationFileDependencies,
+    build_evaluation_jobs,
+)
 from sakuramoon.eval.manual_quality import (
     ManualQualityImage,
     ManualQualityIndex,
@@ -52,6 +75,7 @@ from sakuramoon.eval.metrics import (
     frechet_inception_distance,
 )
 from sakuramoon.eval.publisher import AtomicEvaluationPublisher
+from sakuramoon.eval.schedule import scheduled_evaluations
 from sakuramoon.eval.spec import (
     ArtifactKind,
     CheckpointArtifactKind,
@@ -63,6 +87,12 @@ from sakuramoon.eval.spec import (
     PromptCase,
     PromptManifest,
 )
+from sakuramoon.eval.validation import (
+    ValidationPromptPlan,
+    ValidationPromptPlanError,
+    build_validation_prompt_plan,
+)
+from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.storage import StorageValidationError, require_evaluation_storage
 
 
@@ -72,6 +102,23 @@ class EvaluationGenerator(Protocol):
 
 class EvaluationExtractor(Protocol):
     def extract(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+
+def _runtime_evaluation_cost(
+    *,
+    wall_seconds: float,
+    gpu_seconds: float,
+    training_paused: bool,
+    scope: Literal["checkpoint", "overall"],
+) -> EvaluationCost:
+    try:
+        return EvaluationCost(
+            wall_seconds=wall_seconds,
+            gpu_seconds=gpu_seconds,
+            training_pause_seconds=(wall_seconds if training_paused else 0.0),
+        )
+    except ValueError as error:
+        raise RuntimeError(f"{scope} evaluator cost is invalid: {error}") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +138,12 @@ class EvaluationPreflightError(RuntimeError):
         super().__init__(
             "; ".join(f"{item.code}:{item.subject}" for item in blockers)
         )
+
+
+EvaluationClassification = Literal[
+    "checkpoint_driven_evaluation",
+    "synthetic_bounded_engineering_only",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,17 +189,28 @@ class ValidatedCheckpoint:
 class EvaluationPlan:
     loaded: LoadedConfig
     repository_root: Path
-    prompt_path: Path
+    manifest_path: Path
+    selection_path: Path
+    validation_shard_root: Path
+    validation_selection: ValidationSelection
     prompts: PromptManifest
+    batchable_cases: int
     checkpoints: tuple[ValidatedCheckpoint, ...]
-    extractor_file: VerifiedLocalFile
-    preprocess_file: VerifiedLocalFile
-    real_stats_file: VerifiedLocalFile
-    real_stats: FeatureStats
+    extractor_file: VerifiedLocalFile | None
+    preprocess_file: VerifiedLocalFile | None
+    real_stats_file: VerifiedLocalFile | None
+    real_stats_metadata_file: VerifiedLocalFile | None
+    real_stats_provenance: RealStatsProvenance | None
+    real_stats: FeatureStats | None
     output_root: Path
     trigger_successful_update: int
     stage_end: bool
+    engineering_only: bool
     plan_id: str
+
+    def __post_init__(self) -> None:
+        if type(self.stage_end) is not bool or type(self.engineering_only) is not bool:
+            raise TypeError("evaluation plan mode fields must be explicit booleans")
 
     @property
     def jobs(self) -> tuple[EvaluationJob, ...]:
@@ -159,10 +223,16 @@ class EvaluationRunResult:
     output_path: Path
     artifact_count: int
     checkpoint_count: int
+    classification: EvaluationClassification
     publication_seconds: float
     total_wall_seconds: float
 
     def __post_init__(self) -> None:
+        if self.classification not in (
+            "checkpoint_driven_evaluation",
+            "synthetic_bounded_engineering_only",
+        ):
+            raise ValueError("evaluator result classification is invalid")
         if (
             type(self.publication_seconds) is not float
             or not math.isfinite(self.publication_seconds)
@@ -188,6 +258,15 @@ class _RawProvenance:
     resolution: int
     active_slot_ids: tuple[int, ...]
     alpha: float
+
+
+def _enabled_evaluation(config: RuntimeConfig) -> EvaluationEnabledConfig:
+    evaluation = config.evaluation
+    if getattr(evaluation, "enabled", False) is not True:
+        raise EvaluationPreflightError(
+            (EvaluationBlocker("EVALUATION_DISABLED", "evaluation.enabled"),)
+        )
+    return cast(EvaluationEnabledConfig, evaluation)
 
 
 def _has_symlink_component(path: Path) -> bool:
@@ -263,6 +342,20 @@ def _validate_raw_strict_jlt(
         resolution=growth.resolution,
         active_slot_ids=growth.active_slot_ids,
         alpha=growth.alpha,
+    )
+
+
+def _raw_matches_evaluation_target(
+    provenance: _RawProvenance, config: RuntimeConfig
+) -> bool:
+    """Bind an inspected RAW source to the configured checkpoint target stage."""
+
+    return (
+        provenance.stage == config.stage.name
+        and provenance.world_size == config.stage.world_size
+        and provenance.resolution == config.stage.resolution
+        and provenance.active_slot_ids == active_slot_ids(config.stage.depth)
+        and (config.growth.enabled or provenance.alpha == 1.0)
     )
 
 
@@ -373,6 +466,7 @@ def _plan_id(
     *,
     trigger_successful_update: int,
     stage_end: bool,
+    engineering_only: bool,
 ) -> str:
     payload = {
         "checkpoints": [
@@ -385,6 +479,7 @@ def _plan_id(
         ],
         "resolved_config_sha256": loaded.resolved_sha256,
         "schema_version": 1,
+        "engineering_only": engineering_only,
         "stage_end": stage_end,
         "trigger_successful_update": trigger_successful_update,
     }
@@ -401,11 +496,13 @@ def preflight_evaluator(
     selections: tuple[CheckpointSelection, ...],
     trigger_successful_update: int,
     stage_end: bool,
+    engineering_only: bool = False,
 ) -> EvaluationPlan:
     """Validate every identity before loading a model or starting generation."""
 
     blockers: list[EvaluationBlocker] = []
     config = loaded.config
+    evaluation = _enabled_evaluation(config)
     if (
         not repository_root.is_absolute()
         or ".." in repository_root.parts
@@ -419,11 +516,15 @@ def preflight_evaluator(
         blockers.append(EvaluationBlocker("TRIGGER_UPDATE_INVALID", "successful_update"))
     if type(stage_end) is not bool:
         blockers.append(EvaluationBlocker("EVALUATION_MODE_INVALID", "stage_end"))
+    if type(engineering_only) is not bool:
+        blockers.append(
+            EvaluationBlocker("EVALUATION_MODE_INVALID", "engineering_only")
+        )
     if (
         config.run.intent != "eval"
-        or not config.evaluation.explicit_job
-        or config.evaluation.sampling.profile != "reference"
-        or config.evaluation.gpu_index != 0
+        or not evaluation.explicit_job
+        or evaluation.sampling.profile != "reference"
+        or evaluation.gpu_index != 0
         or config.distributed.world_size != 1
         or config.distributed.backend != "native"
     ):
@@ -433,14 +534,19 @@ def preflight_evaluator(
     roles = tuple(item.role for item in selections)
     if len(set(roles)) != len(roles):
         blockers.append(EvaluationBlocker("CHECKPOINT_ROLE_DUPLICATE", "--checkpoint"))
-    if stage_end is True and (
-        len(selections) != 3 or set(roles) != {"raw", "pma", "accepted"}
-    ):
-        blockers.append(
-            EvaluationBlocker(
-                "STAGE_END_CHECKPOINT_SET_INVALID", "raw,pma,accepted"
+    if stage_end is True and type(engineering_only) is bool:
+        expected_roles = {"raw"} if engineering_only else {"raw", "pma", "accepted"}
+        if len(selections) != len(expected_roles) or set(roles) != expected_roles:
+            blockers.append(
+                EvaluationBlocker(
+                    (
+                        "ENGINEERING_STAGE_END_CHECKPOINT_SET_INVALID"
+                        if engineering_only
+                        else "STAGE_END_CHECKPOINT_SET_INVALID"
+                    ),
+                    ",".join(sorted(expected_roles)),
+                )
             )
-        )
     try:
         require_evaluation_storage(config, repository_root)
     except StorageValidationError:
@@ -450,47 +556,119 @@ def preflight_evaluator(
             )
         )
 
-    prompt_path = Path(config.evaluation.prompt_manifest_path)
+    manifest_path = Path(config.data.manifest.path)
+    selection_path = Path(config.data.validation.selection_path)
+    validation_shard_root = Path(config.data.validation.shard_root)
+    validation_selection: ValidationSelection | None = None
+    prompt_plan: ValidationPromptPlan | None = None
     prompts: PromptManifest | None = None
     try:
-        prompt_path = _repository_path(
-            repository_root, config.evaluation.prompt_manifest_path
-        )
-        prompts = load_prompt_manifest(prompt_path)
-        if prompts.sha256 != config.evaluation.prompt_manifest_sha256:
-            raise ValueError
-    except (OSError, ValueError):
+        manifest_path = _repository_path(repository_root, config.data.manifest.path)
+        manifest = load_dataset_manifest(manifest_path, config.data.source)
+    except (DatasetManifestError, OSError, ValueError):
         blockers.append(
-            EvaluationBlocker("PROMPT_MANIFEST_IDENTITY_INVALID", str(prompt_path))
+            EvaluationBlocker("DATASET_MANIFEST_INVALID", str(manifest_path))
         )
+        manifest = None
+    if manifest is not None:
+        try:
+            selection_path = _repository_path(
+                repository_root, config.data.validation.selection_path
+            )
+            validation_selection = load_validation_selection(
+                selection_path, manifest
+            )
+        except (ValidationSelectionError, OSError, ValueError):
+            blockers.append(
+                EvaluationBlocker(
+                    "VALIDATION_SELECTION_INVALID", str(selection_path)
+                )
+            )
+    if validation_selection is not None:
+        try:
+            validation_shard_root = _repository_path(
+                repository_root, config.data.validation.shard_root
+            )
+            samples = load_validation_prompt_samples(
+                validation_selection,
+                validation_shard_root,
+                run_seed=config.run.seed,
+                caption_fields_parser=parse_modelscope_caption_fields,
+            )
+            prompt_plan = build_validation_prompt_plan(
+                config, validation_selection, samples
+            )
+            prompts = prompt_plan.prompts
+        except ValidationPromptPlanError as error:
+            blockers.append(EvaluationBlocker(error.code, error.subject))
+        except ValidationPromptError:
+            blockers.append(
+                EvaluationBlocker(
+                    "VALIDATION_PROMPT_SOURCE_INVALID", str(validation_shard_root)
+                )
+            )
+        except (BucketError, OSError, ValueError):
+            blockers.append(
+                EvaluationBlocker(
+                    "VALIDATION_BUCKET_CONTRACT_INVALID",
+                    str(config.stage.resolution),
+                )
+            )
 
-    fid = config.evaluation.fid
-    external_specs = (
-        (
-            "FEATURE_EXTRACTOR_IDENTITY_INVALID",
-            fid.feature_extractor_path,
-            fid.feature_extractor_sha256,
-        ),
-        (
-            "PREPROCESS_IDENTITY_INVALID",
-            fid.preprocess_path,
-            fid.preprocess_sha256,
-        ),
-        (
-            "REAL_STATS_IDENTITY_INVALID",
-            fid.real_stats_path,
-            fid.real_stats_sha256,
-        ),
+    due_requests = (
+        scheduled_evaluations(
+            evaluation,
+            successful_update=trigger_successful_update,
+            stage_end=stage_end,
+        )
+        if type(trigger_successful_update) is int
+        and trigger_successful_update > 0
+        and type(stage_end) is bool
+        else ()
     )
+    if engineering_only is True and stage_end is True and (
+        due_requests or not evaluation.manual_quality.enabled
+    ):
+        blockers.append(
+            EvaluationBlocker(
+                "ENGINEERING_STAGE_END_METRIC_SET_INVALID", "manual_quality_only"
+            )
+        )
+    needs_extractor = any(item.metric in ("fid", "is") for item in due_requests)
+    needs_real_stats = any(item.metric == "fid" for item in due_requests)
+    external_specs: list[tuple[str, str]] = []
+    if needs_extractor:
+        if not isinstance(evaluation.extractor, EvaluationExtractorEnabledConfig):
+            raise RuntimeError("scheduled extractor configuration is inconsistent")
+        external_specs.extend(
+            (
+                (
+                    "FEATURE_EXTRACTOR_IDENTITY_INVALID",
+                    evaluation.extractor.feature_extractor_path,
+                ),
+                (
+                    "PREPROCESS_IDENTITY_INVALID",
+                    evaluation.extractor.preprocess_path,
+                ),
+            )
+        )
+    if needs_real_stats:
+        if not isinstance(evaluation.fid, FidEnabledConfig):
+            raise RuntimeError("scheduled FID configuration is inconsistent")
+        external_specs.append(
+            ("REAL_STATS_IDENTITY_INVALID", evaluation.fid.real_stats_path)
+        )
     verified: dict[str, VerifiedLocalFile] = {}
-    for code, configured_path, expected in external_specs:
+    for code, configured_path in external_specs:
         path = Path(configured_path)
         try:
             path = _repository_path(repository_root, configured_path)
-            verified[code] = verify_local_file(path, expected)
+            verified[code] = verify_local_file(path)
         except (ExtractorContractError, ValueError):
             blockers.append(EvaluationBlocker(code, str(path)))
     real_stats: FeatureStats | None = None
+    real_stats_metadata_file: VerifiedLocalFile | None = None
+    real_stats_provenance: RealStatsProvenance | None = None
     real_stats_file = verified.get("REAL_STATS_IDENTITY_INVALID")
     if real_stats_file is not None:
         try:
@@ -501,21 +679,66 @@ def preflight_evaluator(
                     "REAL_STATS_CONTRACT_INVALID", str(real_stats_file.path)
                 )
             )
-    if stage_end is True:
-        blockers.append(
-            EvaluationBlocker(
-                "STAGE_END_PROMPT_CONDITION_CONTRACT_UNRESOLVED",
-                "evaluation.prompt_manifest_path",
+        else:
+            metadata_path = real_stats_provenance_path(real_stats_file.path)
+            try:
+                real_stats_metadata_file = verify_local_file(metadata_path)
+            except ExtractorContractError:
+                blockers.append(
+                    EvaluationBlocker(
+                        "REAL_STATS_PROVENANCE_IDENTITY_INVALID", str(metadata_path)
+                    )
+                )
+    if (
+        real_stats is not None
+        and real_stats_file is not None
+        and real_stats_metadata_file is not None
+        and validation_selection is not None
+        and prompts is not None
+    ):
+        extractor_file = verified.get("FEATURE_EXTRACTOR_IDENTITY_INVALID")
+        preprocess_file = verified.get("PREPROCESS_IDENTITY_INVALID")
+        if (
+            not isinstance(evaluation.extractor, EvaluationExtractorEnabledConfig)
+            or extractor_file is None
+            or preprocess_file is None
+        ):
+            blockers.append(
+                EvaluationBlocker(
+                    "REAL_STATS_PROVENANCE_DEPENDENCY_MISSING", "extractor,preprocess"
+                )
             )
-        )
-    elif prompts is not None:
+        else:
+            try:
+                real_stats_provenance = load_real_stats_provenance(
+                    real_stats_metadata_file,
+                    real_stats_file=real_stats_file,
+                    selection_id=validation_selection.selection_id,
+                    manifest_id=validation_selection.manifest_id,
+                    prompt_manifest_sha256=prompts.sha256,
+                    preprocess_file=preprocess_file,
+                    feature_extractor=evaluation.extractor.feature_extractor,
+                    feature_extractor_version=(
+                        evaluation.extractor.feature_extractor_version
+                    ),
+                    extractor_file=extractor_file,
+                    stats_count=real_stats.count,
+                )
+            except ExtractorContractError:
+                blockers.append(
+                    EvaluationBlocker(
+                        "REAL_STATS_PROVENANCE_CONTRACT_INVALID",
+                        str(real_stats_metadata_file.path),
+                    )
+                )
+    if prompts is not None:
         unresolved_condition = next(
             (case.prompt_id for case in prompts.cases if case.conditions), None
         )
         if unresolved_condition is not None:
             blockers.append(
                 EvaluationBlocker(
-                    "PROMPT_CONDITION_CONTRACT_UNRESOLVED", unresolved_condition
+                    "VALIDATION_PROMPT_CONDITION_INVALID", unresolved_condition
                 )
             )
     try:
@@ -569,7 +792,7 @@ def preflight_evaluator(
         role = item.selection.role
         if item.manifest.kind.value == "raw":
             try:
-                raw_provenance[role] = _validate_raw_strict_jlt(
+                provenance = _validate_raw_strict_jlt(
                     item.selection.path, item.manifest
                 )
             except (CheckpointError, OSError):
@@ -579,6 +802,14 @@ def preflight_evaluator(
                     )
                 )
                 continue
+            if not _raw_matches_evaluation_target(provenance, config):
+                blockers.append(
+                    EvaluationBlocker(
+                        "CHECKPOINT_TARGET_TOPOLOGY_MISMATCH", role
+                    )
+                )
+                continue
+            raw_provenance[role] = provenance
             derived_provenance[role] = "strict_jlt"
         elif item.manifest.kind.value == "model-only":
             if item.selection.objective_provenance != "pre_fix":
@@ -689,7 +920,7 @@ def preflight_evaluator(
             derived_provenance.pop("accepted", None)
 
     validated: list[ValidatedCheckpoint] = []
-    if prompts is not None:
+    if prompts is not None and validation_selection is not None:
         for item in inspected:
             selection = item.selection
             provenance = derived_provenance.get(selection.role)
@@ -721,6 +952,15 @@ def preflight_evaluator(
                     successful_update=trigger_successful_update,
                     stage_end=stage_end,
                     prompts=prompts,
+                    selection=validation_selection,
+                    dependencies=EvaluationFileDependencies(
+                        extractor=verified.get(
+                            "FEATURE_EXTRACTOR_IDENTITY_INVALID"
+                        ),
+                        preprocess=verified.get("PREPROCESS_IDENTITY_INVALID"),
+                        real_stats=real_stats_file,
+                        real_stats_metadata=real_stats_metadata_file,
+                    ),
                 )
             except ValueError:
                 blockers.append(
@@ -738,8 +978,16 @@ def preflight_evaluator(
         )
     if prompts is not None and due_jobs:
         maximum_samples = max(job.sample_count for job in due_jobs)
-        batch_size = config.evaluation.batch_size
-        for start in range(0, maximum_samples, batch_size):
+        if prompt_plan is None or maximum_samples > prompt_plan.batchable_cases:
+            available = 0 if prompt_plan is None else prompt_plan.batchable_cases
+            blockers.append(
+                EvaluationBlocker(
+                    "VALIDATION_SAMPLE_CAPACITY_INSUFFICIENT",
+                    f"required={maximum_samples},batchable={available}",
+                )
+            )
+        batch_size = evaluation.batch_size
+        for start in range(0, min(maximum_samples, len(prompts.cases)), batch_size):
             cases = prompts.cases[start : start + batch_size]
             if len(cases) != batch_size or any(
                 case.height != cases[0].height or case.width != cases[0].width
@@ -747,7 +995,7 @@ def preflight_evaluator(
             ):
                 blockers.append(
                     EvaluationBlocker(
-                        "PROMPT_BATCH_SHAPE_INVALID", f"ordered_prefix:{start}"
+                        "PROMPT_BATCH_SHAPE_INVALID", f"validation_prefix:{start}"
                     )
                 )
                 break
@@ -766,16 +1014,17 @@ def preflight_evaluator(
     if blockers:
         raise EvaluationPreflightError(tuple(blockers))
     assert prompts is not None
-    assert real_stats is not None
-    extractor_file = verified["FEATURE_EXTRACTOR_IDENTITY_INVALID"]
-    preprocess_file = verified["PREPROCESS_IDENTITY_INVALID"]
-    assert real_stats_file is not None
+    assert prompt_plan is not None
+    assert validation_selection is not None
+    extractor_file = verified.get("FEATURE_EXTRACTOR_IDENTITY_INVALID")
+    preprocess_file = verified.get("PREPROCESS_IDENTITY_INVALID")
     checkpoint_tuple = tuple(validated)
     plan_id = _plan_id(
         loaded,
         checkpoint_tuple,
         trigger_successful_update=trigger_successful_update,
         stage_end=stage_end,
+        engineering_only=engineering_only,
     )
     if (
         (output_root / plan_id).exists()
@@ -789,16 +1038,23 @@ def preflight_evaluator(
     return EvaluationPlan(
         loaded=loaded,
         repository_root=repository_root,
-        prompt_path=prompt_path,
+        manifest_path=manifest_path,
+        selection_path=selection_path,
+        validation_shard_root=validation_shard_root,
+        validation_selection=validation_selection,
         prompts=prompts,
+        batchable_cases=prompt_plan.batchable_cases,
         checkpoints=checkpoint_tuple,
         extractor_file=extractor_file,
         preprocess_file=preprocess_file,
         real_stats_file=real_stats_file,
+        real_stats_metadata_file=real_stats_metadata_file,
+        real_stats_provenance=real_stats_provenance,
         real_stats=real_stats,
         output_root=output_root,
         trigger_successful_update=trigger_successful_update,
         stage_end=stage_end,
+        engineering_only=engineering_only,
         plan_id=plan_id,
     )
 
@@ -810,7 +1066,8 @@ ExtractorFactory = Callable[[EvaluationPlan], EvaluationExtractor]
 def _production_generator(
     plan: EvaluationPlan, checkpoint: ValidatedCheckpoint
 ) -> EvaluationGenerator:
-    device = torch.device("cuda", plan.loaded.config.evaluation.gpu_index)
+    evaluation = _enabled_evaluation(plan.loaded.config)
+    device = torch.device("cuda", evaluation.gpu_index)
     return CheckpointGenerator(
         config=plan.loaded.config,
         checkpoint_path=checkpoint.selection.path,
@@ -821,7 +1078,10 @@ def _production_generator(
 
 
 def _production_extractor(plan: EvaluationPlan) -> EvaluationExtractor:
-    device = torch.device("cuda", plan.loaded.config.evaluation.gpu_index)
+    evaluation = _enabled_evaluation(plan.loaded.config)
+    if plan.preprocess_file is None or plan.extractor_file is None:
+        raise ExtractorContractError("verified evaluator extractor is missing")
+    device = torch.device("cuda", evaluation.gpu_index)
     return TorchScriptFeatureExtractor(
         preprocess_file=plan.preprocess_file,
         extractor_file=plan.extractor_file,
@@ -834,13 +1094,15 @@ def _finalize_metric(
     *,
     fid_accumulator: FeatureStatsAccumulator | None,
     is_accumulator: InceptionScoreAccumulator | None,
-    real_stats: FeatureStats,
+    real_stats: FeatureStats | None,
 ) -> tuple[float, float | None]:
     if job.metric == "fid":
         if fid_accumulator is None:
             raise RuntimeError("FID accumulator is missing")
         if fid_accumulator.count != job.sample_count:
             raise RuntimeError("FID aggregation sample count differs from its job")
+        if real_stats is None:
+            raise RuntimeError("FID real statistics are missing")
         value = frechet_inception_distance(fid_accumulator.finalize(), real_stats)
         return value, None
     if job.metric == "is":
@@ -857,23 +1119,18 @@ def run_evaluator(
     generator_factory: GeneratorFactory | None = None,
     extractor_factory: ExtractorFactory | None = None,
     measure_cuda: bool = True,
-    engineering_only: bool = False,
 ) -> EvaluationRunResult:
     """Execute every plan job and atomically publish only a complete run tree."""
 
-    if type(engineering_only) is not bool:
-        raise TypeError("engineering-only evaluator classification must be explicit")
     injected = (
         generator_factory is not None
         or extractor_factory is not None
         or not measure_cuda
     )
-    if injected and not engineering_only:
+    if injected and not plan.engineering_only:
         raise RuntimeError(
             "injected evaluator execution must be classified as engineering-only"
         )
-    if engineering_only and generator_factory is None:
-        raise RuntimeError("engineering-only evaluator requires an explicit generator")
     if not plan.jobs:
         raise EvaluationPreflightError(
             (EvaluationBlocker("NO_EVALUATION_JOB_DUE", str(plan.trigger_successful_update)),)
@@ -881,33 +1138,111 @@ def run_evaluator(
     stage_end_roles = {item.reference.role for item in plan.checkpoints}
     if plan.stage_end:
         stage_blockers: list[EvaluationBlocker] = []
-        if len(plan.checkpoints) != 3 or stage_end_roles != {
-            "raw",
-            "pma",
-            "accepted",
-        }:
+        expected_roles = (
+            {"raw"} if plan.engineering_only else {"raw", "pma", "accepted"}
+        )
+        if (
+            len(plan.checkpoints) != len(expected_roles)
+            or stage_end_roles != expected_roles
+        ):
             stage_blockers.append(
                 EvaluationBlocker(
-                    "STAGE_END_CHECKPOINT_SET_INVALID", "raw,pma,accepted"
+                    (
+                        "ENGINEERING_STAGE_END_CHECKPOINT_SET_INVALID"
+                        if plan.engineering_only
+                        else "STAGE_END_CHECKPOINT_SET_INVALID"
+                    ),
+                    ",".join(sorted(expected_roles)),
                 )
             )
-        stage_blockers.append(
-            EvaluationBlocker(
-                "STAGE_END_PROMPT_CONDITION_CONTRACT_UNRESOLVED",
-                "evaluation.prompt_manifest_path",
+        if plan.engineering_only and any(
+            job.metric != "manual_quality" for job in plan.jobs
+        ):
+            stage_blockers.append(
+                EvaluationBlocker(
+                    "ENGINEERING_STAGE_END_METRIC_SET_INVALID",
+                    "manual_quality_only",
+                )
+            )
+        if stage_blockers:
+            raise EvaluationPreflightError(tuple(stage_blockers))
+    evaluation = _enabled_evaluation(plan.loaded.config)
+    if any(case.conditions for case in plan.prompts.cases):
+        raise EvaluationPreflightError(
+            (
+                EvaluationBlocker(
+                    "VALIDATION_PROMPT_CONDITION_INVALID", "generated_prompt_manifest"
+                ),
             )
         )
-        raise EvaluationPreflightError(tuple(stage_blockers))
+    for job in plan.jobs:
+        if (
+            job.validation_selection_id
+            != plan.validation_selection.selection_id
+            or job.validation_manifest_id
+            != plan.validation_selection.manifest_id
+            or job.validation_seed != plan.validation_selection.seed
+            or job.prompt_manifest_sha256 != plan.prompts.sha256
+        ):
+            raise EvaluationPreflightError(
+                (
+                    EvaluationBlocker(
+                        "VALIDATION_PROVENANCE_CHANGED", job.job_id
+                    ),
+                )
+            )
+    maximum_samples = max(job.sample_count for job in plan.jobs)
+    if maximum_samples > plan.batchable_cases:
+        raise EvaluationPreflightError(
+            (
+                EvaluationBlocker(
+                    "VALIDATION_SAMPLE_CAPACITY_INSUFFICIENT",
+                    f"required={maximum_samples},batchable={plan.batchable_cases}",
+                ),
+            )
+        )
+    for start in range(0, maximum_samples, evaluation.batch_size):
+        cases = plan.prompts.cases[start : start + evaluation.batch_size]
+        if len(cases) != evaluation.batch_size or any(
+            case.height != cases[0].height or case.width != cases[0].width
+            for case in cases[1:]
+        ):
+            raise EvaluationPreflightError(
+                (
+                    EvaluationBlocker(
+                        "PROMPT_BATCH_SHAPE_INVALID", f"validation_prefix:{start}"
+                    ),
+                )
+            )
+    if any(job.metric == "fid" for job in plan.jobs) and (
+        plan.real_stats is None
+        or plan.real_stats_file is None
+        or plan.real_stats_metadata_file is None
+        or plan.real_stats_provenance is None
+    ):
+        raise EvaluationPreflightError(
+            (
+                EvaluationBlocker(
+                    "REAL_STATS_PROVENANCE_REQUIRED", "evaluation.fid.real_stats_path"
+                ),
+            )
+        )
     make_generator = generator_factory or _production_generator
     make_extractor = extractor_factory or _production_extractor
-    execution_classification = (
+    execution_classification: EvaluationClassification = (
         "synthetic_bounded_engineering_only"
-        if engineering_only
+        if plan.engineering_only
         else "checkpoint_driven_evaluation"
     )
     overall_wall_start = time.perf_counter()
     publisher = AtomicEvaluationPublisher(plan.output_root, plan.plan_id)
-    publisher.write_bytes("inputs/prompt-manifest.json", plan.prompts.canonical_bytes())
+    publisher.write_bytes(
+        "inputs/validation-selection.json",
+        canonical_validation_selection_bytes(plan.validation_selection),
+    )
+    publisher.write_bytes(
+        "inputs/validation-prompts.json", plan.prompts.canonical_bytes()
+    )
     overall_start_event: torch.cuda.Event | None = None
     overall_end_event: torch.cuda.Event | None = None
     if measure_cuda:
@@ -938,7 +1273,7 @@ def run_evaluator(
             job for job in checkpoint.jobs if job.metric == "manual_quality"
         )
         max_samples = max(job.sample_count for job in checkpoint.jobs)
-        batch_size = plan.loaded.config.evaluation.batch_size
+        batch_size = evaluation.batch_size
         if max_samples % batch_size:
             raise RuntimeError("evaluation plan contains a partial batch")
         fid_accumulators = {
@@ -949,7 +1284,7 @@ def run_evaluator(
         is_accumulators = {
             job.job_id: InceptionScoreAccumulator(
                 sample_count=job.sample_count,
-                splits=job.is_splits,
+                splits=cast(int, job.is_splits),
             )
             for job in metric_jobs
             if job.metric == "is"
@@ -1025,16 +1360,11 @@ def run_evaluator(
         else:
             gpu_seconds = 0.0
         wall_seconds = float(time.perf_counter() - wall_start)
-        if not math.isfinite(gpu_seconds) or gpu_seconds < 0.0:
-            raise RuntimeError("evaluator GPU cost is invalid")
-        if gpu_seconds > wall_seconds:
-            raise RuntimeError("evaluator GPU cost exceeds wall time")
-        cost = EvaluationCost(
+        cost = _runtime_evaluation_cost(
             wall_seconds=wall_seconds,
             gpu_seconds=gpu_seconds,
-            training_pause_seconds=(
-                wall_seconds if plan.loaded.config.evaluation.training_paused else 0.0
-            ),
+            training_paused=evaluation.training_paused,
+            scope="checkpoint",
         )
         for job in checkpoint.jobs:
             publisher.write_json(f"jobs/{job.job_id}.json", job.as_mapping())
@@ -1130,20 +1460,11 @@ def run_evaluator(
     else:
         overall_gpu_seconds = 0.0
     overall_wall_seconds = float(time.perf_counter() - overall_wall_start)
-    if (
-        not math.isfinite(overall_gpu_seconds)
-        or overall_gpu_seconds < 0.0
-        or overall_gpu_seconds > overall_wall_seconds
-    ):
-        raise RuntimeError("overall evaluator GPU cost is invalid")
-    overall_cost = EvaluationCost(
+    overall_cost = _runtime_evaluation_cost(
         wall_seconds=overall_wall_seconds,
         gpu_seconds=overall_gpu_seconds,
-        training_pause_seconds=(
-            overall_wall_seconds
-            if plan.loaded.config.evaluation.training_paused
-            else 0.0
-        ),
+        training_paused=evaluation.training_paused,
+        scope="overall",
     )
     publication_start = time.perf_counter()
     output = publisher.commit(
@@ -1159,6 +1480,7 @@ def run_evaluator(
                 "wall_seconds": overall_cost.wall_seconds,
             },
             "plan_id": plan.plan_id,
+            "engineering_only": plan.engineering_only,
             "resolved_config_sha256": plan.loaded.resolved_sha256,
             "schema_version": 1,
             "stage_end": plan.stage_end,
@@ -1167,6 +1489,12 @@ def run_evaluator(
                 "recorded_in_run_result_only": True,
             },
             "trigger_successful_update": plan.trigger_successful_update,
+            "validation": {
+                "manifest_id": plan.validation_selection.manifest_id,
+                "prompt_manifest_sha256": plan.prompts.sha256,
+                "seed": plan.validation_selection.seed,
+                "selection_id": plan.validation_selection.selection_id,
+            },
         }
     )
     publication_seconds = float(time.perf_counter() - publication_start)
@@ -1176,6 +1504,7 @@ def run_evaluator(
         output_path=output,
         artifact_count=artifact_count,
         checkpoint_count=len(plan.checkpoints),
+        classification=execution_classification,
         publication_seconds=publication_seconds,
         total_wall_seconds=total_wall_seconds,
     )
@@ -1184,6 +1513,7 @@ def run_evaluator(
 __all__ = [
     "CheckpointSelection",
     "EvaluationBlocker",
+    "EvaluationClassification",
     "EvaluationPlan",
     "EvaluationPreflightError",
     "EvaluationRunResult",

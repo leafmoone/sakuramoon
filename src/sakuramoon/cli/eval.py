@@ -14,12 +14,12 @@ from sakuramoon.eval.extractor import ExtractorContractError
 from sakuramoon.eval.generate import GenerationContractError
 from sakuramoon.eval.jobs import (
     build_evaluation_jobs,
-    load_prompt_manifest,
     write_evaluation_job,
 )
 from sakuramoon.eval.publisher import EvaluationPublicationError
 from sakuramoon.eval.runner import (
     CheckpointSelection,
+    EvaluationBlocker,
     EvaluationPreflightError,
     preflight_evaluator,
     run_evaluator,
@@ -58,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--trend", action="store_true")
     mode.add_argument("--stage-end", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--engineering-only", action="store_true")
     return parser
 
 
@@ -115,22 +116,32 @@ def _emit(payload: dict[str, object]) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
+        loaded = load_config(args.config, config_root=args.config_root)
+        if not loaded.config.evaluation.enabled:
+            raise EvaluationPreflightError(
+                (EvaluationBlocker("EVALUATION_DISABLED", "evaluation.enabled"),)
+            )
         selections = _bind_accepted_source_pma(
             tuple(_checkpoint_selection(value) for value in args.checkpoint),
             args.accepted_source_pma,
         )
-        loaded = load_config(args.config, config_root=args.config_root)
         plan = preflight_evaluator(
             loaded,
             repository_root=args.root,
             selections=selections,
             trigger_successful_update=args.successful_update,
             stage_end=args.stage_end,
+            engineering_only=args.engineering_only,
         )
         if args.preflight_only:
             _emit(
                 {
                     "checkpoint_count": len(plan.checkpoints),
+                    "classification": (
+                        "synthetic_bounded_engineering_only"
+                        if plan.engineering_only
+                        else "checkpoint_driven_evaluation"
+                    ),
                     "job_count": len(plan.jobs),
                     "ok": True,
                     "plan_id": plan.plan_id,
@@ -188,6 +199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         {
             "artifact_count": result.artifact_count,
             "checkpoint_count": result.checkpoint_count,
+            "classification": result.classification,
             "ok": True,
             "output": str(result.output_path),
             "plan_id": result.plan_id,
@@ -206,7 +218,6 @@ if __name__ == "__main__":
 __all__ = [
     "build_evaluation_jobs",
     "build_parser",
-    "load_prompt_manifest",
     "main",
     "write_evaluation_job",
 ]

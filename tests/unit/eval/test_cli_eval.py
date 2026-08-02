@@ -19,6 +19,7 @@ from sakuramoon.config.load import (
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.eval.runner import (
     EvaluationBlocker,
+    EvaluationClassification,
     EvaluationPlan,
     EvaluationPreflightError,
     EvaluationRunResult,
@@ -26,7 +27,57 @@ from sakuramoon.eval.runner import (
 
 
 def _loaded() -> LoadedConfig:
-    return LoadedConfig(cast(RuntimeConfig, object()), (), "resolved\n", "a" * 64)
+    config = cast(
+        RuntimeConfig,
+        SimpleNamespace(evaluation=SimpleNamespace(enabled=True)),
+    )
+    return LoadedConfig(config, (), "resolved\n", "a" * 64)
+
+
+def _disabled_loaded() -> LoadedConfig:
+    config = cast(
+        RuntimeConfig,
+        SimpleNamespace(evaluation=SimpleNamespace(enabled=False)),
+    )
+    return LoadedConfig(config, (), "resolved\n", "a" * 64)
+
+
+def test_disabled_cli_stops_before_checkpoint_parsing_or_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def load_disabled(*_args: object, **_kwargs: object) -> LoadedConfig:
+        return _disabled_loaded()
+
+    monkeypatch.setattr(eval_cli, "load_config", load_disabled)
+
+    def forbidden(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("disabled evaluation must stop before checkpoint preflight")
+
+    monkeypatch.setattr(eval_cli, "_checkpoint_selection", forbidden)
+    monkeypatch.setattr(eval_cli, "preflight_evaluator", forbidden)
+    monkeypatch.setattr(eval_cli, "run_evaluator", forbidden)
+
+    code = eval_cli.main(
+        [
+            "--config",
+            "base.toml",
+            "--checkpoint",
+            "not-even-a-valid-selection",
+            "--successful-update",
+            "10",
+            "--trend",
+        ]
+    )
+
+    assert code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "blockers": [
+            {"code": "EVALUATION_DISABLED", "subject": "evaluation.enabled"}
+        ],
+        "error": "evaluation_preflight_failed",
+        "ok": False,
+    }
 
 
 def test_checkpoint_argument_requires_absolute_role_and_model_provenance() -> None:
@@ -202,6 +253,7 @@ def test_cli_preflight_only_does_not_start_generation(
         EvaluationPlan,
         SimpleNamespace(
             checkpoints=(object(),),
+            engineering_only=False,
             jobs=(object(), object()),
             plan_id="evaluation-preflight",
         ),
@@ -240,27 +292,47 @@ def test_cli_preflight_only_does_not_start_generation(
     assert payload["job_count"] == 2
 
 
-def test_cli_reports_post_commit_and_total_wall_timing(
+@pytest.mark.parametrize(
+    ("extra_args", "expected_engineering_only", "classification"),
+    (
+        ((), False, "checkpoint_driven_evaluation"),
+        (
+            ("--engineering-only",),
+            True,
+            "synthetic_bounded_engineering_only",
+        ),
+    ),
+)
+def test_cli_reports_classification_post_commit_and_total_wall_timing(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
+    extra_args: tuple[str, ...],
+    expected_engineering_only: bool,
+    classification: str,
 ) -> None:
     loaded = _loaded()
-    plan = cast(EvaluationPlan, object())
+    plan = cast(
+        EvaluationPlan,
+        SimpleNamespace(engineering_only=expected_engineering_only),
+    )
     output = tmp_path / "evaluation-complete"
 
     def fake_load(*_args: object, **_kwargs: object) -> LoadedConfig:
         return loaded
 
     def fake_preflight(*_args: object, **_kwargs: object) -> EvaluationPlan:
+        assert _kwargs["engineering_only"] is expected_engineering_only
         return plan
 
     def fake_run(_plan: EvaluationPlan) -> EvaluationRunResult:
+        assert _plan.engineering_only is expected_engineering_only
         return EvaluationRunResult(
             plan_id="evaluation-result",
             output_path=output,
             artifact_count=3,
             checkpoint_count=1,
+            classification=cast(EvaluationClassification, classification),
             publication_seconds=0.25,
             total_wall_seconds=4.5,
         )
@@ -278,6 +350,7 @@ def test_cli_reports_post_commit_and_total_wall_timing(
             "--successful-update",
             "10",
             "--trend",
+            *extra_args,
         ]
     )
 
@@ -285,6 +358,7 @@ def test_cli_reports_post_commit_and_total_wall_timing(
     assert json.loads(capsys.readouterr().out) == {
         "artifact_count": 3,
         "checkpoint_count": 1,
+        "classification": classification,
         "ok": True,
         "output": str(output),
         "plan_id": "evaluation-result",

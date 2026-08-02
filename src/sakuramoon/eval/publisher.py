@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -63,8 +64,58 @@ def _fsync_tree(path: Path) -> None:
         _fsync_directory(directory)
 
 
+def _remove_staging_payload(path: Path) -> None:
+    """Remove every staged entry except the root COMPLETE commit source."""
+
+    for root, child_directories, files in os.walk(path, topdown=False):
+        current = Path(root)
+        for file_name in files:
+            if current == path and file_name == "COMPLETE":
+                continue
+            (current / file_name).unlink()
+        for child in child_directories:
+            (current / child).rmdir()
+
+
+def _publish_tree_noreplace(staging: Path, destination: Path) -> None:
+    """Reserve the final path and publish COMPLETE last using NFS-safe links."""
+
+    destination.mkdir(mode=0o700)
+    _fsync_directory(destination.parent)
+    for root, child_directories, files in os.walk(staging):
+        source_directory = Path(root)
+        relative = source_directory.relative_to(staging)
+        destination_directory = destination / relative
+        for child in sorted(child_directories):
+            (destination_directory / child).mkdir(mode=0o700)
+        for file_name in sorted(files):
+            if relative == Path() and file_name == "COMPLETE":
+                continue
+            os.link(
+                source_directory / file_name,
+                destination_directory / file_name,
+                follow_symlinks=False,
+            )
+    _fsync_tree(destination)
+
+    # Remove the staging payload before exposing COMPLETE. The final hard links retain
+    # the already-fsynced inodes, while any cleanup failure leaves no commit marker.
+    _remove_staging_payload(staging)
+    os.link(
+        staging / "COMPLETE",
+        destination / "COMPLETE",
+        follow_symlinks=False,
+    )
+    _fsync_directory(destination)
+    _fsync_directory(destination.parent)
+    with contextlib.suppress(OSError):
+        (staging / "COMPLETE").unlink()
+        staging.rmdir()
+        _fsync_directory(destination.parent)
+
+
 class AtomicEvaluationPublisher:
-    """Stage all outputs beside their destination and rename only after COMPLETE."""
+    """Stage outputs, reserve the final directory, and link COMPLETE only at commit."""
 
     def __init__(self, output_root: Path, run_id: str) -> None:
         if (
@@ -141,10 +192,7 @@ class AtomicEvaluationPublisher:
         self.write_json("summary.json", summary)
         self.write_bytes("COMPLETE", b"complete\n")
         _fsync_tree(self.staging_path)
-        if self.final_path.exists() or self.final_path.is_symlink():
-            raise FileExistsError("evaluator output run already exists")
-        os.rename(self.staging_path, self.final_path)
-        _fsync_directory(self.output_root)
+        _publish_tree_noreplace(self.staging_path, self.final_path)
         self._committed = True
         return self.final_path
 

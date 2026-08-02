@@ -9,6 +9,13 @@ import re
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from sakuramoon.data.caption import CaptionDropoutHits, CaptionPlan, Tag
+from sakuramoon.data.serialize import (
+    MAIN_SUFFIX,
+    SYSTEM_PREFIX,
+    render_caption_segments,
+)
+from sakuramoon.eval.timing import require_plausible_single_gpu_timing
 from sakuramoon.sampling.profiles import (
     SamplingProfileName,
     SamplingSolver,
@@ -31,6 +38,21 @@ ArtifactKind = Literal[
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_NO_DROPOUT = CaptionDropoutHits(
+    all_condition=False,
+    nsfw=False,
+    character=False,
+    copyright=False,
+    general=False,
+    artist=False,
+    candidate_source=False,
+    long_names=False,
+    long_no_names=False,
+    short_vibes=False,
+    nl2=False,
+    nl3=False,
+)
+_CAPTION_TAG_FIELDS = ("nsfw", "character", "copyright", "general", "artists")
 
 
 def _safe_id(name: str, value: str) -> None:
@@ -43,6 +65,74 @@ def _sha256(name: str, value: str) -> None:
         raise ValueError(f"{name} must be a lowercase SHA-256")
 
 
+def caption_plan_prompt_text(plan: CaptionPlan) -> str:
+    """Return the exact untruncated Qwen text surface for a typed caption plan."""
+
+    body, artist_text = render_caption_segments(plan)
+    return f"{SYSTEM_PREFIX}{body}{MAIN_SUFFIX}{artist_text}"
+
+
+def _caption_plan_mapping(plan: CaptionPlan) -> dict[str, object]:
+    return {
+        **{
+            field: [
+                {"canonical": tag.canonical, "text": tag.text}
+                for tag in getattr(plan, field)
+            ]
+            for field in _CAPTION_TAG_FIELDS
+        },
+        "nl_text": plan.nl_text,
+        "selected_nl": plan.selected_nl,
+    }
+
+
+def _parse_caption_tags(value: object, field: str) -> tuple[Tag, ...]:
+    if type(value) is not list:
+        raise ValueError(f"prompt caption {field} must be an array")
+    result: list[Tag] = []
+    for raw_tag in cast(list[object], value):
+        if type(raw_tag) is not dict:
+            raise ValueError(f"prompt caption {field} tag must be an object")
+        tag = cast(dict[str, object], raw_tag)
+        if set(tag) != {"canonical", "text"}:
+            raise ValueError(f"prompt caption {field} tag fields are invalid")
+        result.append(Tag(cast(str, tag["text"]), cast(str, tag["canonical"])))
+    return tuple(result)
+
+
+def _parse_caption_plan(value: object) -> CaptionPlan | None:
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise ValueError("prompt caption plan must be an object or null")
+    document = cast(dict[str, object], value)
+    if set(document) != {*_CAPTION_TAG_FIELDS, "nl_text", "selected_nl"}:
+        raise ValueError("prompt caption plan fields are invalid")
+    nl_text = document["nl_text"]
+    selected_nl = document["selected_nl"]
+    if nl_text is not None and type(nl_text) is not str:
+        raise ValueError("prompt caption NL text is invalid")
+    if selected_nl is not None and selected_nl not in (
+        "long_names",
+        "long_no_names",
+        "short_vibes",
+        "nl2",
+        "nl3",
+    ):
+        raise ValueError("prompt caption NL branch is invalid")
+    return CaptionPlan(
+        nsfw=_parse_caption_tags(document["nsfw"], "nsfw"),
+        character=_parse_caption_tags(document["character"], "character"),
+        copyright=_parse_caption_tags(document["copyright"], "copyright"),
+        general=_parse_caption_tags(document["general"], "general"),
+        artists=_parse_caption_tags(document["artists"], "artists"),
+        nl_text=nl_text,
+        selected_nl=selected_nl,
+        all_condition_dropped=False,
+        dropout_hits=_NO_DROPOUT,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PromptCase:
     prompt_id: str
@@ -51,13 +141,17 @@ class PromptCase:
     seed: int
     height: int
     width: int
+    caption_plan: CaptionPlan | None = None
 
     def __post_init__(self) -> None:
         _safe_id("prompt_id", self.prompt_id)
         if (
             type(self.prompt) is not str
             or not self.prompt.strip()
-            or self.prompt != self.prompt.strip()
+            or (
+                self.caption_plan is None
+                and self.prompt != self.prompt.strip()
+            )
             or "<think>" in self.prompt
             or "</think>" in self.prompt
         ):
@@ -82,9 +176,34 @@ class PromptCase:
             for value in (self.height, self.width)
         ):
             raise ValueError("prompt dimensions must be positive multiples of 16")
+        if self.caption_plan is not None:
+            if type(self.caption_plan) is not CaptionPlan:
+                raise ValueError("structured evaluator caption plan is invalid")
+            plan = self.caption_plan
+            typed_tags = all(
+                type(getattr(plan, field)) is tuple
+                and all(type(tag) is Tag for tag in getattr(plan, field))
+                for field in _CAPTION_TAG_FIELDS
+            )
+            has_content = any(
+                getattr(plan, field) for field in _CAPTION_TAG_FIELDS
+            ) or plan.nl_text is not None
+            if (
+                not typed_tags
+                or not has_content
+                or plan.all_condition_dropped
+                or any(plan.dropout_hits.as_mapping().values())
+                or self.prompt != caption_plan_prompt_text(plan)
+            ):
+                raise ValueError("structured evaluator caption plan is invalid")
 
     def as_mapping(self) -> dict[str, object]:
         return {
+            "caption_plan": (
+                _caption_plan_mapping(self.caption_plan)
+                if self.caption_plan is not None
+                else None
+            ),
             "conditions": list(self.conditions),
             "height": self.height,
             "prompt": self.prompt,
@@ -142,6 +261,7 @@ class PromptManifest:
             raise ValueError("prompt manifest cases must be an array")
         cases: list[PromptCase] = []
         expected_case_fields = {
+            "caption_plan",
             "conditions",
             "height",
             "prompt",
@@ -169,6 +289,7 @@ class PromptManifest:
                     seed=cast(int, case["seed"]),
                     height=cast(int, case["height"]),
                     width=cast(int, case["width"]),
+                    caption_plan=_parse_caption_plan(case["caption_plan"]),
                 )
             )
         manifest = cls(tuple(cases))
@@ -219,8 +340,12 @@ class EvaluationJob:
     checkpoint: CheckpointRef
     metric: MetricName
     artifact_kind: ArtifactKind
-    prompt_manifest_path: str
-    prompt_selection: Literal["ordered_prefix"]
+    validation_selection_path: str
+    validation_selection_id: str
+    validation_manifest_id: str
+    validation_shard_root: str
+    validation_seed: int
+    prompt_selection: Literal["validation_bucketed_prefix"]
     prompt_manifest_sha256: str
     trigger_successful_update: int
     sample_count: int
@@ -231,15 +356,17 @@ class EvaluationJob:
     time_schedule: TimeSchedule
     solver_steps: int
     solver_nfe: int
-    feature_extractor: str
-    feature_extractor_version: str
-    feature_extractor_path: str
-    feature_extractor_sha256: str
-    preprocess_path: str
-    preprocess_sha256: str
-    real_stats_path: str
-    real_stats_sha256: str
-    is_splits: int
+    feature_extractor: str | None
+    feature_extractor_version: str | None
+    feature_extractor_path: str | None
+    feature_extractor_sha256: str | None
+    preprocess_path: str | None
+    preprocess_sha256: str | None
+    real_stats_path: str | None
+    real_stats_sha256: str | None
+    real_stats_metadata_path: str | None
+    real_stats_metadata_sha256: str | None
+    is_splits: int | None
     gpu_index: int
     training_paused: bool
 
@@ -257,20 +384,24 @@ class EvaluationJob:
         if self.artifact_kind not in expected_artifact_kinds:
             raise ValueError("metric and artifact kind are inconsistent")
         if (
-            type(self.prompt_manifest_path) is not str
-            or not self.prompt_manifest_path
-            or self.prompt_manifest_path != self.prompt_manifest_path.strip()
+            any(
+                type(value) is not str
+                or not value
+                or value != value.strip()
+                for value in (
+                    self.validation_selection_path,
+                    self.validation_shard_root,
+                )
+            )
+            or type(self.validation_seed) is not int
+            or self.validation_seed != 44
         ):
-            raise ValueError("prompt manifest path must be explicit")
-        if self.prompt_selection != "ordered_prefix":
-            raise ValueError("prompt selection must use the ordered manifest prefix")
-        for name, value in (
-            ("prompt_manifest_sha256", self.prompt_manifest_sha256),
-            ("feature_extractor_sha256", self.feature_extractor_sha256),
-            ("preprocess_sha256", self.preprocess_sha256),
-            ("real_stats_sha256", self.real_stats_sha256),
-        ):
-            _sha256(name, value)
+            raise ValueError("validation prompt source must be explicit")
+        _sha256("validation_selection_id", self.validation_selection_id)
+        _sha256("validation_manifest_id", self.validation_manifest_id)
+        if self.prompt_selection != "validation_bucketed_prefix":
+            raise ValueError("prompt selection must use the bucketed validation prefix")
+        _sha256("prompt_manifest_sha256", self.prompt_manifest_sha256)
         if (
             type(self.trigger_successful_update) is not int
             or self.trigger_successful_update <= 0
@@ -305,19 +436,73 @@ class EvaluationJob:
             or self.solver_nfe != selected.nfe
         ):
             raise ValueError("formal evaluation sampling identity is inconsistent")
-        for value in (
+        extractor_values = (
             self.feature_extractor,
             self.feature_extractor_version,
             self.feature_extractor_path,
             self.preprocess_path,
-            self.real_stats_path,
-        ):
-            if type(value) is not str or not value or value != value.strip():
+        )
+        extractor_hashes = (
+            ("feature_extractor_sha256", self.feature_extractor_sha256),
+            ("preprocess_sha256", self.preprocess_sha256),
+        )
+        if self.metric in ("fid", "is"):
+            if any(
+                type(value) is not str or not value or value != value.strip()
+                for value in extractor_values
+            ):
                 raise ValueError("feature extractor identity must be explicit")
-        if type(self.is_splits) is not int or self.is_splits <= 0:
-            raise ValueError("IS splits must be positive")
-        if self.metric == "is" and self.sample_count % self.is_splits != 0:
-            raise ValueError("IS sample count must be exactly divisible by splits")
+            for name, value in extractor_hashes:
+                if type(value) is not str:
+                    raise ValueError("feature extractor identity must be explicit")
+                _sha256(name, value)
+        elif any(value is not None for value in (*extractor_values, *(value for _, value in extractor_hashes))):
+            raise ValueError("manual quality jobs must not bind an extractor")
+        if self.metric == "fid":
+            if (
+                type(self.real_stats_path) is not str
+                or not self.real_stats_path
+                or self.real_stats_path != self.real_stats_path.strip()
+                or type(self.real_stats_sha256) is not str
+                or type(self.real_stats_metadata_path) is not str
+                or not self.real_stats_metadata_path
+                or self.real_stats_metadata_path
+                != self.real_stats_metadata_path.strip()
+                or type(self.real_stats_metadata_sha256) is not str
+            ):
+                raise ValueError("FID real-stat identity must be explicit")
+            _sha256("real_stats_sha256", self.real_stats_sha256)
+            _sha256(
+                "real_stats_metadata_sha256", self.real_stats_metadata_sha256
+            )
+            if self.is_splits is not None:
+                raise ValueError("FID jobs must not bind IS splits")
+        elif self.metric == "is":
+            if any(
+                value is not None
+                for value in (
+                    self.real_stats_path,
+                    self.real_stats_sha256,
+                    self.real_stats_metadata_path,
+                    self.real_stats_metadata_sha256,
+                )
+            ):
+                raise ValueError("IS jobs must not bind real statistics")
+            if type(self.is_splits) is not int or self.is_splits <= 0:
+                raise ValueError("IS splits must be positive")
+            if self.sample_count % self.is_splits != 0:
+                raise ValueError("IS sample count must be exactly divisible by splits")
+        elif any(
+            value is not None
+            for value in (
+                self.real_stats_path,
+                self.real_stats_sha256,
+                self.real_stats_metadata_path,
+                self.real_stats_metadata_sha256,
+                self.is_splits,
+            )
+        ):
+            raise ValueError("manual quality jobs must not bind metric dependencies")
         if type(self.gpu_index) is not int or self.gpu_index < 0:
             raise ValueError("evaluation GPU index must be nonnegative")
         if type(self.training_paused) is not bool:
@@ -347,11 +532,12 @@ class EvaluationJob:
             "metric": self.metric,
             "preprocess_path": self.preprocess_path,
             "preprocess_sha256": self.preprocess_sha256,
-            "prompt_manifest_path": self.prompt_manifest_path,
             "prompt_selection": self.prompt_selection,
             "prompt_manifest_sha256": self.prompt_manifest_sha256,
             "real_stats_path": self.real_stats_path,
             "real_stats_sha256": self.real_stats_sha256,
+            "real_stats_metadata_path": self.real_stats_metadata_path,
+            "real_stats_metadata_sha256": self.real_stats_metadata_sha256,
             "sample_count": self.sample_count,
             "sampling_profile": self.sampling_profile,
             "schema_version": 1,
@@ -361,6 +547,11 @@ class EvaluationJob:
             "trigger_successful_update": self.trigger_successful_update,
             "time_schedule": self.time_schedule,
             "training_paused": self.training_paused,
+            "validation_manifest_id": self.validation_manifest_id,
+            "validation_seed": self.validation_seed,
+            "validation_selection_id": self.validation_selection_id,
+            "validation_selection_path": self.validation_selection_path,
+            "validation_shard_root": self.validation_shard_root,
         }
 
     def comparison_mapping(self) -> dict[str, object]:
@@ -372,10 +563,12 @@ class EvaluationJob:
             "gpu_index",
             "feature_extractor_path",
             "preprocess_path",
-            "prompt_manifest_path",
             "real_stats_path",
+            "real_stats_metadata_path",
             "trigger_successful_update",
             "training_paused",
+            "validation_selection_path",
+            "validation_shard_root",
         ):
             del mapping[field]
         return mapping
@@ -410,8 +603,10 @@ class EvaluationCost:
         ):
             if type(value) is not float or not math.isfinite(value) or value < 0.0:
                 raise ValueError(f"{name} must be a finite nonnegative float")
-        if self.gpu_seconds > self.wall_seconds:
-            raise ValueError("GPU seconds cannot exceed wall seconds for one GPU")
+        require_plausible_single_gpu_timing(
+            wall_seconds=self.wall_seconds,
+            gpu_seconds=self.gpu_seconds,
+        )
         if self.training_pause_seconds > self.wall_seconds:
             raise ValueError("training pause cannot exceed evaluation wall time")
 
@@ -427,4 +622,5 @@ __all__ = [
     "ObjectiveProvenance",
     "PromptCase",
     "PromptManifest",
+    "caption_plan_prompt_text",
 ]

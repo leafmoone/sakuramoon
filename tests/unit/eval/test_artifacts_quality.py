@@ -37,8 +37,12 @@ def _job() -> EvaluationJob:
         ),
         metric="fid",
         artifact_kind="fid_formal",
-        prompt_manifest_path="prompts.json",
-        prompt_selection="ordered_prefix",
+        validation_selection_path="validation-selection.json",
+        validation_selection_id="7" * 64,
+        validation_manifest_id="8" * 64,
+        validation_shard_root="validation-shards",
+        validation_seed=44,
+        prompt_selection="validation_bucketed_prefix",
         prompt_manifest_sha256="2" * 64,
         trigger_successful_update=10,
         sample_count=50000,
@@ -57,7 +61,9 @@ def _job() -> EvaluationJob:
         preprocess_sha256="3" * 64,
         real_stats_path="real-stats.safetensors",
         real_stats_sha256="4" * 64,
-        is_splits=10,
+        real_stats_metadata_path="real-stats.safetensors.metadata.json",
+        real_stats_metadata_sha256="6" * 64,
+        is_splits=None,
         gpu_index=0,
         training_paused=True,
     )
@@ -124,6 +130,13 @@ def test_artifact_rejects_impossible_metric_values_before_publication(
         _job(),
         metric=metric,
         artifact_kind=artifact_kind,
+        real_stats_path=None if metric == "is" else "real-stats.safetensors",
+        real_stats_sha256=None if metric == "is" else "4" * 64,
+        real_stats_metadata_path=(
+            None if metric == "is" else "real-stats.safetensors.metadata.json"
+        ),
+        real_stats_metadata_sha256=None if metric == "is" else "6" * 64,
+        is_splits=10 if metric == "is" else None,
     )
     job = dataclasses.replace(candidate, job_id=candidate.content_addressed_id)
     path = tmp_path / f"{artifact_kind}.json"
@@ -146,7 +159,7 @@ def test_comparison_requires_all_three_checkpoint_kinds() -> None:
         *,
         value: float = 12.0,
         prompt_hash: str = "2" * 64,
-        prompt_path: str = "prompts.json",
+        selection_path: str = "validation-selection.json",
         gpu_index: int = 0,
         training_paused: bool = True,
         trigger_successful_update: int = 10,
@@ -174,7 +187,7 @@ def test_comparison_requires_all_three_checkpoint_kinds() -> None:
                 checkpoint_successful_update,
             ),
             gpu_index=gpu_index,
-            prompt_manifest_path=prompt_path,
+            validation_selection_path=selection_path,
             prompt_manifest_sha256=prompt_hash,
             trigger_successful_update=trigger_successful_update,
             training_paused=training_paused,
@@ -194,7 +207,7 @@ def test_comparison_requires_all_three_checkpoint_kinds() -> None:
             artifact(
                 "pma",
                 value=11.0,
-                prompt_path="other/prompts.json",
+                selection_path="other/validation-selection.json",
                 gpu_index=1,
                 training_paused=False,
             ),
@@ -240,6 +253,17 @@ def test_scalar_artifact_rejects_manual_and_vae_jobs(
         _job(),
         metric=metric,
         artifact_kind=artifact_kind,
+        feature_extractor=None,
+        feature_extractor_version=None,
+        feature_extractor_path=None,
+        feature_extractor_sha256=None,
+        preprocess_path=None,
+        preprocess_sha256=None,
+        real_stats_path=None,
+        real_stats_sha256=None,
+        real_stats_metadata_path=None,
+        real_stats_metadata_sha256=None,
+        is_splits=None,
     )
     job = dataclasses.replace(candidate, job_id=candidate.content_addressed_id)
 
@@ -294,6 +318,17 @@ def test_manual_quality_artifact_binds_job_checkpoint_and_prompt_plan(
         prompt_manifest_sha256=prompts.sha256,
         sample_count=2,
         batch_size=2,
+        feature_extractor=None,
+        feature_extractor_version=None,
+        feature_extractor_path=None,
+        feature_extractor_sha256=None,
+        preprocess_path=None,
+        preprocess_sha256=None,
+        real_stats_path=None,
+        real_stats_sha256=None,
+        real_stats_metadata_path=None,
+        real_stats_metadata_sha256=None,
+        is_splits=None,
     )
     job = dataclasses.replace(candidate, job_id=candidate.content_addressed_id)
     artifact = ManualQualityArtifact(
