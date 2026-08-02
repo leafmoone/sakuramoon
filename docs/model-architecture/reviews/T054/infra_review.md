@@ -80,3 +80,36 @@ DDP reduction kill, stochastic-rounding rank divergence, NCCL rank failure, all-
 synchronized stop, four-rank checkpoint recovery/state equality, formal-stage fault
 canary, and long-run behavior remain blocked or pending. Existing CPU and bounded 1GPU
 evidence cannot close any of those gates.
+
+## Final independent Infra/performance review (2026-08-02)
+
+Reviewer authority: fresh independent `s000_infra_reviewer_final`. This review inspected both
+the lazy-readiness remediation commit
+`a8d16a62032e08f53fafc908a11c516811bc3c73` and the independent post-remediation review
+evidence commit `a5771b9c26ab6725bae32bbc4a82726bdaa2bd66`. It did not modify
+implementation, use a GPU, stage files, or create commits.
+
+### Verdict
+
+PASS for T054's implemented CPU and bounded-single-GPU reliability scope. The prior
+post-remediation conclusions are supported; no new T054 Infra finding was identified.
+
+### Conclusions
+
+- Lazy public exports keep the fault-injection API available without importing the heavy
+  checkpoint/Torch dependency graph before the subprocess readiness barrier.
+- Credential-free child allowlisting, bounded readiness and reaping, process-group kill,
+  durable lease replay, exact complete-parent recovery and no latest/PMA/model-only
+  fallback remain structurally enforced.
+- The post-remediation evidence commit appends reviews without rewriting the historical
+  self-review or changing implementation. Its conclusions preserve the CPU/1GPU evidence
+  boundary and all four-rank blockers.
+
+### Independent checks
+
+- Current archive-free T054 CPU selector: 156 passed, 19 dependency/runtime warnings.
+- The additional training/runtime/stage/fault selector: 66 passed.
+- Scoped Ruff passed; affected-path Pyright reported 0 errors.
+- The retained seven-test RTX 5090 result was inspected as historical bounded evidence;
+  this reviewer did not rerun it or infer a capacity, long-run, formal-stage, DDP/NCCL or
+  four-GPU conclusion.

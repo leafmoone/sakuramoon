@@ -67,3 +67,36 @@ DDP reduction kill, SR rank divergence, NCCL rank failure, synchronized all-rank
 four-rank raw recovery/state equality, and formal stage fault canaries remain blocked
 on real four-GPU resources and the prohibited long-run/formal-stage scope. This PASS
 does not close or reinterpret those retained blockers.
+
+## Independent final post-remediation audit (2026-08-02)
+
+Reviewer authority: independent `s000_ai_reviewer_final`, reviewing
+`a8d16a62032e08f53fafc908a11c516811bc3c73`, the independent evidence commit
+`a5771b9`, and the preserved T054 evidence. This section appends to all prior reviews.
+The reviewer ran CPU/static checks only.
+
+### Verdict
+
+PASS for the implemented CPU and bounded single-GPU T054 scope. The lazy package API
+retains the governed exports without importing checkpoint/Torch dependencies on the
+readiness-only path. It does not change a training control, protected recovery value,
+fault boundary or raw-parent selection rule.
+
+The real service/pipeline lease remains held across shard consumption, abnormal exit
+preserves active state, and only normal exhaustion completes it. Scenario evidence is
+bound to the exact canonical CPU/1GPU matrix and report bytes. OOM recovery still
+requires an explicit complete RAW parent and a fresh-process recovery, with no latest,
+PMA, model-only or fallback selector.
+
+### CPU/static evidence
+
+- Current archive-free T054 selector: 156 passed, 19 warnings.
+- Scoped Ruff: passed.
+- Scoped Pyright: 0 errors, 0 warnings.
+- `git diff --check`: passed before this report append.
+- Existing bounded single-GPU evidence was inspected but not rerun; no GPU command was
+  run by this reviewer.
+
+DDP reduction kill, stochastic-rounding rank divergence, NCCL rank failure,
+synchronized all-rank stop, four-rank RAW recovery/state equality, formal-stage fault
+canaries and long-run behavior remain blocked. This PASS does not close those gates.
