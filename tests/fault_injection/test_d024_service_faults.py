@@ -24,6 +24,7 @@ from sakuramoon.data.service import (
     DataSupplyService,
 )
 from sakuramoon.data.service_protocol import DataServiceSessionIdentity
+from sakuramoon.data.validation import VALIDATION_SHARD_PATHS, select_validation_shards
 
 
 class _Writer(Protocol):
@@ -38,33 +39,31 @@ class _ProcessTransport:
     ) -> None:
         del manifest
         time.sleep(0.02)
-        index = int(Path(shard.path).stem)
+        index = int(Path(shard.path).stem.rsplit("-", maxsplit=1)[-1]) % 256
         output.write(bytes([index]) * shard.bytes)
 
 
 def _manifest() -> DatasetManifest:
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="test-license",
-        access_terms="test-terms",
+        revision="master",
     )
+    paths = (*VALIDATION_SHARD_PATHS, "release/000002.tar", "release/000003.tar")
     records = tuple(
         ShardRecord(
-            path=f"release/{index:06d}.tar",
-            release="release",
+            path=path,
             bytes=512,
-            sha256=hashlib.sha256(bytes([index]) * 512).hexdigest(),
-            samples=index + 1,
+            upstream_sha256=hashlib.sha256(bytes([index]) * 512).hexdigest(),
         )
-        for index in range(4)
+        for path in paths
+        for index in (int(Path(path).stem.rsplit("-", maxsplit=1)[-1]) % 256,)
     )
     return DatasetManifest.from_shards(source, records)
 
 
 def _identity(manifest: DatasetManifest) -> DataServiceSessionIdentity:
     return DataServiceSessionIdentity(
-        manifest_sha256=manifest_sha256(manifest),
+        manifest_id=manifest_sha256(manifest),
         worker_count=2,
     )
 
@@ -85,6 +84,7 @@ def _run_service(
     )
     service = DataSupplyService(
         manifest,
+        select_validation_shards(manifest),
         cache,
         root / "mainset.json",
         (root / "runtime" / "data-service.lock").absolute(),
@@ -128,10 +128,13 @@ def test_service_kill_and_client_disconnect_replay_all_active_shards(
     socket_path.unlink(missing_ok=True)
     process, _stop = _start(context, tmp_path, socket_path, manifest, identity)
     assert process.pid != os.getpid()
-    client = DataServiceClient(socket_path, identity, request_timeout_seconds=5.0)
+    client = DataServiceClient(
+        socket_path, worker_count=2, request_timeout_seconds=5.0
+    )
     first = client.lease(0)
     second = client.lease(1)
     assert first is not None and second is not None
+    assert first.cycle_index == second.cycle_index == 0
     initial_document = json.loads((tmp_path / "mainset.json").read_bytes())
     initial_order = tuple(row["path"] for row in initial_document["rows"])
     assert (first.record.path, second.record.path) == initial_order[:2]
@@ -142,22 +145,21 @@ def test_service_kill_and_client_disconnect_replay_all_active_shards(
 
     restarted, stop = _start(context, tmp_path, socket_path, manifest, identity)
     restarted_client = DataServiceClient(
-        socket_path, identity, request_timeout_seconds=5.0
+        socket_path, worker_count=2, request_timeout_seconds=5.0
     )
     replayed_first = restarted_client.lease(0)
     replayed_second = restarted_client.lease(1)
     assert replayed_first is not None and replayed_second is not None
+    assert replayed_first.cycle_index == replayed_second.cycle_index == 0
     assert (replayed_first.record.path, replayed_second.record.path) == (
         first.record.path,
         second.record.path,
     )
     document = json.loads((tmp_path / "mainset.json").read_bytes())
     assert document["mainset_id"] == initial_document["mainset_id"]
+    assert document["cycle_index"] == initial_document["cycle_index"] == 0
     assert tuple(row["path"] for row in document["rows"]) == initial_order
     assert document["replayed_shards"] == 2
-    assert document["replayed_samples"] == sum(
-        descriptor.record.samples for descriptor in (first, second)
-    )
     restarted_client.acknowledge(replayed_first)
     restarted_client.acknowledge(replayed_second)
 

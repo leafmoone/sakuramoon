@@ -117,7 +117,7 @@ def _restored(
         SingleGpuUpdateState.initial(),
         GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
         StageBudgetCheckpointState(0, 1),
-        CheckpointCadence(0, 0.0),
+        CheckpointCadence(0, 0.0, 1000),
     )
     restored = object.__new__(RestoredSingleGpuCheckpoint)
     restored._manifest = CheckpointManifest(
@@ -138,6 +138,8 @@ def _restored(
 
 def _stream(
     iterator: Iterator[Any] | None = None,
+    *,
+    ready_batch_depth: Callable[[], int] | None = None,
 ) -> AcceptedProductionBatchStream:
     identity = ProductionBatchStreamIdentity(
         _HASH_A,
@@ -149,6 +151,9 @@ def _stream(
     return production_module._issue_batch_stream(
         iter(()) if iterator is None else iterator,
         identity,
+        ready_batch_depth_snapshot=(
+            (lambda: 0) if ready_batch_depth is None else ready_batch_depth
+        ),
     )
 
 
@@ -179,7 +184,7 @@ def _plan(
     plan = object.__new__(SingleGpuPreflightPlan)
     plan._bindings = bindings
     plan._checks = tuple((name, checks[name]) for name in PREFLIGHT_CHECKS)
-    plan._manifest_sha256 = _HASH_B
+    plan._manifest_id = _HASH_B
     plan._owner_pid = preflight_module.os.getpid()
     plan._service_session_sha256 = DataServiceSessionIdentity(_HASH_B, 2).sha256
     plan._token = secrets.token_hex(32)
@@ -424,10 +429,12 @@ def test_synthetic_preflight_batch_uses_resolved_local_batch() -> None:
     assert torch.equal(batch.sample_ids, torch.tensor((1, 2, 3)))
     assert torch.equal(batch.all_condition_dropped, torch.tensor((True, True, True)))
     assert batch.dropout_hits.all_condition == 3
-    assert len(batch.releases) == len(batch.audits) == len(batch.rng_identities) == 3
+    assert (
+        len(batch.source_shards) == len(batch.audits) == len(batch.rng_identities) == 3
+    )
 
 
-def test_static_preflight_checks_contracts_assets_and_evaluator_in_order(
+def test_static_preflight_checks_only_training_contracts_assets_and_storage_in_order(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = cast(
@@ -460,10 +467,6 @@ def test_static_preflight_checks_contracts_assets_and_evaluator_in_order(
     def vae(_root: Path) -> None:
         observed.append("vae")
 
-    def evaluator(_config: RuntimeConfig, _root: Path) -> tuple[()]:
-        observed.append("evaluator")
-        return ()
-
     monkeypatch.setattr(preflight_module, "require_single_gpu_config", topology)
     monkeypatch.setattr(
         preflight_module, "require_logging_checkpoint_contracts", contracts
@@ -471,8 +474,6 @@ def test_static_preflight_checks_contracts_assets_and_evaluator_in_order(
     monkeypatch.setattr(preflight_module, "require_training_storage", storage)
     monkeypatch.setattr(preflight_module, "require_local_qwen", qwen)
     monkeypatch.setattr(preflight_module, "require_local_vae", vae)
-    monkeypatch.setattr(preflight_module, "require_evaluation_identities", evaluator)
-
     preflight_module.require_static_single_gpu_preflight(config, tmp_path)
 
     assert observed == [
@@ -481,7 +482,6 @@ def test_static_preflight_checks_contracts_assets_and_evaluator_in_order(
         "storage",
         "qwen",
         "vae",
-        "evaluator",
     ]
 
 
@@ -605,7 +605,10 @@ def test_preflight_builder_binds_stream_client_checkpoint_and_measured_capacity(
         identity=DataServiceSessionIdentity(_HASH_B, 2),
         health=lambda: True,
     )
-    stream = _stream()
+    ready_depth_calls: list[bool] = []
+    stream = _stream(
+        ready_batch_depth=lambda: ready_depth_calls.append(True) or 1
+    )
     qwen = torch.nn.Linear(1, 1).eval().requires_grad_(False)
     vae = torch.nn.Linear(1, 1).eval().requires_grad_(False)
     module = torch.nn.Linear(1, 1)
@@ -648,10 +651,29 @@ def test_preflight_builder_binds_stream_client_checkpoint_and_measured_capacity(
     dict(plan._checks)["storage_capacity"]()
     with pytest.raises(RuntimeError, match="no training lease"):
         dict(plan._checks)["dataset_revision"]()
+    dict(plan._checks)["ready_batch_depth"]()
     assert measured == [37]
+    assert ready_depth_calls == [True]
     assert plan._bindings.batches is stream
     assert plan._bindings.restored is restored
     assert isinstance(plan._checks, tuple)
+
+
+def test_preflight_ready_batch_depth_check_fails_when_live_queue_is_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan, _restored_handle = _checkpoint_round_trip_plan(
+        tmp_path,
+        monkeypatch,
+        _CheckpointPublisher(tmp_path / "published"),
+    )
+    plan._bindings.batches._ready_batch_depth = None
+
+    with pytest.raises(
+        production_module.ProductionDataError,
+        match="ready-batch depth is unavailable",
+    ):
+        dict(plan._checks)["ready_batch_depth"]()
 
 
 def test_preflight_runtime_check_rejects_checkpoint_drift_before_acceptance(
@@ -675,6 +697,7 @@ def test_preflight_runtime_check_rejects_checkpoint_drift_before_acceptance(
             failure=SimpleNamespace(allow_force_bypass=False),
             growth=SimpleNamespace(enabled=False),
             kernels=SimpleNamespace(attention_backend="fa4_varlen"),
+            checkpoint=SimpleNamespace(full_every_updates=1000),
             data=SimpleNamespace(
                 manifest=SimpleNamespace(sha256=_HASH_B),
                 cache=SimpleNamespace(persistent_workers_per_rank=2),
@@ -706,7 +729,7 @@ def test_preflight_runtime_check_rejects_checkpoint_drift_before_acceptance(
         trainer=SingleGpuUpdateState(5, 5, 5),
         growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
         stage_budget=StageBudgetCheckpointState(5, 6),
-        checkpoint_cadence=CheckpointCadence(5, 0.0),
+        checkpoint_cadence=CheckpointCadence(5, 0.0, 1000),
     )
     qwen = object()
     vae = object()
@@ -749,11 +772,6 @@ def test_preflight_runtime_check_rejects_checkpoint_drift_before_acceptance(
     monkeypatch.setattr(
         preflight_module,
         "require_logging_checkpoint_contracts",
-        accept_runtime_contracts,
-    )
-    monkeypatch.setattr(
-        preflight_module,
-        "require_evaluation_identities",
         accept_runtime_contracts,
     )
     destination = tmp_path / "preflight.json"
@@ -888,9 +906,12 @@ def test_production_checkpoint_publisher_retains_only_after_fresh_qualification(
     monkeypatch.setattr(checkpoint_save, "save_raw_checkpoint", save)
 
     def plan_retention(
-        _root: Path, *, accepted_checkpoint_ids: frozenset[str]
+        _root: Path,
+        *,
+        accepted_checkpoint_ids: frozenset[str],
+        rolling_slots: int,
     ) -> object:
-        retention.append(accepted_checkpoint_ids)
+        retention.extend((accepted_checkpoint_ids, rolling_slots))
         return plan
 
     def apply_retention(
@@ -898,8 +919,9 @@ def test_production_checkpoint_publisher_retains_only_after_fresh_qualification(
         observed: object,
         *,
         accepted_checkpoint_ids: frozenset[str],
+        rolling_slots: int,
     ) -> None:
-        retention.extend((observed, accepted_checkpoint_ids))
+        retention.extend((observed, accepted_checkpoint_ids, rolling_slots))
 
     monkeypatch.setattr(
         checkpoint_policy,
@@ -918,6 +940,7 @@ def test_production_checkpoint_publisher_retains_only_after_fresh_qualification(
         optimizer=optimizer,
         restored_checkpoint=restored,
         accepted_checkpoint_ids=frozenset({"accepted"}),
+        retention_slots=3,
     )
     base = restored.manifest.identity
     preflight_identity = CheckpointIdentity(
@@ -934,7 +957,7 @@ def test_production_checkpoint_publisher_retains_only_after_fresh_qualification(
     assert not temporary.exists()
 
     state = SingleGpuUpdateState(1, 1, 1)
-    cadence = CheckpointCadence(1, 1.0)
+    cadence = CheckpointCadence(1, 1.0, 1000)
     durable = publisher.publish_update(
         state,
         CheckpointReason.STAGE_FINALIZE,
@@ -974,7 +997,13 @@ def test_production_checkpoint_publisher_retains_only_after_fresh_qualification(
     assert retention == []
 
     publisher.apply_verified_retention(durable, durable_manifest, saved[-1][1])
-    assert retention == [frozenset({"accepted"}), plan, frozenset({"accepted"})]
+    assert retention == [
+        frozenset({"accepted"}),
+        3,
+        plan,
+        frozenset({"accepted"}),
+        3,
+    ]
 
 
 def test_checkpoint_round_trip_rejects_noop_cleanup(

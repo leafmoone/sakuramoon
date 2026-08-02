@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from sakuramoon.data.manifest import ShardRecord
 
-SERVICE_PROTOCOL_VERSION = 1
+SERVICE_PROTOCOL_VERSION = 3
 MAX_SERVICE_FRAME_BYTES = 16 * 1024 * 1024
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -33,20 +33,17 @@ def _sha256(value: str, name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class DataServiceSessionIdentity:
-    manifest_sha256: str
+    manifest_id: str
     worker_count: int
 
     def __post_init__(self) -> None:
-        _sha256(self.manifest_sha256, "manifest_sha256")
-        if (
-            type(self.worker_count) is not int
-            or self.worker_count <= 0
-        ):
+        _sha256(self.manifest_id, "manifest_id")
+        if type(self.worker_count) is not int or self.worker_count <= 0:
             raise ValueError("data service session identity is invalid")
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "manifest_sha256": self.manifest_sha256,
+            "manifest_id": self.manifest_id,
             "worker_count": self.worker_count,
         }
 
@@ -59,12 +56,12 @@ class DataServiceSessionIdentity:
         document = _mapping(value, "session identity")
         _exact_keys(
             document,
-            {"manifest_sha256", "worker_count"},
+            {"manifest_id", "worker_count"},
             "session identity",
         )
         try:
             return cls(
-                manifest_sha256=cast(str, document["manifest_sha256"]),
+                manifest_id=cast(str, document["manifest_id"]),
                 worker_count=cast(int, document["worker_count"]),
             )
         except (TypeError, ValueError):
@@ -75,6 +72,7 @@ class DataServiceSessionIdentity:
 class ShardLeaseDescriptor:
     lease_id: str
     worker_id: int
+    cycle_index: int
     state_identity: str
     record: ShardRecord
     local_path: Path
@@ -84,6 +82,8 @@ class ShardLeaseDescriptor:
             _HEX64.fullmatch(self.lease_id) is None
             or type(self.worker_id) is not int
             or self.worker_id < 0
+            or type(self.cycle_index) is not int
+            or self.cycle_index < 0
             or _HEX64.fullmatch(self.state_identity) is None
             or not self.local_path.is_absolute()
         ):
@@ -91,14 +91,13 @@ class ShardLeaseDescriptor:
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "cycle_index": self.cycle_index,
             "lease_id": self.lease_id,
             "local_path": str(self.local_path),
             "record": {
                 "bytes": self.record.bytes,
                 "path": self.record.path,
-                "release": self.record.release,
-                "samples": self.record.samples,
-                "sha256": self.record.sha256,
+                "upstream_sha256": self.record.upstream_sha256,
             },
             "state_identity": self.state_identity,
             "worker_id": self.worker_id,
@@ -109,27 +108,33 @@ class ShardLeaseDescriptor:
         document = _mapping(value, "lease")
         _exact_keys(
             document,
-            {"lease_id", "local_path", "record", "state_identity", "worker_id"},
+            {
+                "cycle_index",
+                "lease_id",
+                "local_path",
+                "record",
+                "state_identity",
+                "worker_id",
+            },
             "lease",
         )
         record = _mapping(document["record"], "lease record")
         _exact_keys(
             record,
-            {"bytes", "path", "release", "samples", "sha256"},
+            {"bytes", "path", "upstream_sha256"},
             "lease record",
         )
         try:
             return cls(
                 lease_id=cast(str, document["lease_id"]),
                 worker_id=cast(int, document["worker_id"]),
+                cycle_index=cast(int, document["cycle_index"]),
                 state_identity=cast(str, document["state_identity"]),
                 local_path=Path(cast(str, document["local_path"])),
                 record=ShardRecord(
                     path=cast(str, record["path"]),
-                    release=cast(str, record["release"]),
                     bytes=cast(int, record["bytes"]),
-                    sha256=cast(str, record["sha256"]),
-                    samples=cast(int, record["samples"]),
+                    upstream_sha256=cast(str, record["upstream_sha256"]),
                 ),
             )
         except (TypeError, ValueError):

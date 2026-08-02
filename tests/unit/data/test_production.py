@@ -1,21 +1,40 @@
 from __future__ import annotations
 
-import hashlib
-import json
-from pathlib import Path
+from collections.abc import Iterator
+from typing import cast
 
 import pytest
 
+import sakuramoon.data.production as production_module
+from sakuramoon.data.collate import TrainingBatch
 from sakuramoon.data.production import (
+    ConfiguredDataLoader,
+    ProductionBatchStreamIdentity,
     ProductionDataError,
     adapt_modelscope_metadata,
     parse_modelscope_caption_fields,
 )
-from sakuramoon.data.validation import (
-    VALIDATION_SAMPLE_COUNT,
-    ValidationManifestError,
-    load_validation_manifest_ids,
-)
+
+
+class _DepthIterator(Iterator[TrainingBatch]):
+    def __init__(self, depth: int) -> None:
+        self.depth = depth
+
+    def __next__(self) -> TrainingBatch:
+        raise StopIteration
+
+    def ready_batch_depth_snapshot(self) -> int:
+        return self.depth
+
+
+def _stream_identity() -> ProductionBatchStreamIdentity:
+    return ProductionBatchStreamIdentity(
+        resolved_config_sha256="1" * 64,
+        loader=ConfiguredDataLoader(1, 1, 1, False, True),
+        manifest_id="2" * 64,
+        service_session_sha256="3" * 64,
+        factory_identity="4" * 64,
+    )
 
 
 def _real_row() -> dict[str, object]:
@@ -33,34 +52,6 @@ def _real_row() -> dict[str, object]:
         "dropout": {"candidate_tags": ["blue_hair"]},
         "nsfw": "safe",
     }
-
-
-def _validation_payload(*, duplicate_last: bool = False) -> bytes:
-    rows: list[str] = []
-    for sample_id in range(1, VALIDATION_SAMPLE_COUNT + 1):
-        row_id = (
-            VALIDATION_SAMPLE_COUNT - 1
-            if duplicate_last and sample_id == VALIDATION_SAMPLE_COUNT
-            else sample_id
-        )
-        rows.append(
-            json.dumps(
-                {
-                    "aspect_bucket": "square",
-                    "caption_available": sample_id % 2 == 0,
-                    "id": row_id,
-                    "release": "1_2024",
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        )
-    return ("\n".join(rows) + "\n").encode()
-
-
-def _write_manifest(path: Path, payload: bytes) -> str:
-    path.write_bytes(payload)
-    return hashlib.sha256(payload).hexdigest()
 
 
 def test_governed_modelscope_adapter_and_caption_parser() -> None:
@@ -107,70 +98,26 @@ def test_governed_modelscope_parser_rejects_schema_drift() -> None:
         parse_modelscope_caption_fields(bad_candidate)
 
 
-def test_strict_validation_manifest_loader_accepts_exact_canonical_ids(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "validation_manifest.jsonl"
-    digest = _write_manifest(path, _validation_payload())
-
-    ids = load_validation_manifest_ids(
-        path,
-        expected_sha256=digest,
-        expected_count=VALIDATION_SAMPLE_COUNT,
+def test_accepted_stream_exposes_only_live_iterator_ready_batch_depth() -> None:
+    iterator = _DepthIterator(2)
+    stream = production_module._issue_batch_stream(  # pyright: ignore[reportPrivateUsage]
+        iterator, _stream_identity()
     )
 
-    assert len(ids) == VALIDATION_SAMPLE_COUNT
-    assert min(ids) == 1 and max(ids) == VALIDATION_SAMPLE_COUNT
+    assert stream.ready_batch_depth_snapshot() == 2
+    iterator.depth = 4
+    assert stream.ready_batch_depth_snapshot() == 4
+    stream.close()
+    with pytest.raises(ProductionDataError, match="closed"):
+        stream.ready_batch_depth_snapshot()
 
 
-def test_strict_validation_manifest_loader_rejects_hash_and_identity_drift(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "validation_manifest.jsonl"
-    _write_manifest(path, _validation_payload())
-    with pytest.raises(ValidationManifestError, match="SHA-256"):
-        load_validation_manifest_ids(
-            path,
-            expected_sha256="0" * 64,
-            expected_count=VALIDATION_SAMPLE_COUNT,
-        )
+def test_accepted_stream_fails_when_iterator_has_no_ready_depth_source() -> None:
+    stream = production_module._issue_batch_stream(  # pyright: ignore[reportPrivateUsage]
+        cast(Iterator[TrainingBatch], iter(())),
+        _stream_identity(),
+    )
 
-    duplicate_digest = _write_manifest(path, _validation_payload(duplicate_last=True))
-    with pytest.raises(ValidationManifestError, match="sorted and globally unique"):
-        load_validation_manifest_ids(
-            path,
-            expected_sha256=duplicate_digest,
-            expected_count=VALIDATION_SAMPLE_COUNT,
-        )
-
-    with pytest.raises(ValidationManifestError, match="settings"):
-        load_validation_manifest_ids(
-            path,
-            expected_sha256=duplicate_digest,
-            expected_count=VALIDATION_SAMPLE_COUNT - 1,
-        )
-
-
-def test_strict_validation_manifest_loader_rejects_noncanonical_and_symlink(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "validation_manifest.jsonl"
-    payload = _validation_payload().replace(b'"id":1', b'"id": 1', 1)
-    digest = _write_manifest(path, payload)
-    with pytest.raises(ValidationManifestError, match="not canonical"):
-        load_validation_manifest_ids(
-            path,
-            expected_sha256=digest,
-            expected_count=VALIDATION_SAMPLE_COUNT,
-        )
-
-    canonical = tmp_path / "canonical.jsonl"
-    canonical_digest = _write_manifest(canonical, _validation_payload())
-    link = tmp_path / "linked.jsonl"
-    link.symlink_to(canonical)
-    with pytest.raises(ValidationManifestError, match="settings"):
-        load_validation_manifest_ids(
-            link,
-            expected_sha256=canonical_digest,
-            expected_count=VALIDATION_SAMPLE_COUNT,
-        )
+    with pytest.raises(ProductionDataError, match="unavailable"):
+        stream.ready_batch_depth_snapshot()
+    stream.close()

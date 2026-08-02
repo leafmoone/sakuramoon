@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from sakuramoon.data.manifest import ShardRecord
-
 
 class MetadataError(ValueError):
     """A metadata row does not satisfy the fields required by the data pipeline."""
@@ -22,6 +20,17 @@ class MetadataRecord:
 
     id: int
     release: str
+    width: int
+    height: int
+    caption_available: bool
+    raw: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class OperationalMetadataRecord:
+    """Training fields available without inventing a dataset release identity."""
+
+    id: int
     width: int
     height: int
     caption_available: bool
@@ -102,10 +111,9 @@ def parse_metadata(raw: Mapping[str, object]) -> MetadataRecord:
 def parse_shard_metadata(
     raw: Mapping[str, object],
     *,
-    shard: ShardRecord,
     fields: MetadataFieldMapping,
-) -> MetadataRecord:
-    """Map explicit raw keys while taking release only from the D010 shard record."""
+) -> OperationalMetadataRecord:
+    """Map only operational fields directly present in one metadata row."""
 
     mapped_names = (
         fields.id_field,
@@ -118,20 +126,23 @@ def parse_shard_metadata(
         raise MetadataError(
             f"metadata is missing mapped fields: {', '.join(missing)}"
         )
-    normalized = {
-        "id": raw[fields.id_field],
-        "release": shard.release,
-        "width": raw[fields.width_field],
-        "height": raw[fields.height_field],
-        "caption_available": raw[fields.caption_available_field],
-    }
-    parsed = parse_metadata(normalized)
-    return MetadataRecord(
-        id=parsed.id,
-        release=parsed.release,
-        width=parsed.width,
-        height=parsed.height,
-        caption_available=parsed.caption_available,
+    sample_id = raw[fields.id_field]
+    width = raw[fields.width_field]
+    height = raw[fields.height_field]
+    caption_available = raw[fields.caption_available_field]
+    if type(sample_id) is not int or sample_id <= 0:
+        raise MetadataError("metadata id must be a positive integer")
+    if type(width) is not int or width <= 0:
+        raise MetadataError("metadata width must be a positive integer")
+    if type(height) is not int or height <= 0:
+        raise MetadataError("metadata height must be a positive integer")
+    if type(caption_available) is not bool:
+        raise MetadataError("metadata caption_available must be a boolean")
+    return OperationalMetadataRecord(
+        id=sample_id,
+        width=width,
+        height=height,
+        caption_available=caption_available,
         raw=dict(raw),
     )
 

@@ -49,7 +49,21 @@ TRAIN_CONFIGS = (
     "train_h2.toml",
 )
 ENTRY_CONFIGS = (*TRAIN_CONFIGS, "eval.toml", "sample.toml")
+RESOLVED_ENTRY_CONFIGS = ("train_s0.toml", "sample.toml")
+UNRESOLVED_ENTRY_CONFIGS = tuple(
+    name for name in ENTRY_CONFIGS if name not in RESOLVED_ENTRY_CONFIGS
+)
 PRODUCTION_CONFIGS = ("base.toml", *ENTRY_CONFIGS)
+S000_ENGINEERING_CONFIGS = (
+    "engineering_capacity_s000.toml",
+    "engineering_capacity_s000_w1_b1.toml",
+    "engineering_capacity_s000_w1_b2.toml",
+    "engineering_capacity_s000_w2_b2.toml",
+    "engineering_capacity_s000_w3_b1.toml",
+    "engineering_capacity_s000_w3_b2.toml",
+    "engineering_eval_s000.toml",
+    "engineering_resume_s000.toml",
+)
 
 
 def _leaves(
@@ -98,9 +112,6 @@ def _synthetic_payload(
         * cast(int, payload["stage"]["world_size"])
     )
     payload["stage"]["global_batch"] = global_batch
-    payload["stage"]["planned_valid_samples"] = (
-        global_batch * cast(int, payload["stage"]["planned_updates"])
-    )
     return payload
 
 
@@ -132,16 +143,27 @@ def test_all_c002_toml_files_parse_and_entry_keys_are_complete(
         with (CONFIG_ROOT / name).open("rb") as stream:
             assert isinstance(tomllib.load(stream), dict)
 
-    expected_keys = {path for path, _value in _leaves(valid_payload)}
     for name in ENTRY_CONFIGS:
-        observed_keys = {path for path, _value in _leaves(_merged(name))}
-        assert observed_keys == expected_keys, name
+        payload = _synthetic_payload(name, valid_payload)
+        config = RuntimeConfig.model_validate(payload)
+        assert set(payload) == set(RuntimeConfig.model_fields), name
+        if name == "eval.toml":
+            assert config.evaluation.enabled is True
+        else:
+            assert config.evaluation.enabled is False
 
 
-def test_public_loader_rejects_every_unresolved_production_entry(
+def test_public_loader_accepts_resolved_and_rejects_unresolved_entries(
     secret_environment: dict[str, str],
 ) -> None:
-    for name in ENTRY_CONFIGS:
+    for name in RESOLVED_ENTRY_CONFIGS:
+        load_config(
+            Path(name),
+            config_root=CONFIG_ROOT,
+            environment=secret_environment,
+        )
+
+    for name in UNRESOLVED_ENTRY_CONFIGS:
         with pytest.raises(
             ConfigurationError, match="unresolved decision/benchmark placeholders"
         ):
@@ -152,9 +174,34 @@ def test_public_loader_rejects_every_unresolved_production_entry(
             )
 
 
-def test_each_s0_placeholder_independently_hard_fails(
-    tmp_path: Path,
-    valid_payload: dict[str, Any],
+def test_s000_engineering_configs_load_strictly(
+    secret_environment: dict[str, str],
+) -> None:
+    for name in S000_ENGINEERING_CONFIGS:
+        loaded = load_config(
+            Path(name),
+            config_root=CONFIG_ROOT,
+            environment=secret_environment,
+        )
+        config = loaded.config
+        assert config.run.intent == (
+            "eval" if name == "engineering_eval_s000.toml" else "train"
+        )
+        assert config.run.stage == "S0"
+        assert config.distributed.world_size == 1
+        assert config.stage.world_size == 1
+        assert config.stage.accumulation == 4
+        assert config.stage.global_batch == (
+            config.stage.local_batch
+            * config.stage.accumulation
+            * config.stage.world_size
+        )
+        assert config.evaluation.enabled is (
+            name == "engineering_eval_s000.toml"
+        )
+
+
+def test_train_s0_has_no_unresolved_placeholders(
     secret_environment: dict[str, str],
 ) -> None:
     unresolved = {
@@ -162,20 +209,19 @@ def test_each_s0_placeholder_independently_hard_fails(
         for path, value in _leaves(_merged("train_s0.toml"))
         if looks_like_unresolved_sentinel(value)
     }
-    assert unresolved
-    resolved = _synthetic_payload("train_s0.toml", valid_payload)
-    for path, sentinel in unresolved.items():
-        candidate = copy.deepcopy(resolved)
-        _set_path(candidate, path, sentinel)
-        (tmp_path / "candidate.toml").write_text(
-            tomli_w.dumps(candidate), encoding="utf-8"
-        )
-        with pytest.raises(ConfigurationError, match=path.replace(".", r"\.")):
-            load_config(
-                Path("candidate.toml"),
-                config_root=tmp_path,
-                environment=secret_environment,
-            )
+    assert unresolved == {}
+
+    loaded = load_config(
+        Path("train_s0.toml"),
+        config_root=CONFIG_ROOT,
+        environment=secret_environment,
+    )
+    assert loaded.config.stage.accumulation == 4
+    assert loaded.config.stage.global_batch == (
+        loaded.config.stage.local_batch
+        * loaded.config.stage.accumulation
+        * loaded.config.stage.world_size
+    )
 
 
 def test_current_templates_and_historical_c002_hashes_are_each_distinct(
@@ -281,8 +327,22 @@ def test_unimplemented_activation_checkpoint_modes_fail_at_runtime_boundary(
 def test_adjacent_stage_diffs_are_metadata_budgets_and_one_main_axis() -> None:
     metadata_and_budgets = {
         "checkpoint.slots",
+        "data.cache.download_concurrency",
+        "data.cache.high_watermark_gib",
+        "data.cache.low_watermark_gib",
+        "data.cache.persistent_workers_per_rank",
+        "data.cache.ready_batches_per_rank",
+        "data.cache.verified_shard_lookahead",
+        "data.service.ack_channel_capacity",
+        "data.service.lease_channel_capacity",
+        "data.service.request_timeout_seconds",
+        "data.transport.connect_timeout_seconds",
+        "data.transport.read_timeout_seconds",
+        "data.transport.stream_chunk_bytes",
         "logging.flush_every_updates",
         "logging.local_jsonl_path",
+        "logging.observer_event_timeout_seconds",
+        "logging.observer_queue_capacity",
         "paths.artifact_dir",
         "paths.checkpoint_dir",
         "paths.run_dir",
@@ -296,12 +356,9 @@ def test_adjacent_stage_diffs_are_metadata_budgets_and_one_main_axis() -> None:
         "stage.global_batch",
         "stage.local_batch",
         "stage.name",
-        "stage.planned_dit_flops",
-        "stage.planned_equivalent_data_passes",
         "stage.planned_updates",
-        "stage.planned_valid_samples",
-        "stage.planned_wall_time_hours",
         "stage.predecessor",
+        "wandb.queue_capacity",
         "wandb.retry_jsonl_path",
     }
     permitted_axes = (
@@ -332,9 +389,6 @@ def test_global_batch_and_valid_sample_budget_are_exact_for_all_stages(
             config.stage.local_batch
             * config.stage.accumulation
             * config.stage.world_size
-        )
-        assert config.stage.planned_valid_samples == (
-            config.stage.global_batch * config.stage.planned_updates
         )
 
 

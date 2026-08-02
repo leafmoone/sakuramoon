@@ -26,7 +26,7 @@ from sakuramoon.data.image_ops import ImageRejected, prepare_image
 from sakuramoon.data.manifest import DatasetManifest, ShardRecord
 from sakuramoon.data.metadata import (
     MetadataFieldMapping,
-    MetadataRecord,
+    OperationalMetadataRecord,
     parse_shard_metadata,
 )
 from sakuramoon.data.serialize import (
@@ -53,7 +53,7 @@ class PipelineSampleError(ValueError):
 class RngIdentity:
     base_seed: int
     stage: str
-    pass_index: int
+    cycle_index: int
     sample_id: int
     caption_seed: int
     crop_seed: int
@@ -72,7 +72,7 @@ class ImageAudit:
 @dataclass(frozen=True)
 class PipelineSample:
     sample_id: int
-    release: str
+    source_shard: str
     image: torch.Tensor
     target_height: int
     target_width: int
@@ -127,7 +127,7 @@ def _validate_shard_records(
 def _domain_seed(
     base_seed: int,
     stage: str,
-    pass_index: int,
+    cycle_index: int,
     sample_id: int,
     domain: str,
 ) -> int:
@@ -135,26 +135,26 @@ def _domain_seed(
         type(base_seed) is not int
         or base_seed < 0
         or not stage
-        or type(pass_index) is not int
-        or pass_index < 0
+        or type(cycle_index) is not int
+        or cycle_index < 0
         or type(sample_id) is not int
         or sample_id <= 0
     ):
         raise PipelineSampleError("RNG identity fields are invalid")
-    payload = f"{base_seed}\0{stage}\0{pass_index}\0{sample_id}\0{domain}".encode()
+    payload = f"{base_seed}\0{stage}\0{cycle_index}\0{sample_id}\0{domain}".encode()
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") & (2**63 - 1)
 
 
 def rng_identity(
-    *, base_seed: int, stage: str, pass_index: int, sample_id: int
+    *, base_seed: int, stage: str, cycle_index: int, sample_id: int
 ) -> RngIdentity:
     return RngIdentity(
         base_seed=base_seed,
         stage=stage,
-        pass_index=pass_index,
+        cycle_index=cycle_index,
         sample_id=sample_id,
-        caption_seed=_domain_seed(base_seed, stage, pass_index, sample_id, "caption"),
-        crop_seed=_domain_seed(base_seed, stage, pass_index, sample_id, "crop"),
+        caption_seed=_domain_seed(base_seed, stage, cycle_index, sample_id, "caption"),
+        crop_seed=_domain_seed(base_seed, stage, cycle_index, sample_id, "crop"),
     )
 
 
@@ -215,7 +215,7 @@ def _uint8_chw(image: Image.Image) -> torch.Tensor:
 
 
 class WebDatasetPipeline(IterableDataset[PipelineSample]):
-    """Decode and serialize each non-validation sample exactly once."""
+    """Decode and serialize each sample from service-approved training shards."""
 
     def __init__(
         self,
@@ -224,7 +224,6 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         shard_records: tuple[ShardRecord, ...],
         metadata_adapter: MetadataAdapter,
         metadata_fields: MetadataFieldMapping,
-        validation_ids: frozenset[int],
         buckets: tuple[BucketShape, ...],
         min_crop_retention: float,
         probabilities: CaptionDropoutProbabilities,
@@ -234,15 +233,13 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         rejection_observer: RejectionObserver,
         base_seed: int,
         stage: str,
-        pass_index: int,
+        cycle_index: int,
     ) -> None:
         super().__init__()
         _validate_local_shard_paths(shard_paths)
         _validate_shard_records(shard_paths, shard_records)
         if (
-            type(validation_ids) is not frozenset
-            or any(type(item) is not int or item <= 0 for item in validation_ids)
-            or type(buckets) is not tuple
+            type(buckets) is not tuple
             or not buckets
             or any(
                 not isinstance(bucket, BucketShape)  # pyright: ignore[reportUnnecessaryIsInstance]
@@ -269,15 +266,14 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             or type(stage) is not str
             or not stage
             or stage != stage.strip()
-            or type(pass_index) is not int
-            or pass_index < 0
+            or type(cycle_index) is not int
+            or cycle_index < 0
         ):
             raise PipelineSampleError("pipeline construction fields are invalid")
         self.shard_paths = shard_paths
         self.shard_records = shard_records
         self.metadata_adapter = metadata_adapter
         self.metadata_fields = metadata_fields
-        self.validation_ids = validation_ids
         self.buckets = buckets
         self.min_crop_retention = min_crop_retention
         self.probabilities = probabilities
@@ -287,7 +283,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.rejection_observer = rejection_observer
         self.base_seed = base_seed
         self.stage = stage
-        self.pass_index = pass_index
+        self.cycle_index = cycle_index
         self._lease_managed = False
 
     def _process(
@@ -308,17 +304,15 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         if not all(isinstance(key, str) for key in adapter_mapping):
             raise PipelineSampleError("metadata adapter keys must be strings")
         mapped_metadata = cast(Mapping[str, object], adapter_mapping)
-        metadata: MetadataRecord = parse_shard_metadata(
+        shard_record = records_by_url[sample_url]
+        metadata: OperationalMetadataRecord = parse_shard_metadata(
             mapped_metadata,
-            shard=records_by_url[sample_url],
             fields=self.metadata_fields,
         )
-        if metadata.id in self.validation_ids:
-            return None
         identity = rng_identity(
             base_seed=self.base_seed,
             stage=self.stage,
-            pass_index=self.pass_index,
+            cycle_index=self.cycle_index,
             sample_id=metadata.id,
         )
         fields = cast(object, self.caption_fields_parser(raw_metadata))
@@ -345,7 +339,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         assignment = processed.assignment
         return PipelineSample(
             sample_id=metadata.id,
-            release=metadata.release,
+            source_shard=shard_record.path,
             image=_uint8_chw(processed.image),
             target_height=assignment.bucket.height,
             target_width=assignment.bucket.width,
@@ -393,6 +387,8 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self,
         shard_paths: tuple[Path, ...],
         shard_records: tuple[ShardRecord, ...],
+        *,
+        cycle_index: int,
     ) -> WebDatasetPipeline:
         """Clone the validated processing contract onto prepared local shards."""
 
@@ -401,7 +397,6 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             shard_records=shard_records,
             metadata_adapter=self.metadata_adapter,
             metadata_fields=self.metadata_fields,
-            validation_ids=self.validation_ids,
             buckets=self.buckets,
             min_crop_retention=self.min_crop_retention,
             probabilities=self.probabilities,
@@ -411,7 +406,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             rejection_observer=self.rejection_observer,
             base_seed=self.base_seed,
             stage=self.stage,
-            pass_index=self.pass_index,
+            cycle_index=cycle_index,
         )
         pipeline._lease_managed = True
         return pipeline

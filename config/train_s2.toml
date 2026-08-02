@@ -40,10 +40,6 @@ accumulation = "BENCHMARK_S2_ACCUMULATION"
 global_batch = "BENCHMARK_S2_GLOBAL_BATCH"
 activation_checkpoint_mode = "BENCHMARK_S2_ACTIVATION_CHECKPOINT_MODE"
 planned_updates = "BENCHMARK_S2_PLANNED_UPDATES"
-planned_valid_samples = "BENCHMARK_S2_PLANNED_VALID_SAMPLES"
-planned_equivalent_data_passes = "BENCHMARK_S2_EQUIVALENT_DATA_PASSES"
-planned_dit_flops = "BENCHMARK_S2_DIT_FLOPS"
-planned_wall_time_hours = "BENCHMARK_S2_WALL_TIME_HOURS"
 manual_finalize = true
 automatic_transition = false
 

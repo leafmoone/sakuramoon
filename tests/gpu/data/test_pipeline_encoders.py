@@ -92,10 +92,8 @@ def test_real_pipeline_qwen_and_mage_encode_one_batch(tmp_path: Path) -> None:
         shard_records=(
             ShardRecord(
                 path=shard.name,
-                release="synthetic",
                 bytes=shard.stat().st_size,
-                sha256="1" * 64,
-                samples=1,
+                upstream_sha256="1" * 64,
             ),
         ),
         metadata_adapter=_identity_metadata,
@@ -105,7 +103,6 @@ def test_real_pipeline_qwen_and_mage_encode_one_batch(tmp_path: Path) -> None:
             height_field="height",
             caption_available_field="caption_available",
         ),
-        validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -115,7 +112,7 @@ def test_real_pipeline_qwen_and_mage_encode_one_batch(tmp_path: Path) -> None:
         rejection_observer=rejections.append,
         base_seed=7,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
     sample = next(iter(pipeline))
     batch = collate_samples((sample,))
@@ -168,15 +165,12 @@ def test_real_modelscope_shard_pipeline_qwen_and_mage() -> None:
         shard_records=(
             ShardRecord(
                 path="data/1_2024/shard-000000.tar",
-                release="1_2024",
                 bytes=2146867200,
-                sha256="857a90de9f087e98ebd98244b3d211f8b719133e80e96eebb3c274c1e518cf97",
-                samples=1,
+                upstream_sha256="857a90de9f087e98ebd98244b3d211f8b719133e80e96eebb3c274c1e518cf97",
             ),
         ),
         metadata_adapter=adapt_modelscope_metadata,
         metadata_fields=PRODUCTION_METADATA_FIELDS,
-        validation_ids=frozenset(),
         buckets=buckets,
         min_crop_retention=0.8,
         probabilities=probabilities,
@@ -186,7 +180,7 @@ def test_real_modelscope_shard_pipeline_qwen_and_mage() -> None:
         rejection_observer=rejections.append,
         base_seed=7,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
     sample = next(iter(pipeline))
     batch = collate_samples((sample,))
@@ -198,7 +192,7 @@ def test_real_modelscope_shard_pipeline_qwen_and_mage() -> None:
     image = batch.images.to(device=device, dtype=torch.bfloat16).div(127.5).sub(1.0)
     latent = vae.encode(image)
 
-    assert sample.release == "1_2024"
+    assert sample.source_shard == "data/1_2024/shard-000000.tar"
     assert sample.sample_id > 0
     assert sample.audit.source_width > 0 and sample.audit.source_height > 0
     assert batch.images.shape[0] == 1

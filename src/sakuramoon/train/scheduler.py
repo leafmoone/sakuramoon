@@ -15,7 +15,7 @@ from sakuramoon.checkpoint.policy import (
 
 @dataclass(frozen=True, slots=True)
 class CheckpointDecision:
-    """A checkpoint due at one successful update and one wall-clock sample."""
+    """A checkpoint decision with its durable wall-clock audit timestamp."""
 
     successful_update: int
     wall_clock_unix_seconds: float
@@ -33,12 +33,12 @@ class CheckpointDecision:
 
 
 class CheckpointScheduler:
-    """Resolve and commit checkpoint cadence only after a durable save.
+    """Resolve update/forced cadence and commit only after a durable save.
 
     ``due`` is side-effect free.  Callers must invoke ``committed`` only after
     the checkpoint callback returns successfully; a failed callback therefore
-    leaves the previous update and wall-clock anchors intact for diagnostics or
-    an explicit retry.
+    leaves the previous update and wall-clock audit anchors intact for diagnostics
+    or an explicit retry. Elapsed wall time is never a checkpoint trigger.
     """
 
     def __init__(

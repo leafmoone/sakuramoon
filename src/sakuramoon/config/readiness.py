@@ -26,52 +26,10 @@ class ProductionReadinessBlocker:
             raise ValueError("production readiness blocker is invalid")
 
 
-S0_GOVERNED_SEMANTIC_BLOCKERS = (
-    ProductionReadinessBlocker(
-        code="S0_WARMUP_FUNCTION_UNRESOLVED",
-        subject="scheduler warmup function and starting learning rate",
-        required_evidence=(
-            "a current confirmed decision; only the 2,000 successful-update length, "
-            "2e-5 stable rate, and manual cosine decay target are locked"
-        ),
-    ),
-    ProductionReadinessBlocker(
-        code="S0_PASS_INDEX_OWNERSHIP_UNRESOLVED",
-        subject="trainer-owned production data pass_index semantics",
-        required_evidence=(
-            "a current confirmed ownership and resume rule; the data service mainset "
-            "must not be inferred as a trainer pass index"
-        ),
-    ),
-    ProductionReadinessBlocker(
-        code="S0_FORMAL_PROMPT_CONDITION_CONTRACT_UNRESOLVED",
-        subject="formal evaluator prompt condition-to-caption-field semantics",
-        required_evidence=(
-            "a current typed prompt-condition manifest contract; flat condition "
-            "strings cannot be guessed into caption field groups"
-        ),
-    ),
-)
+S0_GOVERNED_SEMANTIC_BLOCKERS: tuple[ProductionReadinessBlocker, ...] = ()
 
 
-S0_RUNTIME_INTEGRATION_BLOCKERS = (
-    ProductionReadinessBlocker(
-        code="S0_LIVE_READY_QUEUE_DEPTH_UNBOUND",
-        subject="telemetry ready_queue_depth observation",
-        required_evidence=(
-            "a live trainer-side queue-depth observation at each successful update; "
-            "configured ready-batch capacity is not an observation"
-        ),
-    ),
-    ProductionReadinessBlocker(
-        code="S0_DIT_FLOPS_OBSERVATION_UNBOUND",
-        subject="telemetry actual_dit_flops observation",
-        required_evidence=(
-            "a measured per-update DiT FLOPs observation from the production runtime; "
-            "planned_dit_flops and planned_updates cannot be used to derive it"
-        ),
-    ),
-)
+S0_RUNTIME_INTEGRATION_BLOCKERS: tuple[ProductionReadinessBlocker, ...] = ()
 
 
 ActivationCheckpointMode = Literal["none", "alternating", "all"]

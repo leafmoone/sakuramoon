@@ -68,7 +68,11 @@ def _raw_state(update: int) -> RawCheckpointState:
         trainer=SingleGpuUpdateState(update, update, update * 4),
         growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
         stage_budget=StageBudgetCheckpointState(0, 1000),
-        checkpoint_cadence=CheckpointCadence(update, 1_800_000_000.0 + update),
+        checkpoint_cadence=CheckpointCadence(
+            update,
+            1_800_000_000.0 + update,
+            1000,
+        ),
     )
 
 

@@ -27,7 +27,6 @@ from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetSourceIdentity,
     ShardRecord,
-    manifest_sha256,
 )
 from sakuramoon.data.modelscope import ModelScopeDatasetTransport
 from sakuramoon.data.pipeline import PipelineSampleError
@@ -48,7 +47,7 @@ from sakuramoon.data.service_protocol import (
     DataServiceSessionIdentity,
     ShardLeaseDescriptor,
 )
-from sakuramoon.data.validation import VALIDATION_SAMPLE_COUNT
+from sakuramoon.data.validation import VALIDATION_SHARD_PATHS, select_validation_shards
 
 
 class _Tokenizer:
@@ -66,8 +65,8 @@ def _observe_rejection(_reason: str) -> None:
 
 
 class _Client:
-    def __init__(self, worker_count: int, manifest_sha256: str = "1" * 64) -> None:
-        self.identity = DataServiceSessionIdentity(manifest_sha256, worker_count)
+    def __init__(self, worker_count: int, manifest_id: str = "1" * 64) -> None:
+        self.identity = DataServiceSessionIdentity(manifest_id, worker_count)
 
     def health(self) -> bool:
         return False
@@ -82,9 +81,9 @@ class _Client:
 
 class _LeaseClient(_Client):
     def __init__(
-        self, descriptor: ShardLeaseDescriptor, *, manifest_sha256: str
+        self, descriptor: ShardLeaseDescriptor, *, manifest_id: str
     ) -> None:
-        super().__init__(worker_count=2, manifest_sha256=manifest_sha256)
+        super().__init__(worker_count=2, manifest_id=manifest_id)
         self.descriptor: ShardLeaseDescriptor | None = descriptor
         self.requested_workers: list[int] = []
 
@@ -178,24 +177,21 @@ def _tar_bytes(sample_id: int, *, valid_image: bool = True) -> bytes:
 def _dataset(*, valid_images: bool = True) -> tuple[DatasetManifest, dict[str, bytes]]:
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="test-license",
-        access_terms="test-terms",
+        revision="master",
     )
+    paths = (*VALIDATION_SHARD_PATHS, "release/000002.tar", "release/000003.tar")
     bodies = {
-        f"release/{index:06d}.tar": _tar_bytes(
+        path: _tar_bytes(
             3000 + index,
             valid_image=valid_images,
         )
-        for index in range(4)
+        for index, path in enumerate(paths)
     }
     records = tuple(
         ShardRecord(
             path=path,
-            release="1_2024",
             bytes=len(body),
-            sha256=hashlib.sha256(body).hexdigest(),
-            samples=1,
+            upstream_sha256=hashlib.sha256(body).hexdigest(),
         )
         for path, body in bodies.items()
     )
@@ -221,6 +217,7 @@ def _run_data_service(
     )
     service = DataSupplyService(
         manifest,
+        select_validation_shards(manifest),
         cache,
         root / "mainset.json",
         ownership_lock_path,
@@ -244,7 +241,7 @@ def _start_data_service(
     test_identity = hashlib.sha256(str(root).encode()).hexdigest()[:12]
     socket_path = runtime_root / f"d025-{test_identity}.sock"
     ownership_lock_path = runtime_root / f"d025-{test_identity}.lock"
-    identity = DataServiceSessionIdentity(manifest_sha256(manifest), 2)
+    identity = DataServiceSessionIdentity(manifest.manifest_id, 2)
     stop = context.Event()
     ready = context.Event()
     process = context.Process(
@@ -282,16 +279,7 @@ def _stop_data_service(process: Any, stop: Any, socket_path: Path) -> None:
 def _production_factory(
     valid_payload: dict[str, Any],
     root: Path,
-    manifest: DatasetManifest,
 ) -> ProductionPipelineFactory:
-    validation_path = root / "validation_manifest.jsonl"
-    validation_payload = _validation_payload()
-    validation_path.write_bytes(validation_payload)
-    valid_payload["data"]["manifest"]["sha256"] = manifest_sha256(manifest)
-    valid_payload["data"]["validation"]["manifest_path"] = str(validation_path)
-    valid_payload["data"]["validation"]["manifest_sha256"] = hashlib.sha256(
-        validation_payload
-    ).hexdigest()
     valid_payload["stage"]["local_batch"] = 1
     valid_payload["data"]["cache"]["persistent_workers_per_rank"] = 2
     valid_payload["data"]["cache"]["ready_batches_per_rank"] = 2
@@ -304,26 +292,7 @@ def _production_factory(
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         rejection_observer=_observe_rejection,
-        pass_index=0,
     )
-
-
-def _validation_payload() -> bytes:
-    lines = (
-        json.dumps(
-            {
-                "aspect_bucket": "square",
-                "caption_available": False,
-                "id": sample_id,
-                "release": "1_2024",
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        for sample_id in range(1, VALIDATION_SAMPLE_COUNT + 1)
-    )
-    return ("\n".join(lines) + "\n").encode()
-
 
 def test_loader_controls_are_required_resolved_toml_fields(
     valid_payload: dict[str, Any],
@@ -345,9 +314,6 @@ def test_configured_loader_passes_only_exact_resolved_values(
 ) -> None:
     valid_payload["stage"]["local_batch"] = 7
     valid_payload["stage"]["global_batch"] = 7
-    valid_payload["stage"]["planned_valid_samples"] = (
-        7 * valid_payload["stage"]["planned_updates"]
-    )
     valid_payload["data"]["cache"]["ready_batches_per_rank"] = 4
     valid_payload["data"]["loader"]["pin_memory"] = False
     valid_payload["data"]["loader"]["drop_last"] = False
@@ -377,18 +343,11 @@ def test_configured_loader_passes_only_exact_resolved_values(
         loader.batches(object(), _Client(worker_count=1))  # type: ignore[arg-type]
 
 
-def test_factory_loads_validation_and_freezes_production_pipeline_contract(
+def test_factory_freezes_production_pipeline_contract(
     valid_payload: dict[str, Any],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest_path = tmp_path / "validation_manifest.jsonl"
-    payload = _validation_payload()
-    manifest_path.write_bytes(payload)
-    valid_payload["data"]["validation"]["manifest_path"] = str(manifest_path)
-    valid_payload["data"]["validation"]["manifest_sha256"] = hashlib.sha256(
-        payload
-    ).hexdigest()
     config = RuntimeConfig.model_validate(valid_payload)
     factory = ProductionPipelineFactory.from_config(
         config,
@@ -396,20 +355,18 @@ def test_factory_loads_validation_and_freezes_production_pipeline_contract(
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         rejection_observer=_observe_rejection,
-        pass_index=0,
     )
     shard_path = (tmp_path / "sample.tar").absolute()
     shard_path.write_bytes(b"placeholder")
     record = ShardRecord(
         path=shard_path.name,
-        release="1_2024",
         bytes=shard_path.stat().st_size,
-        sha256="2" * 64,
-        samples=1,
+        upstream_sha256="2" * 64,
     )
     descriptor = ShardLeaseDescriptor(
         lease_id="3" * 64,
         worker_id=0,
+        cycle_index=0,
         state_identity="4" * 64,
         record=record,
         local_path=shard_path,
@@ -417,8 +374,6 @@ def test_factory_loads_validation_and_freezes_production_pipeline_contract(
 
     pipeline = factory.pipeline_for_lease(descriptor)
 
-    assert len(factory.validation_ids) == VALIDATION_SAMPLE_COUNT
-    assert pipeline.validation_ids == factory.validation_ids
     assert pipeline.metadata_adapter is production_module.adapt_modelscope_metadata
     assert pipeline.metadata_fields is production_module.PRODUCTION_METADATA_FIELDS
     assert (
@@ -429,7 +384,7 @@ def test_factory_loads_validation_and_freezes_production_pipeline_contract(
     assert max(shape.height for shape in pipeline.buckets) <= 512
     assert pipeline.base_seed == config.run.seed
     assert pipeline.stage == config.stage.name
-    assert pipeline.pass_index == 0
+    assert pipeline.cycle_index == descriptor.cycle_index
 
     observed: dict[str, object] = {}
 
@@ -447,13 +402,13 @@ def test_factory_loads_validation_and_freezes_production_pipeline_contract(
     monkeypatch.setattr(production_module, "iter_service_batches", fake_iter)
     client = _LeaseClient(
         descriptor,
-        manifest_sha256=config.data.manifest.sha256,
+        manifest_id="1" * 64,
     )
     stream = factory.batches(client)
     assert isinstance(stream, AcceptedProductionBatchStream)
     assert require_accepted_production_batch_stream(stream) is stream
     assert stream.identity.loader == factory.loader
-    assert stream.identity.manifest_sha256 == config.data.manifest.sha256
+    assert stream.identity.manifest_id == client.identity.manifest_id
     assert stream.identity.service_session_sha256 == client.identity.sha256
     assert stream.identity.factory_identity == factory.factory_identity
     list(stream)
@@ -468,17 +423,10 @@ def test_factory_loads_validation_and_freezes_production_pipeline_contract(
     }
 
 
-def test_factory_hard_fails_manifest_drift_unpickleable_fields_and_plain_streams(
+def test_factory_hard_fails_worker_drift_unpickleable_fields_and_plain_streams(
     valid_payload: dict[str, Any],
     tmp_path: Path,
 ) -> None:
-    manifest_path = tmp_path / "validation_manifest.jsonl"
-    payload = _validation_payload()
-    manifest_path.write_bytes(payload)
-    valid_payload["data"]["validation"]["manifest_path"] = str(manifest_path)
-    valid_payload["data"]["validation"]["manifest_sha256"] = hashlib.sha256(
-        payload
-    ).hexdigest()
     config = RuntimeConfig.model_validate(valid_payload)
 
     with pytest.raises(ProductionDataError, match="spawn context"):
@@ -488,7 +436,6 @@ def test_factory_hard_fails_manifest_drift_unpickleable_fields_and_plain_streams
             tokenizer=_Tokenizer(),
             framing=FramingContract(34, 5, 0),
             rejection_observer=lambda _reason: None,
-            pass_index=0,
         )
 
     factory = ProductionPipelineFactory.from_config(
@@ -497,10 +444,9 @@ def test_factory_hard_fails_manifest_drift_unpickleable_fields_and_plain_streams
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         rejection_observer=_observe_rejection,
-        pass_index=0,
     )
-    with pytest.raises(ProductionDataError, match="manifest identity"):
-        factory.batches(_Client(worker_count=2, manifest_sha256="0" * 64))
+    with pytest.raises(ProductionDataError, match="worker_count"):
+        factory.batches(_Client(worker_count=1))
     with pytest.raises(ProductionDataError, match="factory-issued"):
         require_accepted_production_batch_stream(iter(()))
 
@@ -509,40 +455,29 @@ def test_factory_rejects_direct_construction_and_object_new_forgery(
     valid_payload: dict[str, Any],
     tmp_path: Path,
 ) -> None:
-    ungoverned_payload = copy.deepcopy(valid_payload)
-    missing_manifest = tmp_path / "missing-validation.jsonl"
-    ungoverned_payload["data"]["validation"]["manifest_path"] = str(
-        missing_manifest
-    )
-    ungoverned_payload["data"]["validation"]["manifest_sha256"] = "f" * 64
-    ungoverned_config = RuntimeConfig.model_validate(ungoverned_payload)
-    assert not missing_manifest.exists()
+    config = RuntimeConfig.model_validate(valid_payload)
     with pytest.raises(ProductionDataError, match="issued by from_config"):
         ProductionPipelineFactory(
-            config=ungoverned_config,
-            validation_ids=frozenset(range(9_000_001, 9_002_001)),
+            config=config,
             tokenizer=_Tokenizer(),
             framing=FramingContract(34, 5, 0),
             rejection_observer=_observe_rejection,
-            pass_index=0,
             factory_identity="f" * 64,
         )
 
     manifest, _bodies = _dataset()
-    factory = _production_factory(valid_payload, tmp_path, manifest)
+    factory = _production_factory(valid_payload, tmp_path)
     client = _Client(
         worker_count=2,
-        manifest_sha256=factory.config.data.manifest.sha256,
+        manifest_id=manifest.manifest_id,
     )
 
     forged = object.__new__(ProductionPipelineFactory)
     for field in (
         "config",
-        "validation_ids",
         "tokenizer",
         "framing",
         "rejection_observer",
-        "pass_index",
         "factory_identity",
         "_owner_pid",
     ):
@@ -562,13 +497,6 @@ def test_accepted_stream_is_factory_issued_process_local_and_not_pickleable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest_path = tmp_path / "validation_manifest.jsonl"
-    payload = _validation_payload()
-    manifest_path.write_bytes(payload)
-    valid_payload["data"]["validation"]["manifest_path"] = str(manifest_path)
-    valid_payload["data"]["validation"]["manifest_sha256"] = hashlib.sha256(
-        payload
-    ).hexdigest()
     config = RuntimeConfig.model_validate(valid_payload)
     factory = ProductionPipelineFactory.from_config(
         config,
@@ -576,7 +504,6 @@ def test_accepted_stream_is_factory_issued_process_local_and_not_pickleable(
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         rejection_observer=_observe_rejection,
-        pass_index=0,
     )
     other_factory = ProductionPipelineFactory.from_config(
         config,
@@ -584,12 +511,11 @@ def test_accepted_stream_is_factory_issued_process_local_and_not_pickleable(
         tokenizer=_Tokenizer(),
         framing=FramingContract(34, 5, 0),
         rejection_observer=_observe_rejection,
-        pass_index=0,
     )
     assert factory.factory_identity != other_factory.factory_identity
     client = _Client(
         worker_count=2,
-        manifest_sha256=config.data.manifest.sha256,
+        manifest_id="1" * 64,
     )
     stream = factory.batches(client)
     other_stream = other_factory.batches(client)
@@ -617,15 +543,23 @@ def test_real_service_factory_runs_two_spawned_workers_and_acks_each_lease(
     tmp_path: Path,
 ) -> None:
     manifest, bodies = _dataset()
-    factory = _production_factory(valid_payload, tmp_path, manifest)
+    factory = _production_factory(valid_payload, tmp_path)
+    excluded = frozenset(select_validation_shards(manifest).shard_paths)
+    training_paths = tuple(
+        shard.path for shard in manifest.shards if shard.path not in excluded
+    )
     process, stop, socket_path, identity = _start_data_service(
         tmp_path, manifest, bodies
     )
     stream: AcceptedProductionBatchStream | None = None
     try:
         client = _BoundedClient(
-            DataServiceClient(socket_path, identity, request_timeout_seconds=5.0),
-            lease_budget=len(manifest.shards),
+            DataServiceClient(
+                socket_path,
+                worker_count=identity.worker_count,
+                request_timeout_seconds=5.0,
+            ),
+            lease_budget=len(training_paths),
         )
         stream = factory.batches(client)
         batches = tuple(stream)
@@ -638,17 +572,14 @@ def test_real_service_factory_runs_two_spawned_workers_and_acks_each_lease(
         }
         assert len(worker_pids) == 2
         assert os.getpid() not in worker_pids
-        assert sorted(int(batch.sample_ids[0]) for batch in batches) == [
-            3000,
-            3001,
-            3002,
-            3003,
-        ]
+        assert sorted(int(batch.sample_ids[0]) for batch in batches) == sorted(
+            3000 + int(Path(path).stem) for path in training_paths
+        )
         assert {descriptor.worker_id for descriptor in client.leased} == {0, 1}
         assert sorted(
             descriptor.record.path for descriptor in client.acknowledged
-        ) == sorted(bodies)
-        assert len(client.acknowledged) == len(manifest.shards)
+        ) == sorted(training_paths)
+        assert len(client.acknowledged) == len(training_paths)
     finally:
         if stream is not None:
             stream.close()
@@ -663,13 +594,20 @@ def test_factory_early_close_keeps_leases_active_and_restart_replays_from_start(
     tmp_path: Path,
 ) -> None:
     manifest, bodies = _dataset()
-    factory = _production_factory(valid_payload, tmp_path, manifest)
+    factory = _production_factory(valid_payload, tmp_path)
+    training_shard_count = len(manifest.shards) - len(
+        select_validation_shards(manifest).shards
+    )
     process, stop, socket_path, identity = _start_data_service(
         tmp_path, manifest, bodies
     )
     client = _BoundedClient(
-        DataServiceClient(socket_path, identity, request_timeout_seconds=5.0),
-        lease_budget=len(manifest.shards),
+        DataServiceClient(
+            socket_path,
+            worker_count=identity.worker_count,
+            request_timeout_seconds=5.0,
+        ),
+        lease_budget=training_shard_count,
     )
     stream = factory.batches(client)
     try:
@@ -692,7 +630,11 @@ def test_factory_early_close_keeps_leases_active_and_restart_replays_from_start(
     replay_stream: AcceptedProductionBatchStream | None = None
     try:
         replay_client = _BoundedClient(
-            DataServiceClient(socket_path, identity, request_timeout_seconds=5.0),
+            DataServiceClient(
+                socket_path,
+                worker_count=identity.worker_count,
+                request_timeout_seconds=5.0,
+            ),
             lease_budget=len(active_paths),
         )
         replay_stream = factory.batches(replay_client)
@@ -715,7 +657,6 @@ def test_factory_early_close_keeps_leases_active_and_restart_replays_from_start(
 
     replay_state = json.loads((tmp_path / "mainset.json").read_bytes())
     assert replay_state["replayed_shards"] == 2
-    assert replay_state["replayed_samples"] == 2
 
 
 def test_factory_worker_failure_never_acks_and_restart_replays_active_leases(
@@ -723,12 +664,16 @@ def test_factory_worker_failure_never_acks_and_restart_replays_active_leases(
     tmp_path: Path,
 ) -> None:
     manifest, bodies = _dataset(valid_images=False)
-    factory = _production_factory(valid_payload, tmp_path, manifest)
+    factory = _production_factory(valid_payload, tmp_path)
     process, stop, socket_path, identity = _start_data_service(
         tmp_path, manifest, bodies
     )
     client = _BoundedClient(
-        DataServiceClient(socket_path, identity, request_timeout_seconds=5.0),
+        DataServiceClient(
+            socket_path,
+            worker_count=identity.worker_count,
+            request_timeout_seconds=5.0,
+        ),
         lease_budget=2,
     )
     stream = factory.batches(client)
@@ -751,7 +696,11 @@ def test_factory_worker_failure_never_acks_and_restart_replays_active_leases(
     replay_stream: AcceptedProductionBatchStream | None = None
     try:
         replay_client = _BoundedClient(
-            DataServiceClient(socket_path, identity, request_timeout_seconds=5.0),
+            DataServiceClient(
+                socket_path,
+                worker_count=identity.worker_count,
+                request_timeout_seconds=5.0,
+            ),
             lease_budget=2,
         )
         replay_stream = factory.batches(replay_client)
@@ -768,4 +717,3 @@ def test_factory_worker_failure_never_acks_and_restart_replays_active_leases(
 
     replay_state = json.loads((tmp_path / "mainset.json").read_bytes())
     assert replay_state["replayed_shards"] == 2
-    assert replay_state["replayed_samples"] == 2

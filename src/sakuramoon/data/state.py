@@ -11,11 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from sakuramoon.data.manifest import (
-    DatasetManifest,
-    DatasetManifestError,
-    manifest_sha256,
-)
+from sakuramoon.data.manifest import DatasetManifest
 
 if TYPE_CHECKING:
     from sakuramoon.data.cache import CachedShard, ShardCache
@@ -35,7 +31,6 @@ class ShardRunState:
     active_shards: tuple[str, ...]
     worker_count: int
     replayed_shards: int
-    replayed_samples: int
 
     def __init__(
         self,
@@ -43,7 +38,6 @@ class ShardRunState:
         active_shards: tuple[str, ...] | str = (),
         worker_count: int = 1,
         replayed_shards: int = 0,
-        replayed_samples: int = 0,
         *,
         active: str | None = None,
     ) -> None:
@@ -59,7 +53,6 @@ class ShardRunState:
         object.__setattr__(self, "active_shards", active_shards)
         object.__setattr__(self, "worker_count", worker_count)
         object.__setattr__(self, "replayed_shards", replayed_shards)
-        object.__setattr__(self, "replayed_samples", replayed_samples)
 
     @property
     def active(self) -> str | None:
@@ -76,18 +69,16 @@ class ShardRunState:
             active_shards=(),
             worker_count=worker_count,
             replayed_shards=0,
-            replayed_samples=0,
         )
 
 
-def _payload(state: ShardRunState, manifest_digest: str) -> dict[str, object]:
+def _payload(state: ShardRunState, manifest_id: str) -> dict[str, object]:
     return {
         "active_shards": list(state.active_shards),
         "completed": list(state.completed),
-        "manifest_sha256": manifest_digest,
-        "replayed_samples": state.replayed_samples,
+        "manifest_id": manifest_id,
         "replayed_shards": state.replayed_shards,
-        "schema_version": 3,
+        "schema_version": 4,
         "worker_count": state.worker_count,
     }
 
@@ -111,7 +102,7 @@ class ShardStateStore:
         self.path = path
         self.manifest = manifest
         self.worker_count = worker_count
-        self._manifest_sha256 = manifest_sha256(manifest)
+        self._manifest_id = manifest.manifest_id
         self._known_paths = frozenset(shard.path for shard in manifest.shards)
 
     def _validate_state(self, state: ShardRunState) -> None:
@@ -132,8 +123,6 @@ class ShardStateStore:
             or not set(active_shards).isdisjoint(completed)
             or type(state.replayed_shards) is not int
             or state.replayed_shards < 0
-            or type(state.replayed_samples) is not int
-            or state.replayed_samples < 0
         ):
             raise ShardStateError("shard state is invalid")
 
@@ -145,24 +134,22 @@ class ShardStateStore:
             if not isinstance(raw_document, dict):
                 raise TypeError
             document = cast(dict[str, Any], raw_document)
-            if document.get("schema_version") != 3:
+            if document.get("schema_version") != 4:
                 raise ShardStateError("unsupported shard state schema version")
             if set(document) != {
                 "active_shards",
                 "completed",
-                "manifest_sha256",
-                "replayed_samples",
+                "manifest_id",
                 "replayed_shards",
                 "schema_version",
                 "worker_count",
             }:
                 raise ValueError
-            if document["manifest_sha256"] != self._manifest_sha256:
+            if document["manifest_id"] != self._manifest_id:
                 raise ValueError
             active = cast(object, document["active_shards"])
             completed = cast(object, document["completed"])
             replayed_shards = document["replayed_shards"]
-            replayed_samples = document["replayed_samples"]
             worker_count = document["worker_count"]
             if not isinstance(active, list) or not isinstance(completed, list):
                 raise TypeError
@@ -177,7 +164,6 @@ class ShardStateStore:
                 active_shards=tuple(cast(list[str], active_items)),
                 worker_count=cast(int, worker_count),
                 replayed_shards=cast(int, replayed_shards),
-                replayed_samples=cast(int, replayed_samples),
             )
             self._validate_state(state)
             return state
@@ -194,7 +180,7 @@ class ShardStateStore:
         )
         body = (
             json.dumps(
-                _payload(state, self._manifest_sha256),
+                _payload(state, self._manifest_id),
                 sort_keys=True,
                 separators=(",", ":"),
             )
@@ -257,17 +243,9 @@ class ShardStateStore:
         state = self.load()
         if not state.active_shards:
             return state
-        try:
-            samples = sum(
-                self.manifest.shard(shard_path).samples
-                for shard_path in state.active_shards
-            )
-        except DatasetManifestError:
-            raise ShardStateError("active shard is absent from the manifest") from None
         recovered = replace(
             state,
             replayed_shards=state.replayed_shards + len(state.active_shards),
-            replayed_samples=state.replayed_samples + samples,
         )
         self.save(recovered)
         return recovered

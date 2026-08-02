@@ -42,20 +42,22 @@ class DataServiceClient:
     def __init__(
         self,
         socket_path: Path,
-        identity: DataServiceSessionIdentity,
         *,
+        worker_count: int,
         request_timeout_seconds: float,
     ) -> None:
         if (
             not socket_path.is_absolute()
+            or type(worker_count) is not int
+            or worker_count <= 0
             or type(request_timeout_seconds) is not float
             or request_timeout_seconds <= 0.0
         ):
             raise ValueError("data service client settings are invalid")
         self.socket_path = socket_path
-        self.identity = identity
+        self.worker_count = worker_count
         self.request_timeout_seconds = request_timeout_seconds
-        self.health()
+        self.identity, _ = self._health_identity()
 
     def _request(self, payload: dict[str, object]) -> dict[str, Any]:
         frame = canonical_json_bytes(payload)
@@ -75,29 +77,54 @@ class DataServiceClient:
             raise DataServiceUnavailable("data service rejected the request")
         return response
 
-    def health(self) -> bool:
+    def _health_identity(self) -> tuple[DataServiceSessionIdentity, bool]:
         response = self._request(
             {
                 "op": "health",
                 "protocol_version": SERVICE_PROTOCOL_VERSION,
-                "session_identity": self.identity.as_dict(),
+                "worker_count": self.worker_count,
             }
         )
         if set(response) != {
             "done",
             "ok",
             "protocol_version",
+            "session_identity",
             "session_sha256",
         } or (
             response["protocol_version"] != SERVICE_PROTOCOL_VERSION
-            or response["session_sha256"] != self.identity.sha256
             or type(response["done"]) is not bool
         ):
             raise DataServiceUnavailable("data service health identity is invalid")
-        return response["done"]
+        try:
+            identity = DataServiceSessionIdentity.from_dict(
+                response["session_identity"]
+            )
+        except DataServiceProtocolError:
+            raise DataServiceUnavailable(
+                "data service health identity is invalid"
+            ) from None
+        if (
+            identity.worker_count != self.worker_count
+            or response["session_sha256"] != identity.sha256
+        ):
+            raise DataServiceUnavailable("data service health identity is invalid")
+        return identity, response["done"]
+
+    def health(self) -> bool:
+        identity, done = self._health_identity()
+        if identity != self.identity:
+            raise DataServiceUnavailable("data service session changed")
+        return done
 
     def lease(self, worker_id: int) -> ShardLeaseDescriptor | None:
-        response = self._request({"op": "lease", "worker_id": worker_id})
+        response = self._request(
+            {
+                "op": "lease",
+                "session_sha256": self.identity.sha256,
+                "worker_id": worker_id,
+            }
+        )
         if (
             set(response) != {"done", "lease", "ok"}
             or type(response["done"]) is not bool
@@ -120,6 +147,7 @@ class DataServiceClient:
             {
                 "lease_id": descriptor.lease_id,
                 "op": "ack",
+                "session_sha256": self.identity.sha256,
                 "state_identity": descriptor.state_identity,
                 "worker_id": descriptor.worker_id,
             }

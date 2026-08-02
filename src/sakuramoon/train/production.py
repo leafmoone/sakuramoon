@@ -22,13 +22,7 @@ from sakuramoon.checkpoint.schema import (
     RawCheckpointState,
     StageBudgetCheckpointState,
 )
-from sakuramoon.config import (
-    S0_GOVERNED_SEMANTIC_BLOCKERS,
-    S0_RUNTIME_INTEGRATION_BLOCKERS,
-    ConfigurationError,
-    LoadedConfig,
-    load_config,
-)
+from sakuramoon.config import ConfigurationError, LoadedConfig, load_config
 from sakuramoon.config.assembly import (
     build_trainable_composite_from_config,
     build_training_telemetry_from_config,
@@ -42,7 +36,6 @@ from sakuramoon.data.serialize import (
     EXPECTED_SUFFIX_TOKENS,
     FramingContract,
 )
-from sakuramoon.data.service_protocol import DataServiceSessionIdentity
 from sakuramoon.encoders.mage_vae import FrozenMageVAE, load_local_mage_vae
 from sakuramoon.encoders.qwen import QwenRuntime, load_local_qwen
 from sakuramoon.model.growth import active_slot_ids
@@ -61,21 +54,14 @@ from sakuramoon.train.preflight import (
 from sakuramoon.train.runtime import (
     SingleGpuBatchRuntime,
     SuccessfulTrainingObservation,
+    require_checkpoint_cadence_binding,
+    require_single_gpu_checkpoint_binding,
     require_single_gpu_config,
     run_single_gpu_training,
 )
 from sakuramoon.train.step import SingleGpuUpdateState, TrainableComposite
 
 _DEPENDENCY_LOCK = "uv.lock"
-_READINESS_BLOCKERS = tuple(
-    blocker.code
-    for blocker in (
-        *S0_GOVERNED_SEMANTIC_BLOCKERS,
-        *S0_RUNTIME_INTEGRATION_BLOCKERS,
-    )
-)
-
-
 class ProductionReadinessError(RuntimeError):
     """Canonical runtime bindings are absent and production must not guess them."""
 
@@ -127,36 +113,7 @@ class ProductionTrainingResult:
 
 
 LearningRateForUpdate = Callable[[RuntimeConfig, int], float]
-DitFlopsObserver = Callable[[SuccessfulTrainingObservation], int]
-ReadyQueueDepthObserver = Callable[[SuccessfulTrainingObservation], int]
-
-
-@dataclass(frozen=True, slots=True)
-class _GovernedRuntimeBindings:
-    """Bindings that must eventually be issued from canonical config/data APIs."""
-
-    pass_index: int
-    learning_rate_for_update: LearningRateForUpdate
-    dit_flops: DitFlopsObserver
-    ready_queue_depth: ReadyQueueDepthObserver
-
-    def __post_init__(self) -> None:
-        if type(self.pass_index) is not int or self.pass_index < 0:
-            raise ValueError("governed data pass identity is invalid")
-        if not callable(self.learning_rate_for_update):
-            raise TypeError("governed WSD schedule must be callable")
-        if not callable(self.dit_flops):
-            raise TypeError("actual DiT FLOPs observer must be callable")
-        if not callable(self.ready_queue_depth):
-            raise TypeError("governed ready-queue observer must be callable")
-
-
-def _resolve_governed_runtime_bindings(
-    _config: RuntimeConfig,
-) -> _GovernedRuntimeBindings:
-    """Fail until current sources bind all three semantics without inference."""
-
-    raise ProductionReadinessError(_READINESS_BLOCKERS)
+ReadyQueueDepthObserver = Callable[[], int]
 
 
 def _raise_preserving(
@@ -265,25 +222,63 @@ def _build_optimizer(
     )
 
 
-def _optimizer_learning_rate(optimizer: IsolatedAdamW8bit) -> float:
+def _optimizer_learning_rate_scalars(
+    optimizer: IsolatedAdamW8bit,
+) -> tuple[float | torch.Tensor, ...]:
     groups = optimizer.optimizer.param_groups
-    rates: set[float] = set()
+    if not groups:
+        raise ValueError("production optimizer must expose parameter groups")
+    rates: list[float | torch.Tensor] = []
+    representation: tuple[str, torch.dtype | None, torch.device | None] | None = None
     for group in groups:
         raw = group.get("lr")
         if type(raw) is float:
             value = raw
+            current_representation = ("float", None, None)
         elif (
             type(raw) is torch.Tensor and raw.ndim == 0 and raw.dtype.is_floating_point
         ):
             value = float(raw.detach().item())
+            if raw.dtype != torch.float32:
+                raise ValueError(
+                    "production optimizer tensor learning rate dtype must be float32"
+                )
+            current_representation = ("tensor", raw.dtype, raw.device)
         else:
             raise ValueError("production optimizer learning rate is invalid")
         if not math.isfinite(value) or value < 0.0:
             raise ValueError("production optimizer learning rate is invalid")
-        rates.add(value)
-    if len(rates) != 1:
-        raise ValueError("production optimizer learning rates differ across groups")
-    return rates.pop()
+        if representation is None:
+            representation = current_representation
+        elif current_representation != representation:
+            raise ValueError(
+                "production optimizer learning rate representations differ across groups"
+            )
+        rates.append(raw)
+    return tuple(rates)
+
+
+def _optimizer_learning_rate_matches(
+    optimizer: IsolatedAdamW8bit,
+    expected: float,
+) -> bool:
+    if type(expected) is not float or not math.isfinite(expected) or expected < 0.0:
+        raise ValueError("governed learning rate must be a finite nonnegative float")
+    for actual in _optimizer_learning_rate_scalars(optimizer):
+        if isinstance(actual, float):
+            if actual != expected:
+                return False
+            continue
+        assert isinstance(actual, torch.Tensor)
+        canonical = torch.full(
+            (),
+            expected,
+            dtype=actual.dtype,
+            device=actual.device,
+        )
+        if not torch.equal(actual.detach(), canonical):
+            return False
+    return True
 
 
 def _set_optimizer_learning_rate(
@@ -295,23 +290,43 @@ def _set_optimizer_learning_rate(
         or learning_rate < 0.0
     ):
         raise ValueError("governed learning rate must be a finite nonnegative float")
-    for group in optimizer.optimizer.param_groups:
-        current = group.get("lr")
-        if type(current) is float:
+    groups = optimizer.optimizer.param_groups
+    current_rates = _optimizer_learning_rate_scalars(optimizer)
+    for group, current in zip(groups, current_rates, strict=True):
+        if isinstance(current, float):
             group["lr"] = learning_rate
-        elif (
-            type(current) is torch.Tensor
-            and current.ndim == 0
-            and current.dtype.is_floating_point
-        ):
+        else:
+            assert isinstance(current, torch.Tensor)
             with torch.no_grad():
                 current.fill_(learning_rate)
-        else:
-            raise ValueError("production optimizer learning rate is invalid")
+
+
+def _s0_linear_warmup_learning_rate(config: RuntimeConfig, update: int) -> float:
+    """Return the TOML-bound S0 LR for the next successful-update attempt."""
+
+    scheduler = config.scheduler
+    max_lr = scheduler.max_lr
+    warmup_updates = scheduler.warmup_updates
+    if (
+        scheduler.name != "linear_warmup_constant"
+        or scheduler.after_warmup != "constant"
+        or type(max_lr) is not float
+        or not math.isfinite(max_lr)
+        or max_lr <= 0.0
+        or max_lr != config.optimizer.lr
+        or type(warmup_updates) is not int
+        or warmup_updates <= 0
+    ):
+        raise ValueError("resolved S0 linear-warmup schedule is invalid")
+    if type(update) is not int or update <= 0:
+        raise ValueError("scheduled update must be a positive integer")
+    if update >= warmup_updates:
+        return max_lr
+    return max_lr * (update / warmup_updates)
 
 
 class _SuccessfulUpdateLrScheduler:
-    """Apply an externally governed WSD curve only at successful-update edges."""
+    """Apply the governed LR schedule only at successful-update edges."""
 
     def __init__(
         self,
@@ -334,9 +349,9 @@ class _SuccessfulUpdateLrScheduler:
         expected = self._rate(restored_successful_update + 1)
         if fresh:
             _set_optimizer_learning_rate(optimizer, expected)
-        elif _optimizer_learning_rate(optimizer) != expected:
+        elif not _optimizer_learning_rate_matches(optimizer, expected):
             raise ValueError(
-                "restored optimizer learning rate differs from governed WSD state"
+                "restored optimizer learning rate differs from governed schedule state"
             )
 
     def _rate(self, update: int) -> float:
@@ -344,12 +359,12 @@ class _SuccessfulUpdateLrScheduler:
             raise ValueError("scheduled update must be positive")
         rate = self.learning_rate_for_update(self.config, update)
         if type(rate) is not float or not math.isfinite(rate) or rate < 0.0:
-            raise ValueError("governed WSD schedule returned an invalid rate")
+            raise ValueError("governed learning-rate schedule returned an invalid rate")
         return rate
 
     def __call__(self, successful_update: int) -> None:
         if successful_update != self.last_successful_update + 1:
-            raise ValueError("WSD scheduler updates must be consecutive")
+            raise ValueError("learning-rate scheduler updates must be consecutive")
         _set_optimizer_learning_rate(self.optimizer, self._rate(successful_update + 1))
         self.last_successful_update = successful_update
 
@@ -369,7 +384,11 @@ def _initial_raw_state(
             None,
         ),
         stage_budget=StageBudgetCheckpointState(0, config.stage.planned_updates),
-        checkpoint_cadence=CheckpointCadence(0, wall_clock),
+        checkpoint_cadence=CheckpointCadence(
+            0,
+            wall_clock,
+            config.checkpoint.full_every_updates,
+        ),
     )
 
 
@@ -430,6 +449,7 @@ def _restore_checkpoint(
         raise ValueError("resume checkpoint identity differs from the current runtime")
     if state.trainer.successful_updates != identity.update:
         raise ValueError("resume checkpoint update differs from trainer state")
+    require_checkpoint_cadence_binding(loaded.config, state)
     expected_rate = learning_rate_for_update(
         loaded.config, state.trainer.successful_updates + 1
     )
@@ -438,7 +458,7 @@ def _restore_checkpoint(
         or not math.isfinite(expected_rate)
         or expected_rate < 0.0
     ):
-        raise ValueError("governed WSD schedule returned an invalid resume rate")
+        raise ValueError("governed schedule returned an invalid resume rate")
     # The RAW loader compares every optimizer group field before mutation. Setting
     # the trusted expected rate here makes checkpoint LR drift a hard load failure.
     _set_optimizer_learning_rate(optimizer, expected_rate)
@@ -473,23 +493,19 @@ def _runtime(
 class _ProductionMetricContext:
     def __init__(
         self,
-        dit_flops: DitFlopsObserver,
         ready_queue_depth: ReadyQueueDepthObserver,
     ) -> None:
-        if not callable(dit_flops):
-            raise TypeError("actual DiT FLOPs observer must be callable")
         if not callable(ready_queue_depth):
             raise TypeError("live ready-queue observer must be callable")
-        self.dit_flops = dit_flops
         self.ready_queue_depth = ready_queue_depth
 
     def __call__(
         self, observation: SuccessfulTrainingObservation
     ) -> UpdateMetricContext:
-        dit_flops = self.dit_flops(observation)
-        if type(dit_flops) is not int or dit_flops <= 0:
-            raise ValueError("DiT FLOPs observer returned an invalid measurement")
-        depth = self.ready_queue_depth(observation)
+        dit_flops = sum(item.dit_flops for item in observation.microbatches)
+        if dit_flops <= 0:
+            raise ValueError("DiT runtime produced an invalid FLOP observation")
+        depth = self.ready_queue_depth()
         if type(depth) is not int or depth < 0:
             raise ValueError("ready-queue observer returned an invalid depth")
         return UpdateMetricContext(
@@ -518,16 +534,14 @@ def _run_accepted_lifecycle(
 ) -> ProductionTrainingResult:
     config = loaded.config
     require_static_single_gpu_preflight(config, repository_root)
-    bindings = _resolve_governed_runtime_bindings(config)
     dependency_sha256 = _dependency_sha256(repository_root)
     checkpoint_root = repository_directory(repository_root, config.paths.checkpoint_dir)
     resolved_config_path = _publish_resolved_config(loaded, repository_root)
     artifact_root = repository_directory(repository_root, config.paths.artifact_dir)
-    device = torch.device("cuda", config.evaluation.gpu_index)
+    device = torch.device("cuda", 0)
     if (
         not torch.cuda.is_available()
         or torch.cuda.device_count() != 1
-        or config.evaluation.gpu_index != 0
     ):
         raise ValueError(
             "production S0 requires exactly one visible CUDA device at index zero"
@@ -544,7 +558,7 @@ def _run_accepted_lifecycle(
         scheduler = _SuccessfulUpdateLrScheduler(
             config,
             optimizer,
-            bindings.learning_rate_for_update,
+            _s0_linear_warmup_learning_rate,
             restored_successful_update=0,
             fresh=True,
         )
@@ -563,24 +577,25 @@ def _run_accepted_lifecycle(
             dependency_sha256=dependency_sha256,
             module=module,
             optimizer=optimizer,
-            learning_rate_for_update=bindings.learning_rate_for_update,
+            learning_rate_for_update=_s0_linear_warmup_learning_rate,
         )
         scheduler = _SuccessfulUpdateLrScheduler(
             config,
             optimizer,
-            bindings.learning_rate_for_update,
+            _s0_linear_warmup_learning_rate,
             restored_successful_update=restored.state.trainer.successful_updates,
             fresh=False,
         )
 
-    # No service connection may occur before the exact RAW restore above.
-    service_identity = DataServiceSessionIdentity(
-        config.data.manifest.sha256,
-        config.data.cache.persistent_workers_per_rank,
+    require_single_gpu_checkpoint_binding(
+        config,
+        restored.state,
+        runtime_growth_alpha=restored.state.growth.alpha,
     )
+    # No service connection may occur before exact RAW restore and full binding.
     client = DataServiceClient(
         Path(config.data.service.socket_path),
-        service_identity,
+        worker_count=config.data.cache.persistent_workers_per_rank,
         request_timeout_seconds=config.data.service.request_timeout_seconds,
     )
     padding_token_id = qwen.tokenizer.pad_token_id
@@ -596,7 +611,6 @@ def _run_accepted_lifecycle(
             padding_token_id,
         ),
         rejection_observer=_reject_sample,
-        pass_index=bindings.pass_index,
     )
     batches = factory.batches(client)
     primary: BaseException | None = None
@@ -617,6 +631,7 @@ def _run_accepted_lifecycle(
             optimizer=optimizer,
             restored_checkpoint=restored,
             accepted_checkpoint_ids=frozenset(),
+            retention_slots=config.checkpoint.slots,
         )
         workload = build_single_gpu_preflight_workload(
             config,
@@ -658,7 +673,7 @@ def _run_accepted_lifecycle(
             verified_checkpoints: list[Path] = []
             try:
                 context_provider = _ProductionMetricContext(
-                    bindings.dit_flops, bindings.ready_queue_depth
+                    batches.ready_batch_depth_snapshot
                 )
                 telemetry = build_training_telemetry_from_config(
                     config,

@@ -6,7 +6,7 @@ schema_version = 1
 
 [run]
 intent = "train"
-seed = "REQUIRED_STAGE_SEED"
+seed = 44
 
 [paths]
 cache_dir = "cache/data"
@@ -17,9 +17,9 @@ shared_filesystem = "nfs"
 shared_mount_source = "cs1.vast1.bz1.paratera.com:/cs1/fs1/pvc-8eb5b2a2-c80d-4c40-b28a-800fbab13752"
 nfs_version = 3
 hard_mount = true
-minimum_free_gib = "BENCHMARK_MINIMUM_FREE_GIB"
+minimum_free_gib = 50
 measured_raw_checkpoint_bytes = 5143061370
-checkpoint_copies = 3
+checkpoint_copies = 3 # checkpoint.slots (2) plus one in-progress publishing copy
 atomic_publish_probe = true
 
 [security]
@@ -45,11 +45,12 @@ sample_posterior = false
 
 [data.source]
 repo_id = "leafmoone/webdataset_danbooru"
-revision = "REQUIRED_IMMUTABLE_REVISION"
+revision = "master"
 
 [data.manifest]
-path = "REQUIRED_TRAIN_MANIFEST_PATH"
-sha256 = "REQUIRED_TRAIN_MANIFEST_SHA256"
+path = "data/dataset-manifest.json"
+initialize_if_missing = true
+refresh_existing = false
 
 [data.cache]
 low_watermark_gib = "BENCHMARK_CACHE_LOW_WATERMARK_GIB"
@@ -70,8 +71,8 @@ ack_channel_capacity = "BENCHMARK_ACK_CHANNEL_CAPACITY"
 [data.transport]
 connect_timeout_seconds = "BENCHMARK_CONNECT_TIMEOUT_SECONDS"
 read_timeout_seconds = "BENCHMARK_READ_TIMEOUT_SECONDS"
-max_retries = "BENCHMARK_TRANSPORT_MAX_RETRIES"
-retry_backoff_seconds = "BENCHMARK_RETRY_BACKOFF_SECONDS"
+max_retries = 3
+retry_backoff_seconds = 1.0
 stream_chunk_bytes = "BENCHMARK_STREAM_CHUNK_BYTES"
 
 [data.loader]
@@ -79,10 +80,9 @@ pin_memory = true
 drop_last = true
 
 [data.validation]
-manifest_path = "REQUIRED_VALIDATION_MANIFEST_PATH"
-manifest_sha256 = "REQUIRED_VALIDATION_MANIFEST_SHA256"
-sample_count = 2000
-exclude_before_shuffle = true
+selection_path = "data/validation-selection.json"
+shard_root = "data/validation-shards"
+shard_count = 2
 
 [data.image]
 exif_transpose = true
@@ -256,11 +256,10 @@ matrix_weight_decay = 0.01
 sensitive_weight_decay = 0.0
 
 [scheduler]
-name = "wsd"
-warmup_updates = 2000
-stable_lr = 0.00002
-decay_lr = 0.000002
-automatic_decay = false
+name = "linear_warmup_constant"
+warmup_updates = 1000
+max_lr = 0.00002
+after_warmup = "constant"
 
 [gradient]
 clip_norm = 1.0
@@ -270,7 +269,6 @@ global_sample_mean = true
 [checkpoint]
 kind = "raw"
 full_every_updates = 1000
-full_every_hours = 6.0
 atomic_complete_marker = true
 checksum_required = true
 canonical_fqn = true
@@ -291,18 +289,9 @@ automatic_enable = false
 
 [profiling]
 enabled = false
-schedule_updates = "BENCHMARK_PROFILING_SCHEDULE_UPDATES"
-record_shapes = true
-profile_memory = true
 
 [benchmark]
-kind = "candidate"
-warmup_updates = 100
-measured_updates = 500
-starting_successful_update = 899
-profile_trace_updates = "BENCHMARK_PROFILE_TRACE_UPDATES"
-same_workload_required = true
-nsight_compute_hotspot_only = true
+enabled = false
 
 [failure]
 stop_on_nonfinite = true
@@ -319,7 +308,7 @@ observer_event_timeout_seconds = "BENCHMARK_METRIC_EVENT_TIMEOUT_SECONDS"
 [wandb]
 enabled = true
 project = "sakuramoon"
-entity = "REQUIRED_WANDB_ENTITY"
+entity = "2574905817leaf-jinan-university"
 offline_on_network_error = true
 queue_capacity = "BENCHMARK_WANDB_QUEUE_CAPACITY"
 replay_retry_on_start = true
@@ -338,39 +327,4 @@ phases = [
 ]
 
 [evaluation]
-stage_end = true
-explicit_job = true
-prompt_manifest_path = "REQUIRED_PROMPT_MANIFEST_PATH"
-prompt_manifest_sha256 = "REQUIRED_PROMPT_MANIFEST_SHA256"
-gpu_index = "BENCHMARK_EVALUATION_GPU_INDEX"
-training_paused = "BENCHMARK_EVALUATION_TRAINING_PAUSED"
-batch_size = "BENCHMARK_EVALUATION_BATCH_SIZE"
-output_reserve_gib = "BENCHMARK_EVALUATION_OUTPUT_RESERVE_GIB"
-
-[evaluation.sampling]
-profile = "reference"
-
-[evaluation.fid]
-enabled = true
-every_successful_updates = "BENCHMARK_FID_EVERY_SUCCESSFUL_UPDATES"
-trend_samples = "BENCHMARK_FID_TREND_SAMPLES"
-acceptance_samples = "BENCHMARK_FID_ACCEPTANCE_SAMPLES"
-feature_extractor = "REQUIRED_FID_FEATURE_EXTRACTOR"
-feature_extractor_version = "REQUIRED_FID_FEATURE_EXTRACTOR_VERSION"
-feature_extractor_path = "REQUIRED_FID_FEATURE_EXTRACTOR_PATH"
-feature_extractor_sha256 = "REQUIRED_FID_FEATURE_EXTRACTOR_SHA256"
-preprocess_path = "REQUIRED_FID_PREPROCESS_PATH"
-preprocess_sha256 = "REQUIRED_FID_PREPROCESS_SHA256"
-real_stats_path = "REQUIRED_FID_REAL_STATS_PATH"
-real_stats_sha256 = "REQUIRED_FID_REAL_STATS_SHA256"
-
-[evaluation.is]
-enabled = true
-every_successful_updates = "BENCHMARK_IS_EVERY_SUCCESSFUL_UPDATES"
-trend_samples = "BENCHMARK_IS_TREND_SAMPLES"
-acceptance_samples = "BENCHMARK_IS_ACCEPTANCE_SAMPLES"
-splits = "BENCHMARK_IS_SPLITS"
-
-[evaluation.manual_quality]
-enabled = true
-samples = "BENCHMARK_MANUAL_QUALITY_SAMPLES"
+enabled = false

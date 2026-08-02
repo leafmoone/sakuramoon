@@ -24,9 +24,9 @@ shared_filesystem = "nfs" # fixed for the approved server-backed mode
 shared_mount_source = "REQUIRED_NFS_MOUNT_SOURCE" # exact /proc/self/mountinfo source identity
 nfs_version = 3 # fixed to the governed deployment mount
 hard_mount = true # soft NFS mounts are rejected
-minimum_free_gib = "BENCHMARK_REQUIRED" # integer reserve after cache plus three raw checkpoints
+minimum_free_gib = "BENCHMARK_REQUIRED" # integer reserve after cache and checkpoint copies
 measured_raw_checkpoint_bytes = 5143061370 # latest bounded 16L full-RAW measurement
-checkpoint_copies = 3 # fixed measured raw-checkpoint headroom
+checkpoint_copies = 3 # must equal checkpoint.slots plus one publishing copy
 atomic_publish_probe = true # fixed startup write/fsync/replace/readback probe
 
 [security]
@@ -54,11 +54,12 @@ sample_posterior = false # fixed
 
 [data.source]
 repo_id = "leafmoone/webdataset_danbooru" # fixed
-revision = "REQUIRED_IMMUTABLE_REVISION"
+revision = "master" # configured branch selector; service validates the exact remote listing
 
 [data.manifest]
-path = "REQUIRED_TRAIN_MANIFEST_PATH"
-sha256 = "REQUIRED_IMMUTABLE_SHA256"
+path = "data/dataset-manifest.json" # repository-relative durable operational manifest
+initialize_if_missing = true # service creates it atomically when absent
+refresh_existing = false # existing manifests are never silently replaced
 
 [data.cache]
 low_watermark_gib = "BENCHMARK_REQUIRED" # integer, 0 <= low < high; no implicit 300 GiB floor
@@ -88,10 +89,9 @@ pin_memory = true # explicit boolean; no runtime default
 drop_last = true # explicit boolean; no runtime default
 
 [data.validation]
-manifest_path = "REQUIRED_VALIDATION_MANIFEST_PATH"
-manifest_sha256 = "REQUIRED_IMMUTABLE_SHA256"
-sample_count = 2000 # fixed
-exclude_before_shuffle = true # fixed
+selection_path = "data/validation-selection.json" # generated once when absent
+shard_root = "data/validation-shards" # persistent downloaded validation tar files
+shard_count = 2 # fixed user-selected count
 
 [data.image]
 exif_transpose = true # fixed
@@ -266,11 +266,10 @@ matrix_weight_decay = 0.01 # fixed
 sensitive_weight_decay = 0.0 # fixed
 
 [scheduler]
-name = "wsd" # fixed
-warmup_updates = 2000 # fixed successful updates
-stable_lr = 0.00002 # fixed
-decay_lr = 0.000002 # fixed
-automatic_decay = false # fixed
+name = "linear_warmup_constant" # fixed
+warmup_updates = 1000 # fixed successful updates
+max_lr = 0.00002 # fixed
+after_warmup = "constant" # fixed; no decay in this version
 
 [gradient]
 clip_norm = 1.0 # fixed global norm
@@ -285,9 +284,8 @@ automatic_backend_fallback = false # fixed
 
 [checkpoint]
 kind = "raw" # fixed
-full_every_updates = 1000 # fixed successful updates
-full_every_hours = 6.0 # fixed wall hours
-slots = "BENCHMARK_REQUIRED" # integer > 0 with reserved capacity evidence
+full_every_updates = 1000 # explicit positive successful-update interval
+slots = 2 # explicit positive rolling raw retention
 atomic_complete_marker = true # fixed
 checksum_required = true # fixed
 canonical_fqn = true # fixed
@@ -313,10 +311,6 @@ accumulation = "BENCHMARK_REQUIRED" # integer > 0
 global_batch = "BENCHMARK_REQUIRED" # exact local_batch * accumulation * world_size
 activation_checkpoint_mode = "BENCHMARK_REQUIRED" # none|alternating|all
 planned_updates = "BENCHMARK_REQUIRED" # integer > 0
-planned_valid_samples = "BENCHMARK_REQUIRED" # exact global_batch * planned_updates
-planned_equivalent_data_passes = "BENCHMARK_REQUIRED" # TOML float > 0; exposure only
-planned_dit_flops = "BENCHMARK_REQUIRED" # TOML float > 0
-planned_wall_time_hours = "BENCHMARK_REQUIRED" # TOML float > 0
 manual_finalize = true # fixed
 automatic_transition = false # fixed
 
@@ -335,12 +329,13 @@ minimum_end_to_end_gain_percent = 3.0 # fixed gate, percent
 automatic_enable = false # fixed
 
 [profiling]
-enabled = false
+enabled = true # false accepts only this discriminator and no schedule fields
 schedule_updates = "BENCHMARK_REQUIRED" # integer > 0
 record_shapes = true
 profile_memory = true
 
 [benchmark]
+enabled = true # false accepts only this discriminator and no benchmark plan fields
 kind = "candidate"
 warmup_updates = 100 # fixed candidate/final warmup
 measured_updates = 500 # candidate fixed; final config must use >= 1000
@@ -388,31 +383,30 @@ phases = [
 ] # fixed ordered CORE + DETAILED vocabulary
 
 [evaluation]
+enabled = true
 stage_end = true
 explicit_job = true # fixed
-prompt_manifest_path = "REQUIRED_PROMPT_MANIFEST_PATH"
-prompt_manifest_sha256 = "REQUIRED_IMMUTABLE_SHA256"
-gpu_index = "BENCHMARK_REQUIRED" # integer >= 0
-training_paused = "BENCHMARK_REQUIRED" # boolean; evaluator resource plan
+gpu_index = 0 # fixed single-GPU evaluator topology
+training_paused = true # fixed; evaluator must not contend with training on this host
 batch_size = "BENCHMARK_REQUIRED" # integer > 0; every enabled job is exactly divisible
 output_reserve_gib = "BENCHMARK_REQUIRED" # integer > 0; explicit worst-case evaluator output reservation
 
 [evaluation.sampling]
 profile = "reference" # fixed for formal checkpoint evaluation
 
+[evaluation.extractor]
+enabled = true
+feature_extractor = "REQUIRED_LOCKED_FEATURE_EXTRACTOR"
+feature_extractor_version = "REQUIRED_LOCKED_VERSION"
+feature_extractor_path = "REQUIRED_FID_IS_FEATURE_EXTRACTOR_PATH"
+preprocess_path = "REQUIRED_FID_IS_PREPROCESS_PATH"
+
 [evaluation.fid]
 enabled = true
 every_successful_updates = "BENCHMARK_REQUIRED" # integer > 0
 trend_samples = "BENCHMARK_REQUIRED" # integer > 0
 acceptance_samples = 50000 # example only; benchmark may explicitly revise
-feature_extractor = "REQUIRED_LOCKED_FEATURE_EXTRACTOR"
-feature_extractor_version = "REQUIRED_LOCKED_VERSION"
-feature_extractor_path = "REQUIRED_FID_FEATURE_EXTRACTOR_PATH"
-feature_extractor_sha256 = "REQUIRED_IMMUTABLE_SHA256"
-preprocess_path = "REQUIRED_FID_PREPROCESS_PATH"
-preprocess_sha256 = "REQUIRED_IMMUTABLE_SHA256"
 real_stats_path = "REQUIRED_FID_REAL_STATS_PATH"
-real_stats_sha256 = "REQUIRED_IMMUTABLE_SHA256"
 
 [evaluation.is]
 enabled = true

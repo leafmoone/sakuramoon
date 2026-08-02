@@ -41,10 +41,6 @@ accumulation = "BENCHMARK_H1_ACCUMULATION"
 global_batch = "BENCHMARK_H1_GLOBAL_BATCH"
 activation_checkpoint_mode = "BENCHMARK_H1_ACTIVATION_CHECKPOINT_MODE"
 planned_updates = "BENCHMARK_H1_PLANNED_UPDATES"
-planned_valid_samples = "BENCHMARK_H1_PLANNED_VALID_SAMPLES"
-planned_equivalent_data_passes = "BENCHMARK_H1_EQUIVALENT_DATA_PASSES"
-planned_dit_flops = "BENCHMARK_H1_DIT_FLOPS"
-planned_wall_time_hours = "BENCHMARK_H1_WALL_TIME_HOURS"
 manual_finalize = true
 automatic_transition = false
 

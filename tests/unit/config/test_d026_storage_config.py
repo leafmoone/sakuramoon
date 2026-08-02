@@ -96,7 +96,7 @@ def _restored_checkpoint(
         SingleGpuUpdateState.initial(),
         GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
         StageBudgetCheckpointState(0, 1),
-        CheckpointCadence(0, 0.0),
+        CheckpointCadence(0, 0.0, 1000),
     )
     restored._token = secrets.token_hex(32)
     preflight_module._RESTORED_CHECKPOINTS[restored._token] = restored
@@ -129,7 +129,6 @@ def test_server_backed_storage_fields_are_explicit_and_small_cache_is_valid(
         (("storage", "shared_filesystem"), "ext4"),
         (("storage", "nfs_version"), 4),
         (("storage", "hard_mount"), False),
-        (("storage", "checkpoint_copies"), 2),
         (("storage", "atomic_publish_probe"), False),
         (("data", "service", "socket_path"), "cache/data-service.sock"),
         (("data", "service", "ownership_lock_path"), "cache/service.lock"),
@@ -146,6 +145,19 @@ def test_server_backed_identity_and_runtime_path_drift_is_rejected(
 
     with pytest.raises(ValidationError, match="literal_error"):
         RuntimeConfig.model_validate(payload)
+
+
+def test_checkpoint_storage_copies_bind_retention_and_publishing_headroom(
+    valid_payload: dict[str, Any],
+) -> None:
+    valid_payload["checkpoint"]["slots"] = 5
+    valid_payload["storage"]["checkpoint_copies"] = 6
+    config = RuntimeConfig.model_validate(valid_payload)
+    assert config.storage.checkpoint_copies == config.checkpoint.slots + 1
+
+    valid_payload["storage"]["checkpoint_copies"] = 5
+    with pytest.raises(ValidationError, match="plus one publishing copy"):
+        RuntimeConfig.model_validate(valid_payload)
 
 
 @pytest.mark.parametrize(
@@ -212,12 +224,12 @@ def test_training_preflight_calls_governed_storage_with_measured_checkpoint(
     module = torch.nn.Linear(1, 1)
     optimizer = object()
     restored = _restored_checkpoint(module, optimizer)
-    session = DataServiceSessionIdentity(config.data.manifest.sha256, 2)
+    session = DataServiceSessionIdentity(_HASH_B, 2)
     data_client = SimpleNamespace(identity=session)
     stream_identity = ProductionBatchStreamIdentity(
         _HASH_A,
         ConfiguredDataLoader.from_config(config),
-        config.data.manifest.sha256,
+        session.manifest_id,
         session.sha256,
         _HASH_D,
     )

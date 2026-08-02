@@ -13,7 +13,7 @@ from sakuramoon.model.growth import ACTIVE_SLOT_IDS, half_cosine_growth_alpha
 from sakuramoon.train.step import SingleGpuUpdateState
 
 SCHEMA_VERSION = 1
-RAW_SCHEMA_VERSION = 3
+RAW_SCHEMA_VERSION = 4
 MAX_MODEL_SHARD_BYTES = 2 * 1024**3
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _CHECKPOINT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -59,12 +59,11 @@ FORCED_CHECKPOINT_REASONS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class CheckpointCadence:
-    """Durable checkpoint anchors expressed in Unix wall-clock seconds."""
+    """Durable update cadence plus the wall-clock time of its last commit."""
 
     last_successful_update: int
     last_wall_clock_unix_seconds: float
-    every_successful_updates: int = 1000
-    every_hours: float = 6.0
+    every_successful_updates: int
 
     def __post_init__(self) -> None:
         if (
@@ -74,11 +73,9 @@ class CheckpointCadence:
             or not math.isfinite(self.last_wall_clock_unix_seconds)
             or self.last_wall_clock_unix_seconds < 0.0
             or type(self.every_successful_updates) is not int
-            or self.every_successful_updates != 1000
-            or type(self.every_hours) is not float
-            or self.every_hours != 6.0
+            or self.every_successful_updates <= 0
         ):
-            raise ValueError("checkpoint cadence differs from the locked policy")
+            raise ValueError("checkpoint cadence fields are invalid")
 
     def due(
         self,
@@ -104,11 +101,6 @@ class CheckpointCadence:
             and successful_update % self.every_successful_updates == 0
         ):
             return CheckpointReason.UPDATE_CADENCE
-        if (
-            wall_clock_unix_seconds - self.last_wall_clock_unix_seconds
-            >= self.every_hours * 3600.0
-        ):
-            return CheckpointReason.WALL_CADENCE
         return None
 
     def committed(
@@ -128,7 +120,6 @@ class CheckpointCadence:
             successful_update,
             wall_clock_unix_seconds,
             self.every_successful_updates,
-            self.every_hours,
         )
 
 
@@ -438,7 +429,6 @@ def raw_state_to_dict(
     trainer: dict[str, object] = {
         "attempted_updates": state.trainer.attempted_updates,
         "checkpoint_cadence": {
-            "every_hours": state.checkpoint_cadence.every_hours,
             "every_successful_updates": state.checkpoint_cadence.every_successful_updates,
             "last_successful_update": state.checkpoint_cadence.last_successful_update,
             "last_wall_clock_unix_seconds": (
@@ -515,7 +505,6 @@ def raw_state_from_dicts(
             "last_successful_update",
             "last_wall_clock_unix_seconds",
             "every_successful_updates",
-            "every_hours",
         },
         "checkpoint cadence",
     )
@@ -548,7 +537,6 @@ def raw_state_from_dicts(
                 last_successful_update=cadence["last_successful_update"],
                 last_wall_clock_unix_seconds=cadence["last_wall_clock_unix_seconds"],
                 every_successful_updates=cadence["every_successful_updates"],
-                every_hours=cadence["every_hours"],
             ),
         )
     except (TypeError, ValueError):

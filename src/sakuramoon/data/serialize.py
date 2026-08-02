@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -93,6 +94,15 @@ def _artist_text(artists: list[Tag]) -> str:
     return ", ".join(tag.text for tag in artists)
 
 
+def render_caption_segments(plan: CaptionPlan) -> tuple[str, str]:
+    """Render the governed main and Artist segments without tokenization."""
+
+    categories = {
+        category: list(getattr(plan, category)) for category in CATEGORY_ORDER
+    }
+    return _body(categories, plan.nl_text), _artist_text(list(plan.artists))
+
+
 def _bucket_for(tokens: int) -> int:
     for bucket in CONDITION_BUCKETS:
         if tokens <= bucket:
@@ -119,6 +129,18 @@ def serialize_caption(
     nl_text = plan.nl_text
     truncated = False
 
+    def current_plan() -> CaptionPlan:
+        return dataclasses.replace(
+            plan,
+            nsfw=tuple(categories["nsfw"]),
+            character=tuple(categories["character"]),
+            copyright=tuple(categories["copyright"]),
+            general=tuple(categories["general"]),
+            artists=tuple(artists),
+            nl_text=nl_text,
+            selected_nl=plan.selected_nl if nl_text is not None else None,
+        )
+
     if artists:
         fitting_artists: list[Tag] = []
         for artist in artists:
@@ -135,18 +157,18 @@ def serialize_caption(
             )
         artists = fitting_artists
 
-    artist_text = _artist_text(artists)
+    _body_text, artist_text = render_caption_segments(current_plan())
     artist_ids = _encode(tokenizer, artist_text)
     while len(suffix_ids) + len(artist_ids) > TEXT_CONDITION_MAX and len(artists) > 1:
         artists.pop()
         truncated = True
-        artist_text = _artist_text(artists)
+        _body_text, artist_text = render_caption_segments(current_plan())
         artist_ids = _encode(tokenizer, artist_text)
     if len(suffix_ids) + len(artist_ids) > TEXT_CONDITION_MAX:
         raise CaptionSerializationError("Artist segment cannot fit without splitting a tag")
 
     while True:
-        body = _body(categories, nl_text)
+        body, artist_text = render_caption_segments(current_plan())
         body_ids = _encode(tokenizer, body)
         condition_tokens = len(body_ids) + len(suffix_ids) + len(artist_ids)
         if condition_tokens <= TEXT_CONDITION_MAX:

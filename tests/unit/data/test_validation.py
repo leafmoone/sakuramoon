@@ -1,268 +1,524 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
-import os
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol, cast
 
 import pytest
+from PIL import Image
 
-from sakuramoon.data.metadata import MetadataRecord
+import sakuramoon.data.validation as validation_module
+from sakuramoon.data.manifest import (
+    DatasetManifest,
+    DatasetSourceIdentity,
+    ShardRecord,
+)
+from sakuramoon.data.modelscope import ModelScopeDatasetTransport
+from sakuramoon.data.production import parse_modelscope_caption_fields
 from sakuramoon.data.validation import (
-    VALIDATION_SAMPLE_COUNT,
-    ValidationBundleExistsError,
-    ValidationEntry,
-    ValidationPublicationError,
+    VALIDATION_SELECTION_SEED,
+    VALIDATION_SHARD_COUNT,
+    VALIDATION_SHARD_PATHS,
+    ValidationPromptError,
     ValidationSelection,
     ValidationSelectionError,
-    ValidationShardMember,
-    ValidationShardSample,
-    ValidationStratum,
-    exclude_validation_records,
-    select_validation_records,
-    validation_manifest_bytes,
-    write_validation_bundle,
+    ValidationSelectionExistsError,
+    canonical_validation_selection_bytes,
+    ensure_validation_selection,
+    load_validation_prompt_samples,
+    load_validation_selection,
+    parse_validation_selection,
+    prepare_validation_shards,
+    select_validation_shards,
+    write_validation_selection,
 )
 
 
-def _record(sample_id: int) -> MetadataRecord:
-    wide = sample_id % 2 == 0
-    return MetadataRecord(
-        id=sample_id,
-        release="release-a" if sample_id % 4 < 2 else "release-b",
-        width=768 if wide else 512,
-        height=512 if wide else 768,
-        caption_available=sample_id % 8 < 4,
-        raw={"id": sample_id},
+class _Writer(Protocol):
+    def write(self, payload: bytes, /) -> int: ...
+
+
+class _MemoryTransport:
+    stream_chunk_bytes = 64
+
+    def __init__(self, bodies: dict[str, bytes]) -> None:
+        self.bodies = bodies
+        self.downloaded: list[str] = []
+
+    def download(
+        self, manifest: DatasetManifest, shard: ShardRecord, output: _Writer
+    ) -> None:
+        assert manifest.shard(shard.path) == shard
+        self.downloaded.append(shard.path)
+        output.write(self.bodies[shard.path])
+
+
+def _source() -> DatasetSourceIdentity:
+    return DatasetSourceIdentity(
+        repo_id="leafmoone/webdataset_danbooru",
+        revision="master",
     )
 
 
-def _records(count: int = 2400) -> tuple[MetadataRecord, ...]:
-    return tuple(_record(sample_id) for sample_id in range(1, count + 1))
-
-
-def _bucket(width: int, height: int) -> str:
-    return "wide" if width > height else "tall"
-
-
-def test_selection_is_exact_unique_stratified_and_order_independent() -> None:
-    records = _records()
-
-    first = select_validation_records(records, seed=1234, aspect_bucket=_bucket)
-    reordered = select_validation_records(
-        tuple(reversed(records)), seed=1234, aspect_bucket=_bucket
+def _manifest(bodies: dict[str, bytes]) -> DatasetManifest:
+    return DatasetManifest.from_shards(
+        _source(),
+        tuple(
+            ShardRecord(
+                path=path,
+                bytes=len(body),
+                upstream_sha256=hashlib.sha256(body).hexdigest(),
+            )
+            for path, body in bodies.items()
+        ),
     )
 
-    assert first == reordered
-    assert len(first.entries) == VALIDATION_SAMPLE_COUNT
-    assert len(first.ids) == VALIDATION_SAMPLE_COUNT
-    counts = first.stratum_counts()
-    assert len(counts) == 8
-    assert set(counts.values()) == {250}
+
+def _image_bytes(*, width: int = 47, height: int = 33) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (width, height), (20, 40, 60)).save(output, format="PNG")
+    return output.getvalue()
 
 
-def test_selection_seed_changes_members_not_stratum_counts() -> None:
-    records = _records()
-    first = select_validation_records(records, seed=1, aspect_bucket=_bucket)
-    second = select_validation_records(records, seed=2, aspect_bucket=_bucket)
+def _metadata(
+    sample_id: int,
+    *,
+    captions: dict[str, object] | None = None,
+    multicaptions: dict[str, object] | None = None,
+    width: int = 47,
+    height: int = 33,
+) -> bytes:
+    return json.dumps(
+        {
+            "captions": captions if captions is not None else {"nl2": "prompt"},
+            "dropout": {"candidate_tags": []},
+            "id": sample_id,
+            "image": {"height": height, "width": width},
+            "multicaptions": multicaptions if multicaptions is not None else {},
+            "nsfw": "safe",
+            "tags": {
+                "artist": ["artist_name"],
+                "character": [],
+                "copyright": [],
+                "general": ["1girl", "blue_hair"],
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
-    assert first.ids != second.ids
-    assert first.stratum_counts() == second.stratum_counts()
+
+def _tar_bytes(
+    members: list[tuple[str, bytes, str]],
+) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for name, payload, kind in members:
+            member = tarfile.TarInfo(name)
+            member.mtime = 0
+            if kind == "file":
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+            elif kind == "directory":
+                member.type = tarfile.DIRTYPE
+                archive.addfile(member)
+            else:
+                raise AssertionError(f"unknown test member kind: {kind}")
+    return output.getvalue()
 
 
-def test_selection_allocates_unequal_strata_by_available_population() -> None:
-    records = list(_records(2100))
-    for index in range(1, 101):
-        record = records[index - 1]
-        records[index - 1] = MetadataRecord(
-            id=record.id,
-            release="small-release",
-            width=record.width,
-            height=record.height,
-            caption_available=record.caption_available,
-            raw=record.raw,
-        )
-
-    selection = select_validation_records(
-        tuple(records), seed=3, aspect_bucket=_bucket
+def _valid_tar(
+    sample_id: int,
+    *,
+    captions: dict[str, object] | None = None,
+    multicaptions: dict[str, object] | None = None,
+    width: int = 47,
+    height: int = 33,
+) -> bytes:
+    return _tar_bytes(
+        [
+            (
+                f"{sample_id}.json",
+                _metadata(
+                    sample_id,
+                    captions=captions,
+                    multicaptions=multicaptions,
+                    width=width,
+                    height=height,
+                ),
+                "file",
+            ),
+            (
+                f"{sample_id}.png",
+                _image_bytes(width=width, height=height),
+                "file",
+            ),
+        ]
     )
 
-    assert len(selection.entries) == VALIDATION_SAMPLE_COUNT
-    assert all(count > 0 for count in selection.stratum_counts().values())
+
+def _bodies(
+    *,
+    body_factory: Callable[[int], bytes] | None = None,
+) -> dict[str, bytes]:
+    factory = body_factory if body_factory is not None else _valid_tar
+    paths = (*VALIDATION_SHARD_PATHS, "release/train-00.tar", "release/train-01.tar")
+    return {path: factory(index + 1) for index, path in enumerate(paths)}
 
 
-def test_selection_rejects_duplicate_or_insufficient_ids() -> None:
-    with pytest.raises(ValidationSelectionError, match="not enough"):
-        select_validation_records(_records(1999), seed=1, aspect_bucket=_bucket)
+def _materialize_selected(
+    root: Path,
+    manifest: DatasetManifest,
+    bodies: dict[str, bytes],
+) -> ValidationSelection:
+    selection = select_validation_shards(manifest)
+    for record in selection.shards:
+        path = root / record.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bodies[record.path])
+    return selection
 
-    duplicate = _records(2000) + (_record(1),)
-    with pytest.raises(ValidationSelectionError, match="duplicate"):
-        select_validation_records(duplicate, seed=1, aspect_bucket=_bucket)
 
-
-def test_selection_type_rejects_noncanonical_cardinality_ids_and_seed() -> None:
-    stratum = ValidationStratum("release-a", "wide", True)
-    entries = tuple(
-        ValidationEntry(sample_id, stratum)
-        for sample_id in range(1, VALIDATION_SAMPLE_COUNT + 1)
+def _traversal_tar(sample_id: int) -> bytes:
+    return _tar_bytes(
+        [
+            ("../escape.png", _image_bytes(), "file"),
+            ("escape.json", _metadata(sample_id), "file"),
+        ]
     )
-    with pytest.raises(ValidationSelectionError, match="exactly 2,000"):
-        ValidationSelection(entries=entries[:-1], seed=1)
-    with pytest.raises(ValidationSelectionError, match="sorted positive"):
-        ValidationSelection(entries=tuple(reversed(entries)), seed=1)
-    with pytest.raises(ValidationSelectionError, match="seed"):
-        ValidationSelection(entries=entries, seed=True)
 
 
-@pytest.mark.parametrize("bucket", ["", " ", 1])
-def test_selection_rejects_invalid_bucket_resolver_result(bucket: object) -> None:
-    with pytest.raises(ValidationSelectionError, match="invalid key"):
-        select_validation_records(
-            _records(2000),
-            seed=1,
-            aspect_bucket=lambda width, height: bucket,  # type: ignore[return-value]
-        )
+def _directory_tar(_sample_id: int) -> bytes:
+    return _tar_bytes([("folder", b"", "directory")])
 
 
-def test_training_exclusion_removes_all_validation_ids() -> None:
-    records = _records()
-    selection = select_validation_records(records, seed=11, aspect_bucket=_bucket)
-
-    training, report = exclude_validation_records(records, selection.ids)
-
-    assert report.input_records == len(records)
-    assert report.output_records == len(records) - VALIDATION_SAMPLE_COUNT
-    assert report.excluded_records == VALIDATION_SAMPLE_COUNT
-    assert report.encountered_validation_ids == selection.ids
-    assert not any(record.id in selection.ids for record in training)
+def _missing_image_tar(sample_id: int) -> bytes:
+    return _tar_bytes([(f"{sample_id}.json", _metadata(sample_id), "file")])
 
 
-def test_validation_manifest_jsonl_is_deterministic() -> None:
-    selection = select_validation_records(_records(), seed=99, aspect_bucket=_bucket)
+def _missing_json_tar(sample_id: int) -> bytes:
+    return _tar_bytes([(f"{sample_id}.png", _image_bytes(), "file")])
 
-    first = validation_manifest_bytes(selection)
-    second = validation_manifest_bytes(selection)
+
+def _duplicate_member_tar(sample_id: int) -> bytes:
+    return _tar_bytes(
+        [
+            (f"{sample_id}.png", _image_bytes(), "file"),
+            (f"{sample_id}.png", _image_bytes(), "file"),
+            (f"{sample_id}.json", _metadata(sample_id), "file"),
+        ]
+    )
+
+
+def _duplicate_suffix_tar(sample_id: int) -> bytes:
+    return _tar_bytes(
+        [
+            (f"{sample_id}.JPG", _image_bytes(), "file"),
+            (f"{sample_id}.jpg", _image_bytes(), "file"),
+            (f"{sample_id}.json", _metadata(sample_id), "file"),
+        ]
+    )
+
+
+def _invalid_image_tar(sample_id: int) -> bytes:
+    return _tar_bytes(
+        [
+            (f"{sample_id}.png", b"not-an-image", "file"),
+            (f"{sample_id}.json", _metadata(sample_id), "file"),
+        ]
+    )
+
+
+def _invalid_metadata_tar(sample_id: int) -> bytes:
+    return _tar_bytes(
+        [
+            (f"{sample_id}.png", _image_bytes(), "file"),
+            (f"{sample_id}.json", b"not-json", "file"),
+        ]
+    )
+
+
+def _dimension_mismatch_tar(sample_id: int) -> bytes:
+    return _tar_bytes(
+        [
+            (f"{sample_id}.png", _image_bytes(width=48, height=33), "file"),
+            (f"{sample_id}.json", _metadata(sample_id), "file"),
+        ]
+    )
+
+
+def _sidecar_without_image_tar(sample_id: int) -> bytes:
+    return _tar_bytes(
+        [
+            (f"{sample_id}.txt", b"sidecar", "file"),
+            (f"{sample_id}.json", _metadata(sample_id), "file"),
+        ]
+    )
+
+
+def _duplicate_id_tar(_sample_id: int) -> bytes:
+    return _valid_tar(1)
+
+
+_INVALID_ARCHIVES: tuple[tuple[Callable[[int], bytes], str], ...] = (
+    (_traversal_tar, "path is invalid"),
+    (_directory_tar, "regular files"),
+    (_missing_image_tar, "missing exactly one image or JSON"),
+    (_missing_json_tar, "missing exactly one image or JSON"),
+    (_duplicate_member_tar, "duplicate members"),
+    (_duplicate_suffix_tar, "duplicate member suffixes"),
+    (_invalid_image_tar, "image is invalid"),
+    (_invalid_metadata_tar, "metadata JSON is invalid"),
+    (_dimension_mismatch_tar, "dimensions differ from decoded image"),
+    (_sidecar_without_image_tar, "missing exactly one image or JSON"),
+)
+
+
+def test_selects_exactly_two_distinct_shards_stably_with_seed_44() -> None:
+    bodies = _bodies()
+    manifest = _manifest(bodies)
+    reordered = DatasetManifest.from_shards(_source(), tuple(reversed(manifest.shards)))
+
+    first = select_validation_shards(manifest)
+    second = select_validation_shards(reordered)
 
     assert first == second
-    assert first.endswith(b"\n")
-    lines = first.splitlines()
-    assert len(lines) == VALIDATION_SAMPLE_COUNT
-    parsed = json.loads(lines[0])
-    assert set(parsed) == {"aspect_bucket", "caption_available", "id", "release"}
-    assert [json.loads(line)["id"] for line in lines] == sorted(selection.ids)
+    assert first.seed == VALIDATION_SELECTION_SEED == 44
+    assert len(first.shards) == VALIDATION_SHARD_COUNT == 2
+    assert first.shard_paths == VALIDATION_SHARD_PATHS
+    assert set(first.shard_paths) < {item.path for item in manifest.shards}
+    with pytest.raises(ValidationSelectionError, match="seed must equal"):
+        select_validation_shards(manifest, seed=45)
+
+    missing = {path: body for path, body in bodies.items() if path != first.shard_paths[0]}
+    with pytest.raises(ValidationSelectionError, match="fixed validation shard is absent"):
+        select_validation_shards(_manifest(missing))
 
 
-def _validation_samples(
-    ids: tuple[int, ...],
-) -> tuple[ValidationShardSample, ...]:
-    return tuple(
-        ValidationShardSample(
-            id=sample_id,
-            members=(
-                ValidationShardMember(
-                    suffix="json",
-                    payload=json.dumps(
-                        {"id": sample_id}, separators=(",", ":")
-                    ).encode(),
-                ),
-            ),
-        )
-        for sample_id in ids
-    )
+def test_selection_identity_and_encoding_are_canonical() -> None:
+    manifest = _manifest(_bodies())
+    selection = select_validation_shards(manifest)
+    payload = canonical_validation_selection_bytes(selection)
+
+    assert parse_validation_selection(payload) == selection
+    assert payload.endswith(b"\n")
+    document = json.loads(payload)
+    assert set(document) == {
+        "manifest_id",
+        "schema_version",
+        "seed",
+        "selection_id",
+        "shards",
+    }
+    assert hashlib.sha256(payload).hexdigest() != selection.selection_id
+    with pytest.raises(ValidationSelectionError, match="not canonical"):
+        parse_validation_selection(payload.rstrip())
 
 
-def test_validation_bundle_is_deterministic_exact_and_no_clobber(
+def test_selection_publication_is_atomic_no_clobber_and_reloads(
     tmp_path: Path,
 ) -> None:
-    selection = select_validation_records(_records(), seed=99, aspect_bucket=_bucket)
-    ordered_ids = tuple(entry.id for entry in selection.entries)
-    samples = _validation_samples(ordered_ids)
+    manifest = _manifest(_bodies())
+    selection = select_validation_shards(manifest)
+    destination = tmp_path / "state" / "validation-selection.json"
 
-    first = write_validation_bundle(selection, samples, tmp_path / "first")
-    second = write_validation_bundle(selection, samples, tmp_path / "second")
+    write_validation_selection(selection, destination)
 
-    assert first.manifest_path.read_bytes() == validation_manifest_bytes(selection)
-    assert first.manifest_sha256 == second.manifest_sha256
-    assert first.shard_path.read_bytes() == second.shard_path.read_bytes()
-    assert first.shard_sha256 == second.shard_sha256
-    assert first.shard_bytes == second.shard_bytes > 0
-    with tarfile.open(first.shard_path, mode="r:") as archive:
-        members = archive.getmembers()
-        assert len(members) == VALIDATION_SAMPLE_COUNT
-        assert tuple(member.name for member in members) == tuple(
-            f"{sample_id}.json" for sample_id in ordered_ids
-        )
-        assert all(member.mtime == 0 for member in members)
-        first_payload = archive.extractfile(members[0])
-        assert first_payload is not None
-        assert json.load(first_payload) == {"id": ordered_ids[0]}
-
-    with pytest.raises(ValidationBundleExistsError, match="already exists"):
-        write_validation_bundle(selection, samples, first.root)
-    assert first.shard_path.read_bytes() == second.shard_path.read_bytes()
+    assert load_validation_selection(destination, manifest) == selection
+    assert ensure_validation_selection(manifest, destination) == selection
+    with pytest.raises(ValidationSelectionExistsError, match="already exists"):
+        write_validation_selection(selection, destination)
+    assert destination.read_bytes() == canonical_validation_selection_bytes(selection)
+    assert not tuple(destination.parent.glob(f".{destination.name}.*.tmp"))
 
 
-@pytest.mark.parametrize("mutation", ["missing", "extra", "out_of_order"])
-def test_validation_bundle_rejects_id_drift_and_cleans_temporary_directory(
-    tmp_path: Path,
-    mutation: str,
-) -> None:
-    selection = select_validation_records(_records(), seed=17, aspect_bucket=_bucket)
-    ids = [entry.id for entry in selection.entries]
-    if mutation == "missing":
-        ids.pop()
-    elif mutation == "extra":
-        ids.append(max(ids) + 1)
-    else:
-        ids[0], ids[1] = ids[1], ids[0]
-
-    destination = tmp_path / "validation"
-    with pytest.raises(ValidationSelectionError, match="validation shard"):
-        write_validation_bundle(
-            selection,
-            _validation_samples(tuple(ids)),
-            destination,
-        )
-
-    assert not destination.exists()
-    assert not tuple(tmp_path.glob(".validation.*.tmp"))
-
-
-def test_validation_bundle_rolls_back_final_when_parent_fsync_fails(
+def test_selection_publication_rolls_back_when_directory_fsync_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    selection = select_validation_records(_records(), seed=17, aspect_bucket=_bucket)
-    ids = tuple(entry.id for entry in selection.entries)
-    destination = tmp_path / "validation"
-    real_fsync = os.fsync
-    calls = 0
+    selection = select_validation_shards(_manifest(_bodies()))
+    destination = tmp_path / "validation-selection.json"
 
-    def fail_parent_fsync(file_descriptor: int) -> None:
-        nonlocal calls
-        calls += 1
-        if calls >= 4:
-            raise OSError("injected parent fsync failure")
-        real_fsync(file_descriptor)
+    def fail_fsync(_path: Path) -> None:
+        raise OSError("injected directory fsync failure")
 
-    monkeypatch.setattr(os, "fsync", fail_parent_fsync)
-    with pytest.raises(ValidationPublicationError, match="could not be published"):
-        write_validation_bundle(selection, _validation_samples(ids), destination)
+    monkeypatch.setattr(validation_module, "_fsync_directory", fail_fsync)
+    with pytest.raises(ValidationSelectionError, match="could not be published"):
+        write_validation_selection(selection, destination)
 
     assert not destination.exists()
-    assert not tuple(tmp_path.glob(".validation.*.tmp"))
+    assert not tuple(tmp_path.glob(f".{destination.name}.*.tmp"))
 
 
-def test_validation_shard_members_are_nonempty_sorted_unique_and_safe() -> None:
-    with pytest.raises(ValidationSelectionError, match="must have members"):
-        ValidationShardSample(id=1, members=())
-    with pytest.raises(ValidationSelectionError, match="sorted and unique"):
-        ValidationShardSample(
-            id=1,
-            members=(
-                ValidationShardMember("json", b"{}"),
-                ValidationShardMember("jpg", b"x"),
-            ),
+def test_existing_selection_rejects_manifest_drift(tmp_path: Path) -> None:
+    bodies = _bodies()
+    manifest = _manifest(bodies)
+    destination = tmp_path / "validation-selection.json"
+    write_validation_selection(select_validation_shards(manifest), destination)
+    changed = dict(bodies)
+    changed[next(iter(changed))] = _valid_tar(99)
+
+    with pytest.raises(ValidationSelectionError, match="manifest_id differs"):
+        load_validation_selection(destination, _manifest(changed))
+
+
+def test_prepare_downloads_and_verifies_both_complete_selected_tars(
+    tmp_path: Path,
+) -> None:
+    bodies = _bodies()
+    manifest = _manifest(bodies)
+    selection = select_validation_shards(manifest)
+    transport = _MemoryTransport(bodies)
+    root = (tmp_path / "validation-shards").absolute()
+
+    first = prepare_validation_shards(
+        cast(ModelScopeDatasetTransport, transport), manifest, selection, root
+    )
+    second = prepare_validation_shards(
+        cast(ModelScopeDatasetTransport, transport), manifest, selection, root
+    )
+
+    assert first.selection == second.selection == selection
+    assert first.paths == tuple(root / path for path in selection.shard_paths)
+    assert tuple(path.read_bytes() for path in first.paths) == tuple(
+        bodies[path] for path in selection.shard_paths
+    )
+    assert transport.downloaded == list(selection.shard_paths)
+
+
+@pytest.mark.parametrize(
+    "body_factory,error",
+    _INVALID_ARCHIVES,
+)
+def test_strict_loader_rejects_invalid_tar_members_and_pairs(
+    tmp_path: Path,
+    body_factory: Callable[[int], bytes],
+    error: str,
+) -> None:
+    bodies = _bodies(body_factory=body_factory)
+    manifest = _manifest(bodies)
+    selection = _materialize_selected(tmp_path.absolute(), manifest, bodies)
+
+    with pytest.raises(ValidationPromptError, match=error):
+        load_validation_prompt_samples(
+            selection,
+            tmp_path.absolute(),
+            run_seed=44,
         )
-    with pytest.raises(ValidationSelectionError, match="suffix is invalid"):
-        ValidationShardMember("../json", b"{}")
+
+
+def test_loader_uses_caption_priority_stable_seed_and_metadata_dimensions(
+    tmp_path: Path,
+) -> None:
+    def prompts(sample_id: int) -> bytes:
+        return _valid_tar(
+            sample_id,
+            captions={"z-last": "later", "a-first": "  chosen caption  "},
+            multicaptions={"a": "fallback caption"},
+            width=47,
+            height=33,
+        )
+
+    bodies = _bodies(body_factory=prompts)
+    manifest = _manifest(bodies)
+    root = tmp_path.absolute()
+    selection = _materialize_selected(root, manifest, bodies)
+    before = {path: (root / path).read_bytes() for path in selection.shard_paths}
+
+    first = load_validation_prompt_samples(selection, root, run_seed=44)
+    second = load_validation_prompt_samples(selection, root, run_seed=44)
+
+    assert first == second
+    assert len(first) == 2
+    assert {item.prompt for item in first} == {"chosen caption"}
+    assert {(item.height, item.width) for item in first} == {(33, 47)}
+    assert len({item.seed for item in first}) == 2
+    assert len({item.prompt_id for item in first}) == 2
+    assert {path: (root / path).read_bytes() for path in selection.shard_paths} == before
+    with pytest.raises(ValidationPromptError, match="run seed must equal"):
+        load_validation_prompt_samples(selection, root, run_seed=45)
+
+
+def test_loader_falls_back_to_lexicographic_multicaptions(tmp_path: Path) -> None:
+    def prompts(sample_id: int) -> bytes:
+        return _valid_tar(
+            sample_id,
+            captions={"a": "", "b": None},
+            multicaptions={"z": "later", "a": "fallback"},
+        )
+
+    bodies = _bodies(body_factory=prompts)
+    manifest = _manifest(bodies)
+    root = tmp_path.absolute()
+    selection = _materialize_selected(root, manifest, bodies)
+
+    samples = load_validation_prompt_samples(selection, root, run_seed=44)
+
+    assert {item.prompt for item in samples} == {"fallback"}
+
+
+def test_loader_exposes_typed_tags_when_nl_is_empty(tmp_path: Path) -> None:
+    def tags_only(sample_id: int) -> bytes:
+        return _valid_tar(
+            sample_id,
+            captions={"nl2": "", "nl3": None},
+            multicaptions={"vibes": ""},
+        )
+
+    bodies = _bodies(body_factory=tags_only)
+    manifest = _manifest(bodies)
+    root = tmp_path.absolute()
+    selection = _materialize_selected(root, manifest, bodies)
+
+    samples = load_validation_prompt_samples(
+        selection,
+        root,
+        run_seed=44,
+        caption_fields_parser=parse_modelscope_caption_fields,
+    )
+
+    assert len(samples) == 2
+    assert all(sample.prompt is None for sample in samples)
+    assert all(sample.caption_fields is not None for sample in samples)
+
+    def general_tags(sample: validation_module.ValidationPromptSample) -> tuple[str, ...]:
+        assert sample.caption_fields is not None
+        return tuple(tag.text for tag in sample.caption_fields.general)
+
+    assert {general_tags(sample) for sample in samples} == {("1girl", "blue_hair")}
+
+
+def test_loader_exposes_typed_existing_nl_caption(tmp_path: Path) -> None:
+    bodies = _bodies()
+    manifest = _manifest(bodies)
+    root = tmp_path.absolute()
+    selection = _materialize_selected(root, manifest, bodies)
+
+    samples = load_validation_prompt_samples(
+        selection,
+        root,
+        run_seed=44,
+        caption_fields_parser=parse_modelscope_caption_fields,
+    )
+
+    assert {sample.prompt for sample in samples} == {"prompt"}
+    assert all(sample.caption_fields is not None for sample in samples)
+    assert {
+        sample.caption_fields.nl.nl2
+        for sample in samples
+        if sample.caption_fields is not None
+    } == {"prompt"}
+
+
+def test_loader_rejects_global_duplicate_metadata_ids(tmp_path: Path) -> None:
+    bodies = _bodies(body_factory=_duplicate_id_tar)
+    manifest = _manifest(bodies)
+    root = tmp_path.absolute()
+    selection = _materialize_selected(root, manifest, bodies)
+
+    with pytest.raises(ValidationPromptError, match="globally unique"):
+        load_validation_prompt_samples(selection, root, run_seed=44)

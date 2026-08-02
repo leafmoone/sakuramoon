@@ -74,6 +74,7 @@ def _state(
         checkpoint_cadence=CheckpointCadence(
             trainer.successful_updates,
             1_800_000_000.0 + trainer.successful_updates,
+            1000,
         ),
     )
 
@@ -82,6 +83,7 @@ def _transition_cadence(source: RawCheckpointState) -> CheckpointCadence:
     return CheckpointCadence(
         source.trainer.successful_updates,
         source.checkpoint_cadence.last_wall_clock_unix_seconds + 1.0,
+        source.checkpoint_cadence.every_successful_updates,
     )
 
 

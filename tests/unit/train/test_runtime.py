@@ -32,6 +32,7 @@ from sakuramoon.data.production import (
     ConfiguredDataLoader,
     ProductionBatchStreamIdentity,
 )
+from sakuramoon.model.attention import DenseGQAAttention
 from sakuramoon.model.growth import BASE_SLOT_IDS, active_slot_ids
 from sakuramoon.telemetry.timers import PhaseTimer
 from sakuramoon.train.loop import LoopResult
@@ -43,6 +44,7 @@ from sakuramoon.train.preflight import (
     RestoredSingleGpuCheckpoint,
 )
 from sakuramoon.train.runtime import (
+    ActualDitFlopCounter,
     RuntimeMeasurement,
     SingleGpuBatchRuntime,
     SuccessfulTrainingObservation,
@@ -85,7 +87,7 @@ class _CloseableIterator(Iterator[torch.Tensor]):
             raise OSError("synthetic stream close failure")
 
 
-def _config(*, planned_updates: int) -> RuntimeConfig:
+def _config(*, planned_updates: int, checkpoint_updates: int = 1000) -> RuntimeConfig:
     return cast(
         RuntimeConfig,
         SimpleNamespace(
@@ -103,19 +105,27 @@ def _config(*, planned_updates: int) -> RuntimeConfig:
             growth=SimpleNamespace(enabled=False),
             distributed=SimpleNamespace(backend="native", world_size=1),
             failure=SimpleNamespace(allow_force_bypass=False),
-            checkpoint=SimpleNamespace(full_every_updates=1000),
+            checkpoint=SimpleNamespace(full_every_updates=checkpoint_updates),
         ),
     )
 
 
 def _raw_state(
-    state: SingleGpuUpdateState, *, terminal: int, cadence_time: float = 0.0
+    state: SingleGpuUpdateState,
+    *,
+    terminal: int,
+    cadence_time: float = 0.0,
+    cadence_updates: int = 1000,
 ) -> RawCheckpointState:
     return RawCheckpointState(
         trainer=state,
         growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
         stage_budget=StageBudgetCheckpointState(0, terminal),
-        checkpoint_cadence=CheckpointCadence(state.successful_updates, cadence_time),
+        checkpoint_cadence=CheckpointCadence(
+            state.successful_updates,
+            cadence_time,
+            cadence_updates,
+        ),
     )
 
 
@@ -186,6 +196,7 @@ def _runtime(module: torch.nn.Module) -> SingleGpuBatchRuntime:
                 per_sample_loss=loss,
                 image_tokens=1,
                 text_tokens=1,
+                dit_flops=1,
                 sample_ids=("1",),
                 shape_keys=("unit",),
                 high_noise_loss_sum=loss.sum(),
@@ -332,6 +343,34 @@ def test_single_gpu_config_requires_native_s0() -> None:
     )
     with pytest.raises(ValueError, match="topology"):
         require_single_gpu_config(cast(RuntimeConfig, changed))
+
+
+def test_actual_dit_flops_use_live_linear_and_attention_shapes() -> None:
+    attention = DenseGQAAttention(
+        hidden_size=8,
+        q_heads=2,
+        kv_heads=1,
+        head_dim=4,
+        rope_nope_dim=0,
+        rope_y_dim=2,
+        rope_x_dim=2,
+        rope_position_scale=16.0,
+        rope_theta=1000.0,
+        norm_eps=1e-6,
+        linear_dtype=torch.float32,
+        projection_bias=False,
+        dropout=0.0,
+    )
+    tokens = torch.randn((1, 3, 8))
+    mask = torch.ones((1, 1, 3, 3), dtype=torch.bool)
+    coordinates = torch.zeros((1, 3, 2), dtype=torch.float32)
+    counter = ActualDitFlopCounter(attention)
+
+    output, flops = counter.measure(lambda: attention(tokens, mask, coordinates))
+
+    assert output.shape == tokens.shape
+    # Five actual Linear calls plus QK and AV for the live 3-token sequence.
+    assert flops == 1824
 
 
 @pytest.mark.parametrize("mode", ["alternating", "all"])
@@ -664,11 +703,45 @@ def test_nonzero_s0_budget_origin_fails_before_consuming_batch_and_closes_stream
         trainer=SingleGpuUpdateState(5, 5, 5),
         growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
         stage_budget=StageBudgetCheckpointState(5, 6),
-        checkpoint_cadence=CheckpointCadence(5, 0.0),
+        checkpoint_cadence=CheckpointCadence(5, 0.0, 1000),
     )
     restored = _restored(module, optimizer, restored_state)
 
     with pytest.raises(ValueError, match="must start at update zero"):
+        _run(
+            tmp_path,
+            config=config,
+            stream=stream,
+            runtime=runtime,
+            module=module,
+            optimizer=optimizer,
+            restored=restored,
+            accepted=_accepted(config, stream, runtime, module, optimizer, restored),
+        )
+    assert iterator.next_calls == 0
+    assert iterator.close_calls == 1
+
+
+def test_checkpoint_cadence_config_drift_fails_before_consuming_batch(
+    tmp_path: Path,
+) -> None:
+    config = _config(planned_updates=1, checkpoint_updates=7)
+    module = torch.nn.Linear(1, 1, bias=False)
+    optimizer = _SgdAdapter(iter(module.parameters()))
+    runtime = _runtime(module)
+    iterator = _CloseableIterator((torch.ones(1, 1),))
+    stream = _stream(iterator)
+    restored = _restored(
+        module,
+        optimizer,
+        _raw_state(
+            SingleGpuUpdateState.initial(),
+            terminal=1,
+            cadence_updates=1000,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="cadence differs from resolved config"):
         _run(
             tmp_path,
             config=config,
@@ -976,7 +1049,7 @@ def test_due_checkpoint_is_read_back_and_exact_state_is_required(
         (
             SingleGpuUpdateState(1, 1, 1),
             CheckpointReason.STAGE_FINALIZE,
-            CheckpointCadence(1, 1.0),
+            CheckpointCadence(1, 1.0, 1000),
         )
     ]
     assert len(publisher.retained) == 1
@@ -1036,7 +1109,7 @@ def test_due_checkpoint_rejects_unusable_or_mismatched_raw(
             else SingleGpuUpdateState(1, 1, 1),
             restored_state.growth,
             restored_state.stage_budget,
-            CheckpointCadence(1, 1.0),
+            CheckpointCadence(1, 1.0, 1000),
         )
         return manifest, state
 

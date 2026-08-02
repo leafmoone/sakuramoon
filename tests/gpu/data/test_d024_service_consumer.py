@@ -27,7 +27,6 @@ from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetSourceIdentity,
     ShardRecord,
-    manifest_sha256,
 )
 from sakuramoon.data.metadata import MetadataFieldMapping
 from sakuramoon.data.modelscope import ModelScopeDatasetTransport
@@ -42,6 +41,7 @@ from sakuramoon.data.service_protocol import (
     DataServiceSessionIdentity,
     ShardLeaseDescriptor,
 )
+from sakuramoon.data.validation import VALIDATION_SHARD_PATHS, select_validation_shards
 
 
 class _Writer(Protocol):
@@ -80,9 +80,7 @@ def _observe_rejection(_reason: str) -> None:
 
 def _pipeline(path: Path, record: ShardRecord) -> WebDatasetPipeline:
     nl = NlDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0)
-    probabilities = CaptionDropoutProbabilities(
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, nl
-    )
+    probabilities = CaptionDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, nl)
     fields = MetadataFieldMapping(
         id_field="id",
         width_field="width",
@@ -94,7 +92,6 @@ def _pipeline(path: Path, record: ShardRecord) -> WebDatasetPipeline:
         shard_records=(record,),
         metadata_adapter=_metadata,
         metadata_fields=fields,
-        validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=probabilities,
@@ -104,7 +101,7 @@ def _pipeline(path: Path, record: ShardRecord) -> WebDatasetPipeline:
         rejection_observer=_observe_rejection,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
 
 
@@ -128,23 +125,21 @@ def _write_tar(path: Path, sample_id: int) -> None:
 
 def _descriptors(tmp_path: Path) -> tuple[ShardLeaseDescriptor, ...]:
     descriptors: list[ShardLeaseDescriptor] = []
-    for index in range(4):
+    record_paths = (*VALIDATION_SHARD_PATHS, "training-0.tar", "training-1.tar")
+    for index, record_path in enumerate(record_paths):
         path = (tmp_path / f"{index}.tar").absolute()
         _write_tar(path, index + 1)
         record = ShardRecord(
-            path=path.name,
-            release="trusted",
+            path=record_path,
             bytes=path.stat().st_size,
-            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-            samples=1,
+            upstream_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         )
         descriptors.append(
             ShardLeaseDescriptor(
                 lease_id=hashlib.sha256(f"lease-{index}".encode()).hexdigest(),
                 worker_id=index % 2,
-                state_identity=hashlib.sha256(
-                    f"state-{index}".encode()
-                ).hexdigest(),
+                cycle_index=0,
+                state_identity=hashlib.sha256(f"state-{index}".encode()).hexdigest(),
                 record=record,
                 local_path=path,
             )
@@ -169,6 +164,7 @@ class _Client:
         descriptor = ShardLeaseDescriptor(
             lease_id=source.lease_id,
             worker_id=worker_id,
+            cycle_index=source.cycle_index,
             state_identity=source.state_identity,
             record=source.record,
             local_path=source.local_path,
@@ -237,6 +233,7 @@ def _run_service_process(
     )
     service = DataSupplyService(
         manifest,
+        select_validation_shards(manifest),
         cache,
         root / "mainset.json",
         (root / "runtime" / "data-service.lock").absolute(),
@@ -279,9 +276,7 @@ def test_real_service_af_unix_client_reaches_real_cuda_consumer(tmp_path: Path) 
     descriptors = _descriptors(tmp_path)
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="test-license",
-        access_terms="test-terms",
+        revision="master",
     )
     records = tuple(descriptor.record for descriptor in descriptors)
     manifest = DatasetManifest.from_shards(source, records)
@@ -289,7 +284,11 @@ def test_real_service_af_unix_client_reaches_real_cuda_consumer(tmp_path: Path) 
         descriptor.record.path: descriptor.local_path.read_bytes()
         for descriptor in descriptors
     }
-    identity = DataServiceSessionIdentity(manifest_sha256(manifest), 2)
+    identity = DataServiceSessionIdentity(manifest.manifest_id, 2)
+    excluded = frozenset(select_validation_shards(manifest).shard_paths)
+    training_records = tuple(
+        record for record in records if record.path not in excluded
+    )
     socket_path = (
         Path(__file__).parents[3] / f".d024-gpu-service-{os.getpid()}.sock"
     ).absolute()
@@ -307,9 +306,11 @@ def test_real_service_af_unix_client_reaches_real_cuda_consumer(tmp_path: Path) 
         assert ready.wait(timeout=15.0)
         client = _BoundedRealClient(
             DataServiceClient(
-                socket_path, identity, request_timeout_seconds=5.0
+                socket_path,
+                worker_count=identity.worker_count,
+                request_timeout_seconds=5.0,
             ),
-            lease_budget=len(records),
+            lease_budget=len(training_records),
         )
         batches = iter_service_batches(
             _pipeline(descriptors[0].local_path, descriptors[0].record),
@@ -325,7 +326,9 @@ def test_real_service_af_unix_client_reaches_real_cuda_consumer(tmp_path: Path) 
             observed.append(int(batch.sample_ids[0]))
             assert torch.isfinite(images.mean())
         torch.cuda.synchronize()
-        assert sorted(client.acknowledged) == sorted(bodies)
+        assert sorted(client.acknowledged) == sorted(
+            record.path for record in training_records
+        )
     finally:
         stop.set()
         process.join(timeout=15.0)

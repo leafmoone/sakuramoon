@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.metadata import (
     MetadataError,
     MetadataFieldMapping,
     MetadataRecord,
+    OperationalMetadataRecord,
     parse_metadata,
     parse_shard_metadata,
     scan_duplicate_ids,
@@ -93,17 +93,7 @@ def test_unique_id_report_is_empty() -> None:
     assert report.has_duplicates is False
 
 
-def _shard() -> ShardRecord:
-    return ShardRecord(
-        path="release-a/000001.tar",
-        release="trusted-release",
-        bytes=1,
-        sha256="a" * 64,
-        samples=1,
-    )
-
-
-def test_explicit_field_mapping_uses_shard_release_and_preserves_raw() -> None:
+def test_explicit_field_mapping_uses_only_real_row_fields() -> None:
     fields = MetadataFieldMapping(
         id_field="logical_id",
         width_field="image_width",
@@ -119,11 +109,10 @@ def test_explicit_field_mapping_uses_shard_release_and_preserves_raw() -> None:
         "caption_payload": {"nl": "synthetic"},
     }
 
-    record = parse_shard_metadata(raw, shard=_shard(), fields=fields)
+    record = parse_shard_metadata(raw, fields=fields)
 
-    assert record == MetadataRecord(
+    assert record == OperationalMetadataRecord(
         id=23,
-        release="trusted-release",
         width=1024,
         height=768,
         caption_available=True,
@@ -136,13 +125,11 @@ def test_explicit_field_mapping_rejects_missing_or_invalid_values() -> None:
     with pytest.raises(MetadataError, match="missing mapped fields: caption"):
         parse_shard_metadata(
             {"id": 1, "w": 512, "h": 512},
-            shard=_shard(),
             fields=fields,
         )
     with pytest.raises(MetadataError, match="boolean"):
         parse_shard_metadata(
             {"id": 1, "w": 512, "h": 512, "caption": 1},
-            shard=_shard(),
             fields=fields,
         )
 

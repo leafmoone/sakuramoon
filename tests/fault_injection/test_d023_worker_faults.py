@@ -112,7 +112,7 @@ class _PreparedCache:
                 self.root / shard_path,
                 record.path,
                 record.bytes,
-                record.sha256,
+                record.upstream_sha256,
                 False,
             ),
             (),
@@ -134,17 +134,13 @@ def _manifest(
         _write_tar(path, sample_id)
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="test",
-        access_terms="test",
+        revision="master",
     )
     records = tuple(
         ShardRecord(
             path=path.name,
-            release="trusted",
             bytes=path.stat().st_size,
-            sha256="1" * 64,
-            samples=1,
+            upstream_sha256="1" * 64,
         )
         for path in paths
     )
@@ -162,7 +158,6 @@ def _pipeline(
         shard_records=(record,),
         metadata_adapter=metadata_adapter,
         metadata_fields=_fields(),
-        validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -172,7 +167,7 @@ def _pipeline(
         rejection_observer=_observe_rejection,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
 
 
@@ -225,7 +220,6 @@ def test_real_worker_exit_keeps_both_active_and_restart_replays_from_start(
         record.path for record in manifest.shards
     )
     assert restarted.state.replayed_shards == 2
-    assert restarted.state.replayed_samples == 2
 
     batches = tuple(
         _batches(_pipeline(paths[0], manifest.shards[0]), restarted, manifest)
@@ -259,4 +253,3 @@ def test_parent_early_close_keeps_prefetched_shards_active_for_restart(
     )
     assert sorted(int(batch.sample_ids[0]) for batch in replayed) == [1, 2]
     assert restarted.state.replayed_shards == 2
-    assert restarted.state.replayed_samples == 2

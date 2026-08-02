@@ -3,7 +3,7 @@ extends = ["base.toml"]
 [run]
 run_id = "s0-production"
 stage = "S0"
-seed = "REQUIRED_S0_SEED"
+seed = 44
 
 [paths]
 run_dir = "runs/s0"
@@ -17,7 +17,26 @@ frozen_encoders_outside_wrapper = true
 automatic_backend_fallback = false
 
 [checkpoint]
-slots = "BENCHMARK_S0_CHECKPOINT_SLOTS"
+full_every_updates = 1000
+slots = 2
+
+[data.cache]
+low_watermark_gib = 32
+high_watermark_gib = 64
+download_concurrency = 2
+verified_shard_lookahead = 3
+persistent_workers_per_rank = 2
+ready_batches_per_rank = 2
+
+[data.service]
+request_timeout_seconds = 30.0
+lease_channel_capacity = 2
+ack_channel_capacity = 2
+
+[data.transport]
+connect_timeout_seconds = 10.0
+read_timeout_seconds = 30.0
+stream_chunk_bytes = 1048576
 
 [growth]
 enabled = false
@@ -35,23 +54,22 @@ predecessor = ""
 world_size = 1
 depth = 16
 resolution = 256
-local_batch = "BENCHMARK_S0_LOCAL_BATCH"
-accumulation = "BENCHMARK_S0_ACCUMULATION"
-global_batch = "BENCHMARK_S0_GLOBAL_BATCH"
-activation_checkpoint_mode = "BENCHMARK_S0_ACTIVATION_CHECKPOINT_MODE"
-planned_updates = "BENCHMARK_S0_PLANNED_UPDATES"
-planned_valid_samples = "BENCHMARK_S0_PLANNED_VALID_SAMPLES"
-planned_equivalent_data_passes = "BENCHMARK_S0_EQUIVALENT_DATA_PASSES"
-planned_dit_flops = "BENCHMARK_S0_DIT_FLOPS"
-planned_wall_time_hours = "BENCHMARK_S0_WALL_TIME_HOURS"
+local_batch = 2
+accumulation = 4
+global_batch = 8
+activation_checkpoint_mode = "none"
+planned_updates = 1000
 manual_finalize = true
 automatic_transition = false
 
 [logging]
 local_jsonl_path = "artifacts/s0/metrics.jsonl"
-flush_every_updates = "BENCHMARK_S0_METRICS_FLUSH_UPDATES"
+flush_every_updates = 1
 async_remote = true
 noise_observation_boundary = 0.95
+observer_queue_capacity = 64
+observer_event_timeout_seconds = 30.0
 
 [wandb]
 retry_jsonl_path = "artifacts/s0/wandb-retry.jsonl"
+queue_capacity = 64

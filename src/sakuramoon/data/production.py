@@ -22,6 +22,7 @@ from sakuramoon.data.caption import (
     Tag,
 )
 from sakuramoon.data.collate import (
+    CollateError,
     DataLeaseClient,
     TrainingBatch,
     iter_service_batches,
@@ -30,7 +31,6 @@ from sakuramoon.data.metadata import MetadataFieldMapping
 from sakuramoon.data.pipeline import RejectionObserver, WebDatasetPipeline
 from sakuramoon.data.serialize import FramingContract, TokenEncoder
 from sakuramoon.data.service_protocol import ShardLeaseDescriptor
-from sakuramoon.data.validation import load_validation_manifest_ids
 
 
 class ProductionDataError(ValueError):
@@ -190,14 +190,14 @@ class ProductionBatchStreamIdentity:
 
     resolved_config_sha256: str
     loader: ConfiguredDataLoader
-    manifest_sha256: str
+    manifest_id: str
     service_session_sha256: str
     factory_identity: str
 
     def __post_init__(self) -> None:
         digests = (
             self.resolved_config_sha256,
-            self.manifest_sha256,
+            self.manifest_id,
             self.service_session_sha256,
             self.factory_identity,
         )
@@ -224,6 +224,7 @@ class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
         "_identity",
         "_iterator",
         "_owner_pid",
+        "_ready_batch_depth",
         "_token",
     )
 
@@ -234,6 +235,7 @@ class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
         *,
         token: str,
         authority: object,
+        ready_batch_depth_snapshot: Callable[[], int] | None = None,
     ) -> None:
         if authority is not _STREAM_AUTHORITY:
             raise ProductionDataError(
@@ -241,6 +243,13 @@ class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
             )
         self._iterator = iterator
         self._identity = identity
+        inferred_snapshot = getattr(iterator, "ready_batch_depth_snapshot", None)
+        snapshot = (
+            ready_batch_depth_snapshot
+            if ready_batch_depth_snapshot is not None
+            else inferred_snapshot
+        )
+        self._ready_batch_depth = snapshot if callable(snapshot) else None
         self._token = token
         self._owner_pid = os.getpid()
         self._closed = False
@@ -278,6 +287,22 @@ class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
             _ACCEPTED_STREAMS.pop(self._token, None)
             raise
 
+    def ready_batch_depth_snapshot(self) -> int:
+        self._require_live()
+        if self._ready_batch_depth is None:
+            raise ProductionDataError(
+                "live DataLoader ready-batch depth is unavailable"
+            )
+        try:
+            depth = self._ready_batch_depth()
+        except (CollateError, NotImplementedError, OSError):
+            raise ProductionDataError(
+                "live DataLoader ready-batch depth is unsupported"
+            ) from None
+        if type(depth) is not int or depth < 0:
+            raise ProductionDataError("live DataLoader ready-batch depth is invalid")
+        return depth
+
     def close(self) -> None:
         if os.getpid() != self._owner_pid:
             raise ProductionDataError(
@@ -309,6 +334,8 @@ _ACCEPTED_STREAMS: weakref.WeakValueDictionary[
 def _issue_batch_stream(
     iterator: Iterator[TrainingBatch],
     identity: ProductionBatchStreamIdentity,
+    *,
+    ready_batch_depth_snapshot: Callable[[], int] | None = None,
 ) -> AcceptedProductionBatchStream:
     token = secrets.token_hex(32)
     stream = AcceptedProductionBatchStream(
@@ -316,6 +343,7 @@ def _issue_batch_stream(
         identity,
         token=token,
         authority=_STREAM_AUTHORITY,
+        ready_batch_depth_snapshot=ready_batch_depth_snapshot,
     )
     _ACCEPTED_STREAMS[token] = stream
     return stream
@@ -358,11 +386,9 @@ class _PreleasedClient:
 @dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
 class ProductionPipelineFactory:
     config: RuntimeConfig
-    validation_ids: frozenset[int]
     tokenizer: TokenEncoder
     framing: FramingContract
     rejection_observer: RejectionObserver
-    pass_index: int
     factory_identity: str
     _owner_pid: int
 
@@ -377,14 +403,7 @@ class ProductionPipelineFactory:
             not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
                 self.config, RuntimeConfig
             )
-            or type(self.validation_ids) is not frozenset
-            or len(self.validation_ids) != self.config.data.validation.sample_count
-            or any(
-                type(value) is not int or value <= 0 for value in self.validation_ids
-            )
             or not callable(self.rejection_observer)
-            or type(self.pass_index) is not int
-            or self.pass_index < 0
             or type(self.factory_identity) is not str
             or len(self.factory_identity) != 64
             or any(
@@ -420,7 +439,6 @@ class ProductionPipelineFactory:
         tokenizer: TokenEncoder,
         framing: FramingContract,
         rejection_observer: Callable[[str], None],
-        pass_index: int,
     ) -> ProductionPipelineFactory:
         if cls is not ProductionPipelineFactory:
             raise ProductionDataError(
@@ -434,20 +452,8 @@ class ProductionPipelineFactory:
             repository_root, Path
         ) or not repository_root.is_absolute():
             raise ProductionDataError("repository_root must be an absolute path")
-        configured_path = Path(config.data.validation.manifest_path)
-        manifest_path = (
-            configured_path
-            if configured_path.is_absolute()
-            else repository_root / configured_path
-        )
-        validation_ids = load_validation_manifest_ids(
-            manifest_path,
-            expected_sha256=config.data.validation.manifest_sha256,
-            expected_count=config.data.validation.sample_count,
-        )
         factory = object.__new__(cls)
         object.__setattr__(factory, "config", config)
-        object.__setattr__(factory, "validation_ids", validation_ids)
         object.__setattr__(factory, "tokenizer", tokenizer)
         object.__setattr__(factory, "framing", framing)
         object.__setattr__(
@@ -455,7 +461,6 @@ class ProductionPipelineFactory:
             "rejection_observer",
             cast(RejectionObserver, rejection_observer),
         )
-        object.__setattr__(factory, "pass_index", pass_index)
         object.__setattr__(factory, "factory_identity", secrets.token_hex(32))
         object.__setattr__(factory, "_owner_pid", os.getpid())
         factory._validate_fields()
@@ -496,7 +501,6 @@ class ProductionPipelineFactory:
             shard_records=(descriptor.record,),
             metadata_adapter=adapt_modelscope_metadata,
             metadata_fields=PRODUCTION_METADATA_FIELDS,
-            validation_ids=self.validation_ids,
             buckets=buckets,
             min_crop_retention=self.config.data.image.min_crop_retention,
             probabilities=probabilities,
@@ -506,7 +510,7 @@ class ProductionPipelineFactory:
             rejection_observer=self.rejection_observer,
             base_seed=self.config.run.seed,
             stage=self.config.stage.name,
-            pass_index=self.pass_index,
+            cycle_index=descriptor.cycle_index,
         )
         _require_spawn_serializable(pipeline, "production pipeline")
         return pipeline
@@ -517,14 +521,10 @@ class ProductionPipelineFactory:
         self._require_governed_issuance()
         loader = self.loader
         loader.require_identity(client)
-        if client.identity.manifest_sha256 != self.config.data.manifest.sha256:
-            raise ProductionDataError(
-                "resolved manifest identity does not match the data service session"
-            )
         identity = ProductionBatchStreamIdentity(
             resolved_config_sha256=resolved_config_sha256(self.config),
             loader=loader,
-            manifest_sha256=self.config.data.manifest.sha256,
+            manifest_id=client.identity.manifest_id,
             service_session_sha256=client.identity.sha256,
             factory_identity=self.factory_identity,
         )

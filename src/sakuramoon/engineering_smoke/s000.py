@@ -47,7 +47,6 @@ from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetSourceIdentity,
     ShardRecord,
-    manifest_sha256,
 )
 from sakuramoon.data.metadata import MetadataFieldMapping
 from sakuramoon.data.modelscope import ModelScopeDatasetTransport
@@ -71,7 +70,12 @@ from sakuramoon.data.service_protocol import (
     DataServiceSessionIdentity,
     ShardLeaseDescriptor,
 )
-from sakuramoon.data.validation import load_validation_manifest_ids
+from sakuramoon.data.validation import (
+    VALIDATION_SHARD_PATHS,
+    canonical_validation_selection_bytes,
+    load_validation_selection,
+    select_validation_shards,
+)
 from sakuramoon.encoders.mage_vae import load_local_mage_vae
 from sakuramoon.encoders.qwen import load_local_qwen
 from sakuramoon.engineering_smoke.config import (
@@ -226,9 +230,9 @@ def _write_new_bytes(path: Path, payload: bytes) -> None:
 def _write_new_json(path: Path, payload: dict[str, object]) -> None:
     _write_new_bytes(
         path,
-        (
-            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-        ).encode("utf-8"),
+        (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        ),
     )
 
 
@@ -238,7 +242,9 @@ def _repository_root(path: Path) -> Path:
         if path.is_symlink() or not root.is_dir():
             raise OSError
     except OSError:
-        raise EngineeringSmokeError("repository root must be a real directory") from None
+        raise EngineeringSmokeError(
+            "repository root must be a real directory"
+        ) from None
     return root
 
 
@@ -275,7 +281,9 @@ def _existing_output_root(repository_root: Path, configured: str) -> Path:
         if candidate.is_symlink() or not output.is_dir():
             raise OSError
     except (OSError, ValueError):
-        raise EngineeringSmokeError("engineering output root identity changed") from None
+        raise EngineeringSmokeError(
+            "engineering output root identity changed"
+        ) from None
     return output
 
 
@@ -323,48 +331,30 @@ def _tar_bytes(config: EngineeringSmokeConfig, sample_id: int) -> bytes:
 def _dataset(
     config: EngineeringSmokeConfig,
 ) -> tuple[DatasetManifest, dict[str, bytes]]:
+    paths = (
+        *VALIDATION_SHARD_PATHS,
+        *(
+            f"engineering/{index:06d}.tar"
+            for index in range(config.data.shard_count - len(VALIDATION_SHARD_PATHS))
+        ),
+    )
     bodies = {
-        f"engineering/{index:06d}.tar": _tar_bytes(config, 9001 + index)
-        for index in range(config.data.shard_count)
+        path: _tar_bytes(config, 9001 + index)
+        for index, path in enumerate(paths)
     }
-    source_digest = hashlib.sha256()
-    for path, body in sorted(bodies.items()):
-        source_digest.update(path.encode("ascii"))
-        source_digest.update(body)
     source = DatasetSourceIdentity(
         repo_id=DATASET_REPO_ID,
-        revision=source_digest.hexdigest()[:40],
-        license_id="engineering-generated-local-tar",
-        access_terms="synthetic-engineering-evidence-only",
+        revision="master",
     )
     records = tuple(
         ShardRecord(
             path=path,
-            release="engineering-smoke",
             bytes=len(body),
-            sha256=hashlib.sha256(body).hexdigest(),
-            samples=config.data.samples_per_shard,
+            upstream_sha256=hashlib.sha256(body).hexdigest(),
         )
         for path, body in sorted(bodies.items())
     )
     return DatasetManifest.from_shards(source, records), bodies
-
-
-def _validation_payload(config: EngineeringSmokeConfig) -> bytes:
-    rows = (
-        json.dumps(
-            {
-                "aspect_bucket": "engineering-square",
-                "caption_available": False,
-                "id": sample_id,
-                "release": "engineering-validation",
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        for sample_id in range(1, config.data.validation_sample_count + 1)
-    )
-    return ("\n".join(rows) + "\n").encode("utf-8")
 
 
 def _run_data_service(
@@ -376,6 +366,9 @@ def _run_data_service(
     stop: Any,
     ready: Any,
 ) -> None:
+    validation_selection = load_validation_selection(
+        output_root / "validation-selection.json", manifest
+    )
     cache = ShardCache(
         (output_root / "service" / "cache").absolute(),
         manifest,
@@ -390,6 +383,7 @@ def _run_data_service(
     )
     service = DataSupplyService(
         manifest,
+        validation_selection,
         cache,
         output_root / "service" / "mainset.json",
         Path(config.service.ownership_lock_path),
@@ -420,8 +414,8 @@ def _start_data_service(
             "engineering data-service socket is already occupied"
         )
     identity = DataServiceSessionIdentity(
-        manifest_sha256(manifest),
-        config.data.persistent_workers,
+        manifest_id=manifest.manifest_id,
+        worker_count=config.data.persistent_workers,
     )
     context = cast(Any, mp.get_context("spawn"))
     stop = context.Event()
@@ -482,7 +476,9 @@ def _stop_preserving(
         raise
 
 
-def _dropout_probabilities(config: EngineeringSmokeConfig) -> CaptionDropoutProbabilities:
+def _dropout_probabilities(
+    config: EngineeringSmokeConfig,
+) -> CaptionDropoutProbabilities:
     dropout = config.caption.dropout
     return CaptionDropoutProbabilities(
         nsfw=dropout.nsfw,
@@ -518,24 +514,18 @@ def _reject_sample(_reason: str) -> None:
 
 
 def _open_batch_stream(
-    output_root: Path,
     config: EngineeringSmokeConfig,
     identity: DataServiceSessionIdentity,
     tokenizer: Any,
     marker_root: Path,
 ) -> _BatchStream:
-    validation_path = output_root / "validation-manifest.jsonl"
-    validation_payload = validation_path.read_bytes()
-    validation_ids = load_validation_manifest_ids(
-        validation_path,
-        expected_sha256=hashlib.sha256(validation_payload).hexdigest(),
-        expected_count=config.data.validation_sample_count,
-    )
     client = DataServiceClient(
         Path(config.service.socket_path),
-        identity,
+        worker_count=identity.worker_count,
         request_timeout_seconds=config.service.request_timeout_seconds,
     )
+    if client.identity != identity:
+        raise EngineeringSmokeError("engineering data service identity changed")
     if client.health():
         raise EngineeringSmokeError("engineering data service has no lease")
     descriptor = client.lease(0)
@@ -549,7 +539,6 @@ def _open_batch_stream(
         shard_records=(descriptor.record,),
         metadata_adapter=adapt_modelscope_metadata,
         metadata_fields=_METADATA_FIELDS,
-        validation_ids=validation_ids,
         buckets=_buckets(config),
         min_crop_retention=config.data.min_crop_retention,
         probabilities=_dropout_probabilities(config),
@@ -563,7 +552,7 @@ def _open_batch_stream(
         rejection_observer=_reject_sample,
         base_seed=config.run.seed,
         stage=config.stage.name,
-        pass_index=config.data.pass_index,
+        cycle_index=descriptor.cycle_index,
     )
     stream = iter_service_batches(
         pipeline,
@@ -599,8 +588,13 @@ def _wait_for_workers(
     while True:
         observed = _worker_markers(marker_root)
         if set(observed) == expected:
-            if len(set(observed.values())) != len(expected) or os.getpid() in observed.values():
-                raise EngineeringSmokeError("worker markers do not name distinct children")
+            if (
+                len(set(observed.values())) != len(expected)
+                or os.getpid() in observed.values()
+            ):
+                raise EngineeringSmokeError(
+                    "worker markers do not name distinct children"
+                )
             return observed
         if not set(observed) <= expected:
             raise EngineeringSmokeError("unexpected DataLoader worker identity")
@@ -778,9 +772,15 @@ def _run_one_update(
         raise EngineeringSmokeError("engineering update phase coverage is incomplete")
     optimizer_states = optimizer.audit_state()
     initialized = tuple(item for item in optimizer_states if item.initialized)
-    if not initialized or any(item.step != result.state.successful_updates for item in initialized):
-        raise EngineeringSmokeError("TorchAO optimizer state did not advance exactly once")
-    if not torch.isfinite(result.mean_loss) or not torch.isfinite(result.clip.pre_clip_norm):
+    if not initialized or any(
+        item.step != result.state.successful_updates for item in initialized
+    ):
+        raise EngineeringSmokeError(
+            "TorchAO optimizer state did not advance exactly once"
+        )
+    if not torch.isfinite(result.mean_loss) or not torch.isfinite(
+        result.clip.pre_clip_norm
+    ):
         raise EngineeringSmokeError("engineering update produced nonfinite evidence")
     return result.state, {
         "attention_backend": "dense_sdpa_reference",
@@ -825,6 +825,7 @@ def _initial_checkpoint_state(
         checkpoint_cadence=CheckpointCadence(
             trainer.successful_updates,
             0.0,
+            config.checkpoint.full_every_updates,
         ),
     )
 
@@ -842,7 +843,8 @@ def _fresh_resume_worker(
     output_root = _existing_output_root(repository_root, config.run.output_root)
     manifest, _bodies = _dataset(config)
     identity = DataServiceSessionIdentity(
-        manifest_sha256(manifest), config.data.persistent_workers
+        manifest_id=manifest.manifest_id,
+        worker_count=config.data.persistent_workers,
     )
     device = torch.device("cuda", config.device.index)
     torch.cuda.set_device(device)
@@ -860,7 +862,9 @@ def _fresh_resume_worker(
         checkpoint_manifest.identity,
     )
     if restored != checkpoint_state:
-        raise EngineeringSmokeError("fresh process restored state differs from raw sidecar")
+        raise EngineeringSmokeError(
+            "fresh process restored state differs from raw sidecar"
+        )
     runtime = _build_runtime(
         config,
         qwen=qwen_runtime.encoder,
@@ -870,7 +874,6 @@ def _fresh_resume_worker(
     )
     marker_root = output_root / "fresh-worker-pids"
     stream = _open_batch_stream(
-        output_root,
         config,
         identity,
         qwen_runtime.tokenizer,
@@ -930,7 +933,6 @@ def _run_initial_update(
     )
     marker_root = output_root / "initial-worker-pids"
     stream = _open_batch_stream(
-        output_root,
         config,
         identity,
         qwen_runtime.tokenizer,
@@ -952,10 +954,15 @@ def _run_initial_update(
             updates.append(update)
     finally:
         stream.close()
-    return composite, optimizer, state, {
-        "peak_memory_allocated_bytes": torch.cuda.max_memory_allocated(device),
-        "updates": updates,
-    }
+    return (
+        composite,
+        optimizer,
+        state,
+        {
+            "peak_memory_allocated_bytes": torch.cuda.max_memory_allocated(device),
+            "updates": updates,
+        },
+    )
 
 
 def _release_cuda_resources() -> None:
@@ -979,9 +986,17 @@ def run_s000_engineering_smoke(
     (output_root / "service").mkdir()
     (output_root / "checkpoints").mkdir()
     _fsync_directory(output_root)
-    validation_payload = _validation_payload(config)
-    _write_new_bytes(output_root / "validation-manifest.jsonl", validation_payload)
     manifest, bodies = _dataset(config)
+    validation_selection = select_validation_shards(
+        manifest,
+        seed=config.run.seed,
+    )
+    if len(validation_selection.shards) != config.data.validation_shard_count:
+        raise EngineeringSmokeError("engineering validation shard count changed")
+    _write_new_bytes(
+        output_root / "validation-selection.json",
+        canonical_validation_selection_bytes(validation_selection),
+    )
     dependency_path = root / config.run.dependency_lock_path
     if dependency_path.is_symlink() or not dependency_path.is_file():
         raise EngineeringSmokeError("dependency lock identity is unavailable")
@@ -1071,7 +1086,8 @@ def run_s000_engineering_smoke(
     fresh_document = cast(dict[str, object], fresh_result)
     next_update = fresh_document.get("next_successful_update")
     if (
-        fresh_document.get("checkpoint_id") != checkpoint_manifest.identity.checkpoint_id
+        fresh_document.get("checkpoint_id")
+        != checkpoint_manifest.identity.checkpoint_id
         or fresh_document.get("config_sha256") != loaded.resolved_sha256
         or fresh_document.get("restored_successful_update") != initial_successful_update
         or next_update != initial_successful_update + 1
@@ -1083,8 +1099,11 @@ def run_s000_engineering_smoke(
         raise EngineeringSmokeError("engineering service state is not an object")
     mainset_document = cast(dict[str, object], mainset)
     replayed_shards = mainset_document.get("replayed_shards")
+    cycle_index = mainset_document.get("cycle_index")
     if type(replayed_shards) is not int or replayed_shards < 1:
         raise EngineeringSmokeError("fresh service did not record shard replay")
+    if type(cycle_index) is not int or cycle_index < 0:
+        raise EngineeringSmokeError("service-owned cycle index is invalid")
 
     report_path = output_root / "engineering-report.json"
     _write_new_json(
@@ -1102,11 +1121,14 @@ def run_s000_engineering_smoke(
             "config_input_path": loaded.input_path,
             "config_input_sha256": loaded.input_sha256,
             "data": {
-                "manifest_sha256": manifest_sha256(manifest),
+                "cycle_index": cycle_index,
+                "manifest_id": manifest.manifest_id,
                 "replayed_shards": replayed_shards,
                 "service_boundary": "DataServiceServer/DataServiceClient leases",
                 "shards": len(manifest.shards),
                 "source": config.data.source_kind,
+                "validation_selection_id": validation_selection.selection_id,
+                "validation_shards": len(validation_selection.shards),
                 "workers": config.data.persistent_workers,
             },
             "dependency_lock_sha256": dependency_sha256,

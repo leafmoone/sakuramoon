@@ -13,12 +13,13 @@ from typing import NoReturn
 
 from sakuramoon.config import ConfigurationError, load_config
 from sakuramoon.data.cache import CacheQuota, ShardCache, ShardCacheError
-from sakuramoon.data.manifest import DatasetManifestError, load_dataset_manifest
+from sakuramoon.data.manifest import DatasetManifestError
 from sakuramoon.data.modelscope import (
     MODELSCOPE_TOKEN_ENVIRONMENT,
     DatasetAuthenticationError,
     DatasetTransportError,
     ModelScopeDatasetTransport,
+    ensure_dataset_manifest,
 )
 from sakuramoon.data.service import (
     DataServiceError,
@@ -27,6 +28,11 @@ from sakuramoon.data.service import (
     DataSupplyService,
 )
 from sakuramoon.data.service_protocol import DataServiceSessionIdentity
+from sakuramoon.data.validation import (
+    ValidationSelectionError,
+    ensure_validation_selection,
+    prepare_validation_shards,
+)
 from sakuramoon.storage import StorageValidationError, require_data_service_storage
 
 
@@ -75,13 +81,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         root = args.root.resolve(strict=True)
         require_data_service_storage(config, root)
         manifest_path = _root_path(root, config.data.manifest.path)
-        manifest = load_dataset_manifest(
-            manifest_path,
-            config.data.manifest.sha256,
-            config.data.source,
-        )
         transport = ModelScopeDatasetTransport.from_token_environment(
             MODELSCOPE_TOKEN_ENVIRONMENT, config.data.transport
+        )
+        manifest = ensure_dataset_manifest(
+            transport,
+            manifest_path,
+            config.data.source,
+            initialize_if_missing=config.data.manifest.initialize_if_missing,
+            refresh_existing=config.data.manifest.refresh_existing,
+        )
+        validation_selection = ensure_validation_selection(
+            manifest,
+            _root_path(root, config.data.validation.selection_path),
+        )
+        prepare_validation_shards(
+            transport,
+            manifest,
+            validation_selection,
+            _root_path(root, config.data.validation.shard_root),
         )
         cache = ShardCache(
             _root_path(root, config.paths.cache_dir),
@@ -93,11 +111,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         )
         identity = DataServiceSessionIdentity(
-            manifest_sha256=config.data.manifest.sha256,
+            manifest_id=manifest.manifest_id,
             worker_count=config.data.cache.persistent_workers_per_rank,
         )
         service = DataSupplyService(
             manifest,
+            validation_selection,
             cache,
             _root_path(root, config.data.service.mainset_path),
             Path(config.data.service.ownership_lock_path),
@@ -126,9 +145,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             ready_callback=lambda: _emit(
                 {
                     "ok": True,
+                    "manifest_id": identity.manifest_id,
                     "pid": os.getpid(),
                     "service_sha256": identity.sha256,
                     "status": "listening",
+                    "validation_selection_id": validation_selection.selection_id,
                 }
             ),
         )
@@ -150,6 +171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ShardCacheError,
         DatasetTransportError,
         StorageValidationError,
+        ValidationSelectionError,
     ):
         _emit({"error": "data_service_failed", "ok": False})
         return 1

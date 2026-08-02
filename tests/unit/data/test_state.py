@@ -16,7 +16,6 @@ from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetSourceIdentity,
     ShardRecord,
-    manifest_sha256,
 )
 from sakuramoon.data.modelscope import FetchedShard, ModelScopeDatasetTransport
 from sakuramoon.data.state import (
@@ -29,21 +28,19 @@ from sakuramoon.data.state import (
 
 
 def _manifest(
-    revision: str = "b" * 40, *, shard_count: int = 2
+    identity_salt: str = "b", *, shard_count: int = 2
 ) -> DatasetManifest:
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision=revision,
-        license_id="synthetic-license",
-        access_terms="synthetic-terms",
+        revision="master",
     )
     shards = tuple(
         ShardRecord(
             path=f"release/{index:06d}.tar",
-            release="release",
             bytes=4,
-            sha256=hashlib.sha256(bytes([index]) * 4).hexdigest(),
-            samples=(index + 1) * 10,
+            upstream_sha256=hashlib.sha256(
+                f"{identity_salt}:{index}".encode()
+            ).hexdigest(),
         )
         for index in range(shard_count)
     )
@@ -69,7 +66,9 @@ def _coordinator(
         path = root / shard_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"data")
-        return FetchedShard(path, shard.path, shard.bytes, shard.sha256, False)
+        return FetchedShard(
+            path, shard.path, shard.bytes, shard.upstream_sha256, False
+        )
 
     monkeypatch.setattr(cache_module, "fetch_dataset_shard", fetch)
     cache = ShardCache(
@@ -96,7 +95,7 @@ def test_state_begin_complete_round_trip(tmp_path: Path) -> None:
     assert store.load() == completed
 
 
-def test_schema_v3_persists_bounded_active_shards_and_worker_count(
+def test_schema_v4_persists_bounded_active_shards_and_worker_count(
     tmp_path: Path,
 ) -> None:
     manifest = _manifest(shard_count=3)
@@ -107,7 +106,9 @@ def test_schema_v3_persists_bounded_active_shards_and_worker_count(
 
     document = cast(dict[str, object], json.loads(store.path.read_bytes()))
 
-    assert document["schema_version"] == 3
+    assert document["schema_version"] == 4
+    assert document["manifest_id"] == manifest.manifest_id
+    assert "replayed_samples" not in document
     assert document["worker_count"] == 2
     assert document["active_shards"] == [
         manifest.shards[0].path,
@@ -218,7 +219,6 @@ def test_state_distinguishes_committed_state_from_rollback_cleanup_failure(
         completed=(manifest.shards[0].path,),
         active=None,
         replayed_shards=0,
-        replayed_samples=0,
     )
     real_fsync = os.fsync
     directory_fsyncs = 0
@@ -250,7 +250,6 @@ def test_recovery_keeps_active_shard_and_counts_replay(tmp_path: Path) -> None:
 
     assert recovered.active == active.active
     assert recovered.replayed_shards == 1
-    assert recovered.replayed_samples == manifest.shards[1].samples
     assert store.load() == recovered
 
 
@@ -276,7 +275,7 @@ class _RecordingCache:
                 path=path,
                 relative_path=shard.path,
                 bytes=shard.bytes,
-                sha256=shard.sha256,
+                sha256=shard.upstream_sha256,
                 cache_hit=False,
             ),
             evicted_paths=(),
@@ -351,9 +350,6 @@ def test_restart_counts_every_active_shard_and_requires_all_reprepared(
 
     assert restarted.state.active_shards == (first, second)
     assert restarted.state.replayed_shards == 2
-    assert restarted.state.replayed_samples == (
-        manifest.shards[0].samples + manifest.shards[1].samples
-    )
 
     with pytest.raises(ShardStateError, match="replayed and prepared"):
         restarted.prepare(third)
@@ -366,7 +362,6 @@ def test_restart_counts_every_active_shard_and_requires_all_reprepared(
 
     assert restarted.state.active_shards == (second, third)
     assert restarted.state.replayed_shards == 2
-    assert restarted.state.replayed_samples == 30
 
 
 def test_singleton_lease_remains_compatible_with_active_view(tmp_path: Path) -> None:
@@ -405,7 +400,6 @@ def test_coordinator_replays_active_first_and_skips_completed(
 
     assert calls == [manifest.shards[0].path]
     assert coordinator.state.replayed_shards == 1
-    assert coordinator.state.replayed_samples == manifest.shards[0].samples
 
 
 def test_failed_prepare_leaves_shard_active_for_next_process(
@@ -433,12 +427,11 @@ def test_state_rejects_unknown_keys_and_paths(tmp_path: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema_version": 3,
-                "manifest_sha256": manifest_sha256(manifest),
+                "schema_version": 4,
+                "manifest_id": manifest.manifest_id,
                 "completed": ["missing.tar"],
                 "active_shards": [],
                 "replayed_shards": 0,
-                "replayed_samples": 0,
                 "worker_count": 1,
                 "unexpected": True,
             }
@@ -455,7 +448,7 @@ def test_state_rejects_different_manifest_with_identical_paths(tmp_path: Path) -
     original_store = ShardStateStore(path, original)
     original_store.begin(ShardRunState.empty(), original.shards[0].path)
 
-    changed = _manifest("c" * 40)
+    changed = _manifest("c")
     assert tuple(shard.path for shard in changed.shards) == tuple(
         shard.path for shard in original.shards
     )
@@ -463,7 +456,7 @@ def test_state_rejects_different_manifest_with_identical_paths(tmp_path: Path) -
         ShardStateStore(path, changed).load()
 
 
-@pytest.mark.parametrize("schema_version", [1, 2])
+@pytest.mark.parametrize("schema_version", [1, 2, 3])
 def test_state_rejects_legacy_schema(
     tmp_path: Path, schema_version: int
 ) -> None:
@@ -476,7 +469,6 @@ def test_state_rejects_legacy_schema(
                 "completed": [manifest.shards[0].path],
                 "active": None,
                 "replayed_shards": 0,
-                "replayed_samples": 0,
             }
         )
     )

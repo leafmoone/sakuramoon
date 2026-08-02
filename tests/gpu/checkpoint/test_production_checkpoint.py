@@ -123,7 +123,7 @@ def test_full_s0_composite_raw_save_and_restore(tmp_path: Path) -> None:
         trainer=SingleGpuUpdateState(1, 1, 1),
         growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
         stage_budget=StageBudgetCheckpointState(0, 1000),
-        checkpoint_cadence=CheckpointCadence(1, 1_800_000_001.0),
+        checkpoint_cadence=CheckpointCadence(1, 1_800_000_001.0, 1000),
     )
     representative = next(
         spec for spec in optimizer.audit.specs if spec.parameter.numel() <= 1024

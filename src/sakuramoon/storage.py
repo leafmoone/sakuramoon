@@ -9,8 +9,13 @@ import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
-from sakuramoon.config.schema import RuntimeConfig, StorageConfig
+from sakuramoon.config.schema import (
+    EvaluationEnabledConfig,
+    RuntimeConfig,
+    StorageConfig,
+)
 
 
 class StorageValidationError(RuntimeError):
@@ -240,6 +245,21 @@ def require_data_service_storage(
     )
 
 
+def _checkpoint_copy_count(config: RuntimeConfig) -> int:
+    slots = config.checkpoint.slots
+    copies = config.storage.checkpoint_copies
+    if (
+        type(slots) is not int
+        or slots <= 0
+        or type(copies) is not int
+        or copies != slots + 1
+    ):
+        raise StorageValidationError(
+            "checkpoint storage copies must equal retention slots plus one publishing copy"
+        )
+    return slots + 1
+
+
 def require_training_storage(
     config: RuntimeConfig,
     repository_root: Path,
@@ -250,6 +270,7 @@ def require_training_storage(
         raise StorageValidationError(
             "measured raw checkpoint bytes must be a positive integer"
         )
+    checkpoint_copies = _checkpoint_copy_count(config)
     run = repository_directory(repository_root, config.paths.run_dir)
     cache = repository_directory(repository_root, config.paths.cache_dir)
     checkpoint = repository_directory(repository_root, config.paths.checkpoint_dir)
@@ -267,7 +288,7 @@ def require_training_storage(
     required = (
         reserve
         + config.data.cache.high_watermark_gib * 1024**3
-        + config.storage.checkpoint_copies * governed_checkpoint_bytes
+        + checkpoint_copies * governed_checkpoint_bytes
     )
     capacity = _capacity_report(persistent_mount, probed, required)
     runtime_mount = require_host_local_runtime(
@@ -285,6 +306,11 @@ def require_evaluation_storage(
 ) -> ServerBackedStorageReport:
     """Validate evaluator persistence and its explicit output-space reservation."""
 
+    checkpoint_copies = _checkpoint_copy_count(config)
+    evaluation = config.evaluation
+    if not evaluation.enabled:
+        raise StorageValidationError("evaluation storage requires enabled evaluation")
+    enabled_evaluation = cast(EvaluationEnabledConfig, evaluation)
     run = repository_directory(repository_root, config.paths.run_dir)
     cache = repository_directory(repository_root, config.paths.cache_dir)
     checkpoint = repository_directory(repository_root, config.paths.checkpoint_dir)
@@ -297,9 +323,8 @@ def require_evaluation_storage(
     required = (
         config.storage.minimum_free_gib * 1024**3
         + config.data.cache.high_watermark_gib * 1024**3
-        + config.storage.checkpoint_copies
-        * config.storage.measured_raw_checkpoint_bytes
-        + config.evaluation.output_reserve_gib * 1024**3
+        + checkpoint_copies * config.storage.measured_raw_checkpoint_bytes
+        + enabled_evaluation.output_reserve_gib * 1024**3
     )
     capacity = _capacity_report(persistent_mount, probed, required)
     runtime_mount = require_host_local_runtime(

@@ -40,19 +40,15 @@ _SOURCE_ROOT = Path(__file__).parents[2] / "src"
 def _manifest() -> DatasetManifest:
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="synthetic-license",
-        access_terms="synthetic-terms",
+        revision="master",
     )
     return DatasetManifest.from_shards(
         source,
         (
             ShardRecord(
                 path=_SHARD_PATH,
-                release="release",
                 bytes=len(_CONTENT),
-                sha256=hashlib.sha256(_CONTENT).hexdigest(),
-                samples=17,
+                upstream_sha256=hashlib.sha256(_CONTENT).hexdigest(),
             ),
         ),
     )
@@ -98,7 +94,9 @@ class _PreparedCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(_CONTENT)
         return CachedShard(
-            FetchedShard(path, shard.path, shard.bytes, shard.sha256, False),
+            FetchedShard(
+                path, shard.path, shard.bytes, shard.upstream_sha256, False
+            ),
             (),
             shard.bytes,
         )
@@ -117,8 +115,8 @@ from sakuramoon.data.manifest import DatasetManifest, DatasetSourceIdentity, Sha
 from sakuramoon.data.modelscope import fetch_dataset_shard
 from sakuramoon.fault_injection import signal_ready_from_environment
 content = b"complete-synthetic-shard"
-source = DatasetSourceIdentity(repo_id="leafmoone/webdataset_danbooru", revision="a" * 40, license_id="synthetic-license", access_terms="synthetic-terms")
-manifest = DatasetManifest.from_shards(source, (ShardRecord(path="release/000001.tar", release="release", bytes=len(content), sha256=hashlib.sha256(content).hexdigest(), samples=17),))
+source = DatasetSourceIdentity(repo_id="leafmoone/webdataset_danbooru", revision="master")
+manifest = DatasetManifest.from_shards(source, (ShardRecord(path="release/000001.tar", bytes=len(content), upstream_sha256=hashlib.sha256(content).hexdigest()),))
 class Interrupted:
     stream_chunk_bytes = 4
     def download(self, manifest, shard, output):
@@ -205,7 +203,6 @@ def test_worker_os_exit_preserves_active_lease_and_restart_counts_exact_replay(
     )
     assert restarted.state.active == _SHARD_PATH
     assert restarted.state.replayed_shards == 1
-    assert restarted.state.replayed_samples == 17
 
     def complete(
         _pipeline: WebDatasetPipeline,

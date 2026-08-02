@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 import torch
+from torch.utils.data import DataLoader, get_worker_info
 
 from sakuramoon.data.caption import CAPTION_DROPOUT_KEYS, CaptionDropoutHits
 from sakuramoon.data.collate import (
     BucketedBatchDataset,
     CollateError,
     _build_batch_loader,  # pyright: ignore[reportPrivateUsage]
+    _shutdown_loader,  # pyright: ignore[reportPrivateUsage]
     bucketed_batches,
     collate_samples,
 )
@@ -54,7 +58,7 @@ def _sample(sample_id: int, *, width: int = 8, dense_length: int = 64) -> Pipeli
     )
     return PipelineSample(
         sample_id=sample_id,
-        release="r",
+        source_shard="data/test.tar",
         image=torch.full((3, 8, width), sample_id, dtype=torch.uint8),
         target_height=8,
         target_width=width,
@@ -194,8 +198,49 @@ def test_collate_rejects_invalid_artist_routing_metadata(
 
 
 class _EmptyDataset(torch.utils.data.IterableDataset[PipelineSample]):
-    def __iter__(self):
+    def __iter__(self) -> Iterator[PipelineSample]:
         return iter(())
+
+
+class _WorkerSeedDataset(torch.utils.data.IterableDataset[str]):
+    def __iter__(self) -> Iterator[str]:
+        info = get_worker_info()
+        if info is None:
+            raise RuntimeError("worker seed probe requires a DataLoader worker")
+        yield f"{info.id}:{torch.initial_seed()}"
+
+
+def _bootstrap_worker_seeds(worker_seed: int) -> tuple[str, ...]:
+    parent_state = torch.get_rng_state()
+    loader = _build_batch_loader(
+        _WorkerSeedDataset(),
+        worker_count=2,
+        ready_batches=2,
+        pin_memory=False,
+        worker_seed=worker_seed,
+    )
+    assert torch.equal(torch.get_rng_state(), parent_state)
+    try:
+        worker_seeds = tuple(sorted(iter(loader)))
+    finally:
+        _shutdown_loader(loader)
+    assert torch.equal(torch.get_rng_state(), parent_state)
+    return worker_seeds
+
+
+def test_loader_shutdown_only_suppresses_failure_while_preserving_an_exception() -> None:
+    class FailingIterator:
+        def _shutdown_workers(self) -> None:
+            raise RuntimeError("worker terminated during shutdown")
+
+    class FailingLoader:
+        _iterator = FailingIterator()
+
+    loader = cast(DataLoader[Any], FailingLoader())
+    with pytest.raises(RuntimeError, match="terminated during shutdown"):
+        _shutdown_loader(loader)
+
+    _shutdown_loader(loader, suppress_worker_failure=True)
 
 
 def test_loader_requires_exact_divisible_ready_batch_budget() -> None:
@@ -208,6 +253,7 @@ def test_loader_requires_exact_divisible_ready_batch_budget() -> None:
             worker_count=2,
             ready_batches=3,
             pin_memory=True,
+            worker_seed=44,
         )
 
     loader = _build_batch_loader(
@@ -215,10 +261,44 @@ def test_loader_requires_exact_divisible_ready_batch_budget() -> None:
         worker_count=2,
         ready_batches=2,
         pin_memory=True,
+        worker_seed=44,
     )
     assert loader.num_workers == 2
     assert loader.prefetch_factor == 1
     assert loader.persistent_workers is True
+
+
+def test_loader_worker_bootstrap_is_reproducible_without_global_rng_drift() -> None:
+    original_state = torch.get_rng_state()
+    try:
+        torch.manual_seed(90210)  # pyright: ignore[reportUnknownMemberType]
+        expected_parent_state = torch.get_rng_state()
+
+        first = _bootstrap_worker_seeds(44)
+        second = _bootstrap_worker_seeds(44)
+
+        assert torch.equal(torch.get_rng_state(), expected_parent_state)
+        assert first == second
+        parsed = tuple(
+            (int(worker_id), int(seed))
+            for worker_id, seed in (value.split(":", maxsplit=1) for value in first)
+        )
+        assert tuple(worker_id for worker_id, _seed in parsed) == (0, 1)
+        assert parsed[1][1] == parsed[0][1] + 1
+    finally:
+        torch.set_rng_state(original_state)
+
+
+@pytest.mark.parametrize("worker_seed", [True, -1, 1.5, "44", 2**64, None])
+def test_loader_rejects_invalid_worker_seed(worker_seed: object) -> None:
+    with pytest.raises(CollateError, match="worker_seed"):
+        _build_batch_loader(
+            _WorkerSeedDataset(),
+            worker_count=2,
+            ready_batches=2,
+            pin_memory=False,
+            worker_seed=worker_seed,  # pyright: ignore[reportArgumentType]
+        )
 
 
 @pytest.mark.parametrize("drop_last", [0, "false"])

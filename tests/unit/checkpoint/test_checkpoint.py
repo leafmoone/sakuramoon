@@ -30,6 +30,7 @@ from sakuramoon.checkpoint.rng import (
     validate_rank_rng,
 )
 from sakuramoon.checkpoint.schema import (
+    RAW_SCHEMA_VERSION,
     CheckpointError,
     RawCheckpointState,
     raw_state_from_dicts,
@@ -141,7 +142,7 @@ def _raw_state(
         growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
         stage_budget=StageBudgetCheckpointState(0, 1000),
         checkpoint_cadence=CheckpointCadence(
-            successful_updates, wall_clock_unix_seconds
+            successful_updates, wall_clock_unix_seconds, 1000
         ),
     )
 
@@ -312,6 +313,15 @@ def test_raw_training_state_is_strict_and_round_trips() -> None:
     state = _raw_state()
     documents = raw_state_to_dict(state)
 
+    assert documents[0]["schema_version"] == RAW_SCHEMA_VERSION == 4
+    cadence = documents[0]["checkpoint_cadence"]
+    assert cadence == {
+        "every_successful_updates": 1000,
+        "last_successful_update": state.trainer.successful_updates,
+        "last_wall_clock_unix_seconds": (
+            state.checkpoint_cadence.last_wall_clock_unix_seconds
+        ),
+    }
     assert raw_state_from_dicts(*documents) == state
     invalid = dict(documents[0])
     invalid["unexpected"] = True
@@ -438,7 +448,7 @@ def test_growth_state_rejects_alpha_that_differs_from_persisted_progress() -> No
             trainer=SingleGpuUpdateState(501, 501, 1),
             growth=GrowthCheckpointState(BASE_SLOT_IDS, 0.25, "G1", 4, 256, 1, 1000),
             stage_budget=StageBudgetCheckpointState(1, 2001),
-            checkpoint_cadence=CheckpointCadence(501, 1_800_000_000.0),
+            checkpoint_cadence=CheckpointCadence(501, 1_800_000_000.0, 1000),
         )
 
 
@@ -448,7 +458,7 @@ def test_raw_state_rejects_uncommitted_cadence_and_invalid_stage_budget() -> Non
             trainer=SingleGpuUpdateState(3, 2, 11),
             growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
             stage_budget=StageBudgetCheckpointState(0, 1000),
-            checkpoint_cadence=CheckpointCadence(1, 1_800_000_000.0),
+            checkpoint_cadence=CheckpointCadence(1, 1_800_000_000.0, 1000),
         )
 
     with pytest.raises(ValueError, match="outside the persisted stage budget"):
@@ -456,5 +466,5 @@ def test_raw_state_rejects_uncommitted_cadence_and_invalid_stage_budget() -> Non
             trainer=SingleGpuUpdateState(3, 2, 11),
             growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
             stage_budget=StageBudgetCheckpointState(3, 1000),
-            checkpoint_cadence=CheckpointCadence(2, 1_800_000_000.0),
+            checkpoint_cadence=CheckpointCadence(2, 1_800_000_000.0, 1000),
         )

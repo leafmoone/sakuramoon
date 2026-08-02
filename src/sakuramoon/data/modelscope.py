@@ -1,4 +1,4 @@
-"""Small HTTPS client for immutable ModelScope WebDataset shards."""
+"""Small HTTPS client for the configured ModelScope WebDataset branch."""
 
 from __future__ import annotations
 
@@ -14,15 +14,19 @@ from typing import Any, Protocol, cast
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 from sakuramoon.config import ConfigurationError, resolve_secret
-from sakuramoon.config.schema import DataTransportConfig
+from sakuramoon.config.schema import DataSourceConfig, DataTransportConfig
 from sakuramoon.data.manifest import (
     DatasetManifest,
+    DatasetManifestError,
+    DatasetManifestExistsError,
     DatasetSourceIdentity,
-    ManifestBuildInventory,
     RemoteShardRecord,
     ShardRecord,
     build_dataset_manifest,
     is_safe_shard_path,
+    load_dataset_manifest,
+    source_identity,
+    write_dataset_manifest,
 )
 
 MODELSCOPE_DATASET_HOST = "modelscope.cn"
@@ -185,7 +189,7 @@ class ModelScopeDatasetTransport:
         raise DatasetTransportError("ModelScope retry limit exceeded")
 
     def list_files(self, source: DatasetSourceIdentity) -> tuple[RemoteShardRecord, ...]:
-        """List all WebDataset shards for a fixed dataset source revision."""
+        """List all WebDataset shards for the configured branch selector."""
 
         files: list[RemoteShardRecord] = []
         for page in range(1, _LISTING_MAX_PAGES + 1):
@@ -237,7 +241,7 @@ class ModelScopeDatasetTransport:
                         RemoteShardRecord(
                             path=path,
                             bytes=size,
-                            sha256=sha256.lower(),
+                            upstream_sha256=sha256.lower(),
                         )
                     )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -278,20 +282,53 @@ def validate_remote_manifest(
 ) -> None:
     """Require exact path, byte count and SHA equality with remote listing."""
 
-    expected = {(item.path, item.bytes, item.sha256) for item in manifest.shards}
+    expected = {
+        (item.path, item.bytes, item.upstream_sha256) for item in manifest.shards
+    }
     remote_files = transport.list_files(manifest.source)
-    observed = {(item.path, item.bytes, item.sha256) for item in remote_files}
+    observed = {
+        (item.path, item.bytes, item.upstream_sha256) for item in remote_files
+    }
     if len(remote_files) != len(manifest.shards) or observed != expected:
         raise ShardIntegrityError("remote dataset listing differs from manifest")
 
 
 def build_remote_dataset_manifest(
     transport: ModelScopeDatasetTransport,
-    inventory: ManifestBuildInventory,
+    source: DatasetSourceIdentity,
 ) -> DatasetManifest:
-    """Combine remote immutable file facts with explicit release/sample facts."""
+    """Build v2 only from facts returned by the upstream listing."""
 
-    return build_dataset_manifest(inventory, transport.list_files(inventory.source))
+    return build_dataset_manifest(source, transport.list_files(source))
+
+
+def ensure_dataset_manifest(
+    transport: ModelScopeDatasetTransport,
+    path: Path,
+    source: DataSourceConfig,
+    *,
+    initialize_if_missing: bool,
+    refresh_existing: bool,
+) -> DatasetManifest:
+    """Initialize once when absent; otherwise load the operational snapshot locally."""
+
+    if type(initialize_if_missing) is not bool or type(refresh_existing) is not bool:
+        raise DatasetManifestError("dataset manifest policy is invalid")
+    if refresh_existing:
+        raise DatasetManifestError("automatic dataset manifest refresh is prohibited")
+    if path.exists() or path.is_symlink():
+        return load_dataset_manifest(path, source)
+    if not initialize_if_missing:
+        raise DatasetManifestError("dataset manifest is absent and initialization is disabled")
+
+    manifest = build_remote_dataset_manifest(transport, source_identity(source))
+    try:
+        write_dataset_manifest(manifest, path)
+    except DatasetManifestExistsError:
+        # A concurrent service won no-clobber publication. Its strict local manifest
+        # becomes the operational snapshot; mutable master is not relisted on restart.
+        manifest = load_dataset_manifest(path, source)
+    return manifest
 
 
 def _verify_existing(path: Path, shard: ShardRecord, chunk_bytes: int) -> bool:
@@ -301,7 +338,7 @@ def _verify_existing(path: Path, shard: ShardRecord, chunk_bytes: int) -> bool:
     with path.open("rb") as handle:
         while chunk := handle.read(chunk_bytes):
             digest.update(chunk)
-    return digest.hexdigest() == shard.sha256
+    return digest.hexdigest() == shard.upstream_sha256
 
 
 def _fsync_directory(path: Path) -> None:
@@ -325,7 +362,13 @@ def fetch_dataset_shard(
     partial = destination.with_name(f"{destination.name}.partial")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if _verify_existing(destination, shard, transport.stream_chunk_bytes):
-        return FetchedShard(destination, shard.path, shard.bytes, shard.sha256, True)
+        return FetchedShard(
+            destination,
+            shard.path,
+            shard.bytes,
+            shard.upstream_sha256,
+            True,
+        )
     if destination.exists():
         raise ShardIntegrityError("cached shard differs from manifest")
 
@@ -347,7 +390,7 @@ def fetch_dataset_shard(
             transport.download(manifest, shard, _DigestWriter())
             handle.flush()
             os.fsync(handle.fileno())
-        if written != shard.bytes or digest.hexdigest() != shard.sha256:
+        if written != shard.bytes or digest.hexdigest() != shard.upstream_sha256:
             raise ShardIntegrityError("downloaded shard differs from manifest")
         os.replace(partial, destination)
         published = True
@@ -369,4 +412,10 @@ def fetch_dataset_shard(
                 "dataset shard publication rollback failed"
             ) from None
         raise
-    return FetchedShard(destination, shard.path, shard.bytes, shard.sha256, False)
+    return FetchedShard(
+        destination,
+        shard.path,
+        shard.bytes,
+        shard.upstream_sha256,
+        False,
+    )

@@ -246,7 +246,7 @@ def test_diagnostic_publication_failure_preserves_training_error(
     assert loop.state == SingleGpuUpdateState(1, 0, 0)
 
 
-def test_loop_emits_wall_cadence_event_only_after_successful_update(
+def test_loop_never_emits_checkpoint_for_elapsed_wall_time(
     tmp_path: Path,
 ) -> None:
     parameter = nn.Parameter(torch.tensor(1.0))
@@ -265,7 +265,7 @@ def test_loop_emits_wall_cadence_event_only_after_successful_update(
         diagnostic_root=tmp_path / "diagnostics",
         failure_id=lambda phase, state: f"{phase}-{state.successful_updates}",
         state=SingleGpuUpdateState.initial(),
-        cadence=CheckpointCadence(0, 0.0),
+        cadence=CheckpointCadence(0, 0.0, 1000),
         clock=lambda: 6.0 * 3600.0,
         checkpoint_event=lambda update, reason: events.append((update, reason)),
     )
@@ -273,9 +273,9 @@ def test_loop_emits_wall_cadence_event_only_after_successful_update(
     result = loop.run((torch.tensor(1.0),))
 
     assert result.state == SingleGpuUpdateState(1, 1, 1)
-    assert result.checkpoint_updates == (1,)
-    assert result.cadence == CheckpointCadence(1, 6.0 * 3600.0)
-    assert events == [(1, CheckpointReason.WALL_CADENCE)]
+    assert result.checkpoint_updates == ()
+    assert result.cadence == CheckpointCadence(0, 0.0, 1000)
+    assert events == []
     assert legacy_checkpoints == []
 
 
@@ -306,7 +306,7 @@ def test_pre_decay_checkpoint_is_durable_before_scheduler_mutation(
         diagnostic_root=tmp_path / "diagnostics",
         failure_id=lambda phase, state: f"{phase}-{state.successful_updates}",
         state=SingleGpuUpdateState.initial(),
-        cadence=CheckpointCadence(0, 100.0),
+        cadence=CheckpointCadence(0, 100.0, 1000),
         clock=lambda: 101.0,
         forced_checkpoint=lambda _update: CheckpointReason.PRE_DECAY,
         checkpoint_cadence_event=checkpoint_event,
@@ -315,5 +315,5 @@ def test_pre_decay_checkpoint_is_durable_before_scheduler_mutation(
     result = loop.run((torch.tensor(1.0),))
 
     assert order == ["checkpoint", "scheduler"]
-    assert proposed == [CheckpointCadence(1, 101.0)]
+    assert proposed == [CheckpointCadence(1, 101.0, 1000)]
     assert result.cadence == proposed[0]

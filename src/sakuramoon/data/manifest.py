@@ -1,4 +1,4 @@
-"""Dataset manifest for the remote ModelScope WebDataset shards."""
+"""Operational manifest for the ModelScope WebDataset shards."""
 
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ from pydantic import (
 from sakuramoon.config.schema import DataSourceConfig
 
 DATASET_REPO_ID = "leafmoone/webdataset_danbooru"
+DATASET_REVISION = "master"
 
-Commit = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NonEmpty = Annotated[str, StringConstraints(min_length=1, max_length=512)]
 PositiveInt = Annotated[int, Field(gt=0)]
@@ -42,10 +42,6 @@ class DatasetManifestPublicationError(DatasetManifestError):
 
 
 class DatasetManifestExistsError(DatasetManifestPublicationError):
-    pass
-
-
-class ManifestBuildInventoryError(DatasetManifestError):
     pass
 
 
@@ -71,18 +67,18 @@ def is_safe_shard_path(value: str) -> bool:
 
 
 class DatasetSourceIdentity(StrictModel):
+    """The configured mutable branch selector, not an immutable commit identity."""
+
     repo_id: Literal["leafmoone/webdataset_danbooru"]
-    revision: Commit
-    license_id: NonEmpty
-    access_terms: NonEmpty
+    revision: Literal["master"]
 
 
 class ShardRecord(StrictModel):
+    """Facts returned by the upstream listing and used for download verification."""
+
     path: NonEmpty
-    release: NonEmpty
     bytes: PositiveInt
-    sha256: Sha256
-    samples: PositiveInt
+    upstream_sha256: Sha256
 
     @model_validator(mode="after")
     def validate_path(self) -> ShardRecord:
@@ -91,22 +87,10 @@ class ShardRecord(StrictModel):
         return self
 
 
-class ShardBuildRecord(StrictModel):
-    path: NonEmpty
-    release: NonEmpty
-    samples: PositiveInt
-
-    @model_validator(mode="after")
-    def validate_path(self) -> ShardBuildRecord:
-        if not is_safe_shard_path(self.path):
-            raise ValueError("path must be a normalized relative WebDataset tar path")
-        return self
-
-
 class RemoteShardRecord(StrictModel):
     path: NonEmpty
     bytes: PositiveInt
-    sha256: Sha256
+    upstream_sha256: Sha256
 
     @model_validator(mode="after")
     def validate_path(self) -> RemoteShardRecord:
@@ -118,11 +102,38 @@ class RemoteShardRecord(StrictModel):
 class ManifestAggregates(StrictModel):
     shards: PositiveInt
     bytes: PositiveInt
-    samples: PositiveInt
+
+
+def _manifest_identity_bytes(
+    source: DatasetSourceIdentity,
+    shards: tuple[ShardRecord, ...],
+    aggregates: ManifestAggregates,
+) -> bytes:
+    payload = {
+        "aggregates": aggregates.model_dump(mode="json"),
+        "schema_version": 2,
+        "shards": [item.model_dump(mode="json") for item in shards],
+        "source": source.model_dump(mode="json"),
+    }
+    return (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+
+def _manifest_id(
+    source: DatasetSourceIdentity,
+    shards: tuple[ShardRecord, ...],
+    aggregates: ManifestAggregates,
+) -> str:
+    return hashlib.sha256(
+        _manifest_identity_bytes(source, shards, aggregates)
+    ).hexdigest()
 
 
 class DatasetManifest(StrictModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
+    manifest_id: Sha256
     source: DatasetSourceIdentity
     shards: Annotated[tuple[ShardRecord, ...], BeforeValidator(_tuple_from_toml)]
     aggregates: ManifestAggregates
@@ -137,10 +148,11 @@ class DatasetManifest(StrictModel):
         expected = ManifestAggregates(
             shards=len(self.shards),
             bytes=sum(shard.bytes for shard in self.shards),
-            samples=sum(shard.samples for shard in self.shards),
         )
         if self.aggregates != expected:
             raise ValueError("dataset manifest aggregates do not match shard records")
+        if self.manifest_id != _manifest_id(self.source, self.shards, expected):
+            raise ValueError("dataset manifest_id does not match its canonical content")
         return self
 
     @classmethod
@@ -150,15 +162,16 @@ class DatasetManifest(StrictModel):
         shards: tuple[ShardRecord, ...],
     ) -> DatasetManifest:
         ordered = tuple(sorted(shards, key=lambda item: item.path))
+        aggregates = ManifestAggregates(
+            shards=len(ordered),
+            bytes=sum(item.bytes for item in ordered),
+        )
         return cls(
-            schema_version=1,
+            schema_version=2,
+            manifest_id=_manifest_id(source, ordered, aggregates),
             source=source,
             shards=ordered,
-            aggregates=ManifestAggregates(
-                shards=len(ordered),
-                bytes=sum(item.bytes for item in ordered),
-                samples=sum(item.samples for item in ordered),
-            ),
+            aggregates=aggregates,
         )
 
     def shard(self, path: str) -> ShardRecord:
@@ -166,21 +179,6 @@ class DatasetManifest(StrictModel):
             if shard.path == path:
                 return shard
         raise DatasetManifestError(f"unknown dataset shard: {path}")
-
-
-class ManifestBuildInventory(StrictModel):
-    schema_version: Literal[1]
-    source: DatasetSourceIdentity
-    shards: Annotated[tuple[ShardBuildRecord, ...], BeforeValidator(_tuple_from_toml)]
-
-    @model_validator(mode="after")
-    def validate_inventory(self) -> ManifestBuildInventory:
-        paths = tuple(shard.path for shard in self.shards)
-        if not paths:
-            raise ValueError("manifest build inventory must contain at least one shard")
-        if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
-            raise ValueError("manifest build inventory paths must be sorted and unique")
-        return self
 
 
 def canonical_manifest_bytes(manifest: DatasetManifest) -> bytes:
@@ -192,15 +190,9 @@ def canonical_manifest_bytes(manifest: DatasetManifest) -> bytes:
 
 
 def manifest_sha256(manifest: DatasetManifest) -> str:
-    return hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest()
+    """Compatibility name for the internal manifest identity, never user input."""
 
-
-def canonical_build_inventory_bytes(inventory: ManifestBuildInventory) -> bytes:
-    payload = inventory.model_dump(mode="json")
-    return (
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\n"
-    ).encode("utf-8")
+    return manifest.manifest_id
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -225,90 +217,50 @@ def parse_dataset_manifest_bytes(payload: bytes) -> DatasetManifest:
     return manifest
 
 
-def parse_manifest_build_inventory_bytes(payload: bytes) -> ManifestBuildInventory:
+def source_identity(source: DataSourceConfig) -> DatasetSourceIdentity:
     try:
-        parsed = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
-        inventory = ManifestBuildInventory.model_validate(parsed, strict=True)
-    except DatasetManifestError:
-        raise ManifestBuildInventoryError("manifest build inventory is invalid") from None
-    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, TypeError):
-        raise ManifestBuildInventoryError("manifest build inventory is invalid") from None
-    if payload != canonical_build_inventory_bytes(inventory):
-        raise ManifestBuildInventoryError(
-            "manifest build inventory is not canonically encoded"
+        return DatasetSourceIdentity(
+            repo_id=source.repo_id,
+            revision=source.revision,
         )
-    return inventory
-
-
-def load_manifest_build_inventory(
-    path: Path,
-    expected_sha256: str,
-    source: DataSourceConfig,
-) -> ManifestBuildInventory:
-    try:
-        payload = path.read_bytes()
-    except OSError:
-        raise ManifestBuildInventoryError(
-            "manifest build inventory could not be read"
-        ) from None
-    if hashlib.sha256(payload).hexdigest() != expected_sha256:
-        raise ManifestBuildInventoryError(
-            "manifest build inventory SHA-256 does not match"
-        )
-    inventory = parse_manifest_build_inventory_bytes(payload)
-    if (
-        inventory.source.repo_id != source.repo_id
-        or inventory.source.revision != source.revision
-    ):
-        raise ManifestBuildInventoryError(
-            "manifest build inventory source does not match config"
-        )
-    return inventory
+    except ValidationError:
+        raise DatasetManifestError("dataset source config is invalid") from None
 
 
 def build_dataset_manifest(
-    inventory: ManifestBuildInventory,
+    source: DatasetSourceIdentity,
     remote_shards: tuple[RemoteShardRecord, ...],
 ) -> DatasetManifest:
     remote_by_path = {shard.path: shard for shard in remote_shards}
+    if not remote_shards:
+        raise RemoteManifestBuildError("remote inventory contains no WebDataset shards")
     if len(remote_by_path) != len(remote_shards):
         raise RemoteManifestBuildError("remote inventory contains duplicate shard paths")
-    expected_paths = {shard.path for shard in inventory.shards}
-    if set(remote_by_path) != expected_paths:
-        raise RemoteManifestBuildError(
-            "remote inventory paths differ from build inventory"
-        )
     return DatasetManifest.from_shards(
-        inventory.source,
+        source,
         tuple(
             ShardRecord(
                 path=shard.path,
-                release=shard.release,
-                bytes=remote_by_path[shard.path].bytes,
-                sha256=remote_by_path[shard.path].sha256,
-                samples=shard.samples,
+                bytes=shard.bytes,
+                upstream_sha256=shard.upstream_sha256,
             )
-            for shard in inventory.shards
+            for shard in remote_shards
         ),
     )
 
 
 def load_dataset_manifest(
     path: Path,
-    expected_sha256: str,
     source: DataSourceConfig,
 ) -> DatasetManifest:
     try:
+        if path.is_symlink() or not path.is_file():
+            raise OSError
         payload = path.read_bytes()
     except OSError:
         raise DatasetManifestError("dataset manifest could not be read") from None
-    if hashlib.sha256(payload).hexdigest() != expected_sha256:
-        raise DatasetManifestError("dataset manifest SHA-256 does not match config")
     manifest = parse_dataset_manifest_bytes(payload)
-    if (
-        manifest.source.repo_id != source.repo_id
-        or manifest.source.revision != source.revision
-    ):
+    if manifest.source != source_identity(source):
         raise DatasetManifestError("dataset manifest source does not match config")
     return manifest
 
@@ -373,4 +325,4 @@ def write_dataset_manifest(manifest: DatasetManifest, destination: Path) -> str:
         raise DatasetManifestPublicationError(
             "dataset manifest could not be written"
         ) from None
-    return hashlib.sha256(payload).hexdigest()
+    return manifest.manifest_id

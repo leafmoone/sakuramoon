@@ -14,6 +14,7 @@ from sakuramoon.data.serialize import (
     CaptionSerializationError,
     FramingContract,
     TokenEncoder,
+    render_caption_segments,
     serialize_caption,
 )
 
@@ -96,6 +97,28 @@ def test_fixed_framing_category_order_and_join_rules() -> None:
     assert "Tags:" not in result.text
     assert "Description:" not in result.text
     assert result.selected_nl == "short_vibes"
+
+
+def test_public_segment_renderer_is_the_production_serializer_surface() -> None:
+    tokenizer = _CharacterTokenizer()
+    plan = _plan(
+        nsfw=(_tag("safe"),),
+        character=(_tag("alice"),),
+        copyright=(_tag("wonderland"),),
+        general=(_tag("blue dress"),),
+        artists=(_tag("artist one"),),
+        nl_text="soft light",
+        selected_nl="short_vibes",
+    )
+
+    body, artist_text = render_caption_segments(plan)
+    serialized = serialize_caption(plan, tokenizer, _framing(tokenizer))
+
+    assert (body, artist_text) == (
+        "safe, alice, wonderland, blue dress\n\nsoft light",
+        "artist one",
+    )
+    assert (serialized.body, serialized.artist_text) == (body, artist_text)
 
 
 @pytest.mark.parametrize(

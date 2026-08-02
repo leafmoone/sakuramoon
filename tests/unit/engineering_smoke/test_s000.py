@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import inspect
 import tomllib
 from pathlib import Path
@@ -17,6 +18,7 @@ from torch import nn
 from sakuramoon.cli.engineering_smoke import build_parser
 from sakuramoon.conditioning.style_resampler import StyleConditioningOutput
 from sakuramoon.conditioning.text_mixer import TextConditioningOutput
+from sakuramoon.data.validation import select_validation_shards
 from sakuramoon.engineering_smoke.config import (
     EngineeringSmokeConfig,
     EngineeringSmokeConfigurationError,
@@ -25,6 +27,7 @@ from sakuramoon.engineering_smoke.config import (
 )
 from sakuramoon.engineering_smoke.s000 import (
     _build_composite,
+    _dataset,
     run_s000_engineering_smoke,
 )
 from sakuramoon.model.dit import DenseDiT
@@ -87,6 +90,8 @@ def test_checked_config_is_strict_engineering_only_dense_s0() -> None:
     raw = _payload()
 
     assert config.evidence.classification == "synthetic_single_gpu_engineering_only"
+    assert config.run.seed == 44
+    assert config.data.validation_shard_count == 2
     assert config.run.total_successful_updates == 2
     assert config.stage.depth == 16 and config.stage.resolution == 256
     assert config.kernels.attention_backend == "dense_sdpa_reference"
@@ -95,7 +100,30 @@ def test_checked_config_is_strict_engineering_only_dense_s0() -> None:
     assert config.evidence.production_cli_unlock is False
     assert "evaluation" not in raw
     assert "benchmark" not in raw
+    assert "validation_sample_count" not in raw["data"]
+    assert "pass_index" not in raw["data"]
     assert len(loaded.resolved_sha256) == 64
+
+
+def test_synthetic_dataset_uses_seed_44_two_shard_validation_selection() -> None:
+    config = load_engineering_smoke_config(
+        Path(CONFIG_PATH.name), config_root=CONFIG_ROOT
+    ).config
+    manifest, bodies = _dataset(config)
+    selection = select_validation_shards(manifest, seed=config.run.seed)
+    training_paths = {
+        record.path for record in manifest.shards if record not in selection.shards
+    }
+
+    assert manifest.source.revision == "master"
+    assert selection.seed == config.run.seed == 44
+    assert len(selection.shards) == config.data.validation_shard_count == 2
+    assert len(training_paths) == 2
+    assert set(selection.shard_paths).isdisjoint(training_paths)
+    assert all(
+        hashlib.sha256(bodies[record.path]).hexdigest() == record.upstream_sha256
+        for record in manifest.shards
+    )
 
 
 @pytest.mark.parametrize(
@@ -149,9 +177,7 @@ def test_loader_rejects_unresolved_sentinel_and_root_escape(tmp_path: Path) -> N
     payload["run"]["run_id"] = "REQUIRED_ENGINEERING_RUN_ID"
     _write_config(tmp_path, payload)
 
-    with pytest.raises(
-        EngineeringSmokeConfigurationError, match="unresolved sentinel"
-    ):
+    with pytest.raises(EngineeringSmokeConfigurationError, match="unresolved sentinel"):
         load_engineering_smoke_config(Path("candidate.toml"), config_root=tmp_path)
     with pytest.raises(EngineeringSmokeConfigurationError, match="inside config_root"):
         load_engineering_smoke_config(CONFIG_PATH, config_root=tmp_path)
@@ -171,9 +197,7 @@ def test_environment_rejects_extra_gpu_and_distributed_launch(
 
     require_single_gpu_environment(config)
     monkeypatch.setenv("WORLD_SIZE", "1")
-    with pytest.raises(
-        EngineeringSmokeConfigurationError, match="distributed launch"
-    ):
+    with pytest.raises(EngineeringSmokeConfigurationError, match="distributed launch"):
         require_single_gpu_environment(config)
     monkeypatch.delenv("WORLD_SIZE")
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)

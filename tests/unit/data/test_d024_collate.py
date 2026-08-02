@@ -5,7 +5,7 @@ import io
 import json
 import os
 import tarfile
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
 from typing import cast
 
@@ -19,12 +19,18 @@ from sakuramoon.data.caption import (
     NlCandidates,
     NlDropoutProbabilities,
 )
-from sakuramoon.data.collate import iter_service_batches
+from sakuramoon.data.collate import (
+    CollateError,
+    ServiceBatchIterator,
+    TrainingBatch,
+    iter_service_batches,
+)
 from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.metadata import MetadataFieldMapping
 from sakuramoon.data.pipeline import WebDatasetPipeline
 from sakuramoon.data.serialize import MAIN_SUFFIX, SYSTEM_PREFIX, FramingContract
 from sakuramoon.data.service_protocol import (
+    DataServiceProtocolError,
     DataServiceSessionIdentity,
     ShardLeaseDescriptor,
 )
@@ -114,7 +120,6 @@ def _pipeline(
         shard_records=(record,),
         metadata_adapter=metadata_adapter,
         metadata_fields=_fields(),
-        validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -124,14 +129,14 @@ def _pipeline(
         rejection_observer=_observe_rejection,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
 
 
 class _Client:
     def __init__(self, descriptors: tuple[ShardLeaseDescriptor, ...]) -> None:
         self.identity = DataServiceSessionIdentity(
-            manifest_sha256="2" * 64,
+            manifest_id="2" * 64,
             worker_count=2,
         )
         self.pending = list(descriptors)
@@ -148,6 +153,7 @@ class _Client:
         descriptor = ShardLeaseDescriptor(
             lease_id=source.lease_id,
             worker_id=worker_id,
+            cycle_index=source.cycle_index,
             state_identity=source.state_identity,
             record=source.record,
             local_path=source.local_path,
@@ -167,21 +173,75 @@ def _descriptors(tmp_path: Path) -> tuple[ShardLeaseDescriptor, ...]:
         _write_tar(path, index + 1)
         record = ShardRecord(
             path=path.name,
-            release="trusted",
             bytes=path.stat().st_size,
-            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-            samples=1,
+            upstream_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         )
         values.append(
             ShardLeaseDescriptor(
                 lease_id=hashlib.sha256(f"lease-{index}".encode()).hexdigest(),
                 worker_id=index % 2,
+                cycle_index=index // 2,
                 state_identity=hashlib.sha256(f"state-{index}".encode()).hexdigest(),
                 record=record,
                 local_path=path,
             )
         )
     return tuple(values)
+
+
+def test_lease_protocol_requires_exact_persisted_cycle_index(tmp_path: Path) -> None:
+    descriptor = _descriptors(tmp_path)[2]
+    payload = descriptor.as_dict()
+
+    assert payload["cycle_index"] == 1
+    assert ShardLeaseDescriptor.from_dict(payload) == descriptor
+    del payload["cycle_index"]
+    with pytest.raises(DataServiceProtocolError, match="unknown or missing"):
+        ShardLeaseDescriptor.from_dict(payload)
+
+
+class _QueueDepth:
+    def __init__(self, value: int) -> None:
+        self.value = value
+
+    def qsize(self) -> int:
+        return self.value
+
+
+class _UnsupportedQueue:
+    def qsize(self) -> int:
+        raise NotImplementedError
+
+
+class _LoaderIterator:
+    def __init__(self, data_queue: object) -> None:
+        self._data_queue = data_queue
+
+
+def test_service_batch_depth_snapshot_reads_live_dataloader_queue() -> None:
+    queue_depth = _QueueDepth(2)
+    batches = ServiceBatchIterator(
+        cast(Iterator[TrainingBatch], iter(())),
+        _LoaderIterator(queue_depth),
+    )
+
+    assert batches.ready_batch_depth_snapshot() == 2
+    queue_depth.value = 5
+    assert batches.ready_batch_depth_snapshot() == 5
+    batches.close()
+    with pytest.raises(CollateError, match="unavailable"):
+        batches.ready_batch_depth_snapshot()
+
+
+def test_service_batch_depth_rejects_unsupported_dataloader_qsize() -> None:
+    batches = ServiceBatchIterator(
+        cast(Iterator[TrainingBatch], iter(())),
+        _LoaderIterator(_UnsupportedQueue()),
+    )
+
+    with pytest.raises(CollateError, match="unsupported"):
+        batches.ready_batch_depth_snapshot()
+    batches.close()
 
 
 def test_service_descriptors_drive_two_persistent_workers_and_ordered_acks(
@@ -202,6 +262,11 @@ def test_service_descriptors_drive_two_persistent_workers_and_ordered_acks(
     )
 
     assert sorted(int(batch.sample_ids[0]) for batch in batches) == [1, 2, 3, 4]
+    observed_cycles = {
+        int(batch.sample_ids[0]): batch.rng_identities[0].cycle_index
+        for batch in batches
+    }
+    assert observed_cycles == {1: 0, 2: 0, 3: 1, 4: 1}
     assert sorted(client.acknowledged) == sorted(
         descriptor.record.path for descriptor in descriptors
     )
@@ -222,6 +287,7 @@ def test_parent_close_never_acks_partially_consumed_service_leases(
         pin_memory=False,
         drop_last=True,
     )
+    assert batches.ready_batch_depth_snapshot() >= 0
     next(batches)
     cast_batches = cast(Generator[object, None, None], batches)
     cast_batches.close()

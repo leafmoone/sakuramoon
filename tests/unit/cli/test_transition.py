@@ -117,7 +117,7 @@ def _checkpoint(
                 None,
             ),
             stage_budget=StageBudgetCheckpointState(0, 1000),
-            checkpoint_cadence=CheckpointCadence(42, 1_800_000_042.0),
+            checkpoint_cadence=CheckpointCadence(42, 1_800_000_042.0, 1000),
         )
         train_state = checkpoint / "train_state"
         train_state.mkdir()

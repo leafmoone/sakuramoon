@@ -129,7 +129,9 @@ class _PreparedCache:
         record = self.manifest.shard(shard_path)
         path = self.root / shard_path
         return CachedShard(
-            FetchedShard(path, record.path, record.bytes, record.sha256, False),
+            FetchedShard(
+                path, record.path, record.bytes, record.upstream_sha256, False
+            ),
             (),
             sum(item.bytes for item in self.manifest.shards),
         )
@@ -141,7 +143,6 @@ def _pipeline(path: Path, record: ShardRecord) -> WebDatasetPipeline:
         shard_records=(record,),
         metadata_adapter=_metadata,
         metadata_fields=_fields(),
-        validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -151,7 +152,7 @@ def _pipeline(path: Path, record: ShardRecord) -> WebDatasetPipeline:
         rejection_observer=_observe_rejection,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
 
 
@@ -161,17 +162,13 @@ def test_two_persistent_workers_coordinate_parent_state(tmp_path: Path) -> None:
         _write_tar(path, index)
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="test",
-        access_terms="test",
+        revision="master",
     )
     records = tuple(
         ShardRecord(
             path=path.name,
-            release="trusted",
             bytes=path.stat().st_size,
-            sha256="1" * 64,
-            samples=1,
+            upstream_sha256="1" * 64,
         )
         for path in paths
     )
@@ -226,10 +223,8 @@ def test_worker_and_ready_channels_are_bounded_and_two_processes_persist(
     records = tuple(
         ShardRecord(
             path=path.name,
-            release="trusted",
             bytes=path.stat().st_size,
-            sha256="1" * 64,
-            samples=1,
+            upstream_sha256="1" * 64,
         )
         for path in paths
     )
@@ -244,6 +239,7 @@ def test_worker_and_ready_channels_are_bounded_and_two_processes_persist(
         worker_count=2,
         ready_batches=2,
         pin_memory=False,
+        worker_seed=9,
         in_order=False,
     )
     assert dataset.input_queue_capacity == 2
@@ -266,7 +262,10 @@ def test_worker_and_ready_channels_are_bounded_and_two_processes_persist(
         dataset.submit(
             worker_id,
             _ShardWork(
-                records[next_command].path, paths[next_command], records[next_command]
+                records[next_command].path,
+                paths[next_command],
+                records[next_command],
+                next_command // 2,
             )
         )
         next_command += 1
@@ -298,6 +297,7 @@ def test_worker_and_ready_channels_are_bounded_and_two_processes_persist(
                         records[next_command].path,
                         paths[next_command],
                         records[next_command],
+                        next_command // 2,
                     )
                 )
                 next_command += 1
@@ -318,17 +318,13 @@ def test_recovered_active_barrier_and_worker_count_have_no_fallback(
         _write_tar(path, index)
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="test",
-        access_terms="test",
+        revision="master",
     )
     records = tuple(
         ShardRecord(
             path=path.name,
-            release="trusted",
             bytes=path.stat().st_size,
-            sha256="1" * 64,
-            samples=1,
+            upstream_sha256="1" * 64,
         )
         for path in paths
     )
@@ -382,4 +378,3 @@ def test_recovered_active_barrier_and_worker_count_have_no_fallback(
     assert len(cache.protected[2][1]) == 2
     assert records[2].path in cache.protected[2][1]
     assert coordinator.state.replayed_shards == 2
-    assert coordinator.state.replayed_samples == 2

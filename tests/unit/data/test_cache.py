@@ -51,17 +51,13 @@ class _ConcurrentTransport:
 def _manifest(sizes: tuple[int, ...] = (10, 10, 10)) -> DatasetManifest:
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="synthetic-license",
-        access_terms="synthetic-terms",
+        revision="master",
     )
     shards = tuple(
         ShardRecord(
             path=f"release/{index:06d}.tar",
-            release="release",
             bytes=size,
-            sha256=hashlib.sha256(bytes([index]) * size).hexdigest(),
-            samples=index + 1,
+            upstream_sha256=hashlib.sha256(bytes([index]) * size).hexdigest(),
         )
         for index, size in enumerate(sizes)
     )
@@ -94,7 +90,9 @@ def _install_fetch(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
         path = root / shard_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(bytes([index]) * shard.bytes)
-        return FetchedShard(path, shard.path, shard.bytes, shard.sha256, False)
+        return FetchedShard(
+            path, shard.path, shard.bytes, shard.upstream_sha256, False
+        )
 
     monkeypatch.setattr(cache_module, "fetch_dataset_shard", fetch)
 

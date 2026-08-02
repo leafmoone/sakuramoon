@@ -142,7 +142,7 @@ def _source_state(depth: int, stage: str) -> RawCheckpointState:
             None,
         ),
         stage_budget=StageBudgetCheckpointState(0, 50_001),
-        checkpoint_cadence=CheckpointCadence(1, 1_800_000_001.0),
+        checkpoint_cadence=CheckpointCadence(1, 1_800_000_001.0, 1000),
     )
 
 
@@ -161,7 +161,11 @@ def _assert_loaded_growth_point(
         state,
         trainer=SingleGpuUpdateState(update, update, state.trainer.effective_samples),
         growth=replace(state.growth, alpha=alpha),
-        checkpoint_cadence=CheckpointCadence(update, 1_800_000_001.0 + elapsed_updates),
+        checkpoint_cadence=CheckpointCadence(
+            update,
+            1_800_000_001.0 + elapsed_updates,
+            1000,
+        ),
     )
     identity = _identity(f"alpha-{elapsed_updates}", update, optimizer)
     result = save_raw_checkpoint(
@@ -290,12 +294,16 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
                     1000,
                 ),
                 stage_budget=StageBudgetCheckpointState(1, 50_001),
-                checkpoint_cadence=CheckpointCadence(501, 1_800_000_501.0),
+                checkpoint_cadence=CheckpointCadence(
+                    501,
+                    1_800_000_501.0,
+                    1000,
+                ),
             ),
             rejected_target,
             rejected_optimizer,
             request,
-            checkpoint_cadence=CheckpointCadence(501, 1_800_000_502.0),
+            checkpoint_cadence=CheckpointCadence(501, 1_800_000_502.0, 1000),
         )
     assert not rejected_optimizer.optimizer.state
     assert torch.equal(rejected_optimizer.sr_rng.state, rejected_sr)
@@ -310,7 +318,7 @@ def test_raw_growth_migration_preserves_old_state_and_restores_growth_points(
         target,
         target_optimizer,
         request,
-        checkpoint_cadence=CheckpointCadence(1, 1_800_000_002.0),
+        checkpoint_cadence=CheckpointCadence(1, 1_800_000_002.0, 1000),
     )
 
     assert report.source_depth == source_depth
@@ -398,7 +406,7 @@ def test_growth_migration_rejects_optimizer_owned_by_another_module(
             target,
             target_optimizer,
             request,
-            checkpoint_cadence=CheckpointCadence(1, 1_800_000_002.0),
+            checkpoint_cadence=CheckpointCadence(1, 1_800_000_002.0, 1000),
         )
 
     _assert_unchanged(target, target_optimizer, parameters, sr_state)
@@ -428,7 +436,7 @@ def test_growth_migration_rejects_new_slot_prefix_collision(tmp_path: Path) -> N
             target,
             target_optimizer,
             request,
-            checkpoint_cadence=CheckpointCadence(1, 1_800_000_002.0),
+            checkpoint_cadence=CheckpointCadence(1, 1_800_000_002.0, 1000),
         )
 
     _assert_unchanged(target, target_optimizer, parameters, sr_state)

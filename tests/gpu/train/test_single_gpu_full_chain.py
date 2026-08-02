@@ -41,7 +41,7 @@ from sakuramoon.data.manifest import (
     DatasetManifest,
     DatasetSourceIdentity,
     ShardRecord,
-    manifest_sha256,
+    canonical_manifest_bytes,
 )
 from sakuramoon.data.modelscope import ModelScopeDatasetTransport
 from sakuramoon.data.production import ProductionPipelineFactory
@@ -55,10 +55,15 @@ from sakuramoon.data.service_protocol import (
     DataServiceSessionIdentity,
     ShardLeaseDescriptor,
 )
-from sakuramoon.data.validation import VALIDATION_SAMPLE_COUNT
+from sakuramoon.data.validation import (
+    VALIDATION_SHARD_PATHS,
+    ValidationSelection,
+    canonical_validation_selection_bytes,
+    load_validation_prompt_samples,
+    select_validation_shards,
+)
 from sakuramoon.encoders.mage_vae import load_local_mage_vae
 from sakuramoon.encoders.qwen import load_local_qwen
-from sakuramoon.eval.spec import PromptCase, PromptManifest
 from sakuramoon.model.dit import PackedDiT
 from sakuramoon.model.growth import BASE_SLOT_IDS
 from sakuramoon.optim.adamw8bit import build_adamw8bit
@@ -103,11 +108,13 @@ def _config(
         (repository_root / "config/examples/all_options.example.toml").read_text()
     )
     values: dict[str, object] = {
+        "run.seed": 44,
         "storage.shared_mount_source": "server.example:/governed/export",
         "storage.minimum_free_gib": 8,
-        "data.source.revision": "c" * 40,
-        "data.manifest.path": "synthetic/train-manifest.jsonl",
-        "data.manifest.sha256": "3" * 64,
+        "data.source.revision": "master",
+        "data.manifest.path": "synthetic/train-manifest.json",
+        "data.manifest.initialize_if_missing": True,
+        "data.manifest.refresh_existing": False,
         "data.cache.low_watermark_gib": 8,
         "data.cache.high_watermark_gib": 16,
         "data.cache.download_concurrency": 2,
@@ -122,19 +129,15 @@ def _config(
         "data.transport.max_retries": 2,
         "data.transport.retry_backoff_seconds": 0.0,
         "data.transport.stream_chunk_bytes": 1_048_576,
-        "data.validation.manifest_path": "synthetic/validation-manifest.jsonl",
-        "data.validation.manifest_sha256": "4" * 64,
-        "checkpoint.slots": 3,
+        "data.validation.selection_path": "synthetic/validation-selection.json",
+        "data.validation.shard_root": "synthetic/validation-shards",
+        "checkpoint.slots": 2,
         "kernels.attention_backend": "fa4_varlen",
         "stage.local_batch": 1,
         "stage.accumulation": 1,
         "stage.global_batch": 1,
         "stage.activation_checkpoint_mode": "none",
         "stage.planned_updates": 10,
-        "stage.planned_valid_samples": 10,
-        "stage.planned_equivalent_data_passes": 1.0,
-        "stage.planned_dit_flops": 1.0,
-        "stage.planned_wall_time_hours": 1.0,
         "profiling.schedule_updates": 10,
         "benchmark.profile_trace_updates": 5,
         "logging.flush_every_updates": 1,
@@ -144,22 +147,18 @@ def _config(
         "wandb.queue_capacity": 2,
         "evaluation.fid.every_successful_updates": 10,
         "evaluation.fid.trend_samples": 100,
-        "evaluation.fid.feature_extractor": "synthetic-locked-extractor",
-        "evaluation.fid.feature_extractor_version": "synthetic-version",
-        "evaluation.fid.feature_extractor_path": "synthetic/extractor.safetensors",
-        "evaluation.fid.feature_extractor_sha256": "8" * 64,
-        "evaluation.fid.preprocess_path": "synthetic/preprocess.json",
-        "evaluation.fid.preprocess_sha256": "6" * 64,
+        "evaluation.extractor.feature_extractor": "synthetic-locked-extractor",
+        "evaluation.extractor.feature_extractor_version": "synthetic-version",
+        "evaluation.extractor.feature_extractor_path": "synthetic/extractor.safetensors",
+        "evaluation.extractor.preprocess_path": "synthetic/preprocess.json",
         "evaluation.fid.real_stats_path": "synthetic/real-stats.npz",
-        "evaluation.fid.real_stats_sha256": "5" * 64,
         "evaluation.is.every_successful_updates": 10,
         "evaluation.is.trend_samples": 100,
         "evaluation.is.splits": 10,
-        "evaluation.prompt_manifest_path": "synthetic/prompts.json",
-        "evaluation.prompt_manifest_sha256": "7" * 64,
         "evaluation.gpu_index": 0,
         "evaluation.training_paused": True,
         "evaluation.batch_size": 10,
+        "evaluation.output_reserve_gib": 1,
         "evaluation.manual_quality.enabled": True,
         "evaluation.manual_quality.samples": 100,
     }
@@ -173,9 +172,6 @@ def _config(
         * cast(int, payload["stage"]["world_size"])
     )
     payload["stage"]["global_batch"] = global_batch
-    payload["stage"]["planned_valid_samples"] = (
-        global_batch * cast(int, payload["stage"]["planned_updates"])
-    )
     return RuntimeConfig.model_validate(payload)
 
 
@@ -281,7 +277,10 @@ class _BoundedClient:
 def _tar_bytes(sample_id: int) -> bytes:
     metadata = json.dumps(
         {
-            "captions": {"nl2": "", "nl3": ""},
+            "captions": {
+                "nl2": f"bounded engineering prompt {sample_id}",
+                "nl3": "",
+            },
             "dropout": {"candidate_tags": []},
             "id": sample_id,
             "image": {"height": 512, "width": 640},
@@ -311,46 +310,27 @@ def _tar_bytes(sample_id: int) -> bytes:
 def _dataset() -> tuple[DatasetManifest, dict[str, bytes]]:
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="test-license",
-        access_terms="test-terms",
+        revision="master",
     )
+    paths = (*VALIDATION_SHARD_PATHS, "release/000000.tar", "release/000001.tar")
     bodies = {
-        f"release/{index:06d}.tar": _tar_bytes(9000 + index) for index in range(4)
+        path: _tar_bytes(9000 + index) for index, path in enumerate(paths)
     }
     records = tuple(
         ShardRecord(
             path=path,
-            release="1_2024",
             bytes=len(body),
-            sha256=hashlib.sha256(body).hexdigest(),
-            samples=1,
+            upstream_sha256=hashlib.sha256(body).hexdigest(),
         )
         for path, body in bodies.items()
     )
     return DatasetManifest.from_shards(source, records), bodies
 
 
-def _validation_payload() -> bytes:
-    rows = (
-        json.dumps(
-            {
-                "aspect_bucket": "square",
-                "caption_available": False,
-                "id": sample_id,
-                "release": "1_2024",
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        for sample_id in range(1, VALIDATION_SAMPLE_COUNT + 1)
-    )
-    return ("\n".join(rows) + "\n").encode()
-
-
 def _run_data_service(
     root: Path,
     manifest: DatasetManifest,
+    validation_selection: ValidationSelection,
     bodies: dict[str, bytes],
     identity: DataServiceSessionIdentity,
     stop: Any,
@@ -365,6 +345,7 @@ def _run_data_service(
     )
     service = DataSupplyService(
         manifest,
+        validation_selection,
         cache,
         root / "mainset.json",
         Path("/run/sakuramoon/data-service.lock"),
@@ -381,18 +362,22 @@ def _run_data_service(
 def _start_data_service(
     root: Path,
     manifest: DatasetManifest,
+    validation_selection: ValidationSelection,
     bodies: dict[str, bytes],
 ) -> tuple[Any, Any, DataServiceSessionIdentity]:
     socket_path = Path("/run/sakuramoon/data-service.sock")
     if socket_path.exists() or socket_path.is_symlink():
         raise AssertionError("governed data-service socket is already occupied")
-    identity = DataServiceSessionIdentity(manifest_sha256(manifest), 2)
+    identity = DataServiceSessionIdentity(
+        manifest_id=manifest.manifest_id,
+        worker_count=2,
+    )
     context = cast(Any, mp.get_context("spawn"))
     stop = context.Event()
     ready = context.Event()
     process = context.Process(
         target=_run_data_service,
-        args=(root, manifest, bodies, identity, stop, ready),
+        args=(root, manifest, validation_selection, bodies, identity, stop, ready),
     )
     process.start()
     deadline = time.monotonic() + 30.0
@@ -400,8 +385,7 @@ def _start_data_service(
         if not process.is_alive():
             process.join(timeout=1.0)
             raise AssertionError(
-                "data service exited before readiness: "
-                f"exitcode={process.exitcode}"
+                f"data service exited before readiness: exitcode={process.exitcode}"
             )
         if time.monotonic() >= deadline:
             stop.set()
@@ -506,6 +490,7 @@ def _fresh_resume_worker(
     checkpoint: Path,
     repository_root: Path,
     config: RuntimeConfig,
+    training_shard_count: int,
     marker_root: Path,
     result_path: Path,
 ) -> None:
@@ -540,10 +525,10 @@ def _fresh_resume_worker(
     client = _BoundedClient(
         DataServiceClient(
             Path(config.data.service.socket_path),
-            DataServiceSessionIdentity(config.data.manifest.sha256, 2),
+            worker_count=config.data.cache.persistent_workers_per_rank,
             request_timeout_seconds=5.0,
         ),
-        lease_budget=4,
+        lease_budget=training_shard_count,
     )
     factory = ProductionPipelineFactory.from_config(
         config,
@@ -551,7 +536,6 @@ def _fresh_resume_worker(
         tokenizer=_WorkerRecordingTokenizer(marker_root),
         framing=FramingContract(34, 5, 0),
         rejection_observer=_observe_rejection,
-        pass_index=0,
     )
     stream = factory.batches(client)
     try:
@@ -639,9 +623,25 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
 ) -> None:
     repository_root = Path(__file__).parents[3]
     manifest, bodies = _dataset()
-    validation_path = tmp_path / "validation-manifest.jsonl"
-    validation_payload = _validation_payload()
-    validation_path.write_bytes(validation_payload)
+    manifest_path = tmp_path / "train-manifest.json"
+    manifest_path.write_bytes(canonical_manifest_bytes(manifest))
+    validation_selection = select_validation_shards(manifest)
+    validation_path = tmp_path / "validation-selection.json"
+    validation_path.write_bytes(
+        canonical_validation_selection_bytes(validation_selection)
+    )
+    validation_shard_root = tmp_path / "validation-shards"
+    for record in validation_selection.shards:
+        shard_path = validation_shard_root / record.path
+        shard_path.parent.mkdir(parents=True, exist_ok=True)
+        shard_path.write_bytes(bodies[record.path])
+    validation_prompts = load_validation_prompt_samples(
+        validation_selection,
+        validation_shard_root.absolute(),
+        run_seed=44,
+    )
+    assert len(validation_prompts) == 2
+    training_shard_count = len(manifest.shards) - len(validation_selection.shards)
     relative_root = tmp_path.relative_to(repository_root)
     service_root = tmp_path / "service"
     service_root.mkdir()
@@ -649,26 +649,11 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
     checkpoint_root.mkdir()
     evaluation_root = tmp_path / "evaluation"
     evaluation_root.mkdir()
-    prompt_manifest = PromptManifest(
-        tuple(
-            PromptCase(
-                f"bounded-{index:03d}",
-                f"bounded engineering prompt {index}",
-                (),
-                index,
-                256,
-                256,
-            )
-            for index in range(100)
-        )
-    )
     evaluation_payloads = {
         "extractor.pt": b"synthetic-bounded-extractor\n",
         "preprocess.pt": b"synthetic-bounded-preprocess\n",
         "real-stats.safetensors": b"synthetic-bounded-real-stats\n",
     }
-    prompt_path = evaluation_root / "prompts.json"
-    prompt_path.write_bytes(prompt_manifest.canonical_bytes())
     for name, payload in evaluation_payloads.items():
         (evaluation_root / name).write_bytes(payload)
     config = _config(
@@ -678,9 +663,7 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
             "paths.cache_dir": str(relative_root / "cache"),
             "paths.checkpoint_dir": str(relative_root / "checkpoints"),
             "paths.artifact_dir": str(relative_root / "artifacts"),
-            "logging.local_jsonl_path": str(
-                relative_root / "artifacts/metrics.jsonl"
-            ),
+            "logging.local_jsonl_path": str(relative_root / "artifacts/metrics.jsonl"),
             "wandb.retry_jsonl_path": str(
                 relative_root / "artifacts/wandb-retry.jsonl"
             ),
@@ -689,43 +672,31 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
                 "/cs1/fs1/pvc-8eb5b2a2-c80d-4c40-b28a-800fbab13752"
             ),
             "storage.minimum_free_gib": 1,
-            "data.source.revision": "a" * 40,
-            "data.manifest.path": str(relative_root / "train-manifest.jsonl"),
-            "data.manifest.sha256": manifest_sha256(manifest),
+            "data.source.revision": "master",
+            "data.manifest.path": str(relative_root / "train-manifest.json"),
             "data.cache.low_watermark_gib": 0,
             "data.cache.high_watermark_gib": 1,
             "data.service.mainset_path": str(relative_root / "service/mainset.json"),
-            "data.validation.manifest_path": str(validation_path),
-            "data.validation.manifest_sha256": hashlib.sha256(
-                validation_payload
-            ).hexdigest(),
-            "evaluation.prompt_manifest_path": str(
-                relative_root / "evaluation/prompts.json"
+            "data.validation.selection_path": str(
+                relative_root / "validation-selection.json"
             ),
-            "evaluation.prompt_manifest_sha256": prompt_manifest.sha256,
-            "evaluation.fid.trend_samples": 100,
-            "evaluation.fid.acceptance_samples": 100,
-            "evaluation.fid.feature_extractor_path": str(
+            "data.validation.shard_root": str(relative_root / "validation-shards"),
+            "evaluation.fid.trend_samples": 2,
+            "evaluation.fid.acceptance_samples": 2,
+            "evaluation.extractor.feature_extractor_path": str(
                 relative_root / "evaluation/extractor.pt"
             ),
-            "evaluation.fid.feature_extractor_sha256": hashlib.sha256(
-                evaluation_payloads["extractor.pt"]
-            ).hexdigest(),
-            "evaluation.fid.preprocess_path": str(
+            "evaluation.extractor.preprocess_path": str(
                 relative_root / "evaluation/preprocess.pt"
             ),
-            "evaluation.fid.preprocess_sha256": hashlib.sha256(
-                evaluation_payloads["preprocess.pt"]
-            ).hexdigest(),
             "evaluation.fid.real_stats_path": str(
                 relative_root / "evaluation/real-stats.safetensors"
             ),
-            "evaluation.fid.real_stats_sha256": hashlib.sha256(
-                evaluation_payloads["real-stats.safetensors"]
-            ).hexdigest(),
-            "evaluation.is.trend_samples": 100,
-            "evaluation.is.acceptance_samples": 100,
-            "evaluation.manual_quality.samples": 100,
+            "evaluation.is.trend_samples": 2,
+            "evaluation.is.acceptance_samples": 2,
+            "evaluation.is.splits": 1,
+            "evaluation.batch_size": 1,
+            "evaluation.manual_quality.samples": 2,
             "stage.planned_updates": 1,
             "sampling.profile": "preview",
         },
@@ -777,7 +748,11 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
             None,
         ),
         stage_budget=StageBudgetCheckpointState(0, 1),
-        checkpoint_cadence=CheckpointCadence(0, 0.0),
+        checkpoint_cadence=CheckpointCadence(
+            0,
+            0.0,
+            config.checkpoint.full_every_updates,
+        ),
     )
     initial = save_raw_checkpoint(
         checkpoint_root,
@@ -797,6 +772,7 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
     service_process, service_stop, service_identity = _start_data_service(
         service_root,
         manifest,
+        validation_selection,
         bodies,
     )
     main_markers = tmp_path / "main-worker-pids"
@@ -806,18 +782,18 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
         client = _BoundedClient(
             DataServiceClient(
                 Path(config.data.service.socket_path),
-                service_identity,
+                worker_count=service_identity.worker_count,
                 request_timeout_seconds=5.0,
             ),
-            lease_budget=len(manifest.shards),
+            lease_budget=training_shard_count,
         )
+        assert client.identity == service_identity
         factory = ProductionPipelineFactory.from_config(
             config,
             repository_root=repository_root,
             tokenizer=_WorkerRecordingTokenizer(main_markers),
             framing=FramingContract(34, 5, 0),
             rejection_observer=_observe_rejection,
-            pass_index=0,
         )
         stream = factory.batches(client)
         publisher = ProductionSingleGpuCheckpointPublisher(
@@ -827,6 +803,7 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
             optimizer=optimizer,
             restored_checkpoint=restored,
             accepted_checkpoint_ids=frozenset(),
+            retention_slots=config.checkpoint.slots,
         )
         workload = build_single_gpu_preflight_workload(
             config,
@@ -889,7 +866,11 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
         durable_manifest, durable_state = read_raw_checkpoint_state(durable_checkpoint)
         assert durable_manifest.identity.update == 1
         assert durable_state.trainer == SingleGpuUpdateState(1, 1, 1)
-        assert durable_state.checkpoint_cadence == CheckpointCadence(1, 1.0)
+        assert durable_state.checkpoint_cadence == CheckpointCadence(
+            1,
+            1.0,
+            config.checkpoint.full_every_updates,
+        )
     finally:
         _stop_data_service(service_process, service_stop)
 
@@ -916,6 +897,7 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
     replay_process, replay_stop, _replay_identity = _start_data_service(
         service_root,
         manifest,
+        validation_selection,
         bodies,
     )
     fresh_markers = tmp_path / "fresh-worker-pids"
@@ -927,6 +909,7 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
             durable_checkpoint,
             repository_root,
             config,
+            training_shard_count,
             fresh_markers,
             fresh_result_path,
         ),

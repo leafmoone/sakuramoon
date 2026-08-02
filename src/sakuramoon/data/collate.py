@@ -5,6 +5,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import queue
+import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from multiprocessing.queues import Queue as MultiprocessingQueue
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
 
 
 _WORKER_CONTEXT = mp.get_context("spawn")
+_MAX_TORCH_SEED = 2**64 - 1
 
 
 class CollateError(ValueError):
@@ -60,7 +62,7 @@ class TrainingBatch:
     use_null_style: torch.Tensor
     all_condition_dropped: torch.Tensor
     dropout_hits: CaptionDropoutCounts
-    releases: tuple[str, ...]
+    source_shards: tuple[str, ...]
     audits: tuple[ImageAudit, ...]
     rng_identities: tuple[RngIdentity, ...]
 
@@ -88,7 +90,12 @@ class _ShardWork:
     shard_path: str
     local_path: Path
     record: ShardRecord
+    cycle_index: int
     stop: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.cycle_index) is not int or self.cycle_index < 0:
+            raise CollateError("shard work cycle_index is invalid")
 
 
 @dataclass(frozen=True)
@@ -185,7 +192,7 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
         if type(worker_id) is not int or not 0 <= worker_id < self.worker_count:
             raise CollateError("persistent worker stop target is invalid")
         self.input_queues[worker_id].put_nowait(
-            _ShardWork("", Path("."), record, stop=True)
+            _ShardWork("", Path("."), record, 0, stop=True)
         )
 
     def __iter__(self) -> Iterator[_WorkerBatch | _WorkerDone]:
@@ -204,6 +211,7 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
                 shard_pipeline = self.pipeline._with_local_shards(  # pyright: ignore[reportPrivateUsage]
                     (command.local_path,),
                     (command.record,),
+                    cycle_index=command.cycle_index,
                 )
                 for batch in bucketed_batches(
                     shard_pipeline._iter_paths(  # pyright: ignore[reportPrivateUsage]
@@ -235,13 +243,19 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
             yield _WorkerDone(worker_id, worker_pid, command.shard_path)
 
 
-def _shutdown_loader(loader: DataLoader[Any]) -> None:
+def _shutdown_loader(
+    loader: DataLoader[Any], *, suppress_worker_failure: bool = False
+) -> None:
     """Stop persistent workers deterministically when a lease is interrupted."""
 
     iterator = getattr(loader, "_iterator", None)
     shutdown = getattr(iterator, "_shutdown_workers", None)
     if callable(shutdown):
-        shutdown()
+        try:
+            shutdown()
+        except RuntimeError:
+            if not suppress_worker_failure:
+                raise
 
 
 def _completion_for(
@@ -403,7 +417,7 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
             dtype=torch.bool,
         ),
         dropout_hits=CaptionDropoutCounts(**dropout_hits),
-        releases=tuple(sample.release for sample in samples),
+        source_shards=tuple(sample.source_shard for sample in samples),
         audits=tuple(sample.audit for sample in samples),
         rng_identities=tuple(sample.rng for sample in samples),
     )
@@ -466,10 +480,17 @@ def _build_batch_loader[BatchItem](
     worker_count: int,
     ready_batches: int,
     pin_memory: bool,
+    worker_seed: int,
     in_order: bool = True,
 ) -> DataLoader[BatchItem]:
     """Build persistent workers with an exact divisible prefetch budget."""
 
+    if (
+        type(worker_seed) is not int
+        or worker_seed < 0
+        or worker_seed > _MAX_TORCH_SEED
+    ):
+        raise CollateError("worker_seed must be an unsigned 64-bit integer")
     if (
         type(worker_count) is not int
         or worker_count <= 0
@@ -482,6 +503,8 @@ def _build_batch_loader[BatchItem](
         raise CollateError(
             "ready_batches must be a positive multiple of persistent worker_count"
         )
+    worker_generator = torch.Generator(device="cpu")
+    worker_generator.manual_seed(worker_seed)
     return DataLoader(
         dataset,
         batch_size=None,
@@ -491,6 +514,7 @@ def _build_batch_loader[BatchItem](
         pin_memory=pin_memory,
         in_order=in_order,
         multiprocessing_context=_WORKER_CONTEXT,
+        generator=worker_generator,
     )
 
 
@@ -547,6 +571,7 @@ def iter_leased_batches(
         worker_count=worker_count,
         ready_batches=ready_batches,
         pin_memory=pin_memory,
+        worker_seed=pipeline.base_seed,
         in_order=False,
     )
     iterator = iter(loader)
@@ -573,6 +598,7 @@ def iter_leased_batches(
                     shard_path=shard_path,
                     local_path=cached.fetched.path,
                     record=coordinator.store.manifest.shard(shard_path),
+                    cycle_index=pipeline.cycle_index,
                 ),
             )
             queued[shard_path] = worker_id
@@ -617,7 +643,7 @@ def iter_leased_batches(
                 dataset.stop(worker_id, coordinator.store.manifest.shards[0])
             except (queue.Full, IndexError):
                 continue
-        _shutdown_loader(loader)
+        _shutdown_loader(loader, suppress_worker_failure=sys.exception() is not None)
 
 
 class DataLeaseClient(Protocol):
@@ -630,6 +656,58 @@ class DataLeaseClient(Protocol):
     def acknowledge(self, descriptor: ShardLeaseDescriptor) -> None: ...
 
 
+class ServiceBatchIterator(Iterator[TrainingBatch]):
+    """Own a service DataLoader and expose its live result-queue depth."""
+
+    def __init__(
+        self,
+        batches: Iterator[TrainingBatch],
+        loader_iterator: object,
+    ) -> None:
+        self._batches = batches
+        self._loader_iterator = loader_iterator
+        self._closed = False
+
+    def __iter__(self) -> ServiceBatchIterator:
+        return self
+
+    def __next__(self) -> TrainingBatch:
+        if self._closed:
+            raise StopIteration
+        try:
+            return next(self._batches)
+        except StopIteration:
+            self._closed = True
+            raise
+
+    def ready_batch_depth_snapshot(self) -> int:
+        if self._closed:
+            raise CollateError("live DataLoader ready-batch depth is unavailable")
+        data_queue = getattr(self._loader_iterator, "_data_queue", None)
+        qsize = getattr(data_queue, "qsize", None)
+        if not callable(qsize):
+            raise CollateError("live DataLoader ready-batch depth is unsupported")
+        try:
+            depth = qsize()
+        except (NotImplementedError, OSError):
+            raise CollateError(
+                "live DataLoader ready-batch depth is unsupported"
+            ) from None
+        if type(depth) is not int or depth < 0:
+            raise CollateError("live DataLoader ready-batch depth is invalid")
+        return depth
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            close = getattr(self._batches, "close", None)
+            if callable(close):
+                close()
+        finally:
+            self._closed = True
+
+
 def iter_service_batches(
     pipeline: WebDatasetPipeline,
     client: DataLeaseClient,
@@ -639,7 +717,7 @@ def iter_service_batches(
     ready_batches: int,
     pin_memory: bool,
     drop_last: bool,
-) -> Iterator[TrainingBatch]:
+) -> ServiceBatchIterator:
     """Drain service-issued leases without owning service/cache/state in trainer."""
 
     if worker_count != client.identity.worker_count:
@@ -649,7 +727,7 @@ def iter_service_batches(
     if type(batch_size) is not int or batch_size <= 0 or type(drop_last) is not bool:
         raise CollateError("batch_size and drop_last are invalid")
     if client.health():
-        return
+        raise CollateError("data service has no training lease available")
 
     dataset = _PersistentShardDataset(
         pipeline,
@@ -662,6 +740,7 @@ def iter_service_batches(
         worker_count=worker_count,
         ready_batches=ready_batches,
         pin_memory=pin_memory,
+        worker_seed=pipeline.base_seed,
         in_order=False,
     )
     iterator = iter(loader)
@@ -686,6 +765,7 @@ def iter_service_batches(
                     shard_path=descriptor.record.path,
                     local_path=descriptor.local_path,
                     record=descriptor.record,
+                    cycle_index=descriptor.cycle_index,
                 ),
             )
             queued[descriptor.record.path] = descriptor
@@ -710,39 +790,43 @@ def iter_service_batches(
         available_workers.append(descriptor.worker_id)
         submit_available()
 
-    try:
-        submit_available()
-        while queued:
-            item = next(iterator)
-            if isinstance(item, _WorkerBatch):
-                descriptor = queued.get(item.shard_path)
-                if descriptor is None or descriptor.worker_id != item.worker_id:
-                    raise CollateError(
-                        "persistent worker returned an unknown service lease"
-                    )
-                yield item.batch
-            elif isinstance(item, _WorkerDone):
-                descriptor = queued.get(item.shard_path)
-                if descriptor is None or descriptor.worker_id != item.worker_id:
-                    raise CollateError(
-                        "persistent worker done service identity drifted"
-                    )
-                finish_shard(item.shard_path)
-            else:
-                raise CollateError("persistent worker output channel is invalid")
-    finally:
-        if stop_record is not None:
-            for worker_id in range(worker_count):
-                try:
-                    dataset.stop(worker_id, stop_record)
-                except queue.Full:
-                    continue
-        _shutdown_loader(loader)
+    def drain() -> Iterator[TrainingBatch]:
+        try:
+            submit_available()
+            while queued:
+                item = next(iterator)
+                if isinstance(item, _WorkerBatch):
+                    descriptor = queued.get(item.shard_path)
+                    if descriptor is None or descriptor.worker_id != item.worker_id:
+                        raise CollateError(
+                            "persistent worker returned an unknown service lease"
+                        )
+                    yield item.batch
+                elif isinstance(item, _WorkerDone):
+                    descriptor = queued.get(item.shard_path)
+                    if descriptor is None or descriptor.worker_id != item.worker_id:
+                        raise CollateError(
+                            "persistent worker done service identity drifted"
+                        )
+                    finish_shard(item.shard_path)
+                else:
+                    raise CollateError("persistent worker output channel is invalid")
+        finally:
+            if stop_record is not None:
+                for worker_id in range(worker_count):
+                    try:
+                        dataset.stop(worker_id, stop_record)
+                    except queue.Full:
+                        continue
+            _shutdown_loader(loader, suppress_worker_failure=sys.exception() is not None)
+
+    return ServiceBatchIterator(drain(), iterator)
 
 
 __all__ = [
     "BucketedBatchDataset",
     "CollateError",
+    "ServiceBatchIterator",
     "TrainingBatch",
     "bucketed_batches",
     "collate_samples",

@@ -32,6 +32,11 @@ from sakuramoon.data.production import (
 )
 from sakuramoon.encoders.mage_vae import FrozenMageVAE
 from sakuramoon.encoders.qwen import FrozenQwenEncoder
+from sakuramoon.model.attention import (
+    AcceptedCuSeqlens,
+    DenseGQAAttention,
+    FA4VarlenGQAAttention,
+)
 from sakuramoon.model.dit import DenseDiT
 from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.objective.flow import (
@@ -123,6 +128,107 @@ class DenseDiTAdapter(nn.Module):
         return self.model.artifact_config()
 
 
+class ActualDitFlopCounter:
+    """Count executed DiT matmul FLOPs from live tensor and sequence shapes.
+
+    The convention matches T053: one multiply-add is two FLOPs. Linear hooks
+    observe their actual invocation shapes, while attention hooks add the QK and
+    AV matrix products omitted by fused SDPA/FA4 operators. Pointwise operations
+    are outside that benchmark convention.
+    """
+
+    def __init__(self, module: object) -> None:
+        if not isinstance(module, nn.Module):
+            raise TypeError("DiT FLOP counting requires a torch module")
+        self._active_flops: int | None = None
+        self._handles = tuple(
+            child.register_forward_pre_hook(
+                self._linear_hook
+                if isinstance(child, nn.Linear)
+                else self._attention_hook
+            )
+            for child in module.modules()
+            if isinstance(
+                child,
+                (nn.Linear, DenseGQAAttention, FA4VarlenGQAAttention),
+            )
+        )
+        if not self._handles:
+            raise ValueError("DiT module exposes no countable operations")
+
+    def _add(self, value: int) -> None:
+        if self._active_flops is None:
+            return
+        if type(value) is not int or value <= 0:
+            raise RuntimeError("observed DiT FLOP contribution is invalid")
+        self._active_flops += value
+
+    def _linear_hook(
+        self,
+        module: nn.Module,
+        inputs: tuple[object, ...],
+    ) -> None:
+        if not isinstance(module, nn.Linear) or not inputs:
+            raise RuntimeError("DiT linear FLOP hook received an invalid module call")
+        value = inputs[0]
+        if (
+            not isinstance(value, torch.Tensor)
+            or value.ndim == 0
+            or value.shape[-1] != module.in_features
+            or value.numel() % module.in_features
+        ):
+            raise RuntimeError("DiT linear input shape cannot be counted")
+        vectors = value.numel() // module.in_features
+        self._add(2 * vectors * module.in_features * module.out_features)
+
+    def _attention_hook(
+        self,
+        module: nn.Module,
+        inputs: tuple[object, ...],
+    ) -> None:
+        if not inputs or not isinstance(inputs[0], torch.Tensor):
+            raise RuntimeError("DiT attention FLOP hook received invalid tokens")
+        tokens = inputs[0]
+        if isinstance(module, DenseGQAAttention):
+            if tokens.ndim != 3:
+                raise RuntimeError("dense DiT attention tokens cannot be counted")
+            batch, length, _hidden = tokens.shape
+            sequence_squares = batch * length * length
+        elif isinstance(module, FA4VarlenGQAAttention):
+            if (
+                tokens.ndim != 2
+                or len(inputs) < 2
+                or not isinstance(inputs[1], AcceptedCuSeqlens)
+            ):
+                raise RuntimeError("packed DiT attention boundaries cannot be counted")
+            boundaries = inputs[1]
+            if sum(boundaries.sequence_lengths) != tokens.shape[0]:
+                raise RuntimeError("packed DiT attention token identity changed")
+            sequence_squares = sum(
+                length * length for length in boundaries.sequence_lengths
+            )
+        else:
+            raise TypeError("unsupported DiT attention module reached FLOP hook")
+        self._add(4 * module.q_heads * module.head_dim * sequence_squares)
+
+    def measure[ResultT](self, operation: Callable[[], ResultT]) -> tuple[ResultT, int]:
+        """Run one DiT forward and return its observed matmul FLOP count."""
+
+        if not callable(operation):
+            raise TypeError("DiT FLOP observation requires a callable")
+        if self._active_flops is not None:
+            raise RuntimeError("DiT FLOP observation cannot be nested")
+        self._active_flops = 0
+        try:
+            result = operation()
+            observed = self._active_flops
+        finally:
+            self._active_flops = None
+        if observed <= 0:
+            raise RuntimeError("DiT forward produced no observable FLOPs")
+        return result, observed
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedTrainingBatch:
     """The immutable tensors needed by one objective evaluation."""
@@ -139,6 +245,7 @@ class RuntimeMeasurement:
     per_sample_loss: torch.Tensor
     image_tokens: int
     text_tokens: int
+    dit_flops: int
     sample_ids: tuple[str, ...]
     shape_keys: tuple[str, ...]
     high_noise_loss_sum: torch.Tensor
@@ -155,6 +262,7 @@ class RuntimeMeasurement:
             per_sample_loss=self.per_sample_loss.detach(),
             image_tokens=self.image_tokens,
             text_tokens=self.text_tokens,
+            dit_flops=self.dit_flops,
             sample_ids=self.sample_ids,
             shape_keys=self.shape_keys,
             high_noise_loss_sum=self.high_noise_loss_sum.detach(),
@@ -235,8 +343,8 @@ def _require_batch(batch: TrainingBatch) -> None:
         raise ValueError("Artist token routing batch size differs from images")
     if len(batch.main_token_lengths) != batch.images.shape[0]:
         raise ValueError("main token length count differs from images")
-    if len(batch.releases) != batch.images.shape[0]:
-        raise ValueError("release count differs from images")
+    if len(batch.source_shards) != batch.images.shape[0]:
+        raise ValueError("source shard count differs from images")
     if batch.target_height <= 0 or batch.target_width <= 0:
         raise ValueError("training target dimensions must be positive")
 
@@ -304,6 +412,7 @@ class SingleGpuBatchRuntime:
         self.t_eps = t_eps
         self.noise_observation_boundary = noise_observation_boundary
         self.growth_alpha = growth_alpha
+        self.dit_flop_counter = ActualDitFlopCounter(composite.dit)
 
     def prepare(
         self, batch: TrainingBatch, *, phase_timer: PhaseTimer | None = None
@@ -437,12 +546,16 @@ class SingleGpuBatchRuntime:
     ) -> RuntimeMeasurement:
         prepared = self.prepare(batch, phase_timer=phase_timer)
         if phase_timer is None:
-            predictions = self.composite(prepared.inputs)
+            predictions, dit_flops = self.dit_flop_counter.measure(
+                lambda: self.composite(prepared.inputs)
+            )
         else:
             with phase_timer.record("conditioning"):
-                predictions = self.composite.forward_conditioning(prepared.inputs)
+                conditioning = self.composite.forward_conditioning(prepared.inputs)
             with phase_timer.record("dit_forward"):
-                predictions = self.composite.forward_dit(prepared.inputs, predictions)
+                predictions, dit_flops = self.dit_flop_counter.measure(
+                    lambda: self.composite.forward_dit(prepared.inputs, conditioning)
+                )
         if len(predictions) != len(prepared.clean_latents):
             raise ValueError("DiT prediction count differs from latent batch")
         if phase_timer is None:
@@ -465,6 +578,7 @@ class SingleGpuBatchRuntime:
             per_sample_loss=loss.per_sample,
             image_tokens=image_tokens,
             text_tokens=text_tokens,
+            dit_flops=dit_flops,
             sample_ids=sample_ids,
             shape_keys=(shape_key,) * len(sample_ids),
             high_noise_loss_sum=loss.high_noise_loss_sum,
@@ -558,6 +672,7 @@ def require_single_gpu_checkpoint_binding(
     """Bind every restored stage/growth axis to the resolved S0 runtime."""
 
     require_single_gpu_config(config)
+    require_checkpoint_cadence_binding(config, state)
     growth = state.growth
     if (
         growth.stage != config.stage.name
@@ -593,6 +708,19 @@ def require_single_gpu_checkpoint_binding(
         raise ValueError("stage successful-update budget is already exhausted")
     if state.checkpoint_cadence.last_successful_update != trainer.successful_updates:
         raise ValueError("checkpoint cadence update does not match trainer state")
+
+
+def require_checkpoint_cadence_binding(
+    config: RuntimeConfig,
+    state: RawCheckpointState,
+) -> None:
+    """Bind a persisted RAW cadence to the resolved TOML interval."""
+
+    interval = config.checkpoint.full_every_updates
+    if type(interval) is not int or interval <= 0:
+        raise ValueError("resolved checkpoint update interval is invalid")
+    if state.checkpoint_cadence.every_successful_updates != interval:
+        raise ValueError("restored checkpoint cadence differs from resolved config")
 
 
 def _optimizer_learning_rate(optimizer: StepOptimizer) -> float:
@@ -856,11 +984,13 @@ def run_single_gpu_training(
 
 
 __all__ = [
+    "ActualDitFlopCounter",
     "DenseDiTAdapter",
     "PreparedTrainingBatch",
     "RuntimeMeasurement",
     "SingleGpuBatchRuntime",
     "SuccessfulTrainingObservation",
+    "require_checkpoint_cadence_binding",
     "require_single_gpu_checkpoint_binding",
     "require_single_gpu_config",
     "run_single_gpu_training",

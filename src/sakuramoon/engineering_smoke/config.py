@@ -110,11 +110,10 @@ class EngineeringDataConfig(StrictModel):
     source_height: Literal[512]
     shard_count: Annotated[int, Field(ge=4, le=16)]
     samples_per_shard: Literal[1]
-    validation_sample_count: Literal[2000]
+    validation_shard_count: Literal[2]
     persistent_workers: Literal[2]
     ready_batches: Literal[2]
     local_batch: Literal[1]
-    pass_index: Literal[0]
     pin_memory: Literal[True]
     drop_last: Literal[True]
     cache_low_bytes: NonNegativeInt
@@ -222,7 +221,10 @@ class LoadedEngineeringSmokeConfig:
 
 def _contains_sentinel(value: object) -> bool:
     if isinstance(value, dict):
-        return any(_contains_sentinel(item) for item in cast(dict[object, object], value).values())
+        return any(
+            _contains_sentinel(item)
+            for item in cast(dict[object, object], value).values()
+        )
     if isinstance(value, list):
         return any(_contains_sentinel(item) for item in cast(list[object], value))
     return looks_like_unresolved_sentinel(value)
@@ -238,8 +240,7 @@ def _safe_error(error: ValidationError) -> EngineeringSmokeConfigurationError:
         )
     )
     return EngineeringSmokeConfigurationError(
-        "engineering-smoke configuration validation failed at: "
-        + ", ".join(locations)
+        "engineering-smoke configuration validation failed at: " + ", ".join(locations)
     )
 
 
@@ -311,7 +312,13 @@ def require_single_gpu_environment(config: EngineeringSmokeConfig) -> None:
         raise EngineeringSmokeConfigurationError(
             "current CUDA device differs from the TOML selection"
         )
-    distributed_names = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
+    distributed_names = (
+        "RANK",
+        "LOCAL_RANK",
+        "WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+    )
     if any(name in os.environ for name in distributed_names):
         raise EngineeringSmokeConfigurationError(
             "engineering smoke refuses a distributed launch environment"

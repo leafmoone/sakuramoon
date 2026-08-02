@@ -7,7 +7,12 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from sakuramoon.config.schema import RuntimeConfig
+from sakuramoon.config.schema import (
+    EvaluationEnabledConfig,
+    FidEnabledConfig,
+    IsEnabledConfig,
+    RuntimeConfig,
+)
 
 
 def _add_unknown(data: dict[str, Any]) -> None:
@@ -76,6 +81,7 @@ def test_valid_synthetic_fixture_is_strict_and_frozen(
         config.sampling.nfe,
         config.sampling.time_schedule,
     ) == ("heun_final_euler", 25, 49, "linear")
+    assert isinstance(config.evaluation, EvaluationEnabledConfig)
     assert config.evaluation.sampling.profile == "reference"
     assert config.evaluation.sampling.nfe == 99
     with pytest.raises(ValidationError, match="frozen"):
@@ -318,6 +324,9 @@ def test_acceptance_sample_count_is_explicit_but_benchmark_configurable(
 
     config = RuntimeConfig.model_validate(valid_payload)
 
+    assert isinstance(config.evaluation, EvaluationEnabledConfig)
+    assert isinstance(config.evaluation.fid, FidEnabledConfig)
+    assert isinstance(config.evaluation.is_, IsEnabledConfig)
     assert config.evaluation.fid.acceptance_samples == 25000
     assert config.evaluation.is_.acceptance_samples == 25000
 
@@ -348,21 +357,152 @@ def test_runtime_model_paths_are_fixed_local_directories(
         RuntimeConfig.model_validate(valid_payload)
 
 
-@pytest.mark.parametrize(
-    "revision",
-    [
-        "master",
-        "A" * 40,
-        "0" * 39,
-        "0" * 41,
-    ],
-)
-def test_toml_dataset_revision_requires_lowercase_commit(
+@pytest.mark.parametrize("revision", ["main", "A" * 40, "0" * 40, "master "])
+def test_toml_dataset_revision_requires_master_branch(
     valid_payload: dict[str, Any], revision: str
 ) -> None:
     valid_payload["data"]["source"]["revision"] = revision
 
     with pytest.raises(ValidationError, match="revision"):
+        RuntimeConfig.model_validate(valid_payload)
+
+
+def test_training_manifest_is_automatic_and_rejects_external_hash_binding(
+    valid_payload: dict[str, Any],
+) -> None:
+    config = RuntimeConfig.model_validate(valid_payload)
+
+    assert config.data.manifest.path == "synthetic/train-manifest.json"
+    assert config.data.manifest.initialize_if_missing is True
+    assert config.data.manifest.refresh_existing is False
+
+    for field, value in (
+        ("path", "/tmp/train-manifest.json"),
+        ("path", "../train-manifest.json"),
+        ("path", "synthetic\\train-manifest.json"),
+        ("initialize_if_missing", False),
+        ("refresh_existing", True),
+    ):
+        candidate = copy.deepcopy(valid_payload)
+        candidate["data"]["manifest"][field] = value
+        with pytest.raises(ValidationError, match=field):
+            RuntimeConfig.model_validate(candidate)
+
+    stale = copy.deepcopy(valid_payload)
+    stale["data"]["manifest"]["sha256"] = "3" * 64
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        RuntimeConfig.model_validate(stale)
+
+
+def test_validation_uses_two_persistent_shards_without_external_manifest_hash(
+    valid_payload: dict[str, Any],
+) -> None:
+    config = RuntimeConfig.model_validate(valid_payload)
+
+    assert config.data.validation.selection_path == (
+        "synthetic/validation-selection.json"
+    )
+    assert config.data.validation.shard_root == "synthetic/validation-shards"
+    assert config.data.validation.shard_count == 2
+
+    for field, value in (
+        ("selection_path", "/tmp/selection.json"),
+        ("selection_path", "../selection.json"),
+        ("shard_root", "synthetic\\validation-shards"),
+        ("shard_count", 1),
+    ):
+        candidate = copy.deepcopy(valid_payload)
+        candidate["data"]["validation"][field] = value
+        with pytest.raises(ValidationError, match=field):
+            RuntimeConfig.model_validate(candidate)
+
+    stale = copy.deepcopy(valid_payload)
+    stale["data"]["validation"]["manifest_sha256"] = "4" * 64
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        RuntimeConfig.model_validate(stale)
+
+
+def test_lr_schedule_is_linear_warmup_then_constant(
+    valid_payload: dict[str, Any],
+) -> None:
+    config = RuntimeConfig.model_validate(valid_payload)
+
+    assert config.scheduler.name == "linear_warmup_constant"
+    assert config.scheduler.warmup_updates == 1000
+    assert config.scheduler.max_lr == 0.00002
+    assert config.scheduler.after_warmup == "constant"
+
+    configurable = copy.deepcopy(valid_payload)
+    configurable["scheduler"]["warmup_updates"] = 250
+    configurable["scheduler"]["max_lr"] = 0.00001
+    configurable["optimizer"]["lr"] = 0.00001
+    changed = RuntimeConfig.model_validate(configurable)
+    assert changed.scheduler.warmup_updates == 250
+    assert changed.scheduler.max_lr == changed.optimizer.lr == 0.00001
+
+    for field, value in (("name", "cosine"), ("after_warmup", "cosine")):
+        candidate = copy.deepcopy(valid_payload)
+        candidate["scheduler"][field] = value
+        with pytest.raises(ValidationError, match=field):
+            RuntimeConfig.model_validate(candidate)
+
+    for field, value in (("warmup_updates", 0), ("max_lr", 0.0)):
+        candidate = copy.deepcopy(valid_payload)
+        candidate["scheduler"][field] = value
+        with pytest.raises(ValidationError, match=field):
+            RuntimeConfig.model_validate(candidate)
+
+    mismatch = copy.deepcopy(valid_payload)
+    mismatch["scheduler"]["max_lr"] = 0.00001
+    with pytest.raises(ValidationError, match="scheduler.max_lr and optimizer.lr"):
+        RuntimeConfig.model_validate(mismatch)
+
+
+def test_checkpoint_interval_and_retention_are_explicit_positive_integers(
+    valid_payload: dict[str, Any],
+) -> None:
+    valid_payload["checkpoint"]["full_every_updates"] = 37
+    valid_payload["checkpoint"]["slots"] = 5
+    valid_payload["storage"]["checkpoint_copies"] = 6
+    config = RuntimeConfig.model_validate(valid_payload)
+
+    assert config.checkpoint.full_every_updates == 37
+    assert config.checkpoint.slots == 5
+    assert config.storage.checkpoint_copies == 6
+
+    for field, value in (
+        ("full_every_updates", 0),
+        ("full_every_updates", True),
+        ("slots", 0),
+        ("slots", True),
+    ):
+        candidate = copy.deepcopy(valid_payload)
+        candidate["checkpoint"][field] = value
+        with pytest.raises(ValidationError, match=field):
+            RuntimeConfig.model_validate(candidate)
+
+
+def test_disabled_profiling_and_benchmark_reject_stale_plan_fields(
+    valid_payload: dict[str, Any],
+) -> None:
+    valid_payload["profiling"] = {"enabled": False}
+    valid_payload["benchmark"] = {"enabled": False}
+    config = RuntimeConfig.model_validate(valid_payload)
+    assert config.profiling.model_dump() == {"enabled": False}
+    assert config.benchmark.model_dump() == {"enabled": False}
+
+    stale = copy.deepcopy(valid_payload)
+    stale["profiling"]["schedule_updates"] = 10
+    stale["benchmark"]["warmup_updates"] = 100
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        RuntimeConfig.model_validate(stale)
+
+
+def test_profiling_and_benchmark_enablement_must_match(
+    valid_payload: dict[str, Any],
+) -> None:
+    valid_payload["profiling"] = {"enabled": False}
+    with pytest.raises(ValidationError, match="enabled together"):
         RuntimeConfig.model_validate(valid_payload)
 
 

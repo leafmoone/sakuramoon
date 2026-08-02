@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         DuplicateIdReport,
         MetadataError,
         MetadataRecord,
+        OperationalMetadataRecord,
         parse_metadata,
         scan_duplicate_ids,
     )
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
         FetchedShard,
         ModelScopeDatasetTransport,
         ShardIntegrityError,
+        ensure_dataset_manifest,
         fetch_dataset_shard,
         validate_remote_manifest,
     )
@@ -41,17 +43,24 @@ if TYPE_CHECKING:
         require_accepted_production_batch_stream,
     )
     from sakuramoon.data.validation import (
-        VALIDATION_SAMPLE_COUNT,
-        TrainingExclusionReport,
-        ValidationEntry,
-        ValidationManifestError,
+        VALIDATION_SELECTION_SEED,
+        VALIDATION_SHARD_COUNT,
+        VALIDATION_SHARD_PATHS,
+        PreparedValidationShards,
+        ValidationPromptError,
+        ValidationPromptSample,
         ValidationSelection,
         ValidationSelectionError,
-        ValidationStratum,
-        exclude_validation_records,
-        load_validation_manifest_ids,
-        select_validation_records,
-        validation_manifest_bytes,
+        ValidationSelectionExistsError,
+        canonical_validation_selection_bytes,
+        ensure_validation_selection,
+        load_validation_prompt_samples,
+        load_validation_selection,
+        parse_validation_selection,
+        prepare_validation_shards,
+        select_validation_shards,
+        validate_selection_manifest,
+        write_validation_selection,
     )
 
 _EXPORTS = {
@@ -59,9 +68,17 @@ _EXPORTS = {
         "sakuramoon.data.production",
         "AcceptedProductionBatchStream",
     ),
-    "VALIDATION_SAMPLE_COUNT": (
+    "VALIDATION_SELECTION_SEED": (
         "sakuramoon.data.validation",
-        "VALIDATION_SAMPLE_COUNT",
+        "VALIDATION_SELECTION_SEED",
+    ),
+    "VALIDATION_SHARD_COUNT": (
+        "sakuramoon.data.validation",
+        "VALIDATION_SHARD_COUNT",
+    ),
+    "VALIDATION_SHARD_PATHS": (
+        "sakuramoon.data.validation",
+        "VALIDATION_SHARD_PATHS",
     ),
     "DatasetAuthenticationError": (
         "sakuramoon.data.modelscope",
@@ -75,6 +92,10 @@ _EXPORTS = {
     "FetchedShard": ("sakuramoon.data.modelscope", "FetchedShard"),
     "MetadataError": ("sakuramoon.data.metadata", "MetadataError"),
     "MetadataRecord": ("sakuramoon.data.metadata", "MetadataRecord"),
+    "OperationalMetadataRecord": (
+        "sakuramoon.data.metadata",
+        "OperationalMetadataRecord",
+    ),
     "ConfiguredDataLoader": (
         "sakuramoon.data.production",
         "ConfiguredDataLoader",
@@ -96,35 +117,53 @@ _EXPORTS = {
         "sakuramoon.data.production",
         "ProductionPipelineFactory",
     ),
+    "PreparedValidationShards": (
+        "sakuramoon.data.validation",
+        "PreparedValidationShards",
+    ),
     "ShardIntegrityError": ("sakuramoon.data.modelscope", "ShardIntegrityError"),
     "ShardRecord": ("sakuramoon.data.manifest", "ShardRecord"),
-    "TrainingExclusionReport": (
+    "ValidationPromptError": (
         "sakuramoon.data.validation",
-        "TrainingExclusionReport",
+        "ValidationPromptError",
     ),
-    "ValidationEntry": ("sakuramoon.data.validation", "ValidationEntry"),
+    "ValidationPromptSample": (
+        "sakuramoon.data.validation",
+        "ValidationPromptSample",
+    ),
     "ValidationSelection": ("sakuramoon.data.validation", "ValidationSelection"),
     "ValidationSelectionError": (
         "sakuramoon.data.validation",
         "ValidationSelectionError",
     ),
-    "ValidationManifestError": (
+    "ValidationSelectionExistsError": (
         "sakuramoon.data.validation",
-        "ValidationManifestError",
+        "ValidationSelectionExistsError",
     ),
-    "ValidationStratum": ("sakuramoon.data.validation", "ValidationStratum"),
-    "exclude_validation_records": (
+    "canonical_validation_selection_bytes": (
         "sakuramoon.data.validation",
-        "exclude_validation_records",
+        "canonical_validation_selection_bytes",
     ),
     "fetch_dataset_shard": ("sakuramoon.data.modelscope", "fetch_dataset_shard"),
+    "ensure_dataset_manifest": (
+        "sakuramoon.data.modelscope",
+        "ensure_dataset_manifest",
+    ),
     "adapt_modelscope_metadata": (
         "sakuramoon.data.production",
         "adapt_modelscope_metadata",
     ),
-    "load_validation_manifest_ids": (
+    "ensure_validation_selection": (
         "sakuramoon.data.validation",
-        "load_validation_manifest_ids",
+        "ensure_validation_selection",
+    ),
+    "load_validation_prompt_samples": (
+        "sakuramoon.data.validation",
+        "load_validation_prompt_samples",
+    ),
+    "load_validation_selection": (
+        "sakuramoon.data.validation",
+        "load_validation_selection",
     ),
     "load_dataset_manifest": ("sakuramoon.data.manifest", "load_dataset_manifest"),
     "parse_metadata": ("sakuramoon.data.metadata", "parse_metadata"),
@@ -137,23 +176,37 @@ _EXPORTS = {
         "require_accepted_production_batch_stream",
     ),
     "scan_duplicate_ids": ("sakuramoon.data.metadata", "scan_duplicate_ids"),
-    "select_validation_records": (
+    "parse_validation_selection": (
         "sakuramoon.data.validation",
-        "select_validation_records",
+        "parse_validation_selection",
+    ),
+    "prepare_validation_shards": (
+        "sakuramoon.data.validation",
+        "prepare_validation_shards",
+    ),
+    "select_validation_shards": (
+        "sakuramoon.data.validation",
+        "select_validation_shards",
     ),
     "validate_remote_manifest": (
         "sakuramoon.data.modelscope",
         "validate_remote_manifest",
     ),
-    "validation_manifest_bytes": (
+    "validate_selection_manifest": (
         "sakuramoon.data.validation",
-        "validation_manifest_bytes",
+        "validate_selection_manifest",
+    ),
+    "write_validation_selection": (
+        "sakuramoon.data.validation",
+        "write_validation_selection",
     ),
 }
 
 __all__ = [
     "PRODUCTION_METADATA_FIELDS",
-    "VALIDATION_SAMPLE_COUNT",
+    "VALIDATION_SELECTION_SEED",
+    "VALIDATION_SHARD_COUNT",
+    "VALIDATION_SHARD_PATHS",
     "AcceptedProductionBatchStream",
     "ConfiguredDataLoader",
     "DatasetAuthenticationError",
@@ -166,29 +219,36 @@ __all__ = [
     "MetadataError",
     "MetadataRecord",
     "ModelScopeDatasetTransport",
+    "OperationalMetadataRecord",
+    "PreparedValidationShards",
     "ProductionBatchStreamIdentity",
     "ProductionDataError",
     "ProductionPipelineFactory",
     "ShardIntegrityError",
     "ShardRecord",
-    "TrainingExclusionReport",
-    "ValidationEntry",
-    "ValidationManifestError",
+    "ValidationPromptError",
+    "ValidationPromptSample",
     "ValidationSelection",
     "ValidationSelectionError",
-    "ValidationStratum",
+    "ValidationSelectionExistsError",
     "adapt_modelscope_metadata",
-    "exclude_validation_records",
+    "canonical_validation_selection_bytes",
+    "ensure_dataset_manifest",
+    "ensure_validation_selection",
     "fetch_dataset_shard",
     "load_dataset_manifest",
-    "load_validation_manifest_ids",
+    "load_validation_prompt_samples",
+    "load_validation_selection",
     "parse_metadata",
     "parse_modelscope_caption_fields",
+    "parse_validation_selection",
+    "prepare_validation_shards",
     "require_accepted_production_batch_stream",
     "scan_duplicate_ids",
-    "select_validation_records",
+    "select_validation_shards",
     "validate_remote_manifest",
-    "validation_manifest_bytes",
+    "validate_selection_manifest",
+    "write_validation_selection",
 ]
 
 

@@ -24,6 +24,7 @@ from sakuramoon.checkpoint.schema import (
 class RawRetentionPlan:
     root: Path
     accepted_checkpoint_ids: frozenset[str]
+    rolling_slots: int
     keep: tuple[Path, ...]
     remove: tuple[Path, ...]
     identities: tuple[tuple[Path, CheckpointIdentity], ...]
@@ -32,6 +33,8 @@ class RawRetentionPlan:
         paths = self.keep + self.remove
         if (
             not self.root.is_absolute()
+            or type(self.rolling_slots) is not int
+            or self.rolling_slots <= 0
             or any(
                 type(value) is not str or not value
                 for value in self.accepted_checkpoint_ids
@@ -97,11 +100,14 @@ def plan_raw_retention(
     root: Path,
     *,
     accepted_checkpoint_ids: frozenset[str],
+    rolling_slots: int,
 ) -> RawRetentionPlan:
-    """Keep all accepted raw checkpoints plus the two newest rolling raws."""
+    """Keep all accepted raw checkpoints plus the configured rolling raws."""
 
     if root.is_symlink() or not root.is_dir():
         raise ValueError("checkpoint retention root must be a real directory")
+    if type(rolling_slots) is not int or rolling_slots <= 0:
+        raise ValueError("raw checkpoint rolling slots must be a positive integer")
     if any(type(value) is not str or not value for value in accepted_checkpoint_ids):
         raise ValueError("accepted checkpoint IDs must be nonempty strings")
     resolved_root = root.resolve(strict=True)
@@ -131,11 +137,12 @@ def plan_raw_retention(
             raw.append(item)
     accepted.sort()
     raw.sort(key=lambda item: (item[0], item[1], item[2].name))
-    rolling_keep = tuple(item[2] for item in raw[-2:])
-    remove = tuple(item[2] for item in raw[:-2])
+    rolling_keep = tuple(item[2] for item in raw[-rolling_slots:])
+    remove = tuple(item[2] for item in raw[:-rolling_slots])
     return RawRetentionPlan(
         root=resolved_root,
         accepted_checkpoint_ids=accepted_checkpoint_ids,
+        rolling_slots=rolling_slots,
         keep=tuple(accepted) + rolling_keep,
         remove=remove,
         identities=tuple(sorted(identities)),
@@ -147,10 +154,15 @@ def apply_raw_retention(
     plan: RawRetentionPlan,
     *,
     accepted_checkpoint_ids: frozenset[str],
+    rolling_slots: int,
 ) -> None:
     """Apply a previously resolved plan, revalidating every deletion target."""
 
-    current = plan_raw_retention(root, accepted_checkpoint_ids=accepted_checkpoint_ids)
+    current = plan_raw_retention(
+        root,
+        accepted_checkpoint_ids=accepted_checkpoint_ids,
+        rolling_slots=rolling_slots,
+    )
     if current != plan:
         raise ValueError("retention plan is stale or was not produced for this policy")
     resolved_root = current.root

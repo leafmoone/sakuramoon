@@ -57,8 +57,8 @@ PREFLIGHT_CHECKS = (
     "resolved_config",
     "production_contracts",
     "local_assets",
-    "evaluation_identities",
     "dataset_revision",
+    "ready_batch_depth",
     "single_gpu_runtime",
     "storage_capacity",
     "frozen_encoders",
@@ -76,146 +76,6 @@ class PreflightError(RuntimeError):
     """A mandatory preflight check failed."""
 
 
-@dataclass(frozen=True, slots=True)
-class EvaluationIdentityFile:
-    """A hash-bound local evaluator input verified without following symlinks."""
-
-    role: str
-    path: Path
-    sha256: str
-    size: int
-
-
-def _resolve_identity_path(
-    repository_root: Path,
-    configured: str,
-    *,
-    role: str,
-) -> Path:
-    try:
-        root = repository_root.resolve(strict=True)
-    except OSError:
-        raise PreflightError("repository root is unavailable") from None
-    lexical = Path(configured)
-    if not lexical.is_absolute() and ".." in lexical.parts:
-        raise PreflightError(f"{role} identity path escapes repository root")
-    candidate = lexical if lexical.is_absolute() else root / lexical
-    current = Path(candidate.anchor)
-    for part in candidate.parts[1:]:
-        current /= part
-        if current.is_symlink():
-            raise PreflightError(f"{role} identity path contains a symlink")
-    if not lexical.is_absolute():
-        try:
-            candidate.relative_to(root)
-        except ValueError:
-            raise PreflightError(
-                f"{role} identity path escapes repository root"
-            ) from None
-    return candidate
-
-
-def _verify_identity_file(
-    repository_root: Path,
-    configured: str,
-    expected_sha256: str,
-    *,
-    role: str,
-    retain_payload: bool = False,
-) -> tuple[EvaluationIdentityFile, bytes]:
-    path = _resolve_identity_path(repository_root, configured, role=role)
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-    except OSError:
-        raise PreflightError(f"{role} identity file cannot be opened") from None
-    digest = hashlib.sha256()
-    payload = bytearray()
-    size = 0
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise PreflightError(f"{role} identity must be a regular file")
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            size += len(chunk)
-            if retain_payload:
-                payload.extend(chunk)
-    except OSError:
-        raise PreflightError(f"{role} identity file cannot be read") from None
-    finally:
-        os.close(descriptor)
-    if size <= 0:
-        raise PreflightError(f"{role} identity file must not be empty")
-    observed = digest.hexdigest()
-    if observed != expected_sha256:
-        raise PreflightError(f"{role} identity SHA-256 mismatch")
-    return EvaluationIdentityFile(role, path, observed, size), bytes(payload)
-
-
-def require_evaluation_identities(
-    config: RuntimeConfig,
-    repository_root: Path,
-) -> tuple[EvaluationIdentityFile, ...]:
-    """Verify every local formal-evaluator input bound by the resolved config."""
-
-    from sakuramoon.eval.spec import PromptManifest
-
-    evaluation = config.evaluation
-    fid = evaluation.fid
-    configured = (
-        (
-            "prompt manifest",
-            evaluation.prompt_manifest_path,
-            evaluation.prompt_manifest_sha256,
-        ),
-        (
-            "feature extractor",
-            fid.feature_extractor_path,
-            fid.feature_extractor_sha256,
-        ),
-        ("preprocess", fid.preprocess_path, fid.preprocess_sha256),
-        ("real stats", fid.real_stats_path, fid.real_stats_sha256),
-    )
-    verified: list[EvaluationIdentityFile] = []
-    prompt_payload: bytes | None = None
-    for role, path, expected_sha256 in configured:
-        identity, payload = _verify_identity_file(
-            repository_root,
-            path,
-            expected_sha256,
-            role=role,
-            retain_payload=role == "prompt manifest",
-        )
-        verified.append(identity)
-        if role == "prompt manifest":
-            prompt_payload = payload
-    if len({item.path for item in verified}) != len(verified):
-        raise PreflightError("formal evaluator identity files must be distinct")
-    if prompt_payload is None:
-        raise PreflightError("prompt manifest identity was not verified")
-    try:
-        prompt_manifest = PromptManifest.from_canonical_bytes(prompt_payload)
-    except (TypeError, ValueError):
-        raise PreflightError("prompt manifest is not canonical") from None
-    sample_counts: list[int] = []
-    if evaluation.fid.enabled:
-        sample_counts.extend(
-            (evaluation.fid.trend_samples, evaluation.fid.acceptance_samples)
-        )
-    if evaluation.is_.enabled:
-        sample_counts.extend(
-            (evaluation.is_.trend_samples, evaluation.is_.acceptance_samples)
-        )
-    if evaluation.manual_quality.enabled:
-        sample_counts.append(evaluation.manual_quality.samples)
-    if sample_counts and len(prompt_manifest.cases) < max(sample_counts):
-        raise PreflightError("prompt manifest cannot cover configured evaluation jobs")
-    return tuple(verified)
-
-
 def require_logging_checkpoint_contracts(
     config: RuntimeConfig,
     repository_root: Path,
@@ -228,12 +88,14 @@ def require_logging_checkpoint_contracts(
     checkpoint = config.checkpoint
     if (
         checkpoint.kind != "raw"
-        or checkpoint.full_every_updates != 1000
-        or checkpoint.full_every_hours != 6.0
+        or type(checkpoint.full_every_updates) is not int
+        or checkpoint.full_every_updates <= 0
+        or type(checkpoint.slots) is not int
+        or checkpoint.slots <= 0
         or not checkpoint.atomic_complete_marker
         or not checkpoint.checksum_required
         or not checkpoint.canonical_fqn
-        or config.storage.checkpoint_copies != 3
+        or config.storage.checkpoint_copies != checkpoint.slots + 1
     ):
         raise PreflightError("production raw checkpoint contract is invalid")
     checkpoint_root = repository_directory(repository_root, config.paths.checkpoint_dir)
@@ -274,7 +136,6 @@ def require_static_single_gpu_preflight(
     )
     require_local_qwen(repository_root)
     require_local_vae(repository_root)
-    require_evaluation_identities(config, repository_root)
 
 
 class _SingleGpuCheckpointPublisher(Protocol):
@@ -314,7 +175,7 @@ class PreflightReport:
     hardware: str
     passed: bool
     resolved_config_sha256: str
-    manifest_sha256: str
+    manifest_id: str
     service_session_sha256: str
     checkpoint_id: str
     checkpoint_update: int
@@ -445,6 +306,7 @@ class ProductionSingleGpuCheckpointPublisher:
         "_preflight_paths",
         "_resolved_config",
         "_restored_state",
+        "_retention_slots",
     )
 
     def __init__(
@@ -456,6 +318,7 @@ class ProductionSingleGpuCheckpointPublisher:
         optimizer: IsolatedAdamW8bit,
         restored_checkpoint: RestoredSingleGpuCheckpoint,
         accepted_checkpoint_ids: frozenset[str],
+        retention_slots: int,
     ) -> None:
         _require_restored_checkpoint(
             restored_checkpoint,
@@ -480,6 +343,10 @@ class ProductionSingleGpuCheckpointPublisher:
             raise TypeError(
                 "accepted checkpoint IDs must be an explicit string frozenset"
             )
+        if type(retention_slots) is not int or retention_slots <= 0:
+            raise TypeError(
+                "checkpoint retention slots must be an explicit positive integer"
+            )
         identity = restored_checkpoint.manifest.identity
         if hashlib.sha256(resolved_config).hexdigest() != identity.config_sha256:
             raise ValueError(
@@ -496,6 +363,7 @@ class ProductionSingleGpuCheckpointPublisher:
         ] = {}
         self._preflight_paths: dict[Path, CheckpointIdentity] = {}
         self._resolved_config = resolved_config
+        self._retention_slots = retention_slots
         self._restored_state = restored_checkpoint.state
 
     def _require_owner(self) -> None:
@@ -606,11 +474,13 @@ class ProductionSingleGpuCheckpointPublisher:
         plan = plan_raw_retention(
             self._checkpoint_root,
             accepted_checkpoint_ids=self._accepted_checkpoint_ids,
+            rolling_slots=self._retention_slots,
         )
         apply_raw_retention(
             self._checkpoint_root,
             plan,
             accepted_checkpoint_ids=self._accepted_checkpoint_ids,
+            rolling_slots=self._retention_slots,
         )
         self._pending_update_paths.pop(checkpoint)
 
@@ -743,7 +613,7 @@ class SingleGpuPreflightPlan:
         "__weakref__",
         "_bindings",
         "_checks",
-        "_manifest_sha256",
+        "_manifest_id",
         "_owner_pid",
         "_service_session_sha256",
         "_token",
@@ -912,7 +782,7 @@ def _synthetic_preflight_batch(
             batch_size if empty_condition else 0,
             *(0 for _ in range(11)),
         ),
-        releases=("preflight",) * batch_size,
+        source_shards=("synthetic/preflight.tar",) * batch_size,
         audits=(audit,) * batch_size,
         rng_identities=tuple(
             RngIdentity(config.run.seed, "S0", 0, sample_id, 1, 1)
@@ -1196,7 +1066,7 @@ def run_single_gpu_preflight(
                     "1GPU",
                     False,
                     plan._bindings.resolved_config_sha256,
-                    plan._manifest_sha256,
+                    plan._manifest_id,
                     plan._service_session_sha256,
                     restored.manifest.identity.checkpoint_id,
                     restored.state.trainer.successful_updates,
@@ -1219,7 +1089,7 @@ def run_single_gpu_preflight(
             "1GPU",
             True,
             plan._bindings.resolved_config_sha256,
-            plan._manifest_sha256,
+            plan._manifest_id,
             plan._service_session_sha256,
             restored.manifest.identity.checkpoint_id,
             restored.state.trainer.successful_updates,
@@ -1329,10 +1199,8 @@ def _build_single_gpu_preflight_checks(
         raise ValueError(
             "production batch stream resolved identity differs from config"
         )
-    if stream_identity.manifest_sha256 != loaded.config.data.manifest.sha256:
-        raise ValueError(
-            "production batch stream manifest identity differs from config"
-        )
+    if stream_identity.manifest_id != data_client.identity.manifest_id:
+        raise ValueError("production batch stream manifest differs from data service")
     if stream_identity.service_session_sha256 != data_client.identity.sha256:
         raise ValueError("production batch stream service session differs from client")
     checkpoint_identity = restored_checkpoint.manifest.identity
@@ -1376,12 +1244,9 @@ def _build_single_gpu_preflight_checks(
         require_local_qwen(repository_root)
         require_local_vae(repository_root)
 
-    def evaluation_identities() -> None:
-        require_evaluation_identities(loaded.config, repository_root)
-
     def dataset_revision() -> None:
-        if data_client.identity.manifest_sha256 != loaded.config.data.manifest.sha256:
-            raise ValueError("data service manifest identity differs from config")
+        if accepted_batches.identity.manifest_id != data_client.identity.manifest_id:
+            raise ValueError("production batch stream manifest changed")
         if (
             data_client.identity.worker_count
             != loaded.config.data.cache.persistent_workers_per_rank
@@ -1389,6 +1254,9 @@ def _build_single_gpu_preflight_checks(
             raise ValueError("data service worker topology differs from config")
         if data_client.health():
             raise RuntimeError("data service has no training lease available")
+
+    def ready_batch_depth() -> None:
+        accepted_batches.ready_batch_depth_snapshot()
 
     def single_gpu_runtime() -> None:
         require_single_gpu_config(loaded.config)
@@ -1402,8 +1270,8 @@ def _build_single_gpu_preflight_checks(
             raise RuntimeError("CUDA is unavailable")
         if torch.cuda.device_count() != 1:
             raise RuntimeError("single-GPU preflight requires exactly one visible GPU")
-        if torch.cuda.current_device() != loaded.config.evaluation.gpu_index:
-            raise RuntimeError("selected evaluation GPU differs from current device")
+        if torch.cuda.current_device() != 0:
+            raise RuntimeError("single-GPU preflight requires CUDA device index zero")
         properties = cast(
             _CudaDeviceProperties,
             torch.cuda.get_device_properties(  # pyright: ignore[reportUnknownMemberType]
@@ -1553,8 +1421,8 @@ def _build_single_gpu_preflight_checks(
         ("resolved_config", resolved_config),
         ("production_contracts", production_contracts),
         ("local_assets", local_assets),
-        ("evaluation_identities", evaluation_identities),
         ("dataset_revision", dataset_revision),
+        ("ready_batch_depth", ready_batch_depth),
         ("single_gpu_runtime", single_gpu_runtime),
         ("storage_capacity", storage_capacity),
         ("frozen_encoders", frozen_encoders),
@@ -1577,7 +1445,7 @@ def _build_single_gpu_preflight_checks(
     plan = object.__new__(SingleGpuPreflightPlan)
     plan._bindings = bindings
     plan._checks = checks
-    plan._manifest_sha256 = data_client.identity.manifest_sha256
+    plan._manifest_id = data_client.identity.manifest_id
     plan._owner_pid = os.getpid()
     plan._service_session_sha256 = data_client.identity.sha256
     plan._token = secrets.token_hex(32)
@@ -1627,7 +1495,6 @@ def build_single_gpu_preflight_checks(
 __all__ = [
     "PREFLIGHT_CHECKS",
     "AcceptedPreflight",
-    "EvaluationIdentityFile",
     "PreflightCheckResult",
     "PreflightError",
     "PreflightReport",
@@ -1638,7 +1505,6 @@ __all__ = [
     "build_single_gpu_preflight_checks",
     "build_single_gpu_preflight_workload",
     "require_accepted_preflight",
-    "require_evaluation_identities",
     "require_logging_checkpoint_contracts",
     "require_static_single_gpu_preflight",
     "restore_single_gpu_checkpoint",

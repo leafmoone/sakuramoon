@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePosixPath
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, NoReturn, cast
 
 from pydantic import (
     BaseModel,
@@ -74,8 +74,6 @@ FIXED_TIMING_PHASES = (
     "zero_grad",
     "sample",
 )
-Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-Commit = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
 SecretEnvName = Annotated[
     str,
     StringConstraints(pattern=r"^[A-Z][A-Z0-9_]*$", min_length=2, max_length=128),
@@ -94,11 +92,8 @@ FixedNormEps = Annotated[ExactFloat, Field(ge=0.000001, le=0.000001)]
 FixedNegativePointEight = Annotated[ExactFloat, Field(ge=-0.8, le=-0.8)]
 FixedPointZeroFive = Annotated[ExactFloat, Field(ge=0.05, le=0.05)]
 FixedTwoPointNine = Annotated[ExactFloat, Field(ge=2.9, le=2.9)]
-FixedLearningRate = Annotated[ExactFloat, Field(ge=0.00002, le=0.00002)]
 FixedOptimizerEps = Annotated[ExactFloat, Field(ge=0.00000001, le=0.00000001)]
 FixedPointZeroOne = Annotated[ExactFloat, Field(ge=0.01, le=0.01)]
-FixedDecayLearningRate = Annotated[ExactFloat, Field(ge=0.000002, le=0.000002)]
-FixedSix = Annotated[ExactFloat, Field(ge=6.0, le=6.0)]
 FixedPointZeroTwo = Annotated[ExactFloat, Field(ge=0.02, le=0.02)]
 
 
@@ -132,7 +127,7 @@ class StorageConfig(StrictModel):
     hard_mount: Literal[True]
     minimum_free_gib: NonNegativeInt
     measured_raw_checkpoint_bytes: PositiveInt
-    checkpoint_copies: Literal[3]
+    checkpoint_copies: PositiveInt
     atomic_publish_probe: Literal[True]
 
 
@@ -177,12 +172,29 @@ class AssetsConfig(StrictModel):
 
 class DataSourceConfig(StrictModel):
     repo_id: Literal["leafmoone/webdataset_danbooru"]
-    revision: Commit
+    revision: Literal["master"]
 
 
 class DataManifestConfig(StrictModel):
     path: Annotated[str, StringConstraints(min_length=1)]
-    sha256: Sha256
+    initialize_if_missing: Literal[True]
+    refresh_existing: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_path(self) -> DataManifestConfig:
+        path = PurePosixPath(self.path)
+        if (
+            self.path != self.path.strip()
+            or "\\" in self.path
+            or path.is_absolute()
+            or ".." in path.parts
+            or path.as_posix() != self.path
+            or not path.name
+        ):
+            raise ValueError(
+                "data manifest path must be a normalized repository-relative file"
+            )
+        return self
 
 
 class DataCacheConfig(StrictModel):
@@ -223,10 +235,31 @@ class DataLoaderConfig(StrictModel):
 
 
 class DataValidationConfig(StrictModel):
-    manifest_path: Annotated[str, StringConstraints(min_length=1)]
-    manifest_sha256: Sha256
-    sample_count: Literal[2000]
-    exclude_before_shuffle: Literal[True]
+    selection_path: Annotated[str, StringConstraints(min_length=1)]
+    shard_root: Annotated[str, StringConstraints(min_length=1)]
+    shard_count: Literal[2]
+
+    @model_validator(mode="after")
+    def validate_paths(self) -> DataValidationConfig:
+        for name, value in (
+            ("selection_path", self.selection_path),
+            ("shard_root", self.shard_root),
+        ):
+            path = PurePosixPath(value)
+            if (
+                value != value.strip()
+                or "\\" in value
+                or path.is_absolute()
+                or ".." in path.parts
+                or path.as_posix() != value
+                or not path.name
+            ):
+                raise ValueError(
+                    f"data validation {name} must be a normalized repository-relative path"
+                )
+        if self.selection_path == self.shard_root:
+            raise ValueError("data validation selection and shard paths must differ")
+        return self
 
 
 class DataImageConfig(StrictModel):
@@ -557,7 +590,7 @@ class CfgConfig(StrictModel):
 
 class OptimizerConfig(StrictModel):
     name: Literal["torchao_adamw8bit"]
-    lr: FixedLearningRate
+    lr: PositiveFloat
     betas: Annotated[
         tuple[ExactFloat, ExactFloat], BeforeValidator(_toml_array_to_tuple)
     ]
@@ -575,11 +608,10 @@ class OptimizerConfig(StrictModel):
 
 
 class SchedulerConfig(StrictModel):
-    name: Literal["wsd"]
-    warmup_updates: Literal[2000]
-    stable_lr: FixedLearningRate
-    decay_lr: FixedDecayLearningRate
-    automatic_decay: Literal[False]
+    name: Literal["linear_warmup_constant"]
+    warmup_updates: PositiveInt
+    max_lr: PositiveFloat
+    after_warmup: Literal["constant"]
 
 
 class GradientConfig(StrictModel):
@@ -597,8 +629,7 @@ class DistributedConfig(StrictModel):
 
 class CheckpointConfig(StrictModel):
     kind: Literal["raw"]
-    full_every_updates: Literal[1000]
-    full_every_hours: FixedSix
+    full_every_updates: PositiveInt
     slots: PositiveInt
     atomic_complete_marker: Literal[True]
     checksum_required: Literal[True]
@@ -630,10 +661,6 @@ class StageConfig(StrictModel):
     global_batch: PositiveInt
     activation_checkpoint_mode: Literal["none", "alternating", "all"]
     planned_updates: PositiveInt
-    planned_valid_samples: PositiveInt
-    planned_equivalent_data_passes: PositiveFloat
-    planned_dit_flops: PositiveFloat
-    planned_wall_time_hours: PositiveFloat
     manual_finalize: Literal[True]
     automatic_transition: Literal[False]
 
@@ -661,11 +688,6 @@ class StageConfig(StrictModel):
             raise ValueError(
                 "stage global_batch must equal local_batch * accumulation * world_size"
             )
-        expected_valid_samples = self.global_batch * self.planned_updates
-        if self.planned_valid_samples != expected_valid_samples:
-            raise ValueError(
-                "stage planned_valid_samples must equal global_batch * planned_updates"
-            )
         return self
 
 
@@ -687,14 +709,57 @@ class CompileConfig(StrictModel):
     automatic_enable: Literal[False]
 
 
-class ProfilingConfig(StrictModel):
-    enabled: bool
+class ProfilingDisabledConfig(StrictModel):
+    enabled: Literal[False]
+
+    @property
+    def record_shapes(self) -> NoReturn:
+        raise ValueError("profiling is disabled")
+
+    @property
+    def profile_memory(self) -> NoReturn:
+        raise ValueError("profiling is disabled")
+
+
+class ProfilingEnabledConfig(StrictModel):
+    enabled: Literal[True]
     schedule_updates: PositiveInt
     record_shapes: bool
     profile_memory: bool
 
 
-class BenchmarkConfig(StrictModel):
+ProfilingConfig = Annotated[
+    ProfilingDisabledConfig | ProfilingEnabledConfig,
+    Field(discriminator="enabled"),
+]
+
+
+class BenchmarkDisabledConfig(StrictModel):
+    enabled: Literal[False]
+
+    @property
+    def kind(self) -> NoReturn:
+        raise ValueError("benchmark is disabled")
+
+    @property
+    def warmup_updates(self) -> NoReturn:
+        raise ValueError("benchmark is disabled")
+
+    @property
+    def measured_updates(self) -> NoReturn:
+        raise ValueError("benchmark is disabled")
+
+    @property
+    def starting_successful_update(self) -> NoReturn:
+        raise ValueError("benchmark is disabled")
+
+    @property
+    def profile_trace_updates(self) -> NoReturn:
+        raise ValueError("benchmark is disabled")
+
+
+class BenchmarkEnabledConfig(StrictModel):
+    enabled: Literal[True]
     kind: Literal["candidate", "final"]
     warmup_updates: PositiveInt
     measured_updates: PositiveInt
@@ -704,7 +769,7 @@ class BenchmarkConfig(StrictModel):
     nsight_compute_hotspot_only: Literal[True]
 
     @model_validator(mode="after")
-    def validate_measurement_window(self) -> BenchmarkConfig:
+    def validate_measurement_window(self) -> BenchmarkEnabledConfig:
         if self.warmup_updates != 100:
             raise ValueError("benchmark requires exactly 100 warmup updates")
         if self.kind == "candidate" and self.measured_updates != 500:
@@ -723,6 +788,12 @@ class BenchmarkConfig(StrictModel):
                 "benchmark measured window must include the fixed 1,000-update checkpoint cadence"
             )
         return self
+
+
+BenchmarkConfig = Annotated[
+    BenchmarkDisabledConfig | BenchmarkEnabledConfig,
+    Field(discriminator="enabled"),
+]
 
 
 class FailureConfig(StrictModel):
@@ -770,102 +841,152 @@ class TimingConfig(StrictModel):
         return self
 
 
-class FidConfig(StrictModel):
-    enabled: bool
-    every_successful_updates: PositiveInt
-    trend_samples: PositiveInt
-    acceptance_samples: PositiveInt
+class EvaluationDisabledConfig(StrictModel):
+    enabled: Literal[False]
+
+
+class EvaluationExtractorDisabledConfig(StrictModel):
+    enabled: Literal[False]
+
+
+class EvaluationExtractorEnabledConfig(StrictModel):
+    enabled: Literal[True]
     feature_extractor: Annotated[str, StringConstraints(min_length=1)]
     feature_extractor_version: Annotated[str, StringConstraints(min_length=1)]
     feature_extractor_path: Annotated[str, StringConstraints(min_length=1)]
-    feature_extractor_sha256: Sha256
     preprocess_path: Annotated[str, StringConstraints(min_length=1)]
-    preprocess_sha256: Sha256
-    real_stats_path: Annotated[str, StringConstraints(min_length=1)]
-    real_stats_sha256: Sha256
 
     @model_validator(mode="after")
-    def validate_extractor_identity(self) -> FidConfig:
+    def validate_extractor_identity(self) -> EvaluationExtractorEnabledConfig:
         identity_values = (
             self.feature_extractor,
             self.feature_extractor_version,
             self.feature_extractor_path,
             self.preprocess_path,
-            self.real_stats_path,
         )
         if any(value != value.strip() for value in identity_values):
-            raise ValueError("FID identity values must not contain padding")
-        for value in (
-            self.feature_extractor_path,
-            self.preprocess_path,
-            self.real_stats_path,
-        ):
+            raise ValueError("evaluation extractor values must not contain padding")
+        for value in (self.feature_extractor_path, self.preprocess_path):
             path = PurePosixPath(value)
             if path.is_absolute() or ".." in path.parts or not path.name:
                 raise ValueError(
-                    "FID identity paths must be repository-relative files"
+                    "evaluation extractor paths must be repository-relative files"
                 )
         return self
 
 
-class IsConfig(StrictModel):
-    enabled: bool
+EvaluationExtractorConfig = Annotated[
+    EvaluationExtractorDisabledConfig | EvaluationExtractorEnabledConfig,
+    Field(discriminator="enabled"),
+]
+
+
+class FidDisabledConfig(StrictModel):
+    enabled: Literal[False]
+
+
+class FidEnabledConfig(StrictModel):
+    enabled: Literal[True]
+    every_successful_updates: PositiveInt
+    trend_samples: PositiveInt
+    acceptance_samples: PositiveInt
+    real_stats_path: Annotated[str, StringConstraints(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_real_stats_path(self) -> FidEnabledConfig:
+        if self.real_stats_path != self.real_stats_path.strip():
+            raise ValueError("FID real-stat path must not contain padding")
+        path = PurePosixPath(self.real_stats_path)
+        if path.is_absolute() or ".." in path.parts or not path.name:
+            raise ValueError("FID real-stat path must be a repository-relative file")
+        return self
+
+
+FidConfig = Annotated[
+    FidDisabledConfig | FidEnabledConfig, Field(discriminator="enabled")
+]
+
+
+class IsDisabledConfig(StrictModel):
+    enabled: Literal[False]
+
+
+class IsEnabledConfig(StrictModel):
+    enabled: Literal[True]
     every_successful_updates: PositiveInt
     trend_samples: PositiveInt
     acceptance_samples: PositiveInt
     splits: PositiveInt
 
 
-class ManualQualityConfig(StrictModel):
+IsConfig = Annotated[IsDisabledConfig | IsEnabledConfig, Field(discriminator="enabled")]
+
+
+class ManualQualityDisabledConfig(StrictModel):
+    enabled: Literal[False]
+
+
+class ManualQualityEnabledConfig(StrictModel):
     enabled: Literal[True]
     samples: PositiveInt
 
 
-class EvaluationConfig(StrictModel):
+ManualQualityConfig = Annotated[
+    ManualQualityDisabledConfig | ManualQualityEnabledConfig,
+    Field(discriminator="enabled"),
+]
+
+
+class EvaluationEnabledConfig(StrictModel):
+    enabled: Literal[True]
     stage_end: Literal[True]
     explicit_job: Literal[True]
-    prompt_manifest_path: Annotated[str, StringConstraints(min_length=1)]
-    prompt_manifest_sha256: Sha256
-    gpu_index: NonNegativeInt
-    training_paused: bool
+    gpu_index: Literal[0]
+    training_paused: Literal[True]
     batch_size: PositiveInt
     output_reserve_gib: PositiveInt
     sampling: EvaluationSamplingConfig
+    extractor: EvaluationExtractorConfig
     fid: FidConfig
     is_: IsConfig = Field(alias="is")
     manual_quality: ManualQualityConfig
 
     @model_validator(mode="after")
-    def validate_evaluation_inputs(self) -> EvaluationConfig:
-        if self.prompt_manifest_path != self.prompt_manifest_path.strip():
-            raise ValueError("evaluation prompt manifest path must not contain padding")
-        if min(
-            self.fid.trend_samples,
-            self.fid.acceptance_samples,
-            self.is_.trend_samples,
-            self.is_.acceptance_samples,
-            self.manual_quality.samples,
-        ) < 2:
-            raise ValueError("evaluation jobs require at least two samples")
-        if (
-            self.is_.trend_samples % self.is_.splits != 0
-            or self.is_.acceptance_samples % self.is_.splits != 0
-        ):
+    def validate_evaluation_inputs(self) -> EvaluationEnabledConfig:
+        metrics_enabled = self.fid.enabled or self.is_.enabled
+        if metrics_enabled != self.extractor.enabled:
             raise ValueError(
-                "IS trend and acceptance samples must be exactly divisible by splits"
+                "evaluation extractor is required exactly when FID or IS is enabled"
             )
-        sample_counts = (
-            self.fid.trend_samples,
-            self.fid.acceptance_samples,
-            self.is_.trend_samples,
-            self.is_.acceptance_samples,
-            self.manual_quality.samples,
-        )
+        if not metrics_enabled and not self.manual_quality.enabled:
+            raise ValueError("enabled evaluation requires at least one enabled metric")
+        sample_counts: list[int] = []
+        if isinstance(self.fid, FidEnabledConfig):
+            sample_counts.extend((self.fid.trend_samples, self.fid.acceptance_samples))
+        if isinstance(self.is_, IsEnabledConfig):
+            sample_counts.extend((self.is_.trend_samples, self.is_.acceptance_samples))
+            if (
+                self.is_.trend_samples % self.is_.splits != 0
+                or self.is_.acceptance_samples % self.is_.splits != 0
+            ):
+                raise ValueError(
+                    "IS trend and acceptance samples must be exactly divisible by splits"
+                )
+        if isinstance(self.manual_quality, ManualQualityEnabledConfig):
+            sample_counts.append(self.manual_quality.samples)
+        if min(sample_counts) < 2:
+            raise ValueError("evaluation jobs require at least two samples")
         if any(sample_count % self.batch_size for sample_count in sample_counts):
             raise ValueError(
                 "evaluation sample counts must be exactly divisible by batch_size"
             )
         return self
+
+
+EvaluationConfig = Annotated[
+    EvaluationDisabledConfig | EvaluationEnabledConfig,
+    Field(discriminator="enabled"),
+]
 
 
 class RuntimeConfig(StrictModel):
@@ -901,6 +1022,8 @@ class RuntimeConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_cross_table_contract(self) -> RuntimeConfig:
+        if self.scheduler.max_lr != self.optimizer.lr:
+            raise ValueError("scheduler.max_lr and optimizer.lr must match")
         if self.run.stage != self.stage.name:
             raise ValueError("run.stage and stage.name must match")
         if self.run.intent == "template":
@@ -917,6 +1040,13 @@ class RuntimeConfig(StrictModel):
             raise ValueError("distributed and stage world_size must match")
         if self.growth.enabled != (self.stage.name in {"G1", "G2"}):
             raise ValueError("growth is enabled only for G1 and G2")
+        if self.storage.checkpoint_copies != self.checkpoint.slots + 1:
+            raise ValueError(
+                "storage.checkpoint_copies must equal checkpoint.slots plus one "
+                "publishing copy"
+            )
+        if self.profiling.enabled != self.benchmark.enabled:
+            raise ValueError("profiling and benchmark must be enabled together")
         artifact_root = PurePosixPath(self.paths.artifact_dir)
         metric_path = PurePosixPath(self.logging.local_jsonl_path)
         retry_path = PurePosixPath(self.wandb.retry_jsonl_path)

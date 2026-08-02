@@ -7,31 +7,31 @@ from sakuramoon.train.scheduler import CheckpointScheduler
 from sakuramoon.train.stage import ForcedCheckpoint, checkpoint_reason
 
 
-def test_wall_due_is_sampled_after_success_and_commits_only_after_save() -> None:
-    wall = iter((0.0, 6.0 * 3600.0, 6.0 * 3600.0))
+def test_elapsed_wall_time_never_triggers_and_update_commit_records_audit_time() -> None:
+    wall = iter((6.0 * 3600.0, 365.0 * 24.0 * 3600.0, 32_000_001.0))
     scheduler = CheckpointScheduler(
-        CheckpointCadence(0, 0.0),
+        CheckpointCadence(0, 0.0, 1000),
         clock=lambda: next(wall),
     )
 
     assert scheduler.due(1) is None
-    decision = scheduler.due(2)
+    assert scheduler.due(999) is None
+    decision = scheduler.due(1000)
     assert decision is not None
-    assert decision.reason is CheckpointReason.WALL_CADENCE
+    assert decision.reason is CheckpointReason.UPDATE_CADENCE
     assert scheduler.cadence.last_successful_update == 0
     proposed = scheduler.proposed_cadence(decision)
-    assert proposed.last_successful_update == 2
+    assert proposed.last_successful_update == 1000
+    assert proposed.last_wall_clock_unix_seconds == 32_000_001.0
     assert scheduler.cadence.last_successful_update == 0
     scheduler.committed(decision)
-    assert scheduler.cadence.last_successful_update == 2
-    assert scheduler.cadence.last_wall_clock_unix_seconds == 6.0 * 3600.0
-    assert scheduler.due(3) is None
+    assert scheduler.cadence == proposed
 
 
 def test_forced_reason_takes_precedence_over_periodic_cadence() -> None:
     events: list[tuple[int, CheckpointReason | None]] = []
     scheduler = CheckpointScheduler(
-        CheckpointCadence(0, 0.0),
+        CheckpointCadence(0, 0.0, 1000),
         clock=lambda: 0.0,
         forced_checkpoint=lambda update: (
             CheckpointReason.PRE_DECAY if update == 1 else None
@@ -46,18 +46,18 @@ def test_forced_reason_takes_precedence_over_periodic_cadence() -> None:
     assert events == [(1, CheckpointReason.PRE_DECAY)]
 
 
-def test_failed_save_does_not_advance_wall_anchor() -> None:
+def test_failed_update_cadence_save_does_not_advance_audit_anchor() -> None:
     scheduler = CheckpointScheduler(
-        CheckpointCadence(0, 0.0),
+        CheckpointCadence(0, 0.0, 1000),
         clock=lambda: 6.0 * 3600.0,
     )
 
-    decision = scheduler.due(1)
+    decision = scheduler.due(1000)
     assert decision is not None
-    assert decision.reason is CheckpointReason.WALL_CADENCE
+    assert decision.reason is CheckpointReason.UPDATE_CADENCE
     # The caller deliberately does not commit after a failed checkpoint.
-    assert scheduler.cadence == CheckpointCadence(0, 0.0)
-    retry = scheduler.due(1)
+    assert scheduler.cadence == CheckpointCadence(0, 0.0, 1000)
+    retry = scheduler.due(1000)
     assert retry == decision
 
 
@@ -73,7 +73,7 @@ def test_all_transition_and_stage_reasons_reach_scheduler_as_exact_type(
     reason: CheckpointReason,
 ) -> None:
     scheduler = CheckpointScheduler(
-        CheckpointCadence(0, 0.0),
+        CheckpointCadence(0, 0.0, 1000),
         clock=lambda: 1.0,
         forced_checkpoint=lambda _update: reason,
     )

@@ -3,55 +3,66 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
-import os
-import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, cast
+from types import SimpleNamespace
+from typing import ClassVar, Protocol, cast
 
 import pytest
 
-from sakuramoon.config.schema import DataTransportConfig
+from sakuramoon.config.schema import DataSourceConfig, DataTransportConfig
 from sakuramoon.data.manifest import (
     DatasetManifest,
+    DatasetManifestError,
     DatasetSourceIdentity,
-    ManifestBuildInventory,
-    ShardBuildRecord,
+    RemoteShardRecord,
     ShardRecord,
+    load_dataset_manifest,
 )
 from sakuramoon.data.modelscope import (
-    MODELSCOPE_DATASET_HOST,
     MODELSCOPE_TOKEN_ENVIRONMENT,
     DatasetAuthenticationError,
     DatasetTransportError,
-    FetchedShard,
     ModelScopeDatasetTransport,
     ShardIntegrityError,
     build_remote_dataset_manifest,
+    ensure_dataset_manifest,
     fetch_dataset_shard,
     validate_remote_manifest,
 )
 
 CONTENT = b"synthetic-webdataset-shard"
-REVISION = "0123456789abcdef0123456789abcdef01234567"
-SHARD_PATH = "release-a/000001.tar"
+SHARD_PATH = "data/1_2024/shard-000000.tar"
+
+
+def _source() -> DatasetSourceIdentity:
+    return DatasetSourceIdentity(
+        repo_id="leafmoone/webdataset_danbooru",
+        revision="master",
+    )
+
+
+def _config_source() -> DataSourceConfig:
+    return cast(
+        DataSourceConfig,
+        SimpleNamespace(
+            repo_id="leafmoone/webdataset_danbooru",
+            revision="master",
+        ),
+    )
 
 
 def _manifest(content: bytes = CONTENT) -> DatasetManifest:
-    source = DatasetSourceIdentity(
-        repo_id="leafmoone/webdataset_danbooru",
-        revision=REVISION,
-        license_id="source-license",
-        access_terms="source-access-terms",
+    return DatasetManifest.from_shards(
+        _source(),
+        (
+            ShardRecord(
+                path=SHARD_PATH,
+                bytes=len(content),
+                upstream_sha256=hashlib.sha256(content).hexdigest(),
+            ),
+        ),
     )
-    shard = ShardRecord(
-        path=SHARD_PATH,
-        release="release-a",
-        bytes=len(content),
-        sha256=hashlib.sha256(content).hexdigest(),
-        samples=13,
-    )
-    return DatasetManifest.from_shards(source, (shard,))
 
 
 def _policy(**changes: object) -> DataTransportConfig:
@@ -79,7 +90,6 @@ class _Response:
         self._body = body
         self._headers = headers or {}
         self._position = 0
-        self.closed = False
 
     def getheader(self, name: str) -> str | None:
         return self._headers.get(name)
@@ -91,7 +101,7 @@ class _Response:
         return result
 
     def close(self) -> None:
-        self.closed = True
+        pass
 
 
 @dataclass
@@ -138,36 +148,30 @@ class _Connection:
         pass
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, plans: list[_Plan]) -> type[_Connection]:
+def _install(monkeypatch: pytest.MonkeyPatch, plans: list[_Plan]) -> None:
     _Connection.plans = list(plans)
     _Connection.requests = []
     monkeypatch.setattr(http.client, "HTTPSConnection", _Connection)
-    return _Connection
 
 
-def _transport(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    policy: DataTransportConfig | None = None,
-) -> ModelScopeDatasetTransport:
+def _transport(monkeypatch: pytest.MonkeyPatch) -> ModelScopeDatasetTransport:
     monkeypatch.setenv(MODELSCOPE_TOKEN_ENVIRONMENT, "synthetic-token")
     return ModelScopeDatasetTransport.from_token_environment(
-        MODELSCOPE_TOKEN_ENVIRONMENT, policy or _policy()
+        MODELSCOPE_TOKEN_ENVIRONMENT, _policy()
     )
 
 
 def _listing(entries: list[dict[str, object]]) -> _Response:
-    body = json.dumps({"Data": {"Files": entries}}).encode()
-    return _Response(200, body)
+    return _Response(200, json.dumps({"Data": {"Files": entries}}).encode())
 
 
 def _entry(
-    *, size: int = len(CONTENT), sha256: str | None = None
+    *, path: str = SHARD_PATH, size: int = len(CONTENT), digest: str | None = None
 ) -> dict[str, object]:
     return {
-        "Path": SHARD_PATH,
+        "Path": path,
         "Size": size,
-        "Sha256": sha256 or hashlib.sha256(CONTENT).hexdigest(),
+        "Sha256": digest or hashlib.sha256(CONTENT).hexdigest(),
         "Type": "blob",
     }
 
@@ -178,223 +182,179 @@ def test_factory_requires_fixed_token_variable(monkeypatch: pytest.MonkeyPatch) 
         ModelScopeDatasetTransport.from_token_environment("OTHER_TOKEN", _policy())
 
 
-def test_listing_uses_fixed_repo_revision_and_paginates(
+def test_listing_uses_master_and_maps_only_operational_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    http = _install(monkeypatch, [_Plan(_listing([_entry()])), _Plan(_listing([]))])
-
-    files = _transport(monkeypatch).list_files(_manifest().source)
-
-    assert len(files) == 1
-    assert len(http.requests) == 2
-    first = http.requests[0]
-    assert first["host"] == MODELSCOPE_DATASET_HOST
-    assert first["method"] == "GET"
-    assert REVISION in cast(str, first["target"])
-    assert "PageNumber=1" in cast(str, first["target"])
-    headers = cast(dict[str, str], first["headers"])
-    assert headers["Authorization"] == "Bearer synthetic-token"
+    _install(
+        monkeypatch,
+        [
+            _Plan(
+                _listing(
+                    [
+                        _entry(),
+                        {"Path": "README.md", "Size": 1, "Sha256": "0" * 64, "Type": "blob"},
+                        {"Path": "data", "Size": 0, "Sha256": "", "Type": "tree"},
+                    ]
+                )
+            ),
+            _Plan(_listing([])),
+        ],
+    )
+    records = _transport(monkeypatch).list_files(_source())
+    assert records == (
+        RemoteShardRecord(
+            path=SHARD_PATH,
+            bytes=len(CONTENT),
+            upstream_sha256=hashlib.sha256(CONTENT).hexdigest(),
+        ),
+    )
+    assert "Revision=master" in cast(str, _Connection.requests[0]["target"])
 
 
 @pytest.mark.parametrize(
-    "entries",
+    "entry",
     [
-        [],
-        [_entry(size=len(CONTENT) + 1)],
-        [_entry(sha256="f" * 64)],
-        [_entry(), _entry()],
+        {"Path": SHARD_PATH, "Size": 0, "Sha256": "0" * 64, "Type": "blob"},
+        {"Path": "../bad.tar", "Size": 1, "Sha256": "0" * 64, "Type": "blob"},
+        {"Path": SHARD_PATH, "Size": 1, "Sha256": "bad", "Type": "blob"},
     ],
 )
-def test_remote_listing_must_match_manifest(
-    entries: list[dict[str, object]], monkeypatch: pytest.MonkeyPatch
+def test_listing_rejects_invalid_upstream_facts(
+    monkeypatch: pytest.MonkeyPatch, entry: dict[str, object]
 ) -> None:
-    _install(monkeypatch, [_Plan(_listing(entries)), _Plan(_listing([]))])
-    with pytest.raises(ShardIntegrityError, match="differs"):
-        validate_remote_manifest(_transport(monkeypatch), _manifest())
+    _install(monkeypatch, [_Plan(_listing([entry]))])
+    with pytest.raises(DatasetTransportError, match="listing is invalid"):
+        _transport(monkeypatch).list_files(_source())
 
 
-def test_remote_listing_match(monkeypatch: pytest.MonkeyPatch) -> None:
-    metadata: dict[str, object] = {
-        "Path": "README.md",
-        "Size": 1,
-        "Sha256": "0" * 64,
-        "Type": "blob",
-    }
-    _install(
-        monkeypatch,
-        [_Plan(_listing([_entry(), metadata])), _Plan(_listing([]))],
-    )
-    validate_remote_manifest(_transport(monkeypatch), _manifest())
+class _ListingTransport:
+    stream_chunk_bytes = 65536
+
+    def __init__(self, records: tuple[RemoteShardRecord, ...]) -> None:
+        self.records = records
+        self.list_calls = 0
+
+    def list_files(self, source: DatasetSourceIdentity) -> tuple[RemoteShardRecord, ...]:
+        assert source == _source()
+        self.list_calls += 1
+        return self.records
 
 
-def test_remote_builder_uses_explicit_release_and_sample_inventory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = _manifest().source
-    inventory = ManifestBuildInventory(
-        schema_version=1,
-        source=source,
-        shards=(
-            ShardBuildRecord(
-                path=SHARD_PATH,
-                release="explicit-release",
-                samples=99,
-            ),
+def _remote(content: bytes = CONTENT) -> tuple[RemoteShardRecord, ...]:
+    return (
+        RemoteShardRecord(
+            path=SHARD_PATH,
+            bytes=len(content),
+            upstream_sha256=hashlib.sha256(content).hexdigest(),
         ),
     )
-    _install(monkeypatch, [_Plan(_listing([_entry()])), _Plan(_listing([]))])
-
-    manifest = build_remote_dataset_manifest(_transport(monkeypatch), inventory)
-
-    assert manifest.shards[0].release == "explicit-release"
-    assert manifest.shards[0].samples == 99
-    assert manifest.shards[0].bytes == len(CONTENT)
-    assert manifest.shards[0].sha256 == hashlib.sha256(CONTENT).hexdigest()
 
 
-def test_fetch_streams_to_partial_and_atomically_publishes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    http = _install(
-        monkeypatch,
-        [_Plan(_Response(200, CONTENT, {"Content-Length": str(len(CONTENT))}))],
+def test_build_and_remote_validation_require_exact_listing() -> None:
+    transport = cast(ModelScopeDatasetTransport, _ListingTransport(_remote()))
+    manifest = build_remote_dataset_manifest(transport, _source())
+    assert manifest == _manifest()
+    validate_remote_manifest(transport, manifest)
+
+    duplicate = cast(
+        ModelScopeDatasetTransport,
+        _ListingTransport((_remote()[0], _remote()[0])),
     )
-
-    result = fetch_dataset_shard(
-        _transport(monkeypatch), _manifest(), SHARD_PATH, tmp_path
-    )
-
-    assert result == FetchedShard(
-        tmp_path / SHARD_PATH,
-        SHARD_PATH,
-        len(CONTENT),
-        hashlib.sha256(CONTENT).hexdigest(),
-        False,
-    )
-    assert result.path.read_bytes() == CONTENT
-    assert not result.path.with_name("000001.tar.partial").exists()
-    assert "FilePath=release-a%2F000001.tar" in cast(str, http.requests[0]["target"])
-
-
-def test_fetch_rolls_back_and_fsyncs_directory_after_publish_fsync_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _install(
-        monkeypatch,
-        [_Plan(_Response(200, CONTENT, {"Content-Length": str(len(CONTENT))}))],
-    )
-    real_fsync = os.fsync
-    directory_fsyncs = 0
-
-    def fail_first_directory_fsync(descriptor: int) -> None:
-        nonlocal directory_fsyncs
-        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
-            directory_fsyncs += 1
-            if directory_fsyncs == 1:
-                raise OSError("injected parent fsync failure")
-        real_fsync(descriptor)
-
-    monkeypatch.setattr("sakuramoon.data.modelscope.os.fsync", fail_first_directory_fsync)
-
-    with pytest.raises(OSError, match="injected parent fsync failure"):
-        fetch_dataset_shard(_transport(monkeypatch), _manifest(), SHARD_PATH, tmp_path)
-
-    target = tmp_path / SHARD_PATH
-    assert directory_fsyncs == 2
-    assert not target.exists()
-    assert not target.with_name("000001.tar.partial").exists()
-
-
-def test_valid_cache_hit_does_not_request_network(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    target = tmp_path / SHARD_PATH
-    target.parent.mkdir(parents=True)
-    target.write_bytes(CONTENT)
-    http = _install(monkeypatch, [])
-
-    result = fetch_dataset_shard(
-        _transport(monkeypatch), _manifest(), SHARD_PATH, tmp_path
-    )
-
-    assert result.cache_hit is True
-    assert http.requests == []
-
-
-def test_corrupt_download_is_removed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _install(monkeypatch, [_Plan(_Response(200, b"wrong"))])
-
     with pytest.raises(ShardIntegrityError, match="differs"):
-        fetch_dataset_shard(_transport(monkeypatch), _manifest(), SHARD_PATH, tmp_path)
-
-    assert not (tmp_path / SHARD_PATH).exists()
-    assert not (tmp_path / SHARD_PATH).with_name("000001.tar.partial").exists()
+        validate_remote_manifest(duplicate, manifest)
 
 
-def test_existing_corrupt_cache_is_not_overwritten(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_ensure_initializes_once_then_loads_snapshot_without_relisting(
+    tmp_path: Path,
 ) -> None:
-    target = tmp_path / SHARD_PATH
-    target.parent.mkdir(parents=True)
-    target.write_bytes(b"wrong")
-    _install(monkeypatch, [])
-
-    with pytest.raises(ShardIntegrityError, match="cached"):
-        fetch_dataset_shard(_transport(monkeypatch), _manifest(), SHARD_PATH, tmp_path)
-
-    assert target.read_bytes() == b"wrong"
-
-
-def test_retryable_status_is_bounded(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    http = _install(
-        monkeypatch,
-        [_Plan(_Response(503)), _Plan(_Response(200, CONTENT))],
+    path = tmp_path / "manifest.json"
+    initial = _ListingTransport(_remote())
+    manifest = ensure_dataset_manifest(
+        cast(ModelScopeDatasetTransport, initial),
+        path,
+        _config_source(),
+        initialize_if_missing=True,
+        refresh_existing=False,
     )
-    fetch_dataset_shard(
-        _transport(monkeypatch, policy=_policy(max_retries=1)),
-        _manifest(),
-        SHARD_PATH,
-        tmp_path,
+    assert initial.list_calls == 1
+    assert load_dataset_manifest(path, _config_source()) == manifest
+    published = path.read_bytes()
+
+    existing = _ListingTransport(_remote(b"changed-upstream-after-snapshot"))
+    loaded = ensure_dataset_manifest(
+        cast(ModelScopeDatasetTransport, existing),
+        path,
+        _config_source(),
+        initialize_if_missing=True,
+        refresh_existing=False,
     )
-    assert len(http.requests) == 2
+    assert loaded == manifest
+    assert existing.list_calls == 0
+    assert path.read_bytes() == published
 
 
-@pytest.mark.parametrize("status", [401, 403])
-def test_authentication_failure_is_not_retried(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int
-) -> None:
-    http = _install(monkeypatch, [_Plan(_Response(status))])
-    with pytest.raises(DatasetAuthenticationError):
-        fetch_dataset_shard(_transport(monkeypatch), _manifest(), SHARD_PATH, tmp_path)
-    assert len(http.requests) == 1
+def test_ensure_fails_closed_for_invalid_manifest_policy(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    with pytest.raises(DatasetManifestError, match="initialization is disabled"):
+        ensure_dataset_manifest(
+            cast(ModelScopeDatasetTransport, _ListingTransport(_remote())),
+            path,
+            _config_source(),
+            initialize_if_missing=False,
+            refresh_existing=False,
+        )
+    with pytest.raises(DatasetManifestError, match="refresh is prohibited"):
+        ensure_dataset_manifest(
+            cast(ModelScopeDatasetTransport, _ListingTransport(_remote())),
+            path,
+            _config_source(),
+            initialize_if_missing=True,
+            refresh_existing=True,
+        )
+
+class _Writer(Protocol):
+    def write(self, payload: bytes, /) -> int: ...
 
 
-def test_cross_host_redirect_drops_authentication(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    http = _install(
-        monkeypatch,
-        [
-            _Plan(_Response(302, headers={"Location": "https://cdn.modelscope.cn/blob"})),
-            _Plan(_Response(200, CONTENT)),
-        ],
+class _MemoryTransport:
+    stream_chunk_bytes = 4
+
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.downloads = 0
+
+    def download(
+        self, manifest: DatasetManifest, shard: ShardRecord, output: _Writer
+    ) -> None:
+        assert manifest.shard(shard.path) == shard
+        self.downloads += 1
+        output.write(self.content)
+
+
+def test_fetch_verifies_internal_digest_and_reuses_verified_cache(tmp_path: Path) -> None:
+    transport = _MemoryTransport(CONTENT)
+    first = fetch_dataset_shard(
+        cast(ModelScopeDatasetTransport, transport), _manifest(), SHARD_PATH, tmp_path
     )
-    fetch_dataset_shard(_transport(monkeypatch), _manifest(), SHARD_PATH, tmp_path)
-    redirected = cast(dict[str, str], http.requests[1]["headers"])
-    assert "Authorization" not in redirected
-    assert "Cookie" not in redirected
-
-
-def test_non_https_redirect_is_rejected(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _install(
-        monkeypatch,
-        [_Plan(_Response(302, headers={"Location": "http://example.com/blob"}))],
+    second = fetch_dataset_shard(
+        cast(ModelScopeDatasetTransport, transport), _manifest(), SHARD_PATH, tmp_path
     )
-    with pytest.raises(DatasetTransportError, match="unsafe redirect"):
-        fetch_dataset_shard(_transport(monkeypatch), _manifest(), SHARD_PATH, tmp_path)
+    assert first.path.read_bytes() == CONTENT
+    assert not first.cache_hit and second.cache_hit
+    assert transport.downloads == 1
+
+
+@pytest.mark.parametrize("content", [b"wrong-size", b"x" * len(CONTENT)])
+def test_fetch_rejects_corrupt_download_and_cleans_partial(
+    tmp_path: Path, content: bytes
+) -> None:
+    with pytest.raises(ShardIntegrityError, match="differs"):
+        fetch_dataset_shard(
+            cast(ModelScopeDatasetTransport, _MemoryTransport(content)),
+            _manifest(),
+            SHARD_PATH,
+            tmp_path,
+        )
+    destination = tmp_path / SHARD_PATH
+    assert not destination.exists()
+    assert not destination.with_name(f"{destination.name}.partial").exists()

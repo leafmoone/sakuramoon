@@ -74,13 +74,11 @@ def _identity_metadata(
     return raw
 
 
-def _shard_record(path: Path, *, release: str = "trusted-release") -> ShardRecord:
+def _shard_record(path: Path) -> ShardRecord:
     return ShardRecord(
         path=path.name,
-        release=release,
         bytes=path.stat().st_size,
-        sha256="1" * 64,
-        samples=2,
+        upstream_sha256="1" * 64,
     )
 
 
@@ -138,11 +136,11 @@ def _write_tar(
                 archive.addfile(info, io.BytesIO(payload))
 
 
-def test_real_webdataset_iteration_excludes_validation_before_decode(
+def test_real_webdataset_iteration_processes_every_sample_in_training_shard(
     tmp_path: Path,
 ) -> None:
     shard = tmp_path / "samples.tar"
-    _write_tar(shard)
+    _write_tar(shard, records=((1, _jpeg()), (2, _jpeg())))
     parser_calls = 0
 
     def parser(raw: Mapping[str, object]) -> CaptionFields:
@@ -155,7 +153,6 @@ def test_real_webdataset_iteration_excludes_validation_before_decode(
         shard_records=(_shard_record(shard),),
         metadata_adapter=_identity_metadata,
         metadata_fields=_metadata_fields(),
-        validation_ids=frozenset({2}),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -165,21 +162,20 @@ def test_real_webdataset_iteration_excludes_validation_before_decode(
         rejection_observer=_ignore_rejection,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
 
     samples = tuple(pipeline)
 
-    assert len(samples) == 1
-    assert samples[0].sample_id == 1
-    assert samples[0].release == "trusted-release"
+    assert tuple(sample.sample_id for sample in samples) == (1, 2)
+    assert samples[0].source_shard == shard.name
     assert samples[0].image.shape == (3, 512, 512)
     assert samples[0].image.dtype == torch.uint8
     assert samples[0].audit.source_width == 640
-    assert parser_calls == 1
+    assert parser_calls == 2
 
 
-def test_manifest_release_is_trusted_when_raw_release_is_missing_and_fields_are_aliased(
+def test_source_shard_is_preserved_when_raw_release_is_missing_and_fields_are_aliased(
     tmp_path: Path,
 ) -> None:
     shard = tmp_path / "samples.tar"
@@ -210,10 +206,9 @@ def test_manifest_release_is_trusted_when_raw_release_is_missing_and_fields_are_
 
     pipeline = WebDatasetPipeline(
         shard_paths=(shard,),
-        shard_records=(_shard_record(shard, release="manifest-release"),),
+        shard_records=(_shard_record(shard),),
         metadata_adapter=adapter,
         metadata_fields=fields,
-        validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -223,12 +218,12 @@ def test_manifest_release_is_trusted_when_raw_release_is_missing_and_fields_are_
         rejection_observer=_ignore_rejection,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
 
     sample = next(iter(pipeline))
 
-    assert sample.release == "manifest-release"
+    assert sample.source_shard == shard.name
 
 
 def test_pipeline_rejects_unknown_sample_url_and_mismatched_shard_record(
@@ -242,7 +237,6 @@ def test_pipeline_rejects_unknown_sample_url_and_mismatched_shard_record(
         shard_records=(record,),
         metadata_adapter=_identity_metadata,
         metadata_fields=_metadata_fields(),
-        validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -252,7 +246,7 @@ def test_pipeline_rejects_unknown_sample_url_and_mismatched_shard_record(
         rejection_observer=_ignore_rejection,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
     raw_sample = {
         "__url__": str(tmp_path / "unknown.tar"),
@@ -273,10 +267,8 @@ def test_pipeline_rejects_unknown_sample_url_and_mismatched_shard_record(
 
     wrong_record = ShardRecord(
         path="other.tar",
-        release="trusted-release",
         bytes=shard.stat().st_size,
-        sha256="2" * 64,
-        samples=1,
+        upstream_sha256="2" * 64,
     )
     with pytest.raises(PipelineSampleError, match="manifest shard path"):
         WebDatasetPipeline(
@@ -284,7 +276,6 @@ def test_pipeline_rejects_unknown_sample_url_and_mismatched_shard_record(
             shard_records=(wrong_record,),
             metadata_adapter=_identity_metadata,
             metadata_fields=_metadata_fields(),
-            validation_ids=frozenset(),
             buckets=(BucketShape(512, 512),),
             min_crop_retention=0.8,
             probabilities=_probabilities(),
@@ -294,7 +285,7 @@ def test_pipeline_rejects_unknown_sample_url_and_mismatched_shard_record(
             rejection_observer=_ignore_rejection,
             base_seed=9,
             stage="S0",
-            pass_index=0,
+            cycle_index=0,
         )
 
 
@@ -320,7 +311,6 @@ def test_image_rejection_skips_sample_and_continues_real_tar_iteration(
         shard_records=(_shard_record(shard),),
         metadata_adapter=_identity_metadata,
         metadata_fields=_metadata_fields(),
-        validation_ids=frozenset(),
         buckets=(bucket,),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -330,7 +320,7 @@ def test_image_rejection_skips_sample_and_continues_real_tar_iteration(
         rejection_observer=rejections.append,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
 
     samples = tuple(pipeline)
@@ -339,13 +329,13 @@ def test_image_rejection_skips_sample_and_continues_real_tar_iteration(
     assert rejections == ["no_upscale" if bucket.width == 512 else "retention"]
 
 
-def test_rng_identity_changes_by_stage_pass_and_domain() -> None:
-    first = rng_identity(base_seed=4, stage="S0", pass_index=0, sample_id=10)
-    repeated = rng_identity(base_seed=4, stage="S0", pass_index=0, sample_id=10)
-    next_pass = rng_identity(base_seed=4, stage="S0", pass_index=1, sample_id=10)
+def test_rng_identity_changes_by_stage_cycle_and_domain() -> None:
+    first = rng_identity(base_seed=4, stage="S0", cycle_index=0, sample_id=10)
+    repeated = rng_identity(base_seed=4, stage="S0", cycle_index=0, sample_id=10)
+    next_cycle = rng_identity(base_seed=4, stage="S0", cycle_index=1, sample_id=10)
 
     assert first == repeated
-    assert first != next_pass
+    assert first != next_cycle
     assert first.caption_seed != first.crop_seed
 
 
@@ -361,7 +351,9 @@ class _PreparedCache:
         shard = self.manifest.shard(shard_path)
         path = self.root / shard_path
         return CachedShard(
-            FetchedShard(path, shard.path, shard.bytes, shard.sha256, False),
+            FetchedShard(
+                path, shard.path, shard.bytes, shard.upstream_sha256, False
+            ),
             (),
             sum(item.bytes for item in self.manifest.shards),
         )
@@ -375,17 +367,13 @@ def test_durable_loader_consumes_and_completes_each_shard_once(tmp_path: Path) -
         paths.append(path)
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="test",
-        access_terms="test",
+        revision="master",
     )
     shards = tuple(
         ShardRecord(
             path=path.name,
-            release="r",
             bytes=path.stat().st_size,
-            sha256=f"{index + 1:064x}",
-            samples=1,
+            upstream_sha256=f"{index + 1:064x}",
         )
         for index, path in enumerate(paths)
     )
@@ -399,7 +387,6 @@ def test_durable_loader_consumes_and_completes_each_shard_once(tmp_path: Path) -
         shard_records=(shards[0],),
         metadata_adapter=_identity_metadata,
         metadata_fields=_metadata_fields(),
-        validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -409,7 +396,7 @@ def test_durable_loader_consumes_and_completes_each_shard_once(tmp_path: Path) -
         rejection_observer=_ignore_rejection,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
     batches = tuple(
         iter_leased_batches(
@@ -427,7 +414,9 @@ def test_durable_loader_consumes_and_completes_each_shard_once(tmp_path: Path) -
     consumed = sorted(int(batch.sample_ids[0].item()) for batch in batches)
 
     assert consumed == [1, 2, 3]
-    assert tuple(batch.releases for batch in batches) == (("r",), ("r",), ("r",))
+    assert tuple(batch.source_shards for batch in batches) == tuple(
+        (path.name,) for path in paths
+    )
     assert coordinator.state.completed == tuple(sorted(shard.path for shard in shards))
     assert coordinator.state.active is None
 
@@ -437,19 +426,15 @@ def test_durable_loader_rejects_multi_worker_state_mismatch(tmp_path: Path) -> N
     _write_tar(shard, ((1, _jpeg()),))
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="test",
-        access_terms="test",
+        revision="master",
     )
     manifest = DatasetManifest.from_shards(
         source,
         (
             ShardRecord(
                 path=shard.name,
-                release="r",
                 bytes=shard.stat().st_size,
-                sha256="1" * 64,
-                samples=1,
+                upstream_sha256="1" * 64,
             ),
         ),
     )
@@ -462,7 +447,6 @@ def test_durable_loader_rejects_multi_worker_state_mismatch(tmp_path: Path) -> N
         shard_records=(manifest.shards[0],),
         metadata_adapter=_identity_metadata,
         metadata_fields=_metadata_fields(),
-        validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -472,7 +456,7 @@ def test_durable_loader_rejects_multi_worker_state_mismatch(tmp_path: Path) -> N
         rejection_observer=_ignore_rejection,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
 
     with pytest.raises(CollateError, match="exactly one worker"):
@@ -498,7 +482,6 @@ def test_worker_loader_cannot_bypass_durable_lease(tmp_path: Path) -> None:
         shard_records=(_shard_record(shard),),
         metadata_adapter=_identity_metadata,
         metadata_fields=_metadata_fields(),
-        validation_ids=frozenset(),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
         probabilities=_probabilities(),
@@ -508,7 +491,7 @@ def test_worker_loader_cannot_bypass_durable_lease(tmp_path: Path) -> None:
         rejection_observer=_ignore_rejection,
         base_seed=9,
         stage="S0",
-        pass_index=0,
+        cycle_index=0,
     )
     loader = DataLoader(pipeline, batch_size=None, num_workers=1)
 
@@ -529,15 +512,12 @@ def test_pipeline_rejects_nonlocal_or_relative_shard_paths(
             shard_records=(
                 ShardRecord(
                     path="data.tar",
-                    release="r",
                     bytes=1,
-                    sha256="1" * 64,
-                    samples=1,
+                    upstream_sha256="1" * 64,
                 ),
             ),
             metadata_adapter=_identity_metadata,
             metadata_fields=_metadata_fields(),
-            validation_ids=frozenset(),
             buckets=(BucketShape(512, 512),),
             min_crop_retention=0.8,
             probabilities=_probabilities(),
@@ -547,24 +527,20 @@ def test_pipeline_rejects_nonlocal_or_relative_shard_paths(
             rejection_observer=_ignore_rejection,
             base_seed=9,
             stage="S0",
-            pass_index=0,
+            cycle_index=0,
         )
 
 
 def test_local_shard_order_replays_active_and_skips_completed(tmp_path: Path) -> None:
     source = DatasetSourceIdentity(
         repo_id="leafmoone/webdataset_danbooru",
-        revision="a" * 40,
-        license_id="test",
-        access_terms="test",
+        revision="master",
     )
     shards = tuple(
         ShardRecord(
             path=f"r/{index}.tar",
-            release="r",
             bytes=1,
-            sha256=f"{index + 1:064x}",
-            samples=1,
+            upstream_sha256=f"{index + 1:064x}",
         )
         for index in range(3)
     )
@@ -573,7 +549,6 @@ def test_local_shard_order_replays_active_and_skips_completed(tmp_path: Path) ->
         completed=(shards[0].path,),
         active=shards[2].path,
         replayed_shards=1,
-        replayed_samples=1,
     )
 
     assert local_shard_order(tmp_path, manifest, state) == (

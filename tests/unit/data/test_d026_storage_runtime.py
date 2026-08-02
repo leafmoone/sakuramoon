@@ -18,7 +18,7 @@ from sakuramoon.storage import (
 )
 
 
-def _config() -> StorageConfig:
+def _config(*, checkpoint_copies: int = 3) -> StorageConfig:
     return StorageConfig.model_validate(
         {
             "mode": "server_backed",
@@ -28,7 +28,7 @@ def _config() -> StorageConfig:
             "hard_mount": True,
             "minimum_free_gib": 8,
             "measured_raw_checkpoint_bytes": 2048,
-            "checkpoint_copies": 3,
+            "checkpoint_copies": checkpoint_copies,
             "atomic_publish_probe": True,
         }
     )
@@ -139,10 +139,12 @@ def test_runtime_ipc_rejects_any_non_governed_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("checkpoint_payload_bytes", [1024, 4096])
+@pytest.mark.parametrize("slots", [1, 4])
 def test_capacity_uses_larger_of_configured_and_restored_checkpoint_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     checkpoint_payload_bytes: int,
+    slots: int,
 ) -> None:
     mount = MountIdentity(
         tmp_path,
@@ -168,7 +170,8 @@ def test_capacity_uses_larger_of_configured_and_restored_checkpoint_bytes(
         local_runtime,
     )
     config = SimpleNamespace(
-        storage=_config(),
+        storage=_config(checkpoint_copies=slots + 1),
+        checkpoint=SimpleNamespace(slots=slots),
         paths=SimpleNamespace(
             run_dir="runs/test",
             cache_dir="cache/test",
@@ -183,10 +186,10 @@ def test_capacity_uses_larger_of_configured_and_restored_checkpoint_bytes(
                 ownership_lock_path="/run/sakuramoon/data-service.lock",
             ),
         ),
-        evaluation=SimpleNamespace(output_reserve_gib=4),
+        evaluation=SimpleNamespace(enabled=True, output_reserve_gib=4),
     )
     governed_checkpoint_bytes = max(checkpoint_payload_bytes, 2048)
-    required = (8 + 16) * 1024**3 + 3 * governed_checkpoint_bytes
+    required = (8 + 16) * 1024**3 + (slots + 1) * governed_checkpoint_bytes
 
     def insufficient_space(_path: Path) -> SimpleNamespace:
         return SimpleNamespace(free=required - 1)
@@ -211,6 +214,20 @@ def test_capacity_uses_larger_of_configured_and_restored_checkpoint_bytes(
     )
     assert report.capacities[0].required_bytes == required
     assert report.capacities[0].free_bytes == required
+
+
+def test_capacity_rejects_checkpoint_copy_count_drift(tmp_path: Path) -> None:
+    config = SimpleNamespace(
+        storage=_config(checkpoint_copies=3),
+        checkpoint=SimpleNamespace(slots=3),
+    )
+
+    with pytest.raises(StorageValidationError, match="slots plus one"):
+        storage_module.require_training_storage(
+            config,  # pyright: ignore[reportArgumentType]
+            tmp_path,
+            checkpoint_payload_bytes=2048,
+        )
 
 
 def test_evaluator_capacity_adds_explicit_output_reservation(
@@ -242,6 +259,7 @@ def test_evaluator_capacity_adds_explicit_output_reservation(
     )
     config = SimpleNamespace(
         storage=_config(),
+        checkpoint=SimpleNamespace(slots=2),
         paths=SimpleNamespace(
             run_dir="runs/test",
             cache_dir="cache/test",
@@ -256,7 +274,7 @@ def test_evaluator_capacity_adds_explicit_output_reservation(
                 ownership_lock_path="/run/sakuramoon/data-service.lock",
             ),
         ),
-        evaluation=SimpleNamespace(output_reserve_gib=4),
+        evaluation=SimpleNamespace(enabled=True, output_reserve_gib=4),
     )
     required = (8 + 16 + 4) * 1024**3 + 3 * 2048
 

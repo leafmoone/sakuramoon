@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Literal, cast
 
 from sakuramoon.data.cache import CachedShard, ShardCache, ShardCacheError
-from sakuramoon.data.manifest import DatasetManifest, manifest_sha256
+from sakuramoon.data.manifest import DatasetManifest
 from sakuramoon.data.modelscope import DatasetTransportError
 from sakuramoon.data.service_protocol import (
     MAX_SERVICE_FRAME_BYTES,
@@ -29,8 +29,13 @@ from sakuramoon.data.service_protocol import (
     canonical_json_bytes,
     parse_frame,
 )
+from sakuramoon.data.validation import (
+    VALIDATION_SHARD_COUNT,
+    ValidationSelection,
+    validate_selection_manifest,
+)
 
-_MAINSET_SCHEMA_VERSION = 1
+_MAINSET_SCHEMA_VERSION = 4
 _MAINSET_STATUSES = frozenset({"pending", "active", "completed"})
 
 
@@ -87,17 +92,29 @@ class MainsetRow:
 @dataclass(frozen=True, slots=True)
 class PersistentMainset:
     mainset_id: str
-    manifest_sha256: str
+    manifest_id: str
+    validation_selection_id: str
+    excluded_shard_paths: tuple[str, str]
+    cycle_index: int
     shuffle_identity: str
     worker_count: int
     rows: tuple[MainsetRow, ...]
     replayed_shards: int = 0
-    replayed_samples: int = 0
 
     def __post_init__(self) -> None:
         if (
             not _is_sha256(self.mainset_id)
-            or not _is_sha256(self.manifest_sha256)
+            or not _is_sha256(self.manifest_id)
+            or not _is_sha256(self.validation_selection_id)
+            or type(self.excluded_shard_paths) is not tuple
+            or len(self.excluded_shard_paths) != VALIDATION_SHARD_COUNT
+            or any(
+                type(path) is not str or not path
+                for path in self.excluded_shard_paths
+            )
+            or len(set(self.excluded_shard_paths)) != VALIDATION_SHARD_COUNT
+            or type(self.cycle_index) is not int
+            or self.cycle_index < 0
             or not _is_sha256(self.shuffle_identity)
             or type(self.worker_count) is not int
             or self.worker_count <= 0
@@ -105,8 +122,6 @@ class PersistentMainset:
             or not self.rows
             or type(self.replayed_shards) is not int
             or self.replayed_shards < 0
-            or type(self.replayed_samples) is not int
-            or self.replayed_samples < 0
         ):
             raise ValueError("persistent mainset is invalid")
 
@@ -134,9 +149,10 @@ def _is_sha256(value: object) -> bool:
 
 def _mainset_payload(state: PersistentMainset) -> dict[str, object]:
     return {
+        "cycle_index": state.cycle_index,
+        "excluded_shard_paths": list(state.excluded_shard_paths),
         "mainset_id": state.mainset_id,
-        "manifest_sha256": state.manifest_sha256,
-        "replayed_samples": state.replayed_samples,
+        "manifest_id": state.manifest_id,
         "replayed_shards": state.replayed_shards,
         "rows": [
             {"ordinal": row.ordinal, "path": row.path, "status": row.status}
@@ -144,6 +160,7 @@ def _mainset_payload(state: PersistentMainset) -> dict[str, object]:
         ],
         "schema_version": _MAINSET_SCHEMA_VERSION,
         "shuffle_identity": state.shuffle_identity,
+        "validation_selection_id": state.validation_selection_id,
         "worker_count": state.worker_count,
     }
 
@@ -164,15 +181,30 @@ class _MainsetStore:
     """Atomically persist the one service-owned full-manifest table."""
 
     def __init__(
-        self, path: Path, manifest: DatasetManifest, *, worker_count: int
+        self,
+        path: Path,
+        manifest: DatasetManifest,
+        validation_selection: ValidationSelection,
+        *,
+        worker_count: int,
     ) -> None:
         if type(worker_count) is not int or worker_count <= 0:
             raise ValueError("mainset worker_count must be a positive integer")
         self.path = path
         self.manifest = manifest
         self.worker_count = worker_count
-        self.manifest_sha256 = manifest_sha256(manifest)
-        self._paths = frozenset(record.path for record in manifest.shards)
+        self.manifest_id = manifest.manifest_id
+        validate_selection_manifest(validation_selection, manifest)
+        self.validation_selection_id = validation_selection.selection_id
+        self.excluded_shard_paths = validation_selection.shard_paths
+        excluded = frozenset(self.excluded_shard_paths)
+        self._paths = frozenset(
+            record.path for record in manifest.shards if record.path not in excluded
+        )
+        if len(self._paths) != len(manifest.shards) - VALIDATION_SHARD_COUNT:
+            raise DataServiceError("validation shard exclusion is invalid")
+        if not self._paths:
+            raise DataServiceError("validation shard exclusion leaves no training shard")
 
     def validate(self, state: PersistentMainset) -> None:
         paths = tuple(row.path for row in state.rows)
@@ -186,9 +218,11 @@ class _MainsetStore:
             len(state.rows),
         )
         if (
-            state.manifest_sha256 != self.manifest_sha256
+            state.manifest_id != self.manifest_id
+            or state.validation_selection_id != self.validation_selection_id
+            or state.excluded_shard_paths != self.excluded_shard_paths
             or state.worker_count != self.worker_count
-            or len(state.rows) != len(self.manifest.shards)
+            or len(state.rows) != len(self._paths)
             or tuple(row.ordinal for row in state.rows) != tuple(range(len(state.rows)))
             or len(set(paths)) != len(paths)
             or frozenset(paths) != self._paths
@@ -211,16 +245,21 @@ class _MainsetStore:
                 raise TypeError
             document = cast(dict[str, object], raw)
             if set(document) != {
+                "cycle_index",
+                "excluded_shard_paths",
                 "mainset_id",
-                "manifest_sha256",
-                "replayed_samples",
+                "manifest_id",
                 "replayed_shards",
                 "rows",
                 "schema_version",
                 "shuffle_identity",
+                "validation_selection_id",
                 "worker_count",
             } or document["schema_version"] != _MAINSET_SCHEMA_VERSION:
                 raise ValueError
+            raw_excluded = document["excluded_shard_paths"]
+            if not isinstance(raw_excluded, list):
+                raise TypeError
             raw_rows = document["rows"]
             if not isinstance(raw_rows, list):
                 raise TypeError
@@ -243,12 +282,18 @@ class _MainsetStore:
                 )
             state = PersistentMainset(
                 mainset_id=cast(str, document["mainset_id"]),
-                manifest_sha256=cast(str, document["manifest_sha256"]),
+                manifest_id=cast(str, document["manifest_id"]),
+                validation_selection_id=cast(
+                    str, document["validation_selection_id"]
+                ),
+                excluded_shard_paths=cast(
+                    tuple[str, str], tuple(cast(list[object], raw_excluded))
+                ),
+                cycle_index=cast(int, document["cycle_index"]),
                 shuffle_identity=cast(str, document["shuffle_identity"]),
                 worker_count=cast(int, document["worker_count"]),
                 rows=tuple(rows),
                 replayed_shards=cast(int, document["replayed_shards"]),
-                replayed_samples=cast(int, document["replayed_samples"]),
             )
             self.validate(state)
             return state
@@ -336,18 +381,28 @@ class _MainsetStore:
     def new(
         self,
         *,
+        cycle_index: int,
         previous_id: str | None = None,
         replayed_shards: int = 0,
-        replayed_samples: int = 0,
     ) -> PersistentMainset:
-        paths = [record.path for record in self.manifest.shards]
+        if type(cycle_index) is not int or cycle_index < 0:
+            raise DataServiceError("mainset cycle_index is invalid")
+        excluded = frozenset(self.excluded_shard_paths)
+        paths = [
+            record.path
+            for record in self.manifest.shards
+            if record.path not in excluded
+        ]
         secrets.SystemRandom().shuffle(paths)
         mainset_id = secrets.token_hex(32)
         while mainset_id == previous_id:
             mainset_id = secrets.token_hex(32)
         state = PersistentMainset(
             mainset_id=mainset_id,
-            manifest_sha256=self.manifest_sha256,
+            manifest_id=self.manifest_id,
+            validation_selection_id=self.validation_selection_id,
+            excluded_shard_paths=self.excluded_shard_paths,
+            cycle_index=cycle_index,
             shuffle_identity=secrets.token_hex(32),
             worker_count=self.worker_count,
             rows=tuple(
@@ -355,7 +410,6 @@ class _MainsetStore:
                 for ordinal, path in enumerate(paths)
             ),
             replayed_shards=replayed_shards,
-            replayed_samples=replayed_samples,
         )
         self.validate(state)
         return state
@@ -367,13 +421,14 @@ class DataSupplyService:
     def __init__(
         self,
         manifest: DatasetManifest,
+        validation_selection: ValidationSelection,
         cache: ShardCache,
         mainset_path: Path,
         ownership_lock_path: Path,
         identity: DataServiceSessionIdentity,
         limits: DataServiceLimits,
     ) -> None:
-        if manifest_sha256(manifest) != identity.manifest_sha256:
+        if manifest.manifest_id != identity.manifest_id:
             raise DataServiceError("service manifest identity differs from the client")
         if limits.lease_channel_capacity < identity.worker_count:
             raise DataServiceError("lease capacity is smaller than worker topology")
@@ -396,7 +451,10 @@ class DataSupplyService:
         self.identity = identity
         self.limits = limits
         self.store = _MainsetStore(
-            mainset_path, manifest, worker_count=identity.worker_count
+            mainset_path,
+            manifest,
+            validation_selection,
+            worker_count=identity.worker_count,
         )
         self.ownership_lock_path = ownership_lock_path
         self._mainset: PersistentMainset | None = None
@@ -453,17 +511,13 @@ class DataSupplyService:
             self.cache.cleanup_manifest_partials()
             state = self.store.load()
             if state is None:
-                state = self.store.new()
+                state = self.store.new(cycle_index=0)
                 self.store.save(state)
             recovered = state.active_paths
             if recovered:
-                replayed_samples = sum(
-                    self.manifest.shard(path).samples for path in recovered
-                )
                 state = replace(
                     state,
                     replayed_shards=state.replayed_shards + len(recovered),
-                    replayed_samples=state.replayed_samples + replayed_samples,
                 )
                 self.store.save(state)
             self._mainset = state
@@ -527,9 +581,14 @@ class DataSupplyService:
         path = self._next_path()
         if path is None:
             return None
+        return path, self._materialize(path)
+
+    def _materialize(self, path: str) -> CachedShard:
         cached = self._ready.get(path)
         if cached is None:
-            future = self._futures.pop(path)
+            future = self._futures.pop(path, None)
+            if future is None:
+                raise DataServiceError("verified lookahead is incomplete")
             try:
                 cached = future.result()
             except (DatasetTransportError, OSError, ShardCacheError) as exc:
@@ -537,7 +596,27 @@ class DataSupplyService:
                     f"verified lookahead failed: {type(exc).__name__}"
                 ) from None
             self._ready[path] = cached
-        return path, cached
+        return cached
+
+    def wait_until_ready(self) -> None:
+        """Block until the next worker wave is verified in the local cache."""
+
+        with self._lock:
+            self._ensure_running()
+            self._schedule_lookahead()
+            outstanding = {
+                lease.descriptor.record.path
+                for lease in self._outstanding.values()
+            }
+            candidates = tuple(
+                row.path
+                for row in self.mainset.rows
+                if row.status != "completed" and row.path not in outstanding
+            )[: self.identity.worker_count]
+            if not candidates:
+                raise DataServiceError("data service has no training shard to prepare")
+            for path in candidates:
+                self._materialize(path)
 
     def _replace_row_status(
         self,
@@ -597,6 +676,7 @@ class DataSupplyService:
             lease_id = hashlib.sha256(
                 canonical_json_bytes(
                     {
+                        "cycle_index": self.mainset.cycle_index,
                         "mainset_id": self.mainset.mainset_id,
                         "path": path,
                         "state": state_identity,
@@ -607,6 +687,7 @@ class DataSupplyService:
             descriptor = ShardLeaseDescriptor(
                 lease_id=lease_id,
                 worker_id=worker_id,
+                cycle_index=self.mainset.cycle_index,
                 state_identity=state_identity,
                 record=self.manifest.shard(path),
                 local_path=cached.fetched.path,
@@ -638,9 +719,9 @@ class DataSupplyService:
                         "mainset cannot rotate with outstanding supply state"
                     )
                 published = self.store.new(
+                    cycle_index=completed.cycle_index + 1,
                     previous_id=completed.mainset_id,
                     replayed_shards=completed.replayed_shards,
-                    replayed_samples=completed.replayed_samples,
                 )
             else:
                 published = completed
@@ -726,23 +807,25 @@ class DataServiceServer:
     def _dispatch(self, request: dict[str, Any]) -> dict[str, object]:
         operation = request.get("op")
         if operation == "health":
-            if set(request) != {"op", "protocol_version", "session_identity"}:
+            if set(request) != {"op", "protocol_version", "worker_count"}:
                 raise DataServiceError("health request fields are invalid")
-            identity = DataServiceSessionIdentity.from_dict(request["session_identity"])
             if (
                 request["protocol_version"] != SERVICE_PROTOCOL_VERSION
-                or identity != self.service.identity
+                or request["worker_count"] != self.service.identity.worker_count
             ):
-                raise DataServiceError("service identity differs from the client")
+                raise DataServiceError("service topology differs from the client")
             return {
                 "done": self.service.done,
                 "ok": True,
                 "protocol_version": SERVICE_PROTOCOL_VERSION,
+                "session_identity": self.service.identity.as_dict(),
                 "session_sha256": self.service.identity.sha256,
             }
         if operation == "lease":
-            if set(request) != {"op", "worker_id"}:
+            if set(request) != {"op", "session_sha256", "worker_id"}:
                 raise DataServiceError("lease request fields are invalid")
+            if request["session_sha256"] != self.service.identity.sha256:
+                raise DataServiceError("lease service session is stale")
             descriptor = self.service.lease(request["worker_id"])
             return {
                 "done": descriptor is None,
@@ -750,8 +833,16 @@ class DataServiceServer:
                 "ok": True,
             }
         if operation == "ack":
-            if set(request) != {"lease_id", "op", "state_identity", "worker_id"}:
+            if set(request) != {
+                "lease_id",
+                "op",
+                "session_sha256",
+                "state_identity",
+                "worker_id",
+            }:
                 raise DataServiceError("ACK request fields are invalid")
+            if request["session_sha256"] != self.service.identity.sha256:
+                raise DataServiceError("ACK service session is stale")
             self.service.acknowledge(
                 request["lease_id"], request["worker_id"], request["state_identity"]
             )
@@ -802,6 +893,7 @@ class DataServiceServer:
             os.chmod(self.socket_path, 0o600)
             listener.listen(self.service.limits.ack_channel_capacity)
             listener.settimeout(0.2)
+            self.service.wait_until_ready()
             if ready_callback is not None:
                 ready_callback()
             while not stop_event.is_set():

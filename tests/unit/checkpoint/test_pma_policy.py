@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 import torch
@@ -27,6 +28,7 @@ from sakuramoon.checkpoint.load import (
     read_raw_checkpoint_state,
 )
 from sakuramoon.checkpoint.schema import (
+    RAW_SCHEMA_VERSION,
     CheckpointError,
     CheckpointManifest,
     FileRecord,
@@ -129,13 +131,12 @@ def _raw_fixture(root: Path, update: int, value: float) -> Path:
             {
                 "attempted_updates": update,
                 "checkpoint_cadence": {
-                    "every_hours": 6.0,
                     "every_successful_updates": 1000,
                     "last_successful_update": update,
                     "last_wall_clock_unix_seconds": 1_800_000_000.0 + update,
                 },
                 "effective_samples": update,
-                "schema_version": 3,
+                "schema_version": RAW_SCHEMA_VERSION,
                 "stage_budget": {
                     "start_successful_update": 0,
                     "terminal_successful_update": 1000,
@@ -152,7 +153,7 @@ def _raw_fixture(root: Path, update: int, value: float) -> Path:
                 "ramp_start_successful_update": None,
                 "ramp_updates": None,
                 "resolution": 256,
-                "schema_version": 3,
+                "schema_version": RAW_SCHEMA_VERSION,
                 "stage": "S0",
                 "world_size": 1,
             }
@@ -211,7 +212,7 @@ def test_pma_rejects_wrong_window_order_topology_and_missing_sidecars(
         save_pma10(tmp_path, _identity(10, "missing-sidecar"), sources)
 
 
-@pytest.mark.parametrize("legacy_schema", [1, 2])
+@pytest.mark.parametrize("legacy_schema", [1, 2, 3])
 def test_legacy_raw_manifest_is_rejected_before_pma_reads_state(
     tmp_path: Path, legacy_schema: int
 ) -> None:
@@ -281,35 +282,41 @@ def test_raw_resolved_config_is_fail_closed(tmp_path: Path, mutation: str) -> No
 
 
 def test_checkpoint_cadence_advances_only_after_matching_commit() -> None:
-    cadence = CheckpointCadence(0, 1_800_000_000.0)
+    cadence = CheckpointCadence(0, 1_800_000_000.0, 7)
     assert (
-        cadence.due(successful_update=999, wall_clock_unix_seconds=1_800_000_001.0)
+        cadence.due(successful_update=6, wall_clock_unix_seconds=1_800_000_001.0)
         is None
     )
     assert cadence.due(
-        successful_update=1000, wall_clock_unix_seconds=1_800_000_001.0
+        successful_update=7, wall_clock_unix_seconds=1_800_000_001.0
     ) is (CheckpointReason.UPDATE_CADENCE)
+    with pytest.raises(ValueError, match="forced checkpoint"):
+        cadence.due(
+            successful_update=6,
+            wall_clock_unix_seconds=1_800_000_001.0,
+            forced=CheckpointReason.WALL_CADENCE,
+        )
     with pytest.raises(ValueError, match="reason"):
         cadence.committed(
-            successful_update=1000,
+            successful_update=7,
             wall_clock_unix_seconds=1_800_000_001.0,
             reason=CheckpointReason.WALL_CADENCE,
         )
     cadence = cadence.committed(
-        successful_update=1000,
+        successful_update=7,
         wall_clock_unix_seconds=1_800_000_001.0,
         reason=CheckpointReason.UPDATE_CADENCE,
     )
     assert (
         cadence.due(
-            successful_update=1001,
+            successful_update=8,
             wall_clock_unix_seconds=1_800_000_001.0 + 6.0 * 3600.0,
         )
-        is CheckpointReason.WALL_CADENCE
+        is None
     )
     assert (
         cadence.due(
-            successful_update=1001,
+            successful_update=8,
             wall_clock_unix_seconds=1_800_000_002.0,
             forced=CheckpointReason.PRE_DECAY,
         )
@@ -317,13 +324,29 @@ def test_checkpoint_cadence_advances_only_after_matching_commit() -> None:
     )
 
 
-def test_checkpoint_cadence_survives_restart_and_rejects_wall_clock_rollback() -> None:
-    cadence = CheckpointCadence(20, 1_800_000_000.0)
+def test_checkpoint_cadence_interval_is_required() -> None:
+    with pytest.raises(TypeError):
+        CheckpointCadence(0, 0.0)  # pyright: ignore[reportCallIssue]
+
+
+@pytest.mark.parametrize("interval", [True, 0, -1, 1.0])
+def test_checkpoint_cadence_rejects_non_strict_positive_interval(
+    interval: object,
+) -> None:
+    with pytest.raises(ValueError, match="fields are invalid"):
+        CheckpointCadence(
+            0,
+            0.0,
+            cast(int, interval),
+        )
+
+
+def test_checkpoint_audit_time_survives_restart_and_rejects_clock_rollback() -> None:
+    cadence = CheckpointCadence(20, 1_800_000_000.0, 1000)
     restored = CheckpointCadence(
         cadence.last_successful_update,
         cadence.last_wall_clock_unix_seconds,
         cadence.every_successful_updates,
-        cadence.every_hours,
     )
 
     assert (
@@ -331,7 +354,7 @@ def test_checkpoint_cadence_survives_restart_and_rejects_wall_clock_rollback() -
             successful_update=21,
             wall_clock_unix_seconds=1_800_000_000.0 + 6.0 * 3600.0,
         )
-        is CheckpointReason.WALL_CADENCE
+        is None
     )
     with pytest.raises(ValueError, match="cadence input"):
         restored.due(
@@ -343,7 +366,9 @@ def test_checkpoint_cadence_survives_restart_and_rejects_wall_clock_rollback() -
 def test_raw_retention_keeps_two_rolling_and_every_accepted(tmp_path: Path) -> None:
     paths = tuple(_raw_fixture(tmp_path, index, float(index)) for index in range(1, 6))
     plan = plan_raw_retention(
-        tmp_path, accepted_checkpoint_ids=frozenset({"source-02"})
+        tmp_path,
+        accepted_checkpoint_ids=frozenset({"source-02"}),
+        rolling_slots=2,
     )
 
     assert plan.keep == (paths[1], paths[3], paths[4])
@@ -352,14 +377,43 @@ def test_raw_retention_keeps_two_rolling_and_every_accepted(tmp_path: Path) -> N
         tmp_path,
         plan,
         accepted_checkpoint_ids=frozenset({"source-02"}),
+        rolling_slots=2,
     )
     assert tuple(path.exists() for path in paths) == (False, True, False, True, True)
+
+
+def test_raw_retention_uses_explicit_rolling_slot_count(tmp_path: Path) -> None:
+    paths = tuple(_raw_fixture(tmp_path, index, float(index)) for index in range(1, 6))
+
+    plan = plan_raw_retention(
+        tmp_path,
+        accepted_checkpoint_ids=frozenset(),
+        rolling_slots=3,
+    )
+
+    assert plan.rolling_slots == 3
+    assert plan.keep == paths[2:]
+    assert plan.remove == paths[:2]
+
+
+@pytest.mark.parametrize("rolling_slots", [True, 0, -1, 1.0])
+def test_raw_retention_rejects_non_strict_slot_count(
+    tmp_path: Path, rolling_slots: int
+) -> None:
+    with pytest.raises(ValueError, match="rolling slots"):
+        plan_raw_retention(
+            tmp_path,
+            accepted_checkpoint_ids=frozenset(),
+            rolling_slots=rolling_slots,
+        )
 
 
 def test_raw_retention_rejects_forged_or_stale_plan(tmp_path: Path) -> None:
     paths = tuple(_raw_fixture(tmp_path, index, float(index)) for index in range(1, 6))
     accepted = frozenset({"source-02"})
-    plan = plan_raw_retention(tmp_path, accepted_checkpoint_ids=accepted)
+    plan = plan_raw_retention(
+        tmp_path, accepted_checkpoint_ids=accepted, rolling_slots=2
+    )
     forged = replace(
         plan,
         keep=plan.keep[1:],
@@ -367,9 +421,20 @@ def test_raw_retention_rejects_forged_or_stale_plan(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="stale|policy"):
-        apply_raw_retention(tmp_path, forged, accepted_checkpoint_ids=accepted)
+        apply_raw_retention(
+            tmp_path, forged, accepted_checkpoint_ids=accepted, rolling_slots=2
+        )
     with pytest.raises(ValueError, match="stale|policy"):
-        apply_raw_retention(tmp_path, plan, accepted_checkpoint_ids=frozenset())
+        apply_raw_retention(
+            tmp_path,
+            plan,
+            accepted_checkpoint_ids=frozenset(),
+            rolling_slots=2,
+        )
+    with pytest.raises(ValueError, match="stale|policy"):
+        apply_raw_retention(
+            tmp_path, plan, accepted_checkpoint_ids=accepted, rolling_slots=1
+        )
     assert all(path.exists() for path in paths)
 
     manifest_path = paths[0] / "manifest.json"
@@ -377,7 +442,9 @@ def test_raw_retention_rejects_forged_or_stale_plan(tmp_path: Path) -> None:
     manifest["identity"]["update"] = 100
     manifest_path.write_bytes(_json_bytes(manifest))
     with pytest.raises(ValueError, match="stale|policy"):
-        apply_raw_retention(tmp_path, plan, accepted_checkpoint_ids=accepted)
+        apply_raw_retention(
+            tmp_path, plan, accepted_checkpoint_ids=accepted, rolling_slots=2
+        )
     assert all(path.exists() for path in paths)
 
 
@@ -391,11 +458,14 @@ def test_raw_retention_does_not_rehash_payloads(
         raise AssertionError("retention must not hash checkpoint payloads")
 
     monkeypatch.setattr("sakuramoon.checkpoint.load._sha256", fail_hash)
-    plan = plan_raw_retention(tmp_path, accepted_checkpoint_ids=frozenset())
+    plan = plan_raw_retention(
+        tmp_path, accepted_checkpoint_ids=frozenset(), rolling_slots=2
+    )
     apply_raw_retention(
         tmp_path,
         plan,
         accepted_checkpoint_ids=frozenset(),
+        rolling_slots=2,
     )
 
     assert tuple(path.exists() for path in paths) == (False, False, False, True, True)
@@ -407,7 +477,9 @@ def test_raw_retention_rejects_physical_tree_mutation(
     mutation: str,
 ) -> None:
     paths = tuple(_raw_fixture(tmp_path, index, float(index)) for index in range(1, 6))
-    plan = plan_raw_retention(tmp_path, accepted_checkpoint_ids=frozenset())
+    plan = plan_raw_retention(
+        tmp_path, accepted_checkpoint_ids=frozenset(), rolling_slots=2
+    )
 
     if mutation == "payload-size":
         payload = paths[0] / "train_state" / "optimizer.pt"
@@ -424,6 +496,7 @@ def test_raw_retention_rejects_physical_tree_mutation(
             tmp_path,
             plan,
             accepted_checkpoint_ids=frozenset(),
+            rolling_slots=2,
         )
     assert paths[1].exists()
     assert paths[2].exists()

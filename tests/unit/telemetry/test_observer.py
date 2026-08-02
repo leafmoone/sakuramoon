@@ -56,6 +56,7 @@ def _observation(
         per_sample_loss=torch.tensor([1.0, 3.0]),
         image_tokens=32,
         text_tokens=12,
+        dit_flops=1234,
         sample_ids=("sample-a", "sample-b"),
         shape_keys=("256x256x98", "256x256x98"),
         high_noise_loss_sum=torch.tensor(1.0),

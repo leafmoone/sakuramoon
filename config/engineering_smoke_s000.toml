@@ -9,7 +9,7 @@ production_quality_claim = false
 
 [run]
 run_id = "s000-engineering-smoke-20260802-v2"
-seed = 8062
+seed = 44
 optimizer_sr_seed = 8063
 output_root = "artifacts/engineering-smoke/s000-20260802-v2"
 dependency_lock_path = "uv.lock"
@@ -57,11 +57,10 @@ source_width = 640
 source_height = 512
 shard_count = 4
 samples_per_shard = 1
-validation_sample_count = 2000
+validation_shard_count = 2
 persistent_workers = 2
 ready_batches = 2
 local_batch = 1
-pass_index = 0
 pin_memory = true
 drop_last = true
 cache_low_bytes = 0
@@ -223,9 +222,8 @@ automatic_backend_fallback = false
 
 [checkpoint]
 kind = "raw"
-slots = 3
+slots = 2
 full_every_updates = 1000
-full_every_hours = 6.0
 atomic_complete_marker = true
 checksum_required = true
 canonical_fqn = true
