@@ -25,6 +25,7 @@ shared_mount_source = "REQUIRED_NFS_MOUNT_SOURCE" # exact /proc/self/mountinfo s
 nfs_version = 3 # fixed to the governed deployment mount
 hard_mount = true # soft NFS mounts are rejected
 minimum_free_gib = "BENCHMARK_REQUIRED" # integer reserve after cache plus three raw checkpoints
+measured_raw_checkpoint_bytes = 5143061370 # latest bounded 16L full-RAW measurement
 checkpoint_copies = 3 # fixed measured raw-checkpoint headroom
 atomic_publish_probe = true # fixed startup write/fsync/replace/readback probe
 
@@ -393,6 +394,8 @@ prompt_manifest_path = "REQUIRED_PROMPT_MANIFEST_PATH"
 prompt_manifest_sha256 = "REQUIRED_IMMUTABLE_SHA256"
 gpu_index = "BENCHMARK_REQUIRED" # integer >= 0
 training_paused = "BENCHMARK_REQUIRED" # boolean; evaluator resource plan
+batch_size = "BENCHMARK_REQUIRED" # integer > 0; every enabled job is exactly divisible
+output_reserve_gib = "BENCHMARK_REQUIRED" # integer > 0; explicit worst-case evaluator output reservation
 
 [evaluation.sampling]
 profile = "reference" # fixed for formal checkpoint evaluation
@@ -404,7 +407,11 @@ trend_samples = "BENCHMARK_REQUIRED" # integer > 0
 acceptance_samples = 50000 # example only; benchmark may explicitly revise
 feature_extractor = "REQUIRED_LOCKED_FEATURE_EXTRACTOR"
 feature_extractor_version = "REQUIRED_LOCKED_VERSION"
+feature_extractor_path = "REQUIRED_FID_FEATURE_EXTRACTOR_PATH"
+feature_extractor_sha256 = "REQUIRED_IMMUTABLE_SHA256"
+preprocess_path = "REQUIRED_FID_PREPROCESS_PATH"
 preprocess_sha256 = "REQUIRED_IMMUTABLE_SHA256"
+real_stats_path = "REQUIRED_FID_REAL_STATS_PATH"
 real_stats_sha256 = "REQUIRED_IMMUTABLE_SHA256"
 
 [evaluation.is]
@@ -413,3 +420,7 @@ every_successful_updates = "BENCHMARK_REQUIRED" # integer > 0
 trend_samples = "BENCHMARK_REQUIRED" # integer > 0
 acceptance_samples = 50000 # example only; benchmark may explicitly revise
 splits = "BENCHMARK_REQUIRED" # integer > 0
+
+[evaluation.manual_quality]
+enabled = true # fixed; formal stage-end evaluation cannot omit human review
+samples = "BENCHMARK_REQUIRED" # integer > 0 and exactly divisible by evaluation.batch_size

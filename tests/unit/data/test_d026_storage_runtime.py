@@ -27,6 +27,7 @@ def _config() -> StorageConfig:
             "nfs_version": 3,
             "hard_mount": True,
             "minimum_free_gib": 8,
+            "measured_raw_checkpoint_bytes": 2048,
             "checkpoint_copies": 3,
             "atomic_publish_probe": True,
         }
@@ -66,10 +67,27 @@ def test_mount_identity_uses_longest_entry_and_decodes_mount_fields(
 @pytest.mark.parametrize(
     "identity",
     [
-        MountIdentity(Path("/shared"), "nfs4", "server.example:/governed/export", frozenset({"vers=3", "hard"})),
-        MountIdentity(Path("/shared"), "nfs", "other:/export", frozenset({"vers=3", "hard"})),
-        MountIdentity(Path("/shared"), "nfs", "server.example:/governed/export", frozenset({"vers=4", "hard"})),
-        MountIdentity(Path("/shared"), "nfs", "server.example:/governed/export", frozenset({"vers=3", "soft"})),
+        MountIdentity(
+            Path("/shared"),
+            "nfs4",
+            "server.example:/governed/export",
+            frozenset({"vers=3", "hard"}),
+        ),
+        MountIdentity(
+            Path("/shared"), "nfs", "other:/export", frozenset({"vers=3", "hard"})
+        ),
+        MountIdentity(
+            Path("/shared"),
+            "nfs",
+            "server.example:/governed/export",
+            frozenset({"vers=4", "hard"}),
+        ),
+        MountIdentity(
+            Path("/shared"),
+            "nfs",
+            "server.example:/governed/export",
+            frozenset({"vers=3", "soft"}),
+        ),
     ],
 )
 def test_shared_mount_identity_drift_is_a_hard_failure(
@@ -120,8 +138,11 @@ def test_runtime_ipc_rejects_any_non_governed_path(tmp_path: Path) -> None:
         )
 
 
-def test_capacity_requires_cache_three_checkpoints_and_reserve(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("checkpoint_payload_bytes", [1024, 4096])
+def test_capacity_uses_larger_of_configured_and_restored_checkpoint_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint_payload_bytes: int,
 ) -> None:
     mount = MountIdentity(
         tmp_path,
@@ -129,6 +150,7 @@ def test_capacity_requires_cache_three_checkpoints_and_reserve(
         "server.example:/governed/export",
         frozenset({"rw", "vers=3", "hard"}),
     )
+
     def shared_identity(_path: Path) -> MountIdentity:
         return mount
 
@@ -161,8 +183,11 @@ def test_capacity_requires_cache_three_checkpoints_and_reserve(
                 ownership_lock_path="/run/sakuramoon/data-service.lock",
             ),
         ),
+        evaluation=SimpleNamespace(output_reserve_gib=4),
     )
-    required = (8 + 16) * 1024**3 + 3 * 1024
+    governed_checkpoint_bytes = max(checkpoint_payload_bytes, 2048)
+    required = (8 + 16) * 1024**3 + 3 * governed_checkpoint_bytes
+
     def insufficient_space(_path: Path) -> SimpleNamespace:
         return SimpleNamespace(free=required - 1)
 
@@ -172,7 +197,7 @@ def test_capacity_requires_cache_three_checkpoints_and_reserve(
         storage_module.require_training_storage(
             config,  # pyright: ignore[reportArgumentType]
             tmp_path,
-            checkpoint_payload_bytes=1024,
+            checkpoint_payload_bytes=checkpoint_payload_bytes,
         )
 
     def exact_space(_path: Path) -> SimpleNamespace:
@@ -182,7 +207,72 @@ def test_capacity_requires_cache_three_checkpoints_and_reserve(
     report = storage_module.require_training_storage(
         config,  # pyright: ignore[reportArgumentType]
         tmp_path,
-        checkpoint_payload_bytes=1024,
+        checkpoint_payload_bytes=checkpoint_payload_bytes,
     )
+    assert report.capacities[0].required_bytes == required
+    assert report.capacities[0].free_bytes == required
+
+
+def test_evaluator_capacity_adds_explicit_output_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mount = MountIdentity(
+        tmp_path,
+        "nfs",
+        "server.example:/governed/export",
+        frozenset({"rw", "vers=3", "hard"}),
+    )
+
+    def shared_identity(_path: Path) -> MountIdentity:
+        return mount
+
+    def no_probe(_path: Path) -> None:
+        return None
+
+    def runtime_identity(_socket: Path, _lock: Path) -> MountIdentity:
+        return MountIdentity(Path("/"), "tmpfs", "tmpfs", frozenset({"rw"}))
+
+    monkeypatch.setattr(storage_module, "mount_identity", shared_identity)
+    monkeypatch.setattr(storage_module, "probe_atomic_publication", no_probe)
+    monkeypatch.setattr(
+        storage_module,
+        "require_host_local_runtime",
+        runtime_identity,
+    )
+    config = SimpleNamespace(
+        storage=_config(),
+        paths=SimpleNamespace(
+            run_dir="runs/test",
+            cache_dir="cache/test",
+            checkpoint_dir="checkpoints/test",
+            artifact_dir="artifacts/test",
+        ),
+        data=SimpleNamespace(
+            cache=SimpleNamespace(high_watermark_gib=16),
+            service=SimpleNamespace(
+                mainset_path="cache/mainset.json",
+                socket_path="/run/sakuramoon/data-service.sock",
+                ownership_lock_path="/run/sakuramoon/data-service.lock",
+            ),
+        ),
+        evaluation=SimpleNamespace(output_reserve_gib=4),
+    )
+    required = (8 + 16 + 4) * 1024**3 + 3 * 2048
+
+    def exact_space(_path: Path) -> SimpleNamespace:
+        return SimpleNamespace(free=required)
+
+    monkeypatch.setattr(
+        storage_module.shutil,
+        "disk_usage",
+        exact_space,
+    )
+
+    report = storage_module.require_evaluation_storage(
+        config,  # pyright: ignore[reportArgumentType]
+        tmp_path,
+    )
+
     assert report.capacities[0].required_bytes == required
     assert report.capacities[0].free_bytes == required

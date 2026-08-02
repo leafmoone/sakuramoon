@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Generator, Iterable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -41,7 +42,16 @@ class SuccessfulLoopObservation:
     checkpoint_reason: CheckpointReason | None
     data_wait_seconds: float
     checkpoint_seconds: float
+    update_wall_seconds: float
     phase_timer: PhaseTimer | None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.update_wall_seconds) is not float
+            or not math.isfinite(self.update_wall_seconds)
+            or self.update_wall_seconds <= 0.0
+        ):
+            raise ValueError("update wall time must be a finite positive float")
 
 
 class SingleGpuTrainingLoop[BatchT]:
@@ -161,6 +171,7 @@ class SingleGpuTrainingLoop[BatchT]:
         checkpoint_updates: list[int] = []
         checkpoint_scheduler = self._checkpoint_scheduler
         while self.state.successful_updates < self.target_successful_updates:
+            update_wall_started = time.perf_counter_ns()
             phase_timer = (
                 PhaseTimer(device=self._phase_timer.device)
                 if self._phase_timer is not None
@@ -211,6 +222,9 @@ class SingleGpuTrainingLoop[BatchT]:
                 assert cleanup_error is not None
                 self._raise_with_diagnostics("update", exc, cleanup_error)
             self.state = update.state
+            update_wall_seconds = (
+                time.perf_counter_ns() - update_wall_started
+            ) / 1_000_000_000.0
             try:
                 decision = None
                 decision_reason: CheckpointReason | None = None
@@ -320,11 +334,12 @@ class SingleGpuTrainingLoop[BatchT]:
                 if self._successful_update_observer is not None:
                     self._successful_update_observer(
                         SuccessfulLoopObservation(
-                            update,
-                            completed_checkpoint_reason,
-                            data_wait_seconds,
-                            checkpoint_seconds,
-                            phase_timer,
+                            update=update,
+                            checkpoint_reason=completed_checkpoint_reason,
+                            data_wait_seconds=data_wait_seconds,
+                            checkpoint_seconds=checkpoint_seconds,
+                            update_wall_seconds=update_wall_seconds,
+                            phase_timer=phase_timer,
                         )
                     )
             except BaseException as exc:  # noqa: BLE001

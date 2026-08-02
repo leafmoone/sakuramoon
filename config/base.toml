@@ -14,10 +14,11 @@ cache_dir = "cache/data"
 [storage]
 mode = "server_backed"
 shared_filesystem = "nfs"
-shared_mount_source = "REQUIRED_NFS_MOUNT_SOURCE"
+shared_mount_source = "cs1.vast1.bz1.paratera.com:/cs1/fs1/pvc-8eb5b2a2-c80d-4c40-b28a-800fbab13752"
 nfs_version = 3
 hard_mount = true
 minimum_free_gib = "BENCHMARK_MINIMUM_FREE_GIB"
+measured_raw_checkpoint_bytes = 5143061370
 checkpoint_copies = 3
 atomic_publish_probe = true
 
@@ -343,6 +344,8 @@ prompt_manifest_path = "REQUIRED_PROMPT_MANIFEST_PATH"
 prompt_manifest_sha256 = "REQUIRED_PROMPT_MANIFEST_SHA256"
 gpu_index = "BENCHMARK_EVALUATION_GPU_INDEX"
 training_paused = "BENCHMARK_EVALUATION_TRAINING_PAUSED"
+batch_size = "BENCHMARK_EVALUATION_BATCH_SIZE"
+output_reserve_gib = "BENCHMARK_EVALUATION_OUTPUT_RESERVE_GIB"
 
 [evaluation.sampling]
 profile = "reference"
@@ -354,7 +357,11 @@ trend_samples = "BENCHMARK_FID_TREND_SAMPLES"
 acceptance_samples = "BENCHMARK_FID_ACCEPTANCE_SAMPLES"
 feature_extractor = "REQUIRED_FID_FEATURE_EXTRACTOR"
 feature_extractor_version = "REQUIRED_FID_FEATURE_EXTRACTOR_VERSION"
+feature_extractor_path = "REQUIRED_FID_FEATURE_EXTRACTOR_PATH"
+feature_extractor_sha256 = "REQUIRED_FID_FEATURE_EXTRACTOR_SHA256"
+preprocess_path = "REQUIRED_FID_PREPROCESS_PATH"
 preprocess_sha256 = "REQUIRED_FID_PREPROCESS_SHA256"
+real_stats_path = "REQUIRED_FID_REAL_STATS_PATH"
 real_stats_sha256 = "REQUIRED_FID_REAL_STATS_SHA256"
 
 [evaluation.is]
@@ -363,3 +370,7 @@ every_successful_updates = "BENCHMARK_IS_EVERY_SUCCESSFUL_UPDATES"
 trend_samples = "BENCHMARK_IS_TREND_SAMPLES"
 acceptance_samples = "BENCHMARK_IS_ACCEPTANCE_SAMPLES"
 splits = "BENCHMARK_IS_SPLITS"
+
+[evaluation.manual_quality]
+enabled = true
+samples = "BENCHMARK_MANUAL_QUALITY_SAMPLES"

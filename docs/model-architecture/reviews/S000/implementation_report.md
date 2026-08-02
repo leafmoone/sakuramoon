@@ -38,3 +38,23 @@ The production training CLI was not modified or invoked. Formal configuration,
 production checkpoint, evaluator/extractor/preprocess/real-stat identities, approved
 long-run resources, and four GPUs remain absent, so formal S000 and `P060-P067` remain
 blocked.
+
+## 2026-08-02 production integration extension
+
+The preceding paragraph describes the historical engineering-runner scope. The current
+extension adds `sakuramoon.cli.train` and `sakuramoon.train.production` without
+changing the prior artifact. The new entry accepts only strict TOML, fresh start or an
+exact absolute raw `COMPLETE` directory. It performs static topology, NFS capacity,
+asset, logging/checkpoint and evaluator-identity preflight before dependency binding,
+CUDA selection, raw bootstrap or service connection.
+
+The accepted lifecycle assembles the production data client/factory, local frozen
+encoders, 16-layer composite, TorchAO optimizer, successful-update scheduler, T050
+loop, T051 telemetry and T044 raw publisher. Resume restores and validates the exact
+training/optimizer/RNG/config state before connecting to the service. The bounded GPU
+tests executed a real first update and a real data-service/preflight/update/raw/fresh
+resume from update 1 to update 2.
+
+Production remains fail-closed: 60 TOML bindings and five runtime or semantic contracts
+have no governed value or observer. `production_readiness_report.md` records the exact
+boundary and must be read before any launch command is used.

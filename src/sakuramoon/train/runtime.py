@@ -569,7 +569,9 @@ def require_single_gpu_checkpoint_binding(
         raise ValueError("restored checkpoint slots differ from resolved stage depth")
     has_ramp = growth.ramp_start_successful_update is not None
     if has_ramp != config.growth.enabled:
-        raise ValueError("restored checkpoint ramp presence differs from resolved growth")
+        raise ValueError(
+            "restored checkpoint ramp presence differs from resolved growth"
+        )
     if growth.alpha != runtime_growth_alpha:
         raise ValueError("runtime growth alpha differs from restored checkpoint")
     stage_budget = state.stage_budget
@@ -583,8 +585,7 @@ def require_single_gpu_checkpoint_binding(
     if stage_budget.start_successful_update != 0:
         raise ValueError("restored S0 stage budget must start at update zero")
     if (
-        stage_budget.terminal_successful_update
-        - stage_budget.start_successful_update
+        stage_budget.terminal_successful_update - stage_budget.start_successful_update
         != config.stage.planned_updates
     ):
         raise ValueError("restored stage budget differs from resolved config")
@@ -640,6 +641,7 @@ def _run_single_gpu_training(
     restored_checkpoint: RestoredSingleGpuCheckpoint,
     phase_timer: PhaseTimer,
     successful_update_observer: Callable[[SuccessfulTrainingObservation], None],
+    verified_checkpoint_observer: Callable[[Path], None] | None = None,
     forced_checkpoint: Callable[[int], CheckpointReason | None] | None = None,
     clock: Callable[[], float] | None = None,
 ) -> LoopResult:
@@ -679,10 +681,12 @@ def _run_single_gpu_training(
         target_successful_updates = stage_budget.terminal_successful_update
         pending_measurements: list[RuntimeMeasurement] = []
         active_phase_timer: PhaseTimer | None = None
+        active_learning_rate: float | None = None
 
         def update_started(timer: PhaseTimer | None) -> None:
-            nonlocal active_phase_timer
+            nonlocal active_learning_rate, active_phase_timer
             active_phase_timer = timer
+            active_learning_rate = _optimizer_learning_rate(optimizer)
 
         def measure_batch(batch: TrainingBatch) -> torch.Tensor:
             if active_phase_timer is None:
@@ -692,11 +696,13 @@ def _run_single_gpu_training(
             return measurement.per_sample_loss
 
         def observe_update(observation: SuccessfulLoopObservation) -> None:
-            nonlocal active_phase_timer
+            nonlocal active_learning_rate, active_phase_timer
             microbatches = tuple(pending_measurements)
             update_timer = observation.phase_timer
             if update_timer is None or update_timer is not active_phase_timer:
                 raise RuntimeError("training observation phase timer identity changed")
+            if active_learning_rate is None:
+                raise RuntimeError("training update learning rate was not captured")
             if runtime.device.type == "cuda":
                 allocated = torch.cuda.memory_allocated(runtime.device)
                 reserved = torch.cuda.memory_reserved(runtime.device)
@@ -707,12 +713,13 @@ def _run_single_gpu_training(
                 loop=observation,
                 microbatches=microbatches,
                 phase_timer=update_timer,
-                learning_rate=_optimizer_learning_rate(optimizer),
+                learning_rate=active_learning_rate,
                 gpu_memory_allocated_bytes=allocated,
                 gpu_memory_reserved_bytes=reserved,
             )
             successful_update_observer(emitted)
             pending_measurements.clear()
+            active_learning_rate = None
             active_phase_timer = None
 
         def publish_and_verify(
@@ -748,6 +755,8 @@ def _run_single_gpu_training(
                 manifest,
                 published_state,
             )
+            if verified_checkpoint_observer is not None:
+                verified_checkpoint_observer(checkpoint_path)
 
         loop: SingleGpuTrainingLoop[TrainingBatch] = SingleGpuTrainingLoop(
             module=module,
@@ -805,6 +814,7 @@ def run_single_gpu_training(
     restored_checkpoint: RestoredSingleGpuCheckpoint,
     phase_timer: PhaseTimer,
     successful_update_observer: Callable[[SuccessfulTrainingObservation], None],
+    verified_checkpoint_observer: Callable[[Path], None] | None = None,
     forced_checkpoint: Callable[[int], CheckpointReason | None] | None = None,
     clock: Callable[[], float] | None = None,
 ) -> LoopResult:
@@ -839,6 +849,7 @@ def run_single_gpu_training(
         restored_checkpoint=restored_checkpoint,
         phase_timer=phase_timer,
         successful_update_observer=successful_update_observer,
+        verified_checkpoint_observer=verified_checkpoint_observer,
         forced_checkpoint=forced_checkpoint,
         clock=clock,
     )

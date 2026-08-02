@@ -70,7 +70,7 @@ def test_data_and_checkpoint_use_monotonic_wall_time_not_phase_timer(
         yield torch.tensor(1.0)
 
     def checkpoint(_update: int) -> None:
-        time.sleep(0.005)
+        time.sleep(0.02)
 
     loop = SingleGpuTrainingLoop[torch.Tensor](
         module=nn.ParameterList([parameter]),
@@ -94,7 +94,9 @@ def test_data_and_checkpoint_use_monotonic_wall_time_not_phase_timer(
     observation = observations[0]
     assert observation.phase_timer is not None
     assert observation.data_wait_seconds >= 0.004
-    assert observation.checkpoint_seconds >= 0.004
+    assert observation.checkpoint_seconds >= 0.019
+    assert observation.update_wall_seconds >= observation.data_wait_seconds
+    assert observation.update_wall_seconds < observation.checkpoint_seconds
     assert "data" not in observation.phase_timer.recorded_phases
     assert "checkpoint" not in observation.phase_timer.recorded_phases
 

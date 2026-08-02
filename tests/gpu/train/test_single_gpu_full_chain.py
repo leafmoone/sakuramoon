@@ -58,6 +58,7 @@ from sakuramoon.data.service_protocol import (
 from sakuramoon.data.validation import VALIDATION_SAMPLE_COUNT
 from sakuramoon.encoders.mage_vae import load_local_mage_vae
 from sakuramoon.encoders.qwen import load_local_qwen
+from sakuramoon.eval.spec import PromptCase, PromptManifest
 from sakuramoon.model.dit import PackedDiT
 from sakuramoon.model.growth import BASE_SLOT_IDS
 from sakuramoon.optim.adamw8bit import build_adamw8bit
@@ -145,7 +146,11 @@ def _config(
         "evaluation.fid.trend_samples": 100,
         "evaluation.fid.feature_extractor": "synthetic-locked-extractor",
         "evaluation.fid.feature_extractor_version": "synthetic-version",
+        "evaluation.fid.feature_extractor_path": "synthetic/extractor.safetensors",
+        "evaluation.fid.feature_extractor_sha256": "8" * 64,
+        "evaluation.fid.preprocess_path": "synthetic/preprocess.json",
         "evaluation.fid.preprocess_sha256": "6" * 64,
+        "evaluation.fid.real_stats_path": "synthetic/real-stats.npz",
         "evaluation.fid.real_stats_sha256": "5" * 64,
         "evaluation.is.every_successful_updates": 10,
         "evaluation.is.trend_samples": 100,
@@ -154,6 +159,9 @@ def _config(
         "evaluation.prompt_manifest_sha256": "7" * 64,
         "evaluation.gpu_index": 0,
         "evaluation.training_paused": True,
+        "evaluation.batch_size": 10,
+        "evaluation.manual_quality.enabled": True,
+        "evaluation.manual_quality.samples": 100,
     }
     if overrides is not None:
         values.update(overrides)
@@ -639,6 +647,30 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
     service_root.mkdir()
     checkpoint_root = tmp_path / "checkpoints"
     checkpoint_root.mkdir()
+    evaluation_root = tmp_path / "evaluation"
+    evaluation_root.mkdir()
+    prompt_manifest = PromptManifest(
+        tuple(
+            PromptCase(
+                f"bounded-{index:03d}",
+                f"bounded engineering prompt {index}",
+                (),
+                index,
+                256,
+                256,
+            )
+            for index in range(100)
+        )
+    )
+    evaluation_payloads = {
+        "extractor.pt": b"synthetic-bounded-extractor\n",
+        "preprocess.pt": b"synthetic-bounded-preprocess\n",
+        "real-stats.safetensors": b"synthetic-bounded-real-stats\n",
+    }
+    prompt_path = evaluation_root / "prompts.json"
+    prompt_path.write_bytes(prompt_manifest.canonical_bytes())
+    for name, payload in evaluation_payloads.items():
+        (evaluation_root / name).write_bytes(payload)
     config = _config(
         repository_root,
         overrides={
@@ -646,6 +678,12 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
             "paths.cache_dir": str(relative_root / "cache"),
             "paths.checkpoint_dir": str(relative_root / "checkpoints"),
             "paths.artifact_dir": str(relative_root / "artifacts"),
+            "logging.local_jsonl_path": str(
+                relative_root / "artifacts/metrics.jsonl"
+            ),
+            "wandb.retry_jsonl_path": str(
+                relative_root / "artifacts/wandb-retry.jsonl"
+            ),
             "storage.shared_mount_source": (
                 "cs1.vast1.bz1.paratera.com:"
                 "/cs1/fs1/pvc-8eb5b2a2-c80d-4c40-b28a-800fbab13752"
@@ -661,6 +699,33 @@ def test_real_service_preflight_training_checkpoint_and_fresh_resume(
             "data.validation.manifest_sha256": hashlib.sha256(
                 validation_payload
             ).hexdigest(),
+            "evaluation.prompt_manifest_path": str(
+                relative_root / "evaluation/prompts.json"
+            ),
+            "evaluation.prompt_manifest_sha256": prompt_manifest.sha256,
+            "evaluation.fid.trend_samples": 100,
+            "evaluation.fid.acceptance_samples": 100,
+            "evaluation.fid.feature_extractor_path": str(
+                relative_root / "evaluation/extractor.pt"
+            ),
+            "evaluation.fid.feature_extractor_sha256": hashlib.sha256(
+                evaluation_payloads["extractor.pt"]
+            ).hexdigest(),
+            "evaluation.fid.preprocess_path": str(
+                relative_root / "evaluation/preprocess.pt"
+            ),
+            "evaluation.fid.preprocess_sha256": hashlib.sha256(
+                evaluation_payloads["preprocess.pt"]
+            ).hexdigest(),
+            "evaluation.fid.real_stats_path": str(
+                relative_root / "evaluation/real-stats.safetensors"
+            ),
+            "evaluation.fid.real_stats_sha256": hashlib.sha256(
+                evaluation_payloads["real-stats.safetensors"]
+            ).hexdigest(),
+            "evaluation.is.trend_samples": 100,
+            "evaluation.is.acceptance_samples": 100,
+            "evaluation.manual_quality.samples": 100,
             "stage.planned_updates": 1,
             "sampling.profile": "preview",
         },

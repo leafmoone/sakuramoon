@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterator
 from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 import torch
@@ -293,6 +293,8 @@ def _run(
     accepted: AcceptedPreflight,
     checkpoint_publisher: _CheckpointPublisher | None = None,
     observer: Callable[[SuccessfulTrainingObservation], None] | None = None,
+    scheduler_step: Callable[[int], None] | None = None,
+    verified_checkpoint_observer: Callable[[Path], None] | None = None,
     forced_checkpoint: Callable[[int], CheckpointReason | None] | None = None,
     clock: Callable[[], float] | None = None,
 ) -> LoopResult:
@@ -307,13 +309,14 @@ def _run(
         module=module,
         optimizer=optimizer,
         batches=stream,
-        scheduler_step=lambda _update: None,
+        scheduler_step=scheduler_step or (lambda _update: None),
         checkpoint_publisher=publisher,
         diagnostic_root=tmp_path / "diagnostics",
         failure_id=lambda phase, state: f"{phase}-{state.attempted_updates}",
         restored_checkpoint=restored,
         phase_timer=PhaseTimer(device=torch.device("cpu")),
         successful_update_observer=observer or discard_observation,
+        verified_checkpoint_observer=verified_checkpoint_observer,
         forced_checkpoint=forced_checkpoint,
         clock=clock,
     )
@@ -329,6 +332,17 @@ def test_single_gpu_config_requires_native_s0() -> None:
     )
     with pytest.raises(ValueError, match="topology"):
         require_single_gpu_config(cast(RuntimeConfig, changed))
+
+
+@pytest.mark.parametrize("mode", ["alternating", "all"])
+def test_single_gpu_config_rejects_unimplemented_activation_checkpointing(
+    mode: Literal["alternating", "all"],
+) -> None:
+    config = _config(planned_updates=1)
+    config.stage.activation_checkpoint_mode = mode
+
+    with pytest.raises(ValueError, match="does not implement activation checkpointing"):
+        require_single_gpu_config(config)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -419,9 +433,7 @@ def test_public_training_preserves_publisher_rejection_and_stream_close_failure(
     )
     custom = _CheckpointPublisher(_unused_checkpoint_callback)
     config = _config(planned_updates=1)
-    accepted = _accepted(
-        config, stream, runtime, module, optimizer, restored, custom
-    )
+    accepted = _accepted(config, stream, runtime, module, optimizer, restored, custom)
 
     with pytest.raises(BaseExceptionGroup) as captured:
         run_single_gpu_training(
@@ -541,6 +553,46 @@ def test_mid_stage_state_comes_only_from_restored_raw_and_stream_closes_once(
     )
 
 
+def test_observation_records_lr_used_before_successful_update_scheduler_step(
+    tmp_path: Path,
+) -> None:
+    config = _config(planned_updates=2)
+    module = torch.nn.Linear(1, 1, bias=False)
+    optimizer = _SgdAdapter(iter(module.parameters()))
+    runtime = _runtime(module)
+    iterator = _CloseableIterator((torch.ones(1, 1), torch.ones(1, 1)))
+    stream = _stream(iterator)
+    restored = _restored(
+        module,
+        optimizer,
+        _raw_state(SingleGpuUpdateState.initial(), terminal=2),
+    )
+    observations: list[SuccessfulTrainingObservation] = []
+
+    def schedule(successful_update: int) -> None:
+        optimizer.optimizer.param_groups[0]["lr"] = 0.01 * (successful_update + 1)
+
+    _run(
+        tmp_path,
+        config=config,
+        stream=stream,
+        runtime=runtime,
+        module=module,
+        optimizer=optimizer,
+        restored=restored,
+        accepted=_accepted(config, stream, runtime, module, optimizer, restored),
+        observer=observations.append,
+        scheduler_step=schedule,
+        clock=lambda: 1.0,
+    )
+
+    assert [observation.learning_rate for observation in observations] == [
+        pytest.approx(0.01),
+        pytest.approx(0.02),
+    ]
+    assert optimizer.optimizer.param_groups[0]["lr"] == pytest.approx(0.03)
+
+
 def test_stage_budget_drift_fails_before_consuming_batch_and_closes_stream(
     tmp_path: Path,
 ) -> None:
@@ -562,9 +614,7 @@ def test_stage_budget_drift_fails_before_consuming_batch_and_closes_stream(
             module=module,
             optimizer=optimizer,
             restored=restored,
-            accepted=_accepted(
-                config, stream, runtime, module, optimizer, restored
-            ),
+            accepted=_accepted(config, stream, runtime, module, optimizer, restored),
         )
     assert iterator.next_calls == 0
     assert iterator.close_calls == 1
@@ -595,9 +645,7 @@ def test_disabled_s0_fails_before_consuming_batch_and_closes_stream(
             module=module,
             optimizer=optimizer,
             restored=restored,
-            accepted=_accepted(
-                config, stream, runtime, module, optimizer, restored
-            ),
+            accepted=_accepted(config, stream, runtime, module, optimizer, restored),
         )
     assert iterator.next_calls == 0
     assert iterator.close_calls == 1
@@ -614,9 +662,7 @@ def test_nonzero_s0_budget_origin_fails_before_consuming_batch_and_closes_stream
     stream = _stream(iterator)
     restored_state = RawCheckpointState(
         trainer=SingleGpuUpdateState(5, 5, 5),
-        growth=GrowthCheckpointState(
-            BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
-        ),
+        growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
         stage_budget=StageBudgetCheckpointState(5, 6),
         checkpoint_cadence=CheckpointCadence(5, 0.0),
     )
@@ -631,9 +677,7 @@ def test_nonzero_s0_budget_origin_fails_before_consuming_batch_and_closes_stream
             module=module,
             optimizer=optimizer,
             restored=restored,
-            accepted=_accepted(
-                config, stream, runtime, module, optimizer, restored
-            ),
+            accepted=_accepted(config, stream, runtime, module, optimizer, restored),
         )
     assert iterator.next_calls == 0
     assert iterator.close_calls == 1
@@ -643,36 +687,28 @@ def test_nonzero_s0_budget_origin_fails_before_consuming_batch_and_closes_stream
     ("growth", "runtime_growth_alpha", "planned_updates", "message"),
     [
         pytest.param(
-            GrowthCheckpointState(
-                BASE_SLOT_IDS, 1.0, "S1", 1, 256, None, None
-            ),
+            GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S1", 1, 256, None, None),
             1.0,
             1,
             "checkpoint axes differ",
             id="stage",
         ),
         pytest.param(
-            GrowthCheckpointState(
-                BASE_SLOT_IDS, 1.0, "S0", 2, 256, None, None
-            ),
+            GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 2, 256, None, None),
             1.0,
             1,
             "checkpoint axes differ",
             id="world-size",
         ),
         pytest.param(
-            GrowthCheckpointState(
-                BASE_SLOT_IDS, 1.0, "S0", 1, 512, None, None
-            ),
+            GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 512, None, None),
             1.0,
             1,
             "checkpoint axes differ",
             id="resolution",
         ),
         pytest.param(
-            GrowthCheckpointState(
-                active_slot_ids(20), 1.0, "S0", 1, 256, None, None
-            ),
+            GrowthCheckpointState(active_slot_ids(20), 1.0, "S0", 1, 256, None, None),
             1.0,
             1,
             "checkpoint slots differ",
@@ -686,9 +722,7 @@ def test_nonzero_s0_budget_origin_fails_before_consuming_batch_and_closes_stream
             id="ramp-presence",
         ),
         pytest.param(
-            GrowthCheckpointState(
-                BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
-            ),
+            GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
             0.5,
             1,
             "runtime growth alpha differs",
@@ -710,9 +744,7 @@ def test_checkpoint_binding_drift_fails_before_consuming_batch_and_closes_stream
     runtime.growth_alpha = runtime_growth_alpha
     iterator = _CloseableIterator((torch.ones(1, 1),))
     stream = _stream(iterator)
-    baseline = _raw_state(
-        SingleGpuUpdateState.initial(), terminal=planned_updates
-    )
+    baseline = _raw_state(SingleGpuUpdateState.initial(), terminal=planned_updates)
     restored_state = RawCheckpointState(
         baseline.trainer,
         growth,
@@ -730,9 +762,7 @@ def test_checkpoint_binding_drift_fails_before_consuming_batch_and_closes_stream
             module=module,
             optimizer=optimizer,
             restored=restored,
-            accepted=_accepted(
-                config, stream, runtime, module, optimizer, restored
-            ),
+            accepted=_accepted(config, stream, runtime, module, optimizer, restored),
         )
     assert iterator.next_calls == 0
     assert iterator.close_calls == 1
@@ -888,6 +918,7 @@ def test_due_checkpoint_is_read_back_and_exact_state_is_required(
     restored = _restored(module, optimizer, restored_state)
     published = tmp_path / "ckpt_1_published"
     calls: list[tuple[SingleGpuUpdateState, CheckpointReason, CheckpointCadence]] = []
+    checkpoint_learning_rates: list[float] = []
 
     def publisher_callback(
         state: SingleGpuUpdateState,
@@ -895,9 +926,11 @@ def test_due_checkpoint_is_read_back_and_exact_state_is_required(
         cadence: CheckpointCadence,
     ) -> Path:
         calls.append((state, reason, cadence))
+        checkpoint_learning_rates.append(optimizer.optimizer.param_groups[0]["lr"])
         return published
 
     publisher = _CheckpointPublisher(publisher_callback)
+    verified: list[Path] = []
 
     accepted = _accepted(
         config, stream, runtime, module, optimizer, restored, publisher
@@ -929,11 +962,16 @@ def test_due_checkpoint_is_read_back_and_exact_state_is_required(
         restored=restored,
         accepted=accepted,
         checkpoint_publisher=publisher,
+        scheduler_step=lambda update: optimizer.optimizer.param_groups[0].__setitem__(
+            "lr", 0.01 * (update + 1)
+        ),
         forced_checkpoint=lambda _update: CheckpointReason.STAGE_FINALIZE,
+        verified_checkpoint_observer=verified.append,
         clock=lambda: 1.0,
     )
 
     assert result.checkpoint_updates == (1,)
+    assert checkpoint_learning_rates == [pytest.approx(0.02)]
     assert calls == [
         (
             SingleGpuUpdateState(1, 1, 1),
@@ -942,6 +980,7 @@ def test_due_checkpoint_is_read_back_and_exact_state_is_required(
         )
     ]
     assert len(publisher.retained) == 1
+    assert verified == [published]
     retained_path, retained_manifest, retained_state = publisher.retained[0]
     assert retained_path == published
     assert retained_manifest.identity.update == 1

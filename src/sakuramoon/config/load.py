@@ -5,11 +5,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import SecretStr, ValidationError
 
@@ -23,6 +24,39 @@ from sakuramoon.config.schema import (
 
 class ConfigurationError(ValueError):
     """A safe-to-log configuration failure without input values."""
+
+    unresolved_bindings: tuple[UnresolvedConfigBinding, ...]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        unresolved_bindings: tuple[UnresolvedConfigBinding, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.unresolved_bindings = unresolved_bindings
+
+
+UnresolvedBindingKind = Literal["benchmark", "decision", "required"]
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class UnresolvedConfigBinding:
+    """One safe, structured production input that has not been governed yet."""
+
+    path: str
+    sentinel: str
+    kind: UnresolvedBindingKind
+
+    def __post_init__(self) -> None:
+        prefix = self.sentinel.partition("_")[0].lower()
+        if (
+            not self.path
+            or re.fullmatch(r"(?:BENCHMARK|DECISION|REQUIRED)_[A-Z0-9_]+", self.sentinel)
+            is None
+            or prefix != self.kind
+        ):
+            raise ValueError("unresolved config binding is invalid")
 
 
 @dataclass(frozen=True)
@@ -47,19 +81,23 @@ def _safe_validation_error(exc: ValidationError) -> ConfigurationError:
     return ConfigurationError("configuration validation failed:\n" + "\n".join(lines))
 
 
-def _find_sentinels(value: object, prefix: str = "") -> list[str]:
-    paths: list[str] = []
+def _find_unresolved_bindings(
+    value: object, prefix: str = ""
+) -> list[UnresolvedConfigBinding]:
+    bindings: list[UnresolvedConfigBinding] = []
     if isinstance(value, Mapping):
         table = cast(Mapping[object, object], value)
         for key, child in table.items():
             child_path = f"{prefix}.{key}" if prefix else str(key)
-            paths.extend(_find_sentinels(child, child_path))
+            bindings.extend(_find_unresolved_bindings(child, child_path))
     elif isinstance(value, list):
         for index, child in enumerate(cast(list[object], value)):
-            paths.extend(_find_sentinels(child, f"{prefix}[{index}]"))
+            bindings.extend(_find_unresolved_bindings(child, f"{prefix}[{index}]"))
     elif looks_like_unresolved_sentinel(value):
-        paths.append(prefix)
-    return paths
+        sentinel = cast(str, value)
+        kind = cast(UnresolvedBindingKind, sentinel.partition("_")[0].lower())
+        bindings.append(UnresolvedConfigBinding(prefix, sentinel, kind))
+    return bindings
 
 
 def _validate_path_components(root: Path, relative: Path) -> Path:
@@ -214,6 +252,18 @@ def resolve_secret(name: str, environment: Mapping[str, str] | None = None) -> S
     return SecretStr(value)
 
 
+def unresolved_config_bindings(
+    config_path: Path,
+    *,
+    config_root: Path,
+) -> tuple[UnresolvedConfigBinding, ...]:
+    """Inspect merged TOML bindings without resolving secrets or validating fallbacks."""
+
+    loader = _Loader(config_root)
+    payload = loader.load(config_path)
+    return tuple(sorted(_find_unresolved_bindings(payload)))
+
+
 def load_config(
     config_path: Path,
     *,
@@ -224,10 +274,14 @@ def load_config(
 
     loader = _Loader(config_root)
     payload = loader.load(config_path)
-    sentinels = sorted(_find_sentinels(payload))
-    if sentinels:
+    unresolved = tuple(sorted(_find_unresolved_bindings(payload)))
+    if unresolved:
+        rendered = ", ".join(
+            f"{binding.path}={binding.sentinel}" for binding in unresolved
+        )
         raise ConfigurationError(
-            "unresolved decision/benchmark placeholders at: " + ", ".join(sentinels)
+            "unresolved decision/benchmark placeholders at: " + rendered,
+            unresolved_bindings=unresolved,
         )
     try:
         config = RuntimeConfig.model_validate(payload)

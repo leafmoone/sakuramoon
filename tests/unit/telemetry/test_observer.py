@@ -84,6 +84,7 @@ def _observation(
             checkpoint_reason=None,
             data_wait_seconds=0.2,
             checkpoint_seconds=0.3,
+            update_wall_seconds=0.5,
             phase_timer=timer,
         ),
         microbatches=(measurement,),

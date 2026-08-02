@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 114
+registry_revision = 115
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -6294,6 +6294,7 @@ superseded_by = ""
 implementation_commit_ref = "task:T050"
 implementation_paths = [
     "src/sakuramoon/cli/train.py",
+    "src/sakuramoon/train/production.py",
     "src/sakuramoon/train/__init__.py",
     "src/sakuramoon/train/loop.py",
     "src/sakuramoon/train/preflight.py",
@@ -6306,16 +6307,21 @@ implementation_paths = [
     "tests/unit/train/test_runtime.py",
     "tests/unit/train/test_scheduler.py",
     "tests/unit/train/test_step.py",
+    "tests/unit/train/test_production.py",
+    "tests/unit/cli/test_train.py",
     "tests/gpu/train/test_single_gpu_full_chain.py",
     "docs/model-architecture/progress/tasks/T050.md",
     "docs/model-architecture/reviews/T050/implementation_report.md",
     "docs/model-architecture/reviews/T050/test_report.json",
     "docs/model-architecture/reviews/T050/ai_review.md",
     "docs/model-architecture/reviews/T050/infra_review.md",
+    "docs/model-architecture/progress/tasks/S000.md",
+    "docs/model-architecture/reviews/S000/production_readiness_report.md",
+    "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
+evidence_hardware = "1GPU"
+evidence_artifacts = ["docs/model-architecture/reviews/S000/production_readiness_test_report.json"]
 ai_review = ""
 infra_review = ""
 config_keys = [
@@ -12041,9 +12047,15 @@ implementation_paths = [
     "docs/model-architecture/reviews/C002/stage_config_report.json",
     "docs/model-architecture/reviews/C002/ai_review.md",
     "docs/model-architecture/reviews/C002/infra_review.md",
+    "src/sakuramoon/train/production.py",
+    "src/sakuramoon/train/loop.py",
+    "tests/unit/train/test_production.py",
+    "tests/unit/train/test_loop.py",
+    "docs/model-architecture/reviews/S000/production_readiness_report.md",
+    "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
+evidence_hardware = "1GPU"
+evidence_artifacts = ["docs/model-architecture/reviews/S000/production_readiness_test_report.json"]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -12114,9 +12126,15 @@ implementation_paths = [
     "docs/model-architecture/reviews/C002/stage_config_report.json",
     "docs/model-architecture/reviews/C002/ai_review.md",
     "docs/model-architecture/reviews/C002/infra_review.md",
+    "src/sakuramoon/train/production.py",
+    "src/sakuramoon/train/loop.py",
+    "tests/unit/train/test_production.py",
+    "tests/unit/train/test_loop.py",
+    "docs/model-architecture/reviews/S000/production_readiness_report.md",
+    "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
+evidence_hardware = "1GPU"
+evidence_artifacts = ["docs/model-architecture/reviews/S000/production_readiness_test_report.json"]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -12191,9 +12209,15 @@ implementation_paths = [
     "docs/model-architecture/reviews/C002/stage_config_report.json",
     "docs/model-architecture/reviews/C002/ai_review.md",
     "docs/model-architecture/reviews/C002/infra_review.md",
+    "src/sakuramoon/train/production.py",
+    "src/sakuramoon/train/loop.py",
+    "tests/unit/train/test_production.py",
+    "tests/unit/train/test_loop.py",
+    "docs/model-architecture/reviews/S000/production_readiness_report.md",
+    "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
+evidence_hardware = "1GPU"
+evidence_artifacts = ["docs/model-architecture/reviews/S000/production_readiness_test_report.json"]
 ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
 infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
@@ -13114,10 +13138,17 @@ implementation_paths = [
     "src/sakuramoon/checkpoint/load.py",
     "src/sakuramoon/checkpoint/pma.py",
     "src/sakuramoon/train/stage.py",
+    "src/sakuramoon/train/production.py",
+    "src/sakuramoon/cli/train.py",
     "src/sakuramoon/cli/transition.py",
+    "tests/unit/train/test_production.py",
+    "tests/unit/cli/test_train.py",
+    "tests/gpu/train/test_single_gpu_full_chain.py",
+    "docs/model-architecture/reviews/S000/production_readiness_report.md",
+    "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
+evidence_hardware = "1GPU"
+evidence_artifacts = ["docs/model-architecture/reviews/S000/production_readiness_test_report.json"]
 ai_review = ""
 infra_review = ""
 config_keys = ["optimizer.*", "scheduler.*", "gradient.*", "distributed.*", "checkpoint.*", "failure.*"]
@@ -13268,10 +13299,17 @@ implementation_paths = [
     "src/sakuramoon/checkpoint/load.py",
     "src/sakuramoon/checkpoint/pma.py",
     "src/sakuramoon/train/stage.py",
+    "src/sakuramoon/train/production.py",
+    "src/sakuramoon/cli/train.py",
     "src/sakuramoon/cli/transition.py",
+    "tests/unit/train/test_production.py",
+    "tests/unit/cli/test_train.py",
+    "tests/gpu/train/test_single_gpu_full_chain.py",
+    "docs/model-architecture/reviews/S000/production_readiness_report.md",
+    "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
 ]
-evidence_hardware = ""
-evidence_artifacts = []
+evidence_hardware = "1GPU"
+evidence_artifacts = ["docs/model-architecture/reviews/S000/production_readiness_test_report.json"]
 ai_review = ""
 infra_review = ""
 config_keys = ["optimizer.*", "scheduler.*", "gradient.*", "distributed.*", "checkpoint.*", "failure.*"]
@@ -13345,9 +13383,16 @@ implementation_paths = [
     "docs/model-architecture/reviews/D026/test_report.json",
     "docs/model-architecture/reviews/DATA/d010_d026_ai_rereview.md",
     "docs/model-architecture/reviews/DATA/d010_d026_infra_rereview.md",
+    "src/sakuramoon/config/readiness.py",
+    "src/sakuramoon/train/production.py",
+    "tests/unit/config/test_readiness.py",
+    "tests/unit/train/test_production.py",
+    "tests/gpu/train/test_single_gpu_full_chain.py",
+    "docs/model-architecture/reviews/S000/production_readiness_report.md",
+    "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
 ]
 evidence_hardware = ""
-evidence_artifacts = []
+evidence_artifacts = ["docs/model-architecture/reviews/S000/production_readiness_test_report.json"]
 ai_review = ""
 infra_review = ""
 config_keys = ["storage.*", "paths.*", "data.cache.*", "data.service.*"]
@@ -13396,9 +13441,16 @@ implementation_paths = [
     "docs/model-architecture/reviews/D026/test_report.json",
     "docs/model-architecture/reviews/DATA/d010_d026_ai_rereview.md",
     "docs/model-architecture/reviews/DATA/d010_d026_infra_rereview.md",
+    "src/sakuramoon/config/readiness.py",
+    "src/sakuramoon/train/production.py",
+    "tests/unit/config/test_readiness.py",
+    "tests/unit/train/test_production.py",
+    "tests/gpu/train/test_single_gpu_full_chain.py",
+    "docs/model-architecture/reviews/S000/production_readiness_report.md",
+    "docs/model-architecture/reviews/S000/production_readiness_test_report.json",
 ]
 evidence_hardware = ""
-evidence_artifacts = []
+evidence_artifacts = ["docs/model-architecture/reviews/S000/production_readiness_test_report.json"]
 ai_review = ""
 infra_review = ""
 config_keys = ["storage.*", "paths.*", "data.cache.*", "data.service.*"]

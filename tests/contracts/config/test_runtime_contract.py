@@ -37,6 +37,7 @@ def test_runtime_config_inventory_is_exact() -> None:
     }
     assert observed == {
         Path("base.toml"),
+        Path("engineering_smoke_s000.toml"),
         Path("eval.toml"),
         Path("examples/all_options.example.toml"),
         Path("sample.toml"),

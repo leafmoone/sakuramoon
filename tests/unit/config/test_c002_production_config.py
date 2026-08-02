@@ -178,12 +178,12 @@ def test_each_s0_placeholder_independently_hard_fails(
             )
 
 
-def test_eight_stage_templates_have_distinct_synthetic_resolved_hashes(
+def test_current_templates_and_historical_c002_hashes_are_each_distinct(
     tmp_path: Path,
     valid_payload: dict[str, Any],
     secret_environment: dict[str, str],
 ) -> None:
-    hashes: dict[str, str] = {}
+    current_hashes: dict[str, str] = {}
     for index, name in enumerate(TRAIN_CONFIGS):
         loaded = _load_flattened(
             tmp_path,
@@ -191,18 +191,39 @@ def test_eight_stage_templates_have_distinct_synthetic_resolved_hashes(
             _synthetic_payload(name, valid_payload),
             secret_environment,
         )
-        hashes[name] = loaded.resolved_sha256
-    assert len(hashes) == 8
-    assert len(set(hashes.values())) == 8
+        current_hashes[name] = loaded.resolved_sha256
+    assert len(current_hashes) == 8
+    assert len(set(current_hashes.values())) == 8
+
     report = json.loads(
         (
             REPOSITORY_ROOT
             / "docs/model-architecture/reviews/C002/stage_config_report.json"
         ).read_text(encoding="utf-8")
     )
+    assert report["task_id"] == "C002"
     assert report["identity_scope"] == "synthetic_validation_only"
     assert report["production_hashes_published"] is False
-    assert report["resolved_hashes"] == hashes
+    assert report["formal_stage_executed"] is False
+    assert report["synthetic_substitution_source"] == (
+        "tests/unit/config/conftest.py::SYNTHETIC_VALUES"
+    )
+
+    raw_historical_hashes = report["resolved_hashes"]
+    assert isinstance(raw_historical_hashes, dict)
+    historical_hashes = cast(dict[str, object], raw_historical_hashes)
+    assert set(historical_hashes) == set(TRAIN_CONFIGS)
+    raw_hash_values = tuple(historical_hashes.values())
+    assert all(isinstance(digest, str) for digest in raw_hash_values)
+    hash_values = cast(tuple[str, ...], raw_hash_values)
+    assert report["all_hashes_distinct"] is True
+    assert len(set(hash_values)) == len(TRAIN_CONFIGS)
+    assert all(
+        isinstance(digest, str)
+        and len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest)
+        for digest in hash_values
+    )
 
 
 def test_h1_h2_are_hashable_templates_but_never_trainable(

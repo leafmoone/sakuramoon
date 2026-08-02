@@ -309,7 +309,8 @@ def test_preflight_failure_stops_and_redacts_message(tmp_path: Path) -> None:
     with pytest.raises(PreflightError, match="dataset_revision"):
         run_single_gpu_preflight(plan, destination)
 
-    assert calls == ["resolved_config", "local_assets", "dataset_revision"]
+    failure_index = PREFLIGHT_CHECKS.index("dataset_revision")
+    assert calls == list(PREFLIGHT_CHECKS[: failure_index + 1])
     text = destination.read_text()
     assert "secret-shaped" not in text
     assert json.loads(text)["checks"][-1]["error_type"] == "RuntimeError"
@@ -398,6 +399,92 @@ def test_public_builder_has_no_arbitrary_workload_callbacks() -> None:
     }
 
 
+def test_synthetic_preflight_batch_uses_resolved_local_batch() -> None:
+    config = cast(
+        RuntimeConfig,
+        SimpleNamespace(
+            run=SimpleNamespace(seed=7),
+            stage=SimpleNamespace(local_batch=3),
+        ),
+    )
+
+    batch = preflight_module._synthetic_preflight_batch(
+        config,
+        height=256,
+        width=384,
+        dense_length=98,
+        main_length=17,
+        empty_condition=True,
+    )
+
+    assert batch.images.shape == (3, 3, 256, 384)
+    assert batch.input_ids.shape == (3, 98)
+    assert batch.main_token_indices.shape == (3, 17)
+    assert batch.main_token_lengths == (17, 17, 17)
+    assert torch.equal(batch.sample_ids, torch.tensor((1, 2, 3)))
+    assert torch.equal(batch.all_condition_dropped, torch.tensor((True, True, True)))
+    assert batch.dropout_hits.all_condition == 3
+    assert len(batch.releases) == len(batch.audits) == len(batch.rng_identities) == 3
+
+
+def test_static_preflight_checks_contracts_assets_and_evaluator_in_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = cast(
+        RuntimeConfig,
+        SimpleNamespace(
+            storage=SimpleNamespace(measured_raw_checkpoint_bytes=17),
+        ),
+    )
+    observed: list[str] = []
+
+    def topology(_config: RuntimeConfig) -> None:
+        observed.append("topology")
+
+    def contracts(_config: RuntimeConfig, _root: Path) -> tuple[()]:
+        observed.append("contracts")
+        return ()
+
+    def storage(
+        _config: RuntimeConfig,
+        _root: Path,
+        *,
+        checkpoint_payload_bytes: int,
+    ) -> None:
+        assert checkpoint_payload_bytes == 17
+        observed.append("storage")
+
+    def qwen(_root: Path) -> None:
+        observed.append("qwen")
+
+    def vae(_root: Path) -> None:
+        observed.append("vae")
+
+    def evaluator(_config: RuntimeConfig, _root: Path) -> tuple[()]:
+        observed.append("evaluator")
+        return ()
+
+    monkeypatch.setattr(preflight_module, "require_single_gpu_config", topology)
+    monkeypatch.setattr(
+        preflight_module, "require_logging_checkpoint_contracts", contracts
+    )
+    monkeypatch.setattr(preflight_module, "require_training_storage", storage)
+    monkeypatch.setattr(preflight_module, "require_local_qwen", qwen)
+    monkeypatch.setattr(preflight_module, "require_local_vae", vae)
+    monkeypatch.setattr(preflight_module, "require_evaluation_identities", evaluator)
+
+    preflight_module.require_static_single_gpu_preflight(config, tmp_path)
+
+    assert observed == [
+        "topology",
+        "contracts",
+        "storage",
+        "qwen",
+        "vae",
+        "evaluator",
+    ]
+
+
 @pytest.mark.parametrize(
     ("configured", "observed"),
     [
@@ -416,9 +503,7 @@ def test_attention_backend_binding_accepts_exact_dit_artifact(
     module = cast(
         torch.nn.Module,
         SimpleNamespace(
-            dit=SimpleNamespace(
-                artifact_config=lambda: {"attention_backend": observed}
-            )
+            dit=SimpleNamespace(artifact_config=lambda: {"attention_backend": observed})
         ),
     )
 
@@ -619,9 +704,7 @@ def test_preflight_runtime_check_rejects_checkpoint_drift_before_acceptance(
     restored = _restored(module, optimizer)
     restored._state = RawCheckpointState(
         trainer=SingleGpuUpdateState(5, 5, 5),
-        growth=GrowthCheckpointState(
-            BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None
-        ),
+        growth=GrowthCheckpointState(BASE_SLOT_IDS, 1.0, "S0", 1, 256, None, None),
         stage_budget=StageBudgetCheckpointState(5, 6),
         checkpoint_cadence=CheckpointCadence(5, 0.0),
     )
@@ -654,11 +737,25 @@ def test_preflight_runtime_check_rejects_checkpoint_drift_before_acceptance(
         ),
         checkpoint_publisher=_CheckpointPublisher(tmp_path / "published"),
     )
+
     def accept_local_asset(_root: Path) -> None:
         pass
 
+    def accept_runtime_contracts(_config: RuntimeConfig, _root: Path) -> tuple[()]:
+        return ()
+
     monkeypatch.setattr(preflight_module, "require_local_qwen", accept_local_asset)
     monkeypatch.setattr(preflight_module, "require_local_vae", accept_local_asset)
+    monkeypatch.setattr(
+        preflight_module,
+        "require_logging_checkpoint_contracts",
+        accept_runtime_contracts,
+    )
+    monkeypatch.setattr(
+        preflight_module,
+        "require_evaluation_identities",
+        accept_runtime_contracts,
+    )
     destination = tmp_path / "preflight.json"
 
     with pytest.raises(PreflightError, match="single_gpu_runtime"):
@@ -666,12 +763,10 @@ def test_preflight_runtime_check_rejects_checkpoint_drift_before_acceptance(
 
     report = json.loads(destination.read_text())
     assert report["passed"] is False
-    assert [check["name"] for check in report["checks"]] == [
-        "resolved_config",
-        "local_assets",
-        "dataset_revision",
-        "single_gpu_runtime",
-    ]
+    runtime_index = PREFLIGHT_CHECKS.index("single_gpu_runtime")
+    assert [check["name"] for check in report["checks"]] == list(
+        PREFLIGHT_CHECKS[: runtime_index + 1]
+    )
     assert report["checks"][-1]["error_type"] == "ValueError"
 
 

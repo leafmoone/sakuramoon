@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import shutil
+import stat
 import subprocess
 import weakref
 from collections.abc import Callable, Mapping
@@ -36,7 +37,11 @@ from sakuramoon.data.production import (
     require_accepted_production_batch_stream,
 )
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
-from sakuramoon.storage import require_training_storage
+from sakuramoon.storage import (
+    repository_directory,
+    repository_file_parent,
+    require_training_storage,
+)
 from sakuramoon.train.runtime import (
     require_single_gpu_checkpoint_binding,
     require_single_gpu_config,
@@ -44,12 +49,15 @@ from sakuramoon.train.runtime import (
 
 if TYPE_CHECKING:
     from sakuramoon.config.schema import RuntimeConfig
+    from sakuramoon.data.collate import TrainingBatch
     from sakuramoon.train.runtime import SingleGpuBatchRuntime
     from sakuramoon.train.step import SingleGpuUpdateState
 
 PREFLIGHT_CHECKS = (
     "resolved_config",
+    "production_contracts",
     "local_assets",
+    "evaluation_identities",
     "dataset_revision",
     "single_gpu_runtime",
     "storage_capacity",
@@ -66,6 +74,207 @@ PREFLIGHT_CHECKS = (
 
 class PreflightError(RuntimeError):
     """A mandatory preflight check failed."""
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationIdentityFile:
+    """A hash-bound local evaluator input verified without following symlinks."""
+
+    role: str
+    path: Path
+    sha256: str
+    size: int
+
+
+def _resolve_identity_path(
+    repository_root: Path,
+    configured: str,
+    *,
+    role: str,
+) -> Path:
+    try:
+        root = repository_root.resolve(strict=True)
+    except OSError:
+        raise PreflightError("repository root is unavailable") from None
+    lexical = Path(configured)
+    if not lexical.is_absolute() and ".." in lexical.parts:
+        raise PreflightError(f"{role} identity path escapes repository root")
+    candidate = lexical if lexical.is_absolute() else root / lexical
+    current = Path(candidate.anchor)
+    for part in candidate.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise PreflightError(f"{role} identity path contains a symlink")
+    if not lexical.is_absolute():
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            raise PreflightError(
+                f"{role} identity path escapes repository root"
+            ) from None
+    return candidate
+
+
+def _verify_identity_file(
+    repository_root: Path,
+    configured: str,
+    expected_sha256: str,
+    *,
+    role: str,
+    retain_payload: bool = False,
+) -> tuple[EvaluationIdentityFile, bytes]:
+    path = _resolve_identity_path(repository_root, configured, role=role)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        raise PreflightError(f"{role} identity file cannot be opened") from None
+    digest = hashlib.sha256()
+    payload = bytearray()
+    size = 0
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise PreflightError(f"{role} identity must be a regular file")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+            if retain_payload:
+                payload.extend(chunk)
+    except OSError:
+        raise PreflightError(f"{role} identity file cannot be read") from None
+    finally:
+        os.close(descriptor)
+    if size <= 0:
+        raise PreflightError(f"{role} identity file must not be empty")
+    observed = digest.hexdigest()
+    if observed != expected_sha256:
+        raise PreflightError(f"{role} identity SHA-256 mismatch")
+    return EvaluationIdentityFile(role, path, observed, size), bytes(payload)
+
+
+def require_evaluation_identities(
+    config: RuntimeConfig,
+    repository_root: Path,
+) -> tuple[EvaluationIdentityFile, ...]:
+    """Verify every local formal-evaluator input bound by the resolved config."""
+
+    from sakuramoon.eval.spec import PromptManifest
+
+    evaluation = config.evaluation
+    fid = evaluation.fid
+    configured = (
+        (
+            "prompt manifest",
+            evaluation.prompt_manifest_path,
+            evaluation.prompt_manifest_sha256,
+        ),
+        (
+            "feature extractor",
+            fid.feature_extractor_path,
+            fid.feature_extractor_sha256,
+        ),
+        ("preprocess", fid.preprocess_path, fid.preprocess_sha256),
+        ("real stats", fid.real_stats_path, fid.real_stats_sha256),
+    )
+    verified: list[EvaluationIdentityFile] = []
+    prompt_payload: bytes | None = None
+    for role, path, expected_sha256 in configured:
+        identity, payload = _verify_identity_file(
+            repository_root,
+            path,
+            expected_sha256,
+            role=role,
+            retain_payload=role == "prompt manifest",
+        )
+        verified.append(identity)
+        if role == "prompt manifest":
+            prompt_payload = payload
+    if len({item.path for item in verified}) != len(verified):
+        raise PreflightError("formal evaluator identity files must be distinct")
+    if prompt_payload is None:
+        raise PreflightError("prompt manifest identity was not verified")
+    try:
+        prompt_manifest = PromptManifest.from_canonical_bytes(prompt_payload)
+    except (TypeError, ValueError):
+        raise PreflightError("prompt manifest is not canonical") from None
+    sample_counts: list[int] = []
+    if evaluation.fid.enabled:
+        sample_counts.extend(
+            (evaluation.fid.trend_samples, evaluation.fid.acceptance_samples)
+        )
+    if evaluation.is_.enabled:
+        sample_counts.extend(
+            (evaluation.is_.trend_samples, evaluation.is_.acceptance_samples)
+        )
+    if evaluation.manual_quality.enabled:
+        sample_counts.append(evaluation.manual_quality.samples)
+    if sample_counts and len(prompt_manifest.cases) < max(sample_counts):
+        raise PreflightError("prompt manifest cannot cover configured evaluation jobs")
+    return tuple(verified)
+
+
+def require_logging_checkpoint_contracts(
+    config: RuntimeConfig,
+    repository_root: Path,
+) -> tuple[Path, Path, Path]:
+    """Bind production logs and raw checkpoints to durable repository paths."""
+
+    require_single_gpu_config(config)
+    if not config.wandb.enabled or not config.timing.enabled:
+        raise PreflightError("production logging and W&B telemetry must be enabled")
+    checkpoint = config.checkpoint
+    if (
+        checkpoint.kind != "raw"
+        or checkpoint.full_every_updates != 1000
+        or checkpoint.full_every_hours != 6.0
+        or not checkpoint.atomic_complete_marker
+        or not checkpoint.checksum_required
+        or not checkpoint.canonical_fqn
+        or config.storage.checkpoint_copies != 3
+    ):
+        raise PreflightError("production raw checkpoint contract is invalid")
+    checkpoint_root = repository_directory(repository_root, config.paths.checkpoint_dir)
+    local_parent = repository_file_parent(
+        repository_root, config.logging.local_jsonl_path
+    )
+    retry_parent = repository_file_parent(
+        repository_root, config.wandb.retry_jsonl_path
+    )
+    local_path = local_parent / Path(config.logging.local_jsonl_path).name
+    retry_path = retry_parent / Path(config.wandb.retry_jsonl_path).name
+    if local_path == retry_path:
+        raise PreflightError("local metric and W&B retry paths must differ")
+    for role, path in (("local metric", local_path), ("W&B retry", retry_path)):
+        if path.is_symlink():
+            raise PreflightError(f"{role} path may not be a symlink")
+        if path.exists():
+            metadata = path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise PreflightError(f"{role} path must be a regular file")
+            if stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise PreflightError(f"{role} path must use mode 0600")
+    return checkpoint_root, local_path, retry_path
+
+
+def require_static_single_gpu_preflight(
+    config: RuntimeConfig,
+    repository_root: Path,
+) -> None:
+    """Reject static production blockers before a fresh RAW is published."""
+
+    require_single_gpu_config(config)
+    require_logging_checkpoint_contracts(config, repository_root)
+    require_training_storage(
+        config,
+        repository_root,
+        checkpoint_payload_bytes=config.storage.measured_raw_checkpoint_bytes,
+    )
+    require_local_qwen(repository_root)
+    require_local_vae(repository_root)
+    require_evaluation_identities(config, repository_root)
 
 
 class _SingleGpuCheckpointPublisher(Protocol):
@@ -650,6 +859,68 @@ def _issue_verified_preflight_workload(  # pyright: ignore[reportUnusedFunction]
     return workload
 
 
+def _synthetic_preflight_batch(
+    config: RuntimeConfig,
+    *,
+    height: int,
+    width: int,
+    dense_length: int,
+    main_length: int,
+    empty_condition: bool = False,
+) -> TrainingBatch:
+    from sakuramoon.data.caption import CaptionDropoutCounts
+    from sakuramoon.data.collate import TrainingBatch
+    from sakuramoon.data.pipeline import ImageAudit, RngIdentity
+
+    if not 0 < main_length <= dense_length:
+        raise ValueError("synthetic main-token length is outside the dense shape")
+    batch_size = config.stage.local_batch
+    if type(batch_size) is not int or batch_size <= 0:
+        raise ValueError("production preflight local batch is invalid")
+    attention_mask = torch.zeros((batch_size, dense_length), dtype=torch.bool)
+    attention_mask[:, :main_length] = True
+    main_token_indices = torch.arange(main_length, dtype=torch.long).repeat(
+        batch_size, 1
+    )
+    audit = ImageAudit(
+        width,
+        height,
+        width,
+        height,
+        (0, 0, width, height),
+        1.0,
+    )
+    return TrainingBatch(
+        images=torch.zeros((batch_size, 3, height, width), dtype=torch.uint8),
+        input_ids=torch.zeros((batch_size, dense_length), dtype=torch.long),
+        attention_mask=attention_mask,
+        main_token_indices=main_token_indices,
+        main_mask=torch.ones((batch_size, main_length), dtype=torch.bool),
+        main_token_lengths=(main_length,) * batch_size,
+        artist_token_indices=torch.empty((batch_size, 0), dtype=torch.long),
+        artist_mask=torch.empty((batch_size, 0), dtype=torch.bool),
+        active_style_sample_indices=torch.empty((0,), dtype=torch.long),
+        sample_ids=torch.arange(1, batch_size + 1, dtype=torch.long),
+        target_height=height,
+        target_width=width,
+        dense_length=dense_length,
+        use_null_style=torch.ones((batch_size,), dtype=torch.bool),
+        all_condition_dropped=torch.full(
+            (batch_size,), empty_condition, dtype=torch.bool
+        ),
+        dropout_hits=CaptionDropoutCounts(
+            batch_size if empty_condition else 0,
+            *(0 for _ in range(11)),
+        ),
+        releases=("preflight",) * batch_size,
+        audits=(audit,) * batch_size,
+        rng_identities=tuple(
+            RngIdentity(config.run.seed, "S0", 0, sample_id, 1, 1)
+            for sample_id in range(1, batch_size + 1)
+        ),
+    )
+
+
 def build_single_gpu_preflight_workload(
     config: RuntimeConfig,
     *,
@@ -661,9 +932,6 @@ def build_single_gpu_preflight_workload(
 
     from sakuramoon.config.schema import RuntimeConfig
     from sakuramoon.data.buckets import generate_base_buckets, scale_buckets
-    from sakuramoon.data.caption import CaptionDropoutCounts
-    from sakuramoon.data.collate import TrainingBatch
-    from sakuramoon.data.pipeline import ImageAudit, RngIdentity
     from sakuramoon.data.serialize import EXPECTED_PREFIX_TOKENS, EXPECTED_SUFFIX_TOKENS
     from sakuramoon.encoders.mage_vae import FrozenMageVAE
     from sakuramoon.encoders.qwen import FrozenQwenEncoder
@@ -705,55 +973,10 @@ def build_single_gpu_preflight_workload(
     if square is None:
         raise ValueError("production bucket registry has no square probe shape")
 
-    def synthetic_batch(
-        *,
-        height: int,
-        width: int,
-        dense_length: int,
-        main_length: int,
-        empty_condition: bool = False,
-    ) -> TrainingBatch:
-        if not 0 < main_length <= dense_length:
-            raise ValueError("synthetic main-token length is outside the dense shape")
-        attention_mask = torch.zeros((1, dense_length), dtype=torch.bool)
-        attention_mask[:, :main_length] = True
-        return TrainingBatch(
-            images=torch.zeros((1, 3, height, width), dtype=torch.uint8),
-            input_ids=torch.zeros((1, dense_length), dtype=torch.long),
-            attention_mask=attention_mask,
-            main_token_indices=torch.arange(main_length, dtype=torch.long).unsqueeze(0),
-            main_mask=torch.ones((1, main_length), dtype=torch.bool),
-            main_token_lengths=(main_length,),
-            artist_token_indices=torch.empty((1, 0), dtype=torch.long),
-            artist_mask=torch.empty((1, 0), dtype=torch.bool),
-            active_style_sample_indices=torch.empty((0,), dtype=torch.long),
-            sample_ids=torch.ones((1,), dtype=torch.long),
-            target_height=height,
-            target_width=width,
-            dense_length=dense_length,
-            use_null_style=torch.ones((1,), dtype=torch.bool),
-            all_condition_dropped=torch.tensor((empty_condition,), dtype=torch.bool),
-            dropout_hits=CaptionDropoutCounts(
-                int(empty_condition), *(0 for _ in range(11))
-            ),
-            releases=("preflight",),
-            audits=(
-                ImageAudit(
-                    width,
-                    height,
-                    width,
-                    height,
-                    (0, 0, width, height),
-                    1.0,
-                ),
-            ),
-            rng_identities=(RngIdentity(config.run.seed, "S0", 0, 1, 1, 1),),
-        )
-
     def require_measurement(batch: TrainingBatch, *, backward: bool) -> None:
         measurement = runtime.measure(batch)
         if (
-            measurement.per_sample_loss.shape != (1,)
+            measurement.per_sample_loss.shape != (config.stage.local_batch,)
             or measurement.per_sample_loss.dtype is not torch.float32
             or not bool(torch.isfinite(measurement.per_sample_loss).all().item())
         ):
@@ -775,7 +998,8 @@ def build_single_gpu_preflight_workload(
         dense_length, _condition_bucket = text_shapes[0]
         for shape in image_shapes:
             require_measurement(
-                synthetic_batch(
+                _synthetic_preflight_batch(
+                    config,
                     height=shape.height,
                     width=shape.width,
                     dense_length=dense_length,
@@ -787,7 +1011,8 @@ def build_single_gpu_preflight_workload(
     def check_text_shapes() -> None:
         for dense_length, _condition_bucket in text_shapes:
             require_measurement(
-                synthetic_batch(
+                _synthetic_preflight_batch(
+                    config,
                     height=square.height,
                     width=square.width,
                     dense_length=dense_length,
@@ -797,7 +1022,8 @@ def build_single_gpu_preflight_workload(
             )
         shortest_dense, _shortest_bucket = text_shapes[0]
         require_measurement(
-            synthetic_batch(
+            _synthetic_preflight_batch(
+                config,
                 height=square.height,
                 width=square.width,
                 dense_length=shortest_dense,
@@ -810,7 +1036,8 @@ def build_single_gpu_preflight_workload(
     def check_zero_update_loss() -> None:
         dense_length, _condition_bucket = text_shapes[0]
         measurement = runtime.measure(
-            synthetic_batch(
+            _synthetic_preflight_batch(
+                config,
                 height=square.height,
                 width=square.width,
                 dense_length=dense_length,
@@ -830,7 +1057,8 @@ def build_single_gpu_preflight_workload(
         )
         for _ in range(config.stage.accumulation):
             measurement = runtime.measure(
-                synthetic_batch(
+                _synthetic_preflight_batch(
+                    config,
                     height=square.height,
                     width=square.width,
                     dense_length=dense_length,
@@ -844,7 +1072,8 @@ def build_single_gpu_preflight_workload(
 
     def check_sample() -> None:
         dense_length, _condition_bucket = text_shapes[0]
-        batch = synthetic_batch(
+        batch = _synthetic_preflight_batch(
+            config,
             height=square.height,
             width=square.width,
             dense_length=dense_length,
@@ -973,9 +1202,7 @@ def run_single_gpu_preflight(
                     restored.state.trainer.successful_updates,
                     tuple(results),
                 )
-                failure = PreflightError(
-                    f"mandatory preflight check failed: {name}"
-                )
+                failure = PreflightError(f"mandatory preflight check failed: {name}")
                 failure.__cause__ = exc
                 try:
                     _write_report(report, destination)
@@ -1142,9 +1369,15 @@ def _build_single_gpu_preflight_checks(
         if payload != loaded.resolved_toml.encode("utf-8"):
             raise ValueError("resolved config bytes differ from loaded identity")
 
+    def production_contracts() -> None:
+        require_logging_checkpoint_contracts(loaded.config, repository_root)
+
     def local_assets() -> None:
         require_local_qwen(repository_root)
         require_local_vae(repository_root)
+
+    def evaluation_identities() -> None:
+        require_evaluation_identities(loaded.config, repository_root)
 
     def dataset_revision() -> None:
         if data_client.identity.manifest_sha256 != loaded.config.data.manifest.sha256:
@@ -1318,7 +1551,9 @@ def _build_single_gpu_preflight_checks(
 
     checks: tuple[tuple[str, Callable[[], None]], ...] = (
         ("resolved_config", resolved_config),
+        ("production_contracts", production_contracts),
         ("local_assets", local_assets),
+        ("evaluation_identities", evaluation_identities),
         ("dataset_revision", dataset_revision),
         ("single_gpu_runtime", single_gpu_runtime),
         ("storage_capacity", storage_capacity),
@@ -1392,6 +1627,7 @@ def build_single_gpu_preflight_checks(
 __all__ = [
     "PREFLIGHT_CHECKS",
     "AcceptedPreflight",
+    "EvaluationIdentityFile",
     "PreflightCheckResult",
     "PreflightError",
     "PreflightReport",
@@ -1402,6 +1638,9 @@ __all__ = [
     "build_single_gpu_preflight_checks",
     "build_single_gpu_preflight_workload",
     "require_accepted_preflight",
+    "require_evaluation_identities",
+    "require_logging_checkpoint_contracts",
+    "require_static_single_gpu_preflight",
     "restore_single_gpu_checkpoint",
     "run_single_gpu_preflight",
 ]

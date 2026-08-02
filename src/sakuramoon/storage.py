@@ -123,11 +123,12 @@ def require_shared_mount(path: Path, expected: StorageConfig) -> MountIdentity:
     return identity
 
 
-def require_host_local_runtime(socket_path: Path, ownership_path: Path) -> MountIdentity:
-    if (
-        socket_path != Path("/run/sakuramoon/data-service.sock")
-        or ownership_path != Path("/run/sakuramoon/data-service.lock")
-    ):
+def require_host_local_runtime(
+    socket_path: Path, ownership_path: Path
+) -> MountIdentity:
+    if socket_path != Path(
+        "/run/sakuramoon/data-service.sock"
+    ) or ownership_path != Path("/run/sakuramoon/data-service.lock"):
         raise StorageValidationError("data service runtime paths are not governed")
     try:
         runtime = socket_path.parent
@@ -144,7 +145,9 @@ def require_host_local_runtime(socket_path: Path, ownership_path: Path) -> Mount
         if ownership_path.exists() and not stat.S_ISREG(ownership_path.stat().st_mode):
             raise StorageValidationError("data service ownership path is not a file")
     except OSError as exc:
-        raise StorageValidationError("data service runtime path is unavailable") from exc
+        raise StorageValidationError(
+            "data service runtime path is unavailable"
+        ) from exc
     identity = mount_identity(resolved)
     if identity.filesystem in {"nfs", "nfs4"}:
         raise StorageValidationError("data service runtime path must not be on NFS")
@@ -174,7 +177,9 @@ def probe_atomic_publication(directory: Path) -> None:
     except (OSError, StorageValidationError) as exc:
         if isinstance(exc, StorageValidationError):
             raise
-        raise StorageValidationError("server-backed atomic publication probe failed") from exc
+        raise StorageValidationError(
+            "server-backed atomic publication probe failed"
+        ) from exc
     finally:
         cleanup_error: OSError | None = None
         for residue in (temporary, published):
@@ -183,7 +188,9 @@ def probe_atomic_publication(directory: Path) -> None:
             except OSError as exc:
                 cleanup_error = cleanup_error or exc
         if cleanup_error is not None:
-            raise StorageValidationError("server-backed publication probe cleanup failed")
+            raise StorageValidationError(
+                "server-backed publication probe cleanup failed"
+            )
 
 
 def _validate_persistent_directories(
@@ -253,10 +260,46 @@ def require_training_storage(
         persistent, config.storage
     )
     reserve = config.storage.minimum_free_gib * 1024**3
+    governed_checkpoint_bytes = max(
+        checkpoint_payload_bytes,
+        config.storage.measured_raw_checkpoint_bytes,
+    )
     required = (
         reserve
         + config.data.cache.high_watermark_gib * 1024**3
-        + config.storage.checkpoint_copies * checkpoint_payload_bytes
+        + config.storage.checkpoint_copies * governed_checkpoint_bytes
+    )
+    capacity = _capacity_report(persistent_mount, probed, required)
+    runtime_mount = require_host_local_runtime(
+        Path(config.data.service.socket_path),
+        Path(config.data.service.ownership_lock_path),
+    )
+    return ServerBackedStorageReport(
+        persistent_mount, runtime_mount, (capacity,), probed
+    )
+
+
+def require_evaluation_storage(
+    config: RuntimeConfig,
+    repository_root: Path,
+) -> ServerBackedStorageReport:
+    """Validate evaluator persistence and its explicit output-space reservation."""
+
+    run = repository_directory(repository_root, config.paths.run_dir)
+    cache = repository_directory(repository_root, config.paths.cache_dir)
+    checkpoint = repository_directory(repository_root, config.paths.checkpoint_dir)
+    artifact = repository_directory(repository_root, config.paths.artifact_dir)
+    mainset = repository_file_parent(repository_root, config.data.service.mainset_path)
+    persistent = (run, cache, checkpoint, artifact, mainset)
+    persistent_mount, probed = _validate_persistent_directories(
+        persistent, config.storage
+    )
+    required = (
+        config.storage.minimum_free_gib * 1024**3
+        + config.data.cache.high_watermark_gib * 1024**3
+        + config.storage.checkpoint_copies
+        * config.storage.measured_raw_checkpoint_bytes
+        + config.evaluation.output_reserve_gib * 1024**3
     )
     capacity = _capacity_report(persistent_mount, probed, required)
     runtime_mount = require_host_local_runtime(
@@ -278,6 +321,7 @@ __all__ = [
     "repository_directory",
     "repository_file_parent",
     "require_data_service_storage",
+    "require_evaluation_storage",
     "require_host_local_runtime",
     "require_shared_mount",
     "require_training_storage",

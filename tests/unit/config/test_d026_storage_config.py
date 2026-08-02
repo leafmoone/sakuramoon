@@ -112,6 +112,7 @@ def test_server_backed_storage_fields_are_explicit_and_small_cache_is_valid(
     assert config.storage.shared_filesystem == "nfs"
     assert config.storage.nfs_version == 3
     assert config.storage.hard_mount is True
+    assert config.storage.measured_raw_checkpoint_bytes == 5143061370
     assert config.storage.checkpoint_copies == 3
     assert config.data.cache.low_watermark_gib == 8
     assert config.data.cache.high_watermark_gib == 16
@@ -153,6 +154,7 @@ def test_server_backed_identity_and_runtime_path_drift_is_rejected(
         ("storage",),
         ("storage", "shared_mount_source"),
         ("storage", "minimum_free_gib"),
+        ("storage", "measured_raw_checkpoint_bytes"),
         ("data", "service", "ownership_lock_path"),
     ],
 )

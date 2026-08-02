@@ -53,7 +53,11 @@ SYNTHETIC_VALUES: dict[str, object] = {
     "evaluation.fid.trend_samples": 100,
     "evaluation.fid.feature_extractor": "synthetic-locked-extractor",
     "evaluation.fid.feature_extractor_version": "synthetic-version",
+    "evaluation.fid.feature_extractor_path": "synthetic/extractor.safetensors",
+    "evaluation.fid.feature_extractor_sha256": "8" * 64,
+    "evaluation.fid.preprocess_path": "synthetic/preprocess.json",
     "evaluation.fid.preprocess_sha256": "6" * 64,
+    "evaluation.fid.real_stats_path": "synthetic/real-stats.npz",
     "evaluation.fid.real_stats_sha256": "5" * 64,
     "evaluation.is.every_successful_updates": 10,
     "evaluation.is.trend_samples": 100,
@@ -62,6 +66,10 @@ SYNTHETIC_VALUES: dict[str, object] = {
     "evaluation.prompt_manifest_sha256": "7" * 64,
     "evaluation.gpu_index": 0,
     "evaluation.training_paused": True,
+    "evaluation.batch_size": 10,
+    "evaluation.output_reserve_gib": 8,
+    "evaluation.manual_quality.enabled": True,
+    "evaluation.manual_quality.samples": 100,
 }
 
 
@@ -69,7 +77,7 @@ def _set_path(payload: dict[str, Any], path: str, value: object) -> None:
     parts = path.split(".")
     current = payload
     for part in parts[:-1]:
-        child = current[part]
+        child = current.setdefault(part, {})
         assert isinstance(child, dict)
         current = cast(dict[str, Any], child)
     current[parts[-1]] = value

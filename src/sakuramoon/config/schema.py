@@ -131,6 +131,7 @@ class StorageConfig(StrictModel):
     nfs_version: Literal[3]
     hard_mount: Literal[True]
     minimum_free_gib: NonNegativeInt
+    measured_raw_checkpoint_bytes: PositiveInt
     checkpoint_copies: Literal[3]
     atomic_publish_probe: Literal[True]
 
@@ -776,16 +777,34 @@ class FidConfig(StrictModel):
     acceptance_samples: PositiveInt
     feature_extractor: Annotated[str, StringConstraints(min_length=1)]
     feature_extractor_version: Annotated[str, StringConstraints(min_length=1)]
+    feature_extractor_path: Annotated[str, StringConstraints(min_length=1)]
+    feature_extractor_sha256: Sha256
+    preprocess_path: Annotated[str, StringConstraints(min_length=1)]
     preprocess_sha256: Sha256
+    real_stats_path: Annotated[str, StringConstraints(min_length=1)]
     real_stats_sha256: Sha256
 
     @model_validator(mode="after")
     def validate_extractor_identity(self) -> FidConfig:
-        if any(
-            value != value.strip()
-            for value in (self.feature_extractor, self.feature_extractor_version)
+        identity_values = (
+            self.feature_extractor,
+            self.feature_extractor_version,
+            self.feature_extractor_path,
+            self.preprocess_path,
+            self.real_stats_path,
+        )
+        if any(value != value.strip() for value in identity_values):
+            raise ValueError("FID identity values must not contain padding")
+        for value in (
+            self.feature_extractor_path,
+            self.preprocess_path,
+            self.real_stats_path,
         ):
-            raise ValueError("FID feature extractor identity must not contain padding")
+            path = PurePosixPath(value)
+            if path.is_absolute() or ".." in path.parts or not path.name:
+                raise ValueError(
+                    "FID identity paths must be repository-relative files"
+                )
         return self
 
 
@@ -797,6 +816,11 @@ class IsConfig(StrictModel):
     splits: PositiveInt
 
 
+class ManualQualityConfig(StrictModel):
+    enabled: Literal[True]
+    samples: PositiveInt
+
+
 class EvaluationConfig(StrictModel):
     stage_end: Literal[True]
     explicit_job: Literal[True]
@@ -804,9 +828,12 @@ class EvaluationConfig(StrictModel):
     prompt_manifest_sha256: Sha256
     gpu_index: NonNegativeInt
     training_paused: bool
+    batch_size: PositiveInt
+    output_reserve_gib: PositiveInt
     sampling: EvaluationSamplingConfig
     fid: FidConfig
     is_: IsConfig = Field(alias="is")
+    manual_quality: ManualQualityConfig
 
     @model_validator(mode="after")
     def validate_evaluation_inputs(self) -> EvaluationConfig:
@@ -817,14 +844,26 @@ class EvaluationConfig(StrictModel):
             self.fid.acceptance_samples,
             self.is_.trend_samples,
             self.is_.acceptance_samples,
+            self.manual_quality.samples,
         ) < 2:
-            raise ValueError("FID/IS evaluation requires at least two samples")
+            raise ValueError("evaluation jobs require at least two samples")
         if (
             self.is_.trend_samples % self.is_.splits != 0
             or self.is_.acceptance_samples % self.is_.splits != 0
         ):
             raise ValueError(
                 "IS trend and acceptance samples must be exactly divisible by splits"
+            )
+        sample_counts = (
+            self.fid.trend_samples,
+            self.fid.acceptance_samples,
+            self.is_.trend_samples,
+            self.is_.acceptance_samples,
+            self.manual_quality.samples,
+        )
+        if any(sample_count % self.batch_size for sample_count in sample_counts):
+            raise ValueError(
+                "evaluation sample counts must be exactly divisible by batch_size"
             )
         return self
 
