@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "task_id": "T052",
+  "date": "2026-08-02",
+  "finding": "immutable scalar artifacts accepted impossible FID/IS values",
+  "remediation": {
+    "fid_minimum": 0.0,
+    "is_minimum": 1.0,
+    "fails_before_publication": true
+  },
+  "focused_cpu": {
+    "command": "uv run --frozen pytest -q -p no:cacheprovider --basetemp=cache/T052-package-remediation-focused tests/unit/eval/test_artifacts_quality.py tests/unit/eval/test_fid_is_metrics.py",
+    "passed": 17,
+    "failed": 0,
+    "duration_seconds": 3.30
+  },
+  "targeted_cpu": {
+    "command": "uv run --frozen pytest -q -p no:cacheprovider --basetemp=cache/T052-package-remediation-targeted tests/unit/eval tests/unit/config/test_eval_jobs.py tests/unit/config/test_schema.py tests/unit/config/test_load.py tests/contracts/config/test_runtime_contract.py",
+    "passed": 182,
+    "failed": 0,
+    "warnings": 17,
+    "duration_seconds": 17.97
+  },
+  "ruff": "passed",
+  "strict_pyright": "passed:0_errors_0_warnings_0_informations",
+  "traceability_unit": {
+    "command": "uv run --frozen pytest -q -p no:cacheprovider --basetemp=cache/T052-package-remediation-trace tests/unit/docs/test_verify_traceability.py",
+    "passed": 40,
+    "failed": 0,
+    "duration_seconds": 88.09
+  },
+  "traceability_live": {
+    "command": "uv run --frozen python tools/verify_traceability.py --format json",
+    "ok": true,
+    "requirements": 237,
+    "source_nodes": 237,
+    "production_modules": 109,
+    "runtime_config_keys": 907,
+    "archive_files": 16,
+    "errors": 0,
+    "registry_revision": 110
+  },
+  "single_gpu_rerun": false,
+  "formal_quality_evidence": false,
+  "historical_evidence_unchanged": true,
+  "independent_infra_rereview": "pending"
+}

@@ -95,6 +95,41 @@ def test_artifact_is_immutable_records_cost_and_cannot_release(tmp_path: Path) -
         )
 
 
+@pytest.mark.parametrize(
+    ("metric", "artifact_kind", "value", "std", "message"),
+    [
+        ("fid", "fid_formal", -1.0, None, "FID value must be nonnegative"),
+        ("is", "is_formal", 0.999, 0.0, "IS value must be at least one"),
+    ],
+)
+def test_artifact_rejects_impossible_metric_values_before_publication(
+    tmp_path: Path,
+    metric: str,
+    artifact_kind: str,
+    value: float,
+    std: float | None,
+    message: str,
+) -> None:
+    candidate = dataclasses.replace(
+        _job(),
+        metric=metric,
+        artifact_kind=artifact_kind,
+    )
+    job = dataclasses.replace(candidate, job_id=candidate.content_addressed_id)
+    path = tmp_path / f"{artifact_kind}.json"
+
+    with pytest.raises(ValueError, match=message):
+        artifact = EvaluationArtifact(
+            job,
+            value=value,
+            std=std,
+            cost=EvaluationCost(1.0, 0.0, 1.0),
+        )
+        write_evaluation_artifact(path, artifact)
+
+    assert not path.exists()
+
+
 def test_comparison_requires_all_three_checkpoint_kinds() -> None:
     def artifact(
         kind: CheckpointKind,

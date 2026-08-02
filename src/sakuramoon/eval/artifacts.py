@@ -31,6 +31,10 @@ class EvaluationArtifact:
             raise ValueError("evaluation artifact job ID is not content-addressed")
         if type(self.value) is not float or not math.isfinite(self.value):
             raise ValueError("evaluation metric value must be finite")
+        if self.job.metric == "fid" and self.value < 0.0:
+            raise ValueError("FID value must be nonnegative")
+        if self.job.metric == "is" and self.value < 1.0:
+            raise ValueError("IS value must be at least one")
         if self.std is not None and (
             type(self.std) is not float or not math.isfinite(self.std) or self.std < 0.0
         ):
