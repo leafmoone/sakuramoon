@@ -36,3 +36,47 @@ allowlisting, explicit COMPLETE-parent restore, and GPU context recovery remain 
 Ruff, Pyright, and `git diff --check` pass. Main-agent Infra self-review is PASS for this
 bounded CPU/1GPU readiness correction only. No independent rereview, performance
 capacity result, long run, multi-GPU result, or formal-stage evidence is claimed.
+
+## Independent Infra/performance post-remediation review (2026-08-02)
+
+Reviewer authority: fresh independent Infra reviewer. This review inspected commit
+`a8d16a62032e08f53fafc908a11c516811bc3c73` and reran archive-free CPU/static checks.
+The reviewer did not modify implementation, run GPU workloads, stage files, or commit.
+
+### Verdict
+
+PASS for the implemented CPU and bounded-single-GPU post-remediation scope. The earlier
+independent Infra findings are closed within that scope. No performance capacity,
+formal-stage, or multi-GPU conclusion is implied.
+
+### Post-remediation conclusions
+
+- Lazy package exports remove the readiness-path Torch/checkpoint initialization
+  regression. A fresh credential-empty import of `signal_ready_from_environment`
+  completed in 0.028055 seconds; the 23 public exports were unique and matched the lazy
+  export map.
+- The real-SIGKILL and expected-exit drivers use the same fixed credential-free child
+  environment allowlist, bounded readiness/reaping, and process-group termination.
+- `WebDatasetPipeline.iter_leased_shards()` now holds the durable lease across actual
+  iteration: abnormal generator or worker exit preserves active state, while normal
+  exhaustion completes it.
+- The scenario binder requires every CPU/1GPU record in canonical order, validates the
+  strict schema, binds the test-report hash, and verifies exact evidence bytes by
+  SHA-256.
+- The OOM worker requires an explicit complete parent, validates protected recovery
+  controls before allocation, and is followed by fresh-process recovery. Raw recovery
+  remains exact and exposes no latest, PMA, model-only, or silent fallback path.
+
+### Independent checks
+
+- T054 archive-free CPU selector: 161 passed, 5 warnings.
+- Scoped Ruff passed.
+- Scoped Pyright reported 0 errors.
+- `git diff --check` passed before this report append.
+
+### Open boundary
+
+DDP reduction kill, stochastic-rounding rank divergence, NCCL rank failure, all-rank
+synchronized stop, four-rank checkpoint recovery/state equality, formal-stage fault
+canary, and long-run behavior remain blocked or pending. Existing CPU and bounded 1GPU
+evidence cannot close any of those gates.
