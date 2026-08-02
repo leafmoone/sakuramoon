@@ -15,7 +15,7 @@ from sakuramoon.conditioning.style_resampler import (
     StyleResampler,
 )
 from sakuramoon.conditioning.text_mixer import TextConditioner, TextConditioningOutput
-from sakuramoon.model.dit import PackedDiT
+from sakuramoon.model.dit import DenseDiT, PackedDiT
 from sakuramoon.optim.clip import ClipResult, clip_grad_norm_fp32
 from sakuramoon.telemetry.timers import PhaseTimer
 
@@ -52,7 +52,7 @@ class TrainableComposite(nn.Module):
     def __init__(
         self,
         *,
-        dit: PackedDiT,
+        dit: DenseDiT | PackedDiT,
         text: TextConditioner,
         style: StyleResampler,
     ) -> None:
@@ -84,6 +84,18 @@ class TrainableComposite(nn.Module):
         conditioning: tuple[TextConditioningOutput, StyleConditioningOutput],
     ) -> tuple[torch.Tensor, ...]:
         text, style = conditioning
+        if type(self.dit) is DenseDiT:
+            dense_predictions = self.dit(
+                torch.stack(inputs.latents),
+                text.tokens,
+                text.mask,
+                style.tokens,
+                inputs.timestep,
+                inputs.size_scale,
+                inputs.aspect,
+                growth_alpha=inputs.growth_alpha,
+            )
+            return tuple(dense_predictions.unbind(0))
         return self.dit(
             inputs.latents,
             text.tokens,

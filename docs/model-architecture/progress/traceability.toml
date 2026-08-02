@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 113
+registry_revision = 114
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -6004,12 +6004,16 @@ config_keys = [
     "distributed.*",
     "checkpoint.*",
     "failure.*",
+    "device.*",
+    "evidence.*",
 ]
 modules = [
     "src/sakuramoon/optim/**",
     "src/sakuramoon/distributed/**",
     "src/sakuramoon/checkpoint/**",
     "src/sakuramoon/train/**",
+    "src/sakuramoon/engineering_smoke/**",
+    "src/sakuramoon/cli/engineering_smoke.py",
 ]
 reference_modules = []
 tests = [
@@ -6017,6 +6021,7 @@ tests = [
     "tests/**/distributed*",
     "tests/**/checkpoint*",
     "tests/fault_injection/**",
+    "tests/unit/engineering_smoke/**",
 ]
 benchmarks = [
     "benchmarks/training/**",
@@ -6024,6 +6029,7 @@ benchmarks = [
 artifacts = [
     "artifacts/training/**",
     "checkpoints/**",
+    "docs/model-architecture/reviews/S000/**",
 ]
 not_applicable_fields = [
     "reference_modules",
@@ -12120,6 +12126,7 @@ config_keys = [
     "timing.*",
     "profiling.*",
     "evaluation.*",
+    "measurement.noise_observation_boundary",
 ]
 modules = [
     "src/sakuramoon/objective/**",
@@ -12938,7 +12945,7 @@ evidence_hardware = ""
 evidence_artifacts = []
 ai_review = ""
 infra_review = ""
-config_keys = ["data.*", "paths.cache*"]
+config_keys = ["data.*", "paths.cache*", "service.*"]
 modules = ["src/sakuramoon/data/**"]
 reference_modules = []
 tests = ["tests/**/data*", "tests/**/cache*"]
