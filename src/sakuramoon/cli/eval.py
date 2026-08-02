@@ -1,129 +1,212 @@
-"""Build immutable evaluation jobs only from validated TOML and bound manifests."""
+"""Executable, fail-closed checkpoint-driven evaluator entry point."""
 
 from __future__ import annotations
 
-import dataclasses
+import argparse
 import json
-import os
-import stat
+from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn
 
-from sakuramoon.config.schema import RuntimeConfig
-from sakuramoon.eval.schedule import scheduled_evaluations
-from sakuramoon.eval.spec import (
-    CheckpointRef,
-    EvaluationJob,
-    PromptManifest,
+from sakuramoon.config import ConfigurationError, load_config
+from sakuramoon.eval.extractor import ExtractorContractError
+from sakuramoon.eval.generate import GenerationContractError
+from sakuramoon.eval.jobs import (
+    build_evaluation_jobs,
+    load_prompt_manifest,
+    write_evaluation_job,
 )
+from sakuramoon.eval.publisher import EvaluationPublicationError
+from sakuramoon.eval.runner import (
+    CheckpointSelection,
+    EvaluationPreflightError,
+    preflight_evaluator,
+    run_evaluator,
+)
+from sakuramoon.eval.spec import ObjectiveProvenance
 
 
-def load_prompt_manifest(path: Path) -> PromptManifest:
-    """Load one immutable canonical prompt plan without following symlinks."""
-
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        raise ValueError("configured prompt manifest cannot be opened") from None
-    try:
-        with os.fdopen(descriptor, "rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                raise ValueError("configured prompt manifest must be a regular file")
-            payload = handle.read()
-    except OSError:
-        raise ValueError("configured prompt manifest cannot be read") from None
-    return PromptManifest.from_canonical_bytes(payload)
+class _ArgumentError(ValueError):
+    pass
 
 
-def build_evaluation_jobs(
-    config: RuntimeConfig,
-    *,
-    checkpoint: CheckpointRef,
-    successful_update: int,
-    stage_end: bool,
-) -> tuple[EvaluationJob, ...]:
-    requests = scheduled_evaluations(
-        config.evaluation,
-        successful_update=successful_update,
-        stage_end=stage_end,
+class _SafeParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        del message
+        raise _ArgumentError("invalid arguments")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _SafeParser(description="Run checkpoint-driven SakuraMoon evaluation")
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config-root", type=Path, default=Path("config"))
+    parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--checkpoint",
+        action="append",
+        required=True,
+        metavar="ROLE=ABSOLUTE_PATH",
     )
-    if not requests:
-        return ()
-    prompts = load_prompt_manifest(Path(config.evaluation.prompt_manifest_path))
-    if prompts.sha256 != config.evaluation.prompt_manifest_sha256:
-        raise ValueError("prompt manifest hash differs from resolved configuration")
-    if checkpoint.resolved_config_sha256 == "0" * 64:
-        raise ValueError("checkpoint resolved-config identity is invalid")
-    jobs: list[EvaluationJob] = []
-    for request in requests:
-        artifact_kind = f"{request.metric}_{request.run_kind}"
-        if len(prompts.cases) < request.sample_count:
-            raise ValueError(
-                "prompt manifest has fewer cases than the scheduled sample count"
-            )
-        candidate = EvaluationJob(
-            job_id="eval-content-address-pending",
-            checkpoint=checkpoint,
-            metric=request.metric,
-            artifact_kind=artifact_kind,  # pyright: ignore[reportArgumentType]
-            prompt_manifest_path=config.evaluation.prompt_manifest_path,
-            prompt_selection="ordered_prefix",
-            prompt_manifest_sha256=prompts.sha256,
-            trigger_successful_update=successful_update,
-            sample_count=request.sample_count,
-            cfg_scale=config.cfg.scale,
-            sampling_profile=config.evaluation.sampling.profile,
-            solver=config.evaluation.sampling.solver,
-            time_schedule=config.evaluation.sampling.time_schedule,
-            solver_steps=config.evaluation.sampling.steps,
-            solver_nfe=config.evaluation.sampling.nfe,
-            feature_extractor=config.evaluation.fid.feature_extractor,
-            feature_extractor_version=(
-                config.evaluation.fid.feature_extractor_version
-            ),
-            preprocess_sha256=config.evaluation.fid.preprocess_sha256,
-            real_stats_sha256=config.evaluation.fid.real_stats_sha256,
-            is_splits=config.evaluation.is_.splits,
-            gpu_index=config.evaluation.gpu_index,
-            training_paused=config.evaluation.training_paused,
-        )
-        jobs.append(
-            dataclasses.replace(
-                candidate,
-                job_id=candidate.content_addressed_id,
-            )
-        )
-    return tuple(jobs)
+    parser.add_argument(
+        "--accepted-source-pma",
+        type=Path,
+        metavar="ABSOLUTE_PATH",
+    )
+    parser.add_argument("--successful-update", type=int, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--trend", action="store_true")
+    mode.add_argument("--stage-end", action="store_true")
+    parser.add_argument("--preflight-only", action="store_true")
+    return parser
 
 
-def write_evaluation_job(path: Path, job: EvaluationJob) -> None:
-    """Publish one no-clobber job manifest and fsync its namespace."""
+def _checkpoint_selection(value: str) -> CheckpointSelection:
+    if type(value) is not str or "=" not in value:
+        raise _ArgumentError("invalid checkpoint selection")
+    raw_role, raw_path = value.split("=", 1)
+    if not raw_role or not raw_path:
+        raise _ArgumentError("invalid checkpoint selection")
+    objective: ObjectiveProvenance = "strict_jlt"
+    role_text = raw_role
+    if raw_role.startswith("model-only:"):
+        role_text, objective_text = raw_role.split(":", 1)
+        if objective_text not in ("strict_jlt", "pre_fix"):
+            raise _ArgumentError("invalid model-only objective provenance")
+        objective = objective_text
+    elif ":" in raw_role:
+        raise _ArgumentError("invalid checkpoint role")
+    if role_text not in ("raw", "model-only", "pma", "accepted"):
+        raise _ArgumentError("invalid checkpoint role")
+    if role_text == "model-only" and ":" not in raw_role:
+        raise _ArgumentError("model-only objective provenance is required")
+    path = Path(raw_path)
+    if not path.is_absolute() or ".." in path.parts:
+        raise _ArgumentError("checkpoint path must be canonical and absolute")
+    return CheckpointSelection(
+        role=role_text,
+        path=path,
+        objective_provenance=objective,
+    )
 
-    if job.job_id != job.content_addressed_id:
-        raise ValueError("evaluation job ID is not content-addressed")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() or path.is_symlink():
-        raise FileExistsError("evaluation job already exists")
-    temporary = path.with_name(f".{path.name}.tmp")
-    if temporary.exists() or temporary.is_symlink():
-        raise FileExistsError("evaluation job temporary path exists")
-    body = (
-        json.dumps(job.as_mapping(), sort_keys=True, separators=(",", ":")) + "\n"
-    ).encode()
+
+def _bind_accepted_source_pma(
+    selections: tuple[CheckpointSelection, ...], source_pma: Path | None
+) -> tuple[CheckpointSelection, ...]:
+    if source_pma is None:
+        return selections
+    if not source_pma.is_absolute() or ".." in source_pma.parts:
+        raise _ArgumentError("accepted source PMA path must be canonical and absolute")
+    accepted_indices = tuple(
+        index for index, selection in enumerate(selections) if selection.role == "accepted"
+    )
+    if len(accepted_indices) != 1:
+        raise _ArgumentError("accepted source PMA requires one accepted checkpoint")
+    index = accepted_indices[0]
+    bound = list(selections)
+    bound[index] = replace(bound[index], accepted_source_pma=source_pma)
+    return tuple(bound)
+
+
+def _emit(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     try:
-        with temporary.open("xb") as handle:
-            handle.write(body)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.link(temporary, path, follow_symlinks=False)
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-            temporary.unlink()
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        temporary.unlink(missing_ok=True)
+        args = build_parser().parse_args(argv)
+        selections = _bind_accepted_source_pma(
+            tuple(_checkpoint_selection(value) for value in args.checkpoint),
+            args.accepted_source_pma,
+        )
+        loaded = load_config(args.config, config_root=args.config_root)
+        plan = preflight_evaluator(
+            loaded,
+            repository_root=args.root,
+            selections=selections,
+            trigger_successful_update=args.successful_update,
+            stage_end=args.stage_end,
+        )
+        if args.preflight_only:
+            _emit(
+                {
+                    "checkpoint_count": len(plan.checkpoints),
+                    "job_count": len(plan.jobs),
+                    "ok": True,
+                    "plan_id": plan.plan_id,
+                    "preflight_only": True,
+                    "resolved_config_sha256": loaded.resolved_sha256,
+                }
+            )
+            return 0
+        result = run_evaluator(plan)
+    except _ArgumentError:
+        _emit({"error": "invalid_arguments", "ok": False})
+        return 2
+    except ConfigurationError as error:
+        payload: dict[str, object] = {
+            "error": "configuration_invalid",
+            "ok": False,
+        }
+        if error.unresolved_bindings:
+            payload["unresolved_bindings"] = [
+                {
+                    "kind": binding.kind,
+                    "path": binding.path,
+                    "sentinel": binding.sentinel,
+                }
+                for binding in error.unresolved_bindings
+            ]
+        _emit(payload)
+        return 2
+    except EvaluationPreflightError as error:
+        _emit(
+            {
+                "blockers": [item.as_mapping() for item in error.blockers],
+                "error": "evaluation_preflight_failed",
+                "ok": False,
+            }
+        )
+        return 1
+    except (
+        ExtractorContractError,
+        GenerationContractError,
+        EvaluationPublicationError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        _emit(
+            {
+                "error": "evaluation_failed",
+                "exception_type": type(error).__name__,
+                "ok": False,
+            }
+        )
+        return 1
+    _emit(
+        {
+            "artifact_count": result.artifact_count,
+            "checkpoint_count": result.checkpoint_count,
+            "ok": True,
+            "output": str(result.output_path),
+            "plan_id": result.plan_id,
+            "publication_seconds": result.publication_seconds,
+            "started_training": False,
+            "total_wall_seconds": result.total_wall_seconds,
+        }
+    )
+    return 0
 
 
-__all__ = ["build_evaluation_jobs", "load_prompt_manifest", "write_evaluation_job"]
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = [
+    "build_evaluation_jobs",
+    "build_parser",
+    "load_prompt_manifest",
+    "main",
+    "write_evaluation_job",
+]

@@ -16,7 +16,9 @@ from sakuramoon.sampling.profiles import (
     resolve_sampling_profile,
 )
 
-CheckpointKind = Literal["raw_latest", "pma10", "accepted"]
+CheckpointRole = Literal["raw", "model-only", "pma", "accepted"]
+CheckpointArtifactKind = Literal["raw", "model-only", "pma", "release"]
+ObjectiveProvenance = Literal["strict_jlt", "pre_fix"]
 MetricName = Literal["fid", "is", "manual_quality", "vae_reconstruction"]
 ArtifactKind = Literal[
     "fid_trend",
@@ -64,11 +66,15 @@ class PromptCase:
             type(self.conditions) is not tuple
             or any(
                 type(value) is not str or not value or value != value.strip()
+                or ", " in value
+                or "\n" in value
+                or "<think>" in value
+                or "</think>" in value
                 for value in self.conditions
             )
             or len(set(self.conditions)) != len(self.conditions)
         ):
-            raise ValueError("prompt conditions are invalid")
+            raise ValueError("prompt conditions must be complete tag boundaries")
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("prompt seed must be a nonnegative integer")
         if any(
@@ -178,14 +184,30 @@ class PromptManifest:
 @dataclass(frozen=True, slots=True)
 class CheckpointRef:
     checkpoint_id: str
-    kind: CheckpointKind
+    role: CheckpointRole
+    artifact_kind: CheckpointArtifactKind
+    objective_provenance: ObjectiveProvenance
     resolved_config_sha256: str
     successful_update: int
 
     def __post_init__(self) -> None:
         _safe_id("checkpoint_id", self.checkpoint_id)
-        if self.kind not in ("raw_latest", "pma10", "accepted"):
-            raise ValueError("checkpoint kind is invalid")
+        if self.role not in ("raw", "model-only", "pma", "accepted"):
+            raise ValueError("checkpoint role is invalid")
+        if self.artifact_kind not in ("raw", "model-only", "pma", "release"):
+            raise ValueError("checkpoint artifact kind is invalid")
+        allowed_artifacts: dict[CheckpointRole, tuple[CheckpointArtifactKind, ...]] = {
+            "raw": ("raw",),
+            "model-only": ("model-only",),
+            "pma": ("pma",),
+            "accepted": ("raw", "release"),
+        }
+        if self.artifact_kind not in allowed_artifacts[self.role]:
+            raise ValueError("checkpoint role and artifact kind are inconsistent")
+        if self.objective_provenance not in ("strict_jlt", "pre_fix"):
+            raise ValueError("checkpoint objective provenance is invalid")
+        if self.objective_provenance == "pre_fix" and self.role != "model-only":
+            raise ValueError("pre-fix objective is restricted to model-only inference")
         _sha256("resolved_config_sha256", self.resolved_config_sha256)
         if type(self.successful_update) is not int or self.successful_update < 0:
             raise ValueError("checkpoint successful update must be nonnegative")
@@ -202,6 +224,7 @@ class EvaluationJob:
     prompt_manifest_sha256: str
     trigger_successful_update: int
     sample_count: int
+    batch_size: int
     cfg_scale: float
     sampling_profile: SamplingProfileName
     solver: SamplingSolver
@@ -210,7 +233,11 @@ class EvaluationJob:
     solver_nfe: int
     feature_extractor: str
     feature_extractor_version: str
+    feature_extractor_path: str
+    feature_extractor_sha256: str
+    preprocess_path: str
     preprocess_sha256: str
+    real_stats_path: str
     real_stats_sha256: str
     is_splits: int
     gpu_index: int
@@ -239,6 +266,7 @@ class EvaluationJob:
             raise ValueError("prompt selection must use the ordered manifest prefix")
         for name, value in (
             ("prompt_manifest_sha256", self.prompt_manifest_sha256),
+            ("feature_extractor_sha256", self.feature_extractor_sha256),
             ("preprocess_sha256", self.preprocess_sha256),
             ("real_stats_sha256", self.real_stats_sha256),
         ):
@@ -251,12 +279,18 @@ class EvaluationJob:
         if self.checkpoint.successful_update > self.trigger_successful_update:
             raise ValueError("evaluation cannot use a future checkpoint")
         if (
-            self.checkpoint.kind == "raw_latest"
+            self.checkpoint.role == "raw"
             and self.checkpoint.successful_update != self.trigger_successful_update
         ):
-            raise ValueError("raw latest checkpoint must match the trigger update")
+            raise ValueError("raw checkpoint must match the trigger update")
         if type(self.sample_count) is not int or self.sample_count <= 0:
             raise ValueError("evaluation sample count must be positive")
+        if type(self.batch_size) is not int or self.batch_size <= 0:
+            raise ValueError("evaluation batch size must be positive")
+        if self.sample_count % self.batch_size:
+            raise ValueError(
+                "evaluation sample count must be exactly divisible by batch size"
+            )
         if self.metric in ("fid", "is") and self.sample_count < 2:
             raise ValueError("FID/IS evaluation requires at least two samples")
         if type(self.cfg_scale) is not float or self.cfg_scale != 2.9:
@@ -271,7 +305,13 @@ class EvaluationJob:
             or self.solver_nfe != selected.nfe
         ):
             raise ValueError("formal evaluation sampling identity is inconsistent")
-        for value in (self.feature_extractor, self.feature_extractor_version):
+        for value in (
+            self.feature_extractor,
+            self.feature_extractor_version,
+            self.feature_extractor_path,
+            self.preprocess_path,
+            self.real_stats_path,
+        ):
             if type(value) is not str or not value or value != value.strip():
                 raise ValueError("feature extractor identity must be explicit")
         if type(self.is_splits) is not int or self.is_splits <= 0:
@@ -288,22 +328,29 @@ class EvaluationJob:
 
         return {
             "artifact_kind": self.artifact_kind,
+            "batch_size": self.batch_size,
             "cfg_scale": self.cfg_scale,
             "checkpoint": {
+                "artifact_kind": self.checkpoint.artifact_kind,
                 "checkpoint_id": self.checkpoint.checkpoint_id,
-                "kind": self.checkpoint.kind,
+                "objective_provenance": self.checkpoint.objective_provenance,
                 "resolved_config_sha256": self.checkpoint.resolved_config_sha256,
+                "role": self.checkpoint.role,
                 "successful_update": self.checkpoint.successful_update,
             },
             "feature_extractor": self.feature_extractor,
+            "feature_extractor_path": self.feature_extractor_path,
+            "feature_extractor_sha256": self.feature_extractor_sha256,
             "feature_extractor_version": self.feature_extractor_version,
             "gpu_index": self.gpu_index,
             "is_splits": self.is_splits,
             "metric": self.metric,
+            "preprocess_path": self.preprocess_path,
             "preprocess_sha256": self.preprocess_sha256,
             "prompt_manifest_path": self.prompt_manifest_path,
             "prompt_selection": self.prompt_selection,
             "prompt_manifest_sha256": self.prompt_manifest_sha256,
+            "real_stats_path": self.real_stats_path,
             "real_stats_sha256": self.real_stats_sha256,
             "sample_count": self.sample_count,
             "sampling_profile": self.sampling_profile,
@@ -323,7 +370,10 @@ class EvaluationJob:
         for field in (
             "checkpoint",
             "gpu_index",
+            "feature_extractor_path",
+            "preprocess_path",
             "prompt_manifest_path",
+            "real_stats_path",
             "trigger_successful_update",
             "training_paused",
         ):
@@ -368,11 +418,13 @@ class EvaluationCost:
 
 __all__ = [
     "ArtifactKind",
-    "CheckpointKind",
+    "CheckpointArtifactKind",
     "CheckpointRef",
+    "CheckpointRole",
     "EvaluationCost",
     "EvaluationJob",
     "MetricName",
+    "ObjectiveProvenance",
     "PromptCase",
     "PromptManifest",
 ]

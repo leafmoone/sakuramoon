@@ -10,7 +10,7 @@ from pathlib import Path
 
 from sakuramoon.eval.spec import (
     ArtifactKind,
-    CheckpointKind,
+    CheckpointRole,
     EvaluationCost,
     EvaluationJob,
 )
@@ -56,6 +56,7 @@ class EvaluationArtifact:
             "automatic_release": False,
             "cost": {
                 "gpu_seconds": self.cost.gpu_seconds,
+                "publication_seconds_included": False,
                 "training_pause_seconds": self.cost.training_pause_seconds,
                 "wall_seconds": self.cost.wall_seconds,
             },
@@ -103,13 +104,13 @@ class CheckpointMetricComparison:
             type(artifact) is not EvaluationArtifact for artifact in self.artifacts
         ):
             raise TypeError("comparison artifacts must be an immutable artifact tuple")
-        kinds = tuple(artifact.job.checkpoint.kind for artifact in self.artifacts)
-        if len(self.artifacts) != 3 or set(kinds) != {
-            "raw_latest",
-            "pma10",
+        roles = tuple(artifact.job.checkpoint.role for artifact in self.artifacts)
+        if len(self.artifacts) != 3 or set(roles) != {
+            "raw",
+            "pma",
             "accepted",
         }:
-            raise ValueError("comparison requires raw latest, PMA-10, and accepted")
+            raise ValueError("comparison requires raw, PMA, and accepted roles")
         if any(
             artifact.job.artifact_kind != self.artifact_kind
             for artifact in self.artifacts
@@ -124,9 +125,9 @@ class CheckpointMetricComparison:
             )
 
     @property
-    def values(self) -> tuple[tuple[CheckpointKind, float], ...]:
+    def values(self) -> tuple[tuple[CheckpointRole, float], ...]:
         return tuple(
-            (artifact.job.checkpoint.kind, artifact.value)
+            (artifact.job.checkpoint.role, artifact.value)
             for artifact in self.artifacts
         )
 

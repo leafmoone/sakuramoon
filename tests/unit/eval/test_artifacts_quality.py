@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -18,8 +19,9 @@ from sakuramoon.eval.manual_quality import (
     write_manual_quality_artifact,
 )
 from sakuramoon.eval.spec import (
-    CheckpointKind,
+    CheckpointArtifactKind,
     CheckpointRef,
+    CheckpointRole,
     EvaluationCost,
     EvaluationJob,
     PromptCase,
@@ -30,7 +32,9 @@ from sakuramoon.eval.spec import (
 def _job() -> EvaluationJob:
     candidate = EvaluationJob(
         job_id="eval-content-address-pending",
-        checkpoint=CheckpointRef("checkpoint-1", "raw_latest", "1" * 64, 10),
+        checkpoint=CheckpointRef(
+            "checkpoint-1", "raw", "raw", "strict_jlt", "1" * 64, 10
+        ),
         metric="fid",
         artifact_kind="fid_formal",
         prompt_manifest_path="prompts.json",
@@ -38,6 +42,7 @@ def _job() -> EvaluationJob:
         prompt_manifest_sha256="2" * 64,
         trigger_successful_update=10,
         sample_count=50000,
+        batch_size=10,
         cfg_scale=2.9,
         sampling_profile="reference",
         solver="heun_final_euler",
@@ -46,7 +51,11 @@ def _job() -> EvaluationJob:
         solver_nfe=99,
         feature_extractor="inception",
         feature_extractor_version="1.0",
+        feature_extractor_path="extractor.pt",
+        feature_extractor_sha256="5" * 64,
+        preprocess_path="preprocess.pt",
         preprocess_sha256="3" * 64,
+        real_stats_path="real-stats.safetensors",
         real_stats_sha256="4" * 64,
         is_splits=10,
         gpu_index=0,
@@ -72,6 +81,7 @@ def test_artifact_is_immutable_records_cost_and_cannot_release(tmp_path: Path) -
     assert payload["job"]["artifact_kind"] == "fid_formal"
     assert payload["cost"] == {
         "gpu_seconds": 18.0,
+        "publication_seconds_included": False,
         "training_pause_seconds": 20.0,
         "wall_seconds": 20.0,
     }
@@ -132,7 +142,7 @@ def test_artifact_rejects_impossible_metric_values_before_publication(
 
 def test_comparison_requires_all_three_checkpoint_kinds() -> None:
     def artifact(
-        kind: CheckpointKind,
+        role: CheckpointRole,
         *,
         value: float = 12.0,
         prompt_hash: str = "2" * 64,
@@ -143,12 +153,23 @@ def test_comparison_requires_all_three_checkpoint_kinds() -> None:
         checkpoint_successful_update: int | None = None,
     ) -> EvaluationArtifact:
         if checkpoint_successful_update is None:
-            checkpoint_successful_update = 9 if kind == "accepted" else 10
+            checkpoint_successful_update = 9 if role == "accepted" else 10
+        artifact_kind = cast(
+            CheckpointArtifactKind,
+            {
+                "raw": "raw",
+                "model-only": "model-only",
+                "pma": "pma",
+                "accepted": "release",
+            }[role],
+        )
         candidate = dataclasses.replace(
             _job(),
             checkpoint=CheckpointRef(
-                f"checkpoint-{kind}",
-                kind,
+                f"checkpoint-{role}",
+                role,
+                artifact_kind,
+                "strict_jlt",
                 "1" * 64,
                 checkpoint_successful_update,
             ),
@@ -169,9 +190,9 @@ def test_comparison_requires_all_three_checkpoint_kinds() -> None:
     comparison = CheckpointMetricComparison(
         "fid_formal",
         (
-            artifact("raw_latest", value=12.0),
+            artifact("raw", value=12.0),
             artifact(
-                "pma10",
+                "pma",
                 value=11.0,
                 prompt_path="other/prompts.json",
                 gpu_index=1,
@@ -185,20 +206,20 @@ def test_comparison_requires_all_three_checkpoint_kinds() -> None:
             ),
         ),
     )
-    assert comparison.values[1] == ("pma10", 11.0)
+    assert comparison.values[1] == ("pma", 11.0)
     assert comparison.artifacts[2].job.checkpoint.successful_update == 9
 
-    with pytest.raises(ValueError, match="raw latest"):
+    with pytest.raises(ValueError, match="raw"):
         CheckpointMetricComparison(
             "fid_formal",
-            (artifact("raw_latest"), artifact("pma10"), artifact("pma10")),
+            (artifact("raw"), artifact("pma"), artifact("pma")),
         )
     with pytest.raises(ValueError, match="share metric"):
         CheckpointMetricComparison(
             "fid_formal",
             (
-                artifact("raw_latest"),
-                artifact("pma10"),
+                artifact("raw"),
+                artifact("pma"),
                 artifact("accepted", prompt_hash="9" * 64),
             ),
         )
@@ -272,6 +293,7 @@ def test_manual_quality_artifact_binds_job_checkpoint_and_prompt_plan(
         artifact_kind="manual_quality",
         prompt_manifest_sha256=prompts.sha256,
         sample_count=2,
+        batch_size=2,
     )
     job = dataclasses.replace(candidate, job_id=candidate.content_addressed_id)
     artifact = ManualQualityArtifact(
@@ -289,9 +311,11 @@ def test_manual_quality_artifact_binds_job_checkpoint_and_prompt_plan(
     assert payload["artifact_kind"] == "manual_quality"
     assert payload["automatic_release"] is False
     assert payload["job"]["checkpoint"] == {
+        "artifact_kind": "raw",
         "checkpoint_id": "checkpoint-1",
-        "kind": "raw_latest",
+        "objective_provenance": "strict_jlt",
         "resolved_config_sha256": "1" * 64,
+        "role": "raw",
         "successful_update": 10,
     }
     assert payload["job"]["trigger_successful_update"] == 10

@@ -3,9 +3,10 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 
 from sakuramoon.cli.eval import (
     build_evaluation_jobs,
@@ -34,7 +35,9 @@ def test_jobs_bind_resolved_toml_checkpoint_and_prompt_manifest(
     valid_payload["evaluation"]["prompt_manifest_path"] = str(prompt_path)
     valid_payload["evaluation"]["prompt_manifest_sha256"] = prompts.sha256
     config = RuntimeConfig.model_validate(valid_payload)
-    checkpoint = CheckpointRef("checkpoint-1", "raw_latest", "8" * 64, 10)
+    checkpoint = CheckpointRef(
+        "checkpoint-1", "raw", "raw", "strict_jlt", "8" * 64, 10
+    )
 
     first = build_evaluation_jobs(
         config,
@@ -55,6 +58,7 @@ def test_jobs_bind_resolved_toml_checkpoint_and_prompt_manifest(
     assert all(job.prompt_manifest_path == str(prompt_path) for job in first)
     assert all(job.prompt_selection == "ordered_prefix" for job in first)
     assert all(job.trigger_successful_update == 10 for job in first)
+    assert all(job.batch_size == config.evaluation.batch_size for job in first)
     assert all(job.job_id == job.content_addressed_id for job in first)
     assert all(
         (
@@ -75,6 +79,7 @@ def test_jobs_bind_resolved_toml_checkpoint_and_prompt_manifest(
     assert payload["solver"] == "heun_final_euler"
     assert payload["solver_nfe"] == 99
     assert payload["trigger_successful_update"] == 10
+    assert payload["batch_size"] == config.evaluation.batch_size
     assert payload["prompt_manifest_path"] == str(prompt_path)
     with pytest.raises(FileExistsError):
         write_evaluation_job(path, first[0])
@@ -97,7 +102,9 @@ def test_job_builder_rejects_prompt_hash_drift(
     with pytest.raises(ValueError, match="prompt manifest hash"):
         build_evaluation_jobs(
             config,
-            checkpoint=CheckpointRef("checkpoint-1", "raw_latest", "8" * 64, 10),
+            checkpoint=CheckpointRef(
+                "checkpoint-1", "raw", "raw", "strict_jlt", "8" * 64, 10
+            ),
             successful_update=10,
             stage_end=False,
         )
@@ -116,7 +123,9 @@ def test_job_builder_rejects_undersized_prompt_plan(
     with pytest.raises(ValueError, match="fewer cases"):
         build_evaluation_jobs(
             config,
-            checkpoint=CheckpointRef("checkpoint-1", "raw_latest", "8" * 64, 10),
+            checkpoint=CheckpointRef(
+                "checkpoint-1", "raw", "raw", "strict_jlt", "8" * 64, 10
+            ),
             successful_update=10,
             stage_end=False,
         )
@@ -132,13 +141,15 @@ def test_non_due_update_does_not_read_missing_prompt_manifest(
 
     assert build_evaluation_jobs(
         config,
-        checkpoint=CheckpointRef("checkpoint-1", "raw_latest", "8" * 64, 9),
+        checkpoint=CheckpointRef(
+            "checkpoint-1", "raw", "raw", "strict_jlt", "8" * 64, 9
+        ),
         successful_update=9,
         stage_end=False,
     ) == ()
 
 
-def test_disabled_metrics_do_not_read_missing_prompt_manifest_at_stage_end(
+def test_disabled_fid_is_cannot_skip_stage_end_manual_quality_prompt(
     valid_payload: dict[str, Any], tmp_path: Path
 ) -> None:
     valid_payload["evaluation"]["prompt_manifest_path"] = str(
@@ -148,12 +159,24 @@ def test_disabled_metrics_do_not_read_missing_prompt_manifest_at_stage_end(
     valid_payload["evaluation"]["is"]["enabled"] = False
     config = RuntimeConfig.model_validate(valid_payload)
 
-    assert build_evaluation_jobs(
-        config,
-        checkpoint=CheckpointRef("checkpoint-1", "raw_latest", "8" * 64, 10),
-        successful_update=10,
-        stage_end=True,
-    ) == ()
+    with pytest.raises(ValueError, match="cannot be opened"):
+        build_evaluation_jobs(
+            config,
+            checkpoint=CheckpointRef(
+                "checkpoint-1", "raw", "raw", "strict_jlt", "8" * 64, 10
+            ),
+            successful_update=10,
+            stage_end=True,
+        )
+
+
+def test_formal_manual_quality_cannot_be_disabled(
+    valid_payload: dict[str, Any],
+) -> None:
+    valid_payload["evaluation"]["manual_quality"]["enabled"] = False
+
+    with pytest.raises(ValidationError, match="literal_error"):
+        RuntimeConfig.model_validate(valid_payload)
 
 
 def test_prompt_manifest_loader_rejects_noncanonical_or_symlinked_file(
@@ -170,9 +193,16 @@ def test_prompt_manifest_loader_rejects_noncanonical_or_symlinked_file(
 
     canonical = tmp_path / "canonical.json"
     canonical.write_bytes(prompts.canonical_bytes())
+    assert load_prompt_manifest(canonical) == prompts
+    with pytest.raises(ValueError, match="canonical absolute path"):
+        load_prompt_manifest(Path("canonical.json"))
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    with pytest.raises(ValueError, match="canonical absolute path"):
+        load_prompt_manifest(nested / ".." / "canonical.json")
     symlink = tmp_path / "prompts-link.json"
     symlink.symlink_to(canonical)
-    with pytest.raises(ValueError, match="cannot be opened"):
+    with pytest.raises(ValueError, match="contains a symlink"):
         load_prompt_manifest(symlink)
 
 
@@ -183,6 +213,55 @@ def test_eval_config_rejects_is_sample_counts_not_divisible_by_splits(
     valid_payload["evaluation"]["is"][field] = 101
 
     with pytest.raises(ValueError, match="exactly divisible"):
+        RuntimeConfig.model_validate(valid_payload)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("evaluation", "fid", "feature_extractor_path"),
+        ("evaluation", "fid", "feature_extractor_sha256"),
+        ("evaluation", "fid", "preprocess_path"),
+        ("evaluation", "fid", "preprocess_sha256"),
+        ("evaluation", "fid", "real_stats_path"),
+        ("evaluation", "fid", "real_stats_sha256"),
+        ("evaluation", "batch_size"),
+        ("evaluation", "output_reserve_gib"),
+        ("evaluation", "manual_quality"),
+    ],
+)
+def test_formal_evaluator_identity_and_batch_fields_are_required(
+    valid_payload: dict[str, Any], path: tuple[str, ...]
+) -> None:
+    current = valid_payload
+    for part in path[:-1]:
+        current = cast(dict[str, Any], current[part])
+    current.pop(path[-1])
+
+    with pytest.raises(ValidationError, match="missing"):
+        RuntimeConfig.model_validate(valid_payload)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("evaluation", "fid", "feature_extractor_path"), "/tmp/extractor"),
+        (("evaluation", "fid", "preprocess_path"), "../preprocess.json"),
+        (("evaluation", "fid", "real_stats_path"), " padded "),
+        (("evaluation", "prompt_manifest_path"), " padded "),
+        (("evaluation", "manual_quality", "samples"), 101),
+        (("evaluation", "fid", "trend_samples"), 101),
+    ],
+)
+def test_formal_evaluator_rejects_unsafe_paths_or_partial_batches(
+    valid_payload: dict[str, Any], path: tuple[str, ...], value: object
+) -> None:
+    current = valid_payload
+    for part in path[:-1]:
+        current = cast(dict[str, Any], current[part])
+    current[path[-1]] = value
+
+    with pytest.raises(ValidationError):
         RuntimeConfig.model_validate(valid_payload)
 
 

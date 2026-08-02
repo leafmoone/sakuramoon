@@ -1,14 +1,33 @@
 from __future__ import annotations
 
+# pyright: reportPrivateUsage=false
 import pytest
 import torch
 
+from sakuramoon.eval.generate import _initial_gaussian_noise
 from sakuramoon.eval.metrics import (
     FeatureStats,
     frechet_inception_distance,
     inception_score,
 )
+from sakuramoon.eval.spec import PromptCase
 from sakuramoon.sampling.heun import heun_final_euler
+
+
+def test_checkpoint_evaluator_seeded_noise_is_cuda_fp32() -> None:
+    device = torch.device("cuda", 0)
+    cases = (
+        PromptCase("case-0", "synthetic prompt", (), 17, 256, 256),
+        PromptCase("case-1", "synthetic prompt", (), 23, 256, 256),
+    )
+
+    first = _initial_gaussian_noise(cases, device=device)
+    repeated = _initial_gaussian_noise(cases, device=device)
+
+    assert first.device == device
+    assert first.dtype == torch.float32
+    assert first.shape == (2, 128, 16, 16)
+    torch.testing.assert_close(first, repeated, atol=0.0, rtol=0.0)
 
 
 def test_seeded_cuda_heun_feature_and_metric_pipeline_is_deterministic() -> None:

@@ -10,12 +10,12 @@ from sakuramoon.cli.benchmark import (
     write_comparison_report,
     write_trace_index,
 )
-from sakuramoon.cli.eval import (
+from sakuramoon.cli.fault_injection import main as fault_injection_main
+from sakuramoon.eval.jobs import (
     build_evaluation_jobs,
     load_prompt_manifest,
     write_evaluation_job,
 )
-from sakuramoon.cli.fault_injection import main as fault_injection_main
 
 __all__ = [
     "benchmark_plan",

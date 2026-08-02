@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "task_id": "T052",
+  "base_commit": "0d0c792524a398533e200b92f3aa16be51c0c9f0",
+  "formal_evaluation": "blocked",
+  "evaluator_cpu": {
+    "command": "uv run --frozen pytest -q -p no:cacheprovider tests/unit/eval tests/unit/config/test_eval_jobs.py",
+    "status": "passed",
+    "passed": 148,
+    "failed": 0,
+    "warnings": 17
+  },
+  "cuda_heun_metric_smoke": {
+    "command": "CUDA_VISIBLE_DEVICES=0 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.105.08 PYTHONPATH=src uv run --frozen pytest -q -p no:cacheprovider --basetemp=/tmp/sakuramoon-eval-gpu-final-20260802 tests/gpu/eval/test_metric_pipeline.py -s",
+    "status": "passed",
+    "passed": 2,
+    "duration_seconds": 13.27,
+    "coverage": "CUDA FP32 seeded checkpoint-evaluator noise plus Heun-50/99 NFE and feature/FID/IS plumbing",
+    "classification": "synthetic_bounded_engineering_only"
+  },
+  "atomic_runner_smoke": {
+    "command": "PYTHONPATH=src uv run --frozen pytest -q -p no:cacheprovider --basetemp=/root/shared-nvme/sakuramoon/artifacts/s000-evaluator-bounded-remediation-20260802 tests/unit/eval/test_runner.py::test_runner_publishes_metrics_manual_index_and_complete_tree -s",
+    "status": "passed",
+    "passed": 1,
+    "duration_seconds": 8.88,
+    "classification": "synthetic_bounded_engineering_only",
+    "summary_sha256": "f6b773c23a2e7cfcba7e243d9b36417ea6da32b6ff8a6ad1398b39b479bd1728"
+  },
+  "eval_cli_preflight": {
+    "command": "PYTHONPATH=src uv run --frozen python -m sakuramoon.cli.eval --config eval.toml --config-root config --root /root/shared-nvme/sakuramoon --checkpoint raw=/tmp/nonexistent --successful-update 1 --trend --preflight-only",
+    "status": "blocked_expected",
+    "exit_code": 2,
+    "unresolved_bindings": 60,
+    "download_attempted": false
+  },
+  "static_validation": {
+    "ruff_check": "passed",
+    "affected_path_pyright": "0 errors, 0 warnings, 0 informations",
+    "git_diff_check": "passed"
+  }
+}
