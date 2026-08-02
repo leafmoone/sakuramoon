@@ -478,6 +478,12 @@ class BenchmarkRun:
     trace: CapturedTrace
     data_sequence_sha256: str
     shape_distribution_sha256: str
+    measured_window_seconds: float
+
+    def __post_init__(self) -> None:
+        _finite_nonnegative(
+            "measured_window_seconds", self.measured_window_seconds, positive=True
+        )
 
 
 def _process_memory_status(pid: int) -> tuple[int, int, int]:
@@ -680,6 +686,8 @@ def _derive_trace_metrics(
         raise ValueError("profiler trace omits measured successful-update markers")
 
     kernel_intervals: list[tuple[float, float]] = []
+    active_device_intervals: list[tuple[float, float]] = []
+    unknown_device_intervals: list[tuple[float, float]] = []
     grouped_intervals: dict[str, list[tuple[float, float]]] = {
         name: [] for name in kernel_groups
     }
@@ -690,7 +698,21 @@ def _derive_trace_metrics(
             continue
         mapping = cast(dict[str, object], event)
         category = mapping.get("cat")
-        if type(category) is not str or "kernel" not in category.lower():
+        if type(category) is not str:
+            continue
+        category_tokens = {
+            token.strip().lower() for token in category.split(",") if token.strip()
+        }
+        is_kernel = any("kernel" in token for token in category_tokens)
+        is_governed_transfer = bool(
+            category_tokens.intersection({"gpu_memcpy", "gpu_memset"})
+        )
+        is_unknown_device_work = (
+            not is_kernel
+            and not is_governed_transfer
+            and any(token.startswith("gpu_") for token in category_tokens)
+        )
+        if not (is_kernel or is_governed_transfer or is_unknown_device_work):
             continue
         span = _trace_span(mapping)
         if span is None:
@@ -700,6 +722,12 @@ def _derive_trace_metrics(
         if end <= start:
             continue
         clipped = (start, end)
+        if is_unknown_device_work:
+            unknown_device_intervals.append(clipped)
+        else:
+            active_device_intervals.append(clipped)
+        if not is_kernel:
+            continue
         kernel_intervals.append(clipped)
         kernel_launches += 1
         name = mapping.get("name")
@@ -716,8 +744,12 @@ def _derive_trace_metrics(
         if matched_groups:
             grouped_intervals[matched_groups[0]].append(clipped)
 
-    gpu_active = _interval_union_seconds(kernel_intervals)
-    gpu_idle = max(0.0, trace_wall - gpu_active)
+    gpu_active = _interval_union_seconds(active_device_intervals)
+    observed_device = _interval_union_seconds(
+        (*active_device_intervals, *unknown_device_intervals)
+    )
+    gpu_unattributed = max(0.0, observed_device - gpu_active)
+    gpu_idle = max(0.0, trace_wall - observed_device)
     ordered_kernel_intervals = sorted(kernel_intervals)
     kernel_gap = 0.0
     if ordered_kernel_intervals:
@@ -731,14 +763,16 @@ def _derive_trace_metrics(
         for name, intervals in grouped_intervals.items()
         if intervals
     }
-    if require_cuda_activity and kernel_launches == 0:
-        raise ValueError("CUDA profiler trace omits kernel activity")
+    if require_cuda_activity and not (
+        active_device_intervals or unknown_device_intervals
+    ):
+        raise ValueError("CUDA profiler trace omits device activity")
     return TraceMetrics(
         sampled_updates=len(sampled_successful_updates),
         trace_wall_seconds=trace_wall,
         gpu_active_seconds=gpu_active,
         gpu_idle_seconds=gpu_idle,
-        gpu_unattributed_seconds=0.0,
+        gpu_unattributed_seconds=gpu_unattributed,
         kernel_launches=kernel_launches,
         kernel_gap_seconds=kernel_gap,
         nccl_seconds=_interval_union_seconds(nccl_intervals),
@@ -861,10 +895,12 @@ def run_benchmark(
     )
     profiler_started = False
     trace_window: torch.profiler.record_function | None = None
+    trace_capture_completed = False
     trace_exported = False
     measurement_completed = False
     data_sequence_digest = hashlib.sha256()
     shape_distribution_digest = hashlib.sha256()
+    measured_window_seconds: float | None = None
 
     def observe(payload: StepPayload) -> None:
         data_sequence_digest.update(
@@ -914,6 +950,9 @@ def run_benchmark(
             )
         )
         try:
+            if cuda:
+                torch.cuda.synchronize(device)
+            measured_window_started = time.perf_counter_ns()
             for measured_update in range(1, plan.measured_updates + 1):
                 successful_update = first_measured_successful + measured_update - 1
                 tracing = measured_update <= trace_plan.sampled_updates
@@ -956,12 +995,18 @@ def run_benchmark(
                     trace_window = None
                     profiler.stop()
                     profiler_started = False
-                    profiler.export_chrome_trace(temporary_trace.as_posix())
-                    trace_exported = True
+                    trace_capture_completed = True
+            if cuda:
+                torch.cuda.synchronize(device)
+            measured_window_seconds = (
+                time.perf_counter_ns() - measured_window_started
+            ) / 1_000_000_000.0
         finally:
             host_rss_bytes, pinned_ram_bytes, host_swap_bytes = memory_sampler.stop()
-        if cuda:
-            torch.cuda.synchronize(device)
+        if not trace_capture_completed:
+            raise RuntimeError("measured profiler trace capture did not complete")
+        profiler.export_chrome_trace(temporary_trace.as_posix())
+        trace_exported = True
         observed_data_sequence_sha256 = data_sequence_digest.hexdigest()
         observed_shape_distribution_sha256 = shape_distribution_digest.hexdigest()
         if observed_data_sequence_sha256 != expected_data_sequence_sha256:
@@ -1059,6 +1104,7 @@ def run_benchmark(
             captured_trace,
             observed_data_sequence_sha256,
             observed_shape_distribution_sha256,
+            measured_window_seconds,
         )
     finally:
         temporary_trace.unlink(missing_ok=True)
@@ -1137,12 +1183,14 @@ def summarize_benchmark(
         raise ValueError("benchmark data sequence differs from workload identity")
     if run.shape_distribution_sha256 != identity.workload.shape_distribution_sha256:
         raise ValueError("benchmark shape distribution differs from workload identity")
-    total_seconds = sum(sample.step_seconds for sample in samples)
+    total_seconds = run.measured_window_seconds
     phase_totals = {
         phase: sum(sample.phase_seconds.get(phase, 0.0) for sample in samples)
         for phase in sorted(TIMING_PHASES)
     }
     steps = tuple(sample.step_seconds for sample in samples)
+    if max(steps) > total_seconds * 1.05 + 0.001:
+        raise ValueError("an update duration exceeds the measured benchmark window")
     return BenchmarkReport(
         identity=identity,
         plan=plan,
@@ -1329,6 +1377,7 @@ class ComparisonPolicy:
     cuda_reserved: ResourceIncreaseDisclosure
     host_rss: ResourceIncreaseDisclosure
     pinned_ram: ResourceIncreaseDisclosure
+    host_swap: ResourceIncreaseDisclosure
 
     def __post_init__(self) -> None:
         _finite_nonnegative(
@@ -1340,6 +1389,8 @@ class ComparisonPolicy:
             raise ValueError("regional compile gain gate must be at least 3 percent")
         for name in ("max_p95_regression_percent", "max_p99_regression_percent"):
             _finite_nonnegative(name, getattr(self, name))
+        if self.host_swap.max_extra_bytes != 0:
+            raise ValueError("benchmark comparison policy must require zero host swap")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1351,6 +1402,7 @@ class BenchmarkComparison:
     extra_cuda_reserved_bytes: int
     extra_host_rss_bytes: int
     extra_pinned_ram_bytes: int
+    extra_host_swap_bytes: int
     regional_compile_allowed: bool
 
 
@@ -1378,6 +1430,23 @@ def compare_benchmarks(
         and "kernels.attention_backend" not in after_variant.changed_config_keys
     ):
         raise ValueError("backend drift is not an explicitly disclosed variant")
+    compile_transition = (
+        "regional_compile" not in before_variant.enabled_features
+        and "regional_compile" in after_variant.enabled_features
+    )
+    expected_compile_features = set(before_variant.enabled_features) | {
+        "regional_compile"
+    }
+    if compile_transition and (
+        after_variant.changed_config_keys != ("compile.regional_enabled",)
+        or before_variant.backend != after_variant.backend
+        or set(after_variant.enabled_features) != expected_compile_features
+    ):
+        raise ValueError(
+            "regional compile comparison must isolate the compile feature and config key"
+        )
+    if baseline.max_host_swap_bytes != 0 or after.max_host_swap_bytes != 0:
+        raise ValueError("benchmark comparison requires zero host swap")
     resources = (
         (
             after.max_cuda_allocated_bytes - baseline.max_cuda_allocated_bytes,
@@ -1392,17 +1461,17 @@ def compare_benchmarks(
             after.max_pinned_ram_bytes - baseline.max_pinned_ram_bytes,
             policy.pinned_ram,
         ),
+        (
+            after.max_host_swap_bytes - baseline.max_host_swap_bytes,
+            policy.host_swap,
+        ),
     )
     if any(extra > disclosure.max_extra_bytes for extra, disclosure in resources):
         raise ValueError("after benchmark uses an undisclosed memory increase")
     gain = _percent_change(after.samples_per_second, baseline.samples_per_second)
     p95 = _percent_change(after.step_p95_seconds, baseline.step_p95_seconds)
     p99 = _percent_change(after.step_p99_seconds, baseline.step_p99_seconds)
-    compile_variant = (
-        "compile.regional_enabled" in after_variant.changed_config_keys
-        and "regional_compile" not in before_variant.enabled_features
-        and "regional_compile" in after_variant.enabled_features
-    )
+    compile_variant = compile_transition
     return BenchmarkComparison(
         throughput_gain_percent=gain,
         p95_regression_percent=p95,
@@ -1411,6 +1480,7 @@ def compare_benchmarks(
         extra_cuda_reserved_bytes=resources[1][0],
         extra_host_rss_bytes=resources[2][0],
         extra_pinned_ram_bytes=resources[3][0],
+        extra_host_swap_bytes=resources[4][0],
         regional_compile_allowed=(
             compile_variant
             and after.measured_compile_count == 0

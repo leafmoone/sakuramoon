@@ -141,6 +141,12 @@ def test_runtime_config_drives_harness_and_complete_report(
     assert plan.measured_updates == 500
     assert document["report"]["checkpoint_bytes"] > 0
     assert document["report"]["checkpoint_amortized_share"] > 0.0
+    assert run.measured_window_seconds > 0.0
+    assert (
+        document["report"]["total_measured_seconds"]
+        == run.measured_window_seconds
+        == report.total_measured_seconds
+    )
     assert document["report"]["measured_compile_count"] == 0
     assert document["report"]["measured_recompile_count"] == 0
     assert document["report"]["measured_fallback_count"] == 0
@@ -268,7 +274,7 @@ def test_comparison_artifact_persists_policy_result_and_compile_gate(
         ),
     )
     zero = ResourceIncreaseDisclosure(0, "")
-    policy = ComparisonPolicy(3.0, 0.0, 0.0, zero, zero, zero, zero)
+    policy = ComparisonPolicy(3.0, 0.0, 0.0, zero, zero, zero, zero, zero)
     destination = tmp_path / "comparison.json"
 
     result = write_comparison_report(
@@ -284,6 +290,8 @@ def test_comparison_artifact_persists_policy_result_and_compile_gate(
     assert document["policy"]["minimum_end_to_end_gain_percent"] == 3.0
     assert document["regional_compile_evidence"]["ddp"] is None
     assert document["comparison"]["regional_compile_allowed"] is False
+    assert document["comparison"]["extra_host_swap_bytes"] == 0
+    assert document["policy"]["host_swap"]["max_extra_bytes"] == 0
 
 
 def test_runtime_config_rejects_short_final_or_compile_enable(

@@ -3,12 +3,14 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import statistics
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 import torch
 
+import sakuramoon.telemetry.profiler as profiler_module
 from sakuramoon.telemetry.metrics import CORE_TIMING_PHASES
 from sakuramoon.telemetry.profiler import (
     ArtifactReference,
@@ -157,6 +159,7 @@ def _sample(
     *,
     scale: float = 1.0,
     extra_reserved: int = 0,
+    host_swap: int = 0,
 ) -> BenchmarkSample:
     return BenchmarkSample(
         update,
@@ -172,7 +175,7 @@ def _sample(
         2000 + extra_reserved,
         3000,
         400,
-        0,
+        host_swap,
         0,
         0.0,
     )
@@ -217,7 +220,11 @@ def _trace() -> TraceMetrics:
     )
 
 
-def _run(samples: tuple[BenchmarkSample, ...]) -> BenchmarkRun:
+def _run(
+    samples: tuple[BenchmarkSample, ...],
+    *,
+    measured_window_seconds: float | None = None,
+) -> BenchmarkRun:
     zero = CompileCounters(0, 0, 0)
     path = Path(__file__)
     trace = CapturedTrace(
@@ -241,6 +248,9 @@ def _run(samples: tuple[BenchmarkSample, ...]) -> BenchmarkRun:
         trace,
         "3" * 64,
         "4" * 64,
+        sum(sample.step_seconds for sample in samples)
+        if measured_window_seconds is None
+        else measured_window_seconds,
     )
 
 
@@ -300,6 +310,70 @@ def test_candidate_runner_measures_100_warmup_and_500_successful_updates(
     assert len({sample.host_rss_bytes for sample in run.samples}) == 1
     assert run.trace.metrics.sampled_updates == 5
     assert run.trace.entry.sha256 == stream_sha256(run.trace.entry.path)
+
+
+def test_trace_serialization_is_outside_the_measured_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock_ns = 0
+
+    def perf_counter_ns() -> int:
+        nonlocal clock_ns
+        clock_ns += 1_000_000
+        return clock_ns
+
+    class FakeProfiler:
+        def start(self) -> None:
+            pass
+
+        def step(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def export_chrome_trace(self, path: str) -> None:
+            nonlocal clock_ns
+            clock_ns += 10_000_000_000
+            events: list[dict[str, object]] = [
+                {
+                    "name": "benchmark_trace_window:1000:1004",
+                    "cat": "user_annotation",
+                    "ph": "X",
+                    "ts": 0,
+                    "dur": 1_000_000,
+                }
+            ]
+            events.extend(
+                {
+                    "name": (
+                        f"benchmark_measured_update:{index};"
+                        f"successful_update:{999 + index}"
+                    ),
+                    "cat": "user_annotation",
+                    "ph": "X",
+                    "ts": index,
+                    "dur": 1,
+                }
+                for index in range(1, 6)
+            )
+            Path(path).write_text(
+                json.dumps({"traceEvents": events}), encoding="utf-8"
+            )
+
+    monkeypatch.setattr(profiler_module.time, "perf_counter_ns", perf_counter_ns)
+    monkeypatch.setattr(
+        torch.profiler, "profile", lambda **_kwargs: FakeProfiler()
+    )
+
+    run = _run_observed_benchmark(
+        _plan(),
+        _Adapter(),
+        compile_probe=_zero_probe(),
+        trace_plan=_trace_plan(tmp_path),
+    )
+
+    assert run.measured_window_seconds < 10.0
 
 
 def test_measured_recompile_or_fallback_hard_fails(tmp_path: Path) -> None:
@@ -408,6 +482,171 @@ def test_summary_supports_overlapped_core_and_detailed_phases() -> None:
     ).hexdigest()
 
 
+def test_summary_uses_synchronized_window_for_aggregate_rates_and_shares() -> None:
+    plan = _plan()
+    samples = tuple(_sample(update) for update in range(1, 501))
+    checkpoint_seconds = 0.00001
+    first_phases = dict(samples[0].phase_seconds)
+    first_phases["checkpoint"] = checkpoint_seconds
+    samples = (
+        dataclasses.replace(
+            samples[0],
+            phase_seconds=first_phases,
+            checkpoint_bytes=17,
+            checkpoint_seconds=checkpoint_seconds,
+        ),
+        *samples[1:],
+    )
+    per_update_sum = sum(sample.step_seconds for sample in samples)
+    synchronized_window = per_update_sum * 0.75
+
+    report = summarize_benchmark(
+        _identity(),
+        plan,
+        _run(samples, measured_window_seconds=synchronized_window),
+    )
+
+    assert report.total_measured_seconds == pytest.approx(synchronized_window)
+    assert report.samples_per_second == pytest.approx(
+        sum(sample.samples for sample in samples) / synchronized_window
+    )
+    assert report.image_tokens_per_second == pytest.approx(
+        sum(sample.image_tokens for sample in samples) / synchronized_window
+    )
+    assert report.phase_share["checkpoint"] == pytest.approx(
+        checkpoint_seconds / synchronized_window
+    )
+    assert report.checkpoint_amortized_share == pytest.approx(
+        checkpoint_seconds / synchronized_window
+    )
+    assert report.step_p50_seconds == pytest.approx(
+        float(statistics.median(sample.step_seconds for sample in samples))
+    )
+
+
+@pytest.mark.parametrize("elapsed", [0.0, float("nan"), float("inf")])
+def test_benchmark_run_rejects_invalid_synchronized_window(elapsed: float) -> None:
+    samples = tuple(_sample(update) for update in range(1, 501))
+    with pytest.raises(ValueError, match="measured_window_seconds"):
+        _run(samples, measured_window_seconds=elapsed)
+
+
+def test_summary_rejects_update_longer_than_synchronized_window() -> None:
+    samples = (
+        _sample(1, scale=20.0),
+        *tuple(_sample(update) for update in range(2, 501)),
+    )
+    with pytest.raises(ValueError, match="update duration"):
+        summarize_benchmark(
+            _identity(),
+            _plan(),
+            _run(samples, measured_window_seconds=0.00001),
+        )
+
+
+def _write_synthetic_trace(path: Path, device_events: list[dict[str, object]]) -> None:
+    events: list[dict[str, object]] = [
+        {
+            "name": "benchmark_trace_window:1000:1000",
+            "cat": "user_annotation",
+            "ph": "X",
+            "ts": 0,
+            "dur": 1_000_000,
+        },
+        {
+            "name": "benchmark_measured_update:1;successful_update:1000",
+            "cat": "user_annotation",
+            "ph": "X",
+            "ts": 1,
+            "dur": 1,
+        },
+        *device_events,
+    ]
+    path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+
+
+def test_trace_metrics_include_overlapping_kernel_copy_and_memset_activity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "trace.json"
+    _write_synthetic_trace(
+        path,
+        [
+            {
+                "name": "fused_kernel",
+                "cat": "kernel",
+                "ph": "X",
+                "ts": 100_000,
+                "dur": 200_000,
+            },
+            {
+                "name": "copy",
+                "cat": "gpu_memcpy",
+                "ph": "X",
+                "ts": 250_000,
+                "dur": 200_000,
+            },
+            {
+                "name": "zero",
+                "cat": "gpu_memset",
+                "ph": "X",
+                "ts": 500_000,
+                "dur": 100_000,
+            },
+        ],
+    )
+
+    metrics = profiler_module._derive_trace_metrics(  # pyright: ignore[reportPrivateUsage]
+        path,
+        sampled_successful_updates=(1000,),
+        kernel_groups={"fused": ("fused_kernel",)},
+        require_cuda_activity=True,
+    )
+
+    assert metrics.gpu_active_seconds == pytest.approx(0.45)
+    assert metrics.gpu_idle_seconds == pytest.approx(0.55)
+    assert metrics.gpu_unattributed_seconds == 0.0
+    assert metrics.kernel_launches == 1
+    assert metrics.kernel_group_seconds == {"fused": pytest.approx(0.2)}
+
+
+def test_trace_metrics_classify_unknown_gpu_work_as_unattributed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "trace.json"
+    _write_synthetic_trace(
+        path,
+        [
+            {
+                "name": "kernel",
+                "cat": "kernel",
+                "ph": "X",
+                "ts": 100_000,
+                "dur": 350_000,
+            },
+            {
+                "name": "unknown",
+                "cat": "gpu_custom",
+                "ph": "X",
+                "ts": 400_000,
+                "dur": 300_000,
+            },
+        ],
+    )
+
+    metrics = profiler_module._derive_trace_metrics(  # pyright: ignore[reportPrivateUsage]
+        path,
+        sampled_successful_updates=(1000,),
+        kernel_groups={},
+        require_cuda_activity=True,
+    )
+
+    assert metrics.gpu_active_seconds == pytest.approx(0.35)
+    assert metrics.gpu_unattributed_seconds == pytest.approx(0.25)
+    assert metrics.gpu_idle_seconds == pytest.approx(0.4)
+    assert metrics.kernel_launches == 1
+
+
 def test_coarse_and_fusible_kernel_groups_require_decisions() -> None:
     report = summarize_benchmark(
         _identity(),
@@ -448,14 +687,31 @@ def _policy(*, extra_reserved: int = 0) -> ComparisonPolicy:
         ResourceIncreaseDisclosure(extra_reserved, "declared workspace" if extra_reserved else ""),
         zero,
         zero,
+        zero,
     )
 
 
-def _report(identity: BenchmarkIdentity, *, scale: float, extra_reserved: int = 0) -> BenchmarkReport:
+def _report(
+    identity: BenchmarkIdentity,
+    *,
+    scale: float,
+    extra_reserved: int = 0,
+    host_swap: int = 0,
+) -> BenchmarkReport:
     return summarize_benchmark(
         identity,
         _plan(),
-        _run(tuple(_sample(update, scale=scale, extra_reserved=extra_reserved) for update in range(1, 501))),
+        _run(
+            tuple(
+                _sample(
+                    update,
+                    scale=scale,
+                    extra_reserved=extra_reserved,
+                    host_swap=host_swap,
+                )
+                for update in range(1, 501)
+            )
+        ),
     )
 
 
@@ -586,6 +842,61 @@ def test_compile_gate_rejects_variant_without_compile_feature(tmp_path: Path) ->
         regional_compile=_regional_compile_evidence(tmp_path, after.identity),
     )
     assert comparison.regional_compile_allowed is False
+
+
+def test_compile_gate_rejects_combined_backend_and_compile_change() -> None:
+    changed = ("compile.regional_enabled", "kernels.attention_backend")
+    baseline_identity = _identity(changed=changed, world_size=4)
+    baseline_identity = dataclasses.replace(
+        baseline_identity,
+        variant=dataclasses.replace(
+            baseline_identity.variant, backend="dense_sdpa_reference"
+        ),
+    )
+    after_identity = _identity(
+        variant="compile-and-backend",
+        changed=changed,
+        features=("dit", "regional_compile"),
+        world_size=4,
+    )
+    after_identity = dataclasses.replace(
+        after_identity,
+        variant=dataclasses.replace(after_identity.variant, backend="fa4_varlen"),
+    )
+
+    with pytest.raises(ValueError, match="must isolate"):
+        compare_benchmarks(
+            _report(baseline_identity, scale=1.0),
+            _report(after_identity, scale=0.9),
+            policy=_policy(),
+            regional_compile=RegionalCompileEvidence(None, None, None),
+        )
+
+
+@pytest.mark.parametrize(("baseline_swap", "after_swap"), [(1, 0), (0, 1)])
+def test_comparison_rejects_any_host_swap(baseline_swap: int, after_swap: int) -> None:
+    with pytest.raises(ValueError, match="zero host swap"):
+        compare_benchmarks(
+            _report(_identity(), scale=1.0, host_swap=baseline_swap),
+            _report(_identity(variant="after"), scale=0.9, host_swap=after_swap),
+            policy=_policy(),
+            regional_compile=RegionalCompileEvidence(None, None, None),
+        )
+
+
+def test_comparison_policy_rejects_host_swap_allowance() -> None:
+    zero = ResourceIncreaseDisclosure(0, "")
+    with pytest.raises(ValueError, match="zero host swap"):
+        ComparisonPolicy(
+            3.0,
+            0.0,
+            0.0,
+            zero,
+            zero,
+            zero,
+            zero,
+            ResourceIncreaseDisclosure(1, "not permitted"),
+        )
 
 
 def test_compile_artifact_rejects_non_exact_schema_types(tmp_path: Path) -> None:

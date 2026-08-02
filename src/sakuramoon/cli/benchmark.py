@@ -176,6 +176,7 @@ def comparison_policy(
     cuda_reserved: ResourceIncreaseDisclosure,
     host_rss: ResourceIncreaseDisclosure,
     pinned_ram: ResourceIncreaseDisclosure,
+    host_swap: ResourceIncreaseDisclosure,
 ) -> ComparisonPolicy:
     return ComparisonPolicy(
         config.compile.minimum_end_to_end_gain_percent,
@@ -185,6 +186,7 @@ def comparison_policy(
         cuda_reserved,
         host_rss,
         pinned_ram,
+        host_swap,
     )
 
 
