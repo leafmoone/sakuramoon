@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 111
+registry_revision = 112
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -10365,8 +10365,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "optimizer.*",
     "scheduler.*",
@@ -10437,8 +10437,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "optimizer.*",
     "scheduler.*",
@@ -12036,8 +12036,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "logging.*",
     "wandb.*",
@@ -12109,8 +12109,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "logging.*",
     "logging.noise_observation_boundary",
@@ -12185,8 +12185,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "logging.*",
     "wandb.*",
@@ -12305,8 +12305,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "logging.*",
     "wandb.*",
@@ -12364,8 +12364,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "logging.*",
     "wandb.*",
@@ -12424,8 +12424,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "logging.*",
     "wandb.*",
@@ -12486,8 +12486,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "logging.*",
     "wandb.*",
@@ -12546,8 +12546,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "logging.*",
     "wandb.*",
@@ -12606,8 +12606,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "logging.*",
     "wandb.*",
@@ -12690,8 +12690,8 @@ implementation_paths = [
 ]
 evidence_hardware = ""
 evidence_artifacts = []
-ai_review = ""
-infra_review = ""
+ai_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/ai_review.md"
+infra_review = "docs/model-architecture/reviews/TRAINING_UTILITIES/infra_review.md"
 config_keys = [
     "logging.*",
     "wandb.*",
