@@ -1,5 +1,5 @@
 schema_version = 1
-registry_revision = 112
+registry_revision = 113
 archive_manifest = "docs/model-architecture/SHA256SUMS"
 roadmap = "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md"
 [[changes]]
@@ -5856,6 +5856,7 @@ implementation_paths = [
     "docs/model-architecture/reviews/T054/fault_matrix.json",
     "docs/model-architecture/reviews/T054/ai_review.md",
     "docs/model-architecture/reviews/T054/infra_review.md",
+    "docs/model-architecture/reviews/T054/readiness_report.json",
     "docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md",
     "docs/model-architecture/progress/tasks/D022.md",
     "docs/model-architecture/reviews/D022/test_report.json",
@@ -10986,6 +10987,7 @@ implementation_paths = [
     "docs/model-architecture/reviews/T054/implementation_report.md",
     "docs/model-architecture/reviews/T054/test_report.json",
     "docs/model-architecture/reviews/T054/fault_matrix.json",
+    "docs/model-architecture/reviews/T054/readiness_report.json",
     "docs/model-architecture/progress/traceability.toml",
 ]
 evidence_hardware = ""

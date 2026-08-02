@@ -27,3 +27,19 @@ backend, world size, optimizer, LR, feature gates, or checkpoint cadence.
 DDP reduction kill, SR rank divergence, NCCL rank failure, synchronized all-rank stop,
 four-rank raw recovery/state equality, and formal fault canaries remain blocked on
 `FOUR-GPU-AVAILABLE`; none is inferred from 1GPU evidence.
+
+## Main-agent post-remediation readiness self-review
+
+The 2026-08-02 readiness run exposed a package-import regression before any fault was
+injected: the readiness-only worker spent 12.847739 seconds loading transitive
+checkpoint and Torch modules and missed the fixed five-second barrier. Converting the
+package exports to the repository's established lazy-public-API pattern preserves all
+symbols and type-only imports while reducing the fresh credential-free import to
+0.030985 seconds.
+
+The three phase-specific SIGKILL barriers now pass, as do the complete 159-test CPU
+selector and seven bounded single-GPU tests. This validates the control-plane timing
+needed to reach the intended fault boundary; it does not add training semantics,
+fallbacks, or production-stage claims. Main-agent AI/model self-review is PASS for the
+implemented CPU and bounded 1GPU scope only. No independent post-remediation conclusion
+is claimed under the user's no-agent direction.

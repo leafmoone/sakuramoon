@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "task_id": "T054",
+  "review_kind": "main_agent_post_remediation_readiness",
+  "base_t054_commit": "25282782eceef188d1cc5ca810c0c6abd7630989",
+  "head_reviewed": "4a30f0e6a503da89d0f95105d4f3bfa7df6c1fae",
+  "finding": {
+    "id": "T054-READINESS-001",
+    "status": "resolved",
+    "summary": "The public fault-injection package eagerly imported checkpoint and Torch dependencies before a readiness-only child could signal its inherited pipe.",
+    "readiness_contract_seconds": 5.0,
+    "pre_fix_fresh_import_seconds": 12.847739,
+    "remediation": "Resolve the unchanged public API lazily from each owning module.",
+    "post_fix_fresh_import_seconds": 0.030985
+  },
+  "fresh_import_probe": {
+    "command": "env -i PATH=/usr/bin:/bin PYTHONPATH=/root/shared-nvme/sakuramoon/src /root/shared-nvme/sakuramoon/.venv/bin/python -c 'import time; start=time.perf_counter(); from sakuramoon.fault_injection import signal_ready_from_environment; print(f\"{time.perf_counter()-start:.6f}\")'",
+    "credential_environment": "empty allowlist probe",
+    "status": "passed"
+  },
+  "targeted_cpu_initial": {
+    "command": "uv run --frozen pytest -q -p no:cacheprovider --basetemp=/tmp/sakuramoon-t054-main-readiness-cpu-20260802 tests/fault_injection/test_control_plane.py tests/fault_injection/test_data_failures.py tests/fault_injection/test_training_failures.py tests/unit/data/test_state.py tests/unit/data/test_modelscope.py tests/unit/data/test_cache.py tests/unit/data/test_pipeline.py tests/unit/train/test_step.py tests/unit/train/test_loop.py tests/unit/train/test_preflight_failures.py tests/unit/checkpoint/test_checkpoint.py",
+    "status": "failed",
+    "passed": 156,
+    "failed": 3,
+    "failed_scope": "the microbatch, optimizer, and checkpoint SIGKILL readiness-barrier variants"
+  },
+  "focused_control_plane_rerun": {
+    "command": "uv run --frozen pytest -q -p no:cacheprovider --basetemp=/tmp/sakuramoon-t054-main-readiness-driver-20260802 tests/fault_injection/test_control_plane.py",
+    "status": "passed",
+    "passed": 10,
+    "failed": 0,
+    "warnings": 3,
+    "duration_seconds": 10.49
+  },
+  "targeted_cpu_rerun": {
+    "command": "uv run --frozen pytest -q -p no:cacheprovider --basetemp=/tmp/sakuramoon-t054-main-readiness-cpu-rerun-20260802 tests/fault_injection/test_control_plane.py tests/fault_injection/test_data_failures.py tests/fault_injection/test_training_failures.py tests/unit/data/test_state.py tests/unit/data/test_modelscope.py tests/unit/data/test_cache.py tests/unit/data/test_pipeline.py tests/unit/train/test_step.py tests/unit/train/test_loop.py tests/unit/train/test_preflight_failures.py tests/unit/checkpoint/test_checkpoint.py",
+    "status": "passed",
+    "passed": 159,
+    "failed": 0,
+    "warnings": 5,
+    "duration_seconds": 28.87
+  },
+  "targeted_single_gpu": {
+    "command": "CUDA_VISIBLE_DEVICES=0 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.105.08 uv run --frozen pytest -q -p no:cacheprovider --basetemp=/tmp/sakuramoon-t054-main-readiness-gpu-20260802 tests/fault_injection/test_single_gpu_faults.py tests/gpu/checkpoint/test_raw_checkpoint.py::test_fault_recovery_selector_requires_exact_complete_raw_parent tests/gpu/checkpoint/test_raw_checkpoint.py::test_fresh_process_resume_matches_next_update -s",
+    "status": "passed",
+    "passed": 7,
+    "failed": 0,
+    "warnings": 17,
+    "duration_seconds": 113.11,
+    "gpu": "NVIDIA GeForce RTX 5090"
+  },
+  "static_validation": {
+    "ruff": "passed",
+    "pyright": "0 errors, 0 warnings, 0 informations",
+    "git_diff_check": "passed"
+  },
+  "traceability_validation": {
+    "method": "archive-free Python tomllib parsing and stable-field comparison",
+    "archive_reading_verifier": "not_run:prohibited_archive_access"
+  },
+  "review_authority": "main_agent_self_review",
+  "independent_post_remediation_review": "not_run:user_directed_no_agents",
+  "ddp_reduction_kill": "blocked:FOUR-GPU-AVAILABLE",
+  "sr_rank_divergence": "blocked:FOUR-GPU-AVAILABLE",
+  "nccl_rank_failure": "blocked:FOUR-GPU-AVAILABLE",
+  "all_rank_stop": "blocked:FOUR-GPU-AVAILABLE",
+  "four_rank_checkpoint_recovery": "blocked:FOUR-GPU-AVAILABLE",
+  "formal_stage_fault_canary": "blocked:FOUR-GPU-AVAILABLE-and-NO-LONG-RUN"
+}

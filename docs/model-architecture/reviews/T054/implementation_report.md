@@ -57,3 +57,24 @@ matrix/OOM result without explicit parent restoration. All three are remediated 
 Two direct attempts to start a fresh reviewer failed with `agent thread limit reached`;
 the user directed continuation without agents. The final acceptance is therefore a
 main-agent remediation review, not a falsely claimed independent rereview.
+
+## Main-agent readiness revalidation
+
+On 2026-08-02, the archive-free T054 CPU selector initially reported 156 passed and
+three failed. All three failures were the real-SIGKILL readiness-barrier variants. A
+fresh credential-free process required 12.847739 seconds to import
+`signal_ready_from_environment`, exceeding the driver's fixed five-second contract.
+The public package initializer eagerly imported evidence, checkpoint, and Torch code
+that the readiness-only child does not use.
+
+The package now keeps the same public names while resolving each name from its owning
+module on first access. A fresh credential-free import completed in 0.030985 seconds.
+The focused control-plane file then passed 10 tests, the full CPU selector passed all
+159 tests, and the bounded RTX 5090 matrix passed all seven tests. Ruff, Pyright, and
+the whitespace check also passed. Exact commands and results are recorded in
+`readiness_report.json` without replacing the original task evidence.
+
+This follow-up is a main-agent implementation and self-review because the user directed
+that no agents be used. It does not claim a fresh independent AI or Infra review. The
+existing independent audit findings remain preserved above, and every four-GPU and
+formal-canary blocker remains unchanged.
