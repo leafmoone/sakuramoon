@@ -74,7 +74,11 @@ class DataServiceClient:
         finally:
             connection.close()
         if response.get("ok") is not True:
-            raise DataServiceUnavailable("data service rejected the request")
+            reason = response.get("error")
+            detail = reason if isinstance(reason, str) and reason else "unknown error"
+            raise DataServiceUnavailable(
+                f"data service rejected the request: {detail}"
+            )
         return response
 
     def _health_identity(self) -> tuple[DataServiceSessionIdentity, bool]:
@@ -90,7 +94,6 @@ class DataServiceClient:
             "ok",
             "protocol_version",
             "session_identity",
-            "session_sha256",
         } or (
             response["protocol_version"] != SERVICE_PROTOCOL_VERSION
             or type(response["done"]) is not bool
@@ -104,10 +107,7 @@ class DataServiceClient:
             raise DataServiceUnavailable(
                 "data service health identity is invalid"
             ) from None
-        if (
-            identity.worker_count != self.worker_count
-            or response["session_sha256"] != identity.sha256
-        ):
+        if identity.worker_count != self.worker_count:
             raise DataServiceUnavailable("data service health identity is invalid")
         return identity, response["done"]
 
@@ -121,7 +121,7 @@ class DataServiceClient:
         response = self._request(
             {
                 "op": "lease",
-                "session_sha256": self.identity.sha256,
+                "session_id": self.identity.session_id,
                 "worker_id": worker_id,
             }
         )
@@ -147,8 +147,8 @@ class DataServiceClient:
             {
                 "lease_id": descriptor.lease_id,
                 "op": "ack",
-                "session_sha256": self.identity.sha256,
-                "state_identity": descriptor.state_identity,
+                "session_id": self.identity.session_id,
+                "state_revision": descriptor.state_revision,
                 "worker_id": descriptor.worker_id,
             }
         )

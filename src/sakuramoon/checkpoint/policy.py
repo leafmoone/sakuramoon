@@ -47,7 +47,7 @@ class RawRetentionPlan:
 
 
 def _retention_manifest(path: Path) -> CheckpointManifest:
-    """Validate complete checkpoint metadata without rehashing multi-GB payloads."""
+    """Validate complete checkpoint metadata without rereading multi-GB payloads."""
 
     if path.is_symlink() or not path.is_dir():
         raise CheckpointError("retention checkpoint must be a real directory")

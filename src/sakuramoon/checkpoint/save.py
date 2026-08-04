@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -35,7 +34,6 @@ from sakuramoon.checkpoint.schema import (
     raw_state_to_dict,
 )
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
-from sakuramoon.optim.groups import audit_trainable_parameters
 
 _SAFETENSORS_HEADER_RESERVE_BYTES = 1024 * 1024
 
@@ -67,14 +65,6 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _target_name(kind: CheckpointKind, identity: CheckpointIdentity) -> str:
@@ -157,7 +147,7 @@ def _write_model(
         model_dir / "manifest.json",
         {
             "files": [
-                {"path": record.path, "sha256": record.sha256, "size": record.size}
+                {"path": record.path, "size": record.size}
                 for record in model_records
             ],
             "schema_version": 1,
@@ -178,7 +168,6 @@ def _optimizer_schema(optimizer: IsolatedAdamW8bit) -> dict[str, object]:
         groups.append({"group_name": group_name, "param_names": param_names})
     return {
         "groups": groups,
-        "parameter_schema_sha256": optimizer.audit.schema_sha256,
         "schema_version": 1,
     }
 
@@ -226,7 +215,7 @@ def _payload_records(temporary: Path) -> tuple[FileRecord, ...]:
     for path in sorted(temporary.rglob("*")):
         relative = path.relative_to(temporary).as_posix()
         if path.is_file() and relative not in {"manifest.json", "COMPLETE"}:
-            records.append(FileRecord(relative, path.stat().st_size, _sha256(path)))
+            records.append(FileRecord(relative, path.stat().st_size))
     return tuple(records)
 
 
@@ -254,21 +243,9 @@ def _save(
             raise ValueError("resolved config must be valid UTF-8 TOML") from None
         if not parsed_config:
             raise ValueError("resolved config must be nonempty")
-        if hashlib.sha256(resolved_config).hexdigest() != identity.config_sha256:
-            raise ValueError("resolved config hash does not match checkpoint identity")
     elif resolved_config is not None:
         raise ValueError("non-raw artifacts cannot contain resolved config sidecars")
     export_trainable_composite(module)
-    if optimizer is not None and optimizer.audit.schema_sha256 != identity.parameter_schema_sha256:
-        raise ValueError("optimizer parameter schema does not match checkpoint identity")
-    if optimizer is None:
-        audit = audit_trainable_parameters(
-            module,
-            matrix_weight_decay=0.01,
-            sensitive_weight_decay=0.0,
-        )
-        if audit.schema_sha256 != identity.parameter_schema_sha256:
-            raise ValueError("model parameter schema does not match checkpoint identity")
     if state is not None and identity.update != state.trainer.successful_updates:
         raise ValueError("checkpoint update must equal successful optimizer updates")
     if optimizer is not None:

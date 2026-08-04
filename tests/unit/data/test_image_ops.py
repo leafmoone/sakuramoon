@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from collections.abc import Iterator
@@ -234,12 +233,11 @@ def test_image_scan_report_is_canonical_fsynced_and_atomically_replaced(
     monkeypatch.setattr(os, "fsync", record_fsync)
     monkeypatch.setattr(os, "replace", record_replace)
 
-    digest = write_image_scan_report(report, destination)
+    write_image_scan_report(report, destination)
 
     assert fsync_calls == 1
     assert replace_calls == 1
     assert destination.read_bytes() == payload
-    assert digest == hashlib.sha256(payload).hexdigest()
     document = json.loads(payload)
     assert document["schema_version"] == 1
     assert document["bucket_scan"]["assigned_samples"] == 1

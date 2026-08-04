@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from sakuramoon.data.manifest import DatasetManifest
 from sakuramoon.data.modelscope import (
+    DownloadProgress,
     FetchedShard,
     ModelScopeDatasetTransport,
     fetch_dataset_shard,
@@ -114,7 +116,12 @@ class ShardCache:
         return tuple(evicted)
 
     def fetch(
-        self, shard_path: str, *, protected_paths: frozenset[str] = frozenset()
+        self,
+        shard_path: str,
+        *,
+        protected_paths: frozenset[str] = frozenset(),
+        progress: DownloadProgress | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> CachedShard:
         shard = self.manifest.shard(shard_path)
         with self._lock:
@@ -125,7 +132,12 @@ class ShardCache:
             self._reservations[shard_path] = reserved
         try:
             fetched = fetch_dataset_shard(
-                self.transport, self.manifest, shard_path, self.root
+                self.transport,
+                self.manifest,
+                shard_path,
+                self.root,
+                progress=progress,
+                cancelled=cancelled,
             )
             with self._lock:
                 try:
@@ -145,34 +157,33 @@ class ShardCache:
                 self._reservations.pop(shard_path, None)
         return CachedShard(fetched=fetched, evicted_paths=evicted, usage_bytes=usage)
 
-    def cleanup_manifest_partials(self) -> tuple[str, ...]:
-        """Remove only manifest-owned interrupted download files."""
+    def resumable_partials(self) -> tuple[tuple[str, int], ...]:
+        """List interrupted downloads without discarding their progress."""
 
-        removed: list[str] = []
-        synced: set[Path] = set()
+        found: list[tuple[str, int]] = []
         with self._lock:
             if self._reservations:
-                raise ShardCacheError("partial cleanup requires no in-flight downloads")
+                raise ShardCacheError("partial inspection requires no in-flight downloads")
             try:
                 for shard in self.manifest.shards:
                     destination = self._path(shard.path)
                     partial = destination.with_name(f"{destination.name}.partial")
-                    if partial.is_symlink():
-                        raise ShardCacheError("cache partial must not be a symlink")
-                    if partial.exists():
-                        if not partial.is_file():
+                    candidates = (partial,)
+                    if partial.is_file():
+                        candidates += tuple(
+                            partial.parent.glob(f"{partial.name}.range-*")
+                        )
+                    for candidate in candidates:
+                        if candidate.is_symlink():
+                            raise ShardCacheError(
+                                "cache partial must not be a symlink"
+                            )
+                        if candidate.exists() and not candidate.is_file():
                             raise ShardCacheError(
                                 "cache partial must be a regular file"
                             )
-                        partial.unlink()
-                        removed.append(shard.path)
-                        synced.add(partial.parent)
-                for directory in sorted(synced):
-                    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-                    try:
-                        os.fsync(descriptor)
-                    finally:
-                        os.close(descriptor)
+                        if candidate.is_file():
+                            found.append((shard.path, candidate.stat().st_size))
             except OSError:
-                raise ShardCacheError("cache partial cleanup failed") from None
-        return tuple(removed)
+                raise ShardCacheError("cache partial inspection failed") from None
+        return tuple(found)

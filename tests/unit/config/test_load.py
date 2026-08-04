@@ -39,7 +39,6 @@ def test_recursive_merge_is_deterministic(
 
     assert first.config.run.run_id == "merged"
     assert first.resolved_toml == second.resolved_toml
-    assert first.resolved_sha256 == second.resolved_sha256
     assert [item.path for item in first.inputs] == ["base.toml", "overlay.toml"]
 
 
@@ -186,7 +185,6 @@ def test_environment_values_do_not_appear_in_result(
     for value in secret_environment.values():
         assert value not in loaded.resolved_toml
         assert value not in repr(loaded)
-    assert len(loaded.resolved_sha256) == 64
 
 
 def test_secret_resolution_returns_masked_transient_value() -> None:

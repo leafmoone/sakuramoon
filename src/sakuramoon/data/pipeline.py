@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import math
+import random
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import torch
 import webdataset as wds
@@ -23,7 +23,7 @@ from sakuramoon.data.caption import (
     build_caption_plan,
 )
 from sakuramoon.data.image_ops import ImageRejected, prepare_image
-from sakuramoon.data.manifest import DatasetManifest, ShardRecord
+from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.metadata import (
     MetadataFieldMapping,
     OperationalMetadataRecord,
@@ -35,9 +35,6 @@ from sakuramoon.data.serialize import (
     TokenEncoder,
     serialize_caption,
 )
-
-if TYPE_CHECKING:
-    from sakuramoon.data.state import ShardRunState, SingleProcessShardCoordinator
 
 CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
 MetadataAdapter = Callable[[Mapping[str, object]], Mapping[str, object]]
@@ -141,8 +138,8 @@ def _domain_seed(
         or sample_id <= 0
     ):
         raise PipelineSampleError("RNG identity fields are invalid")
-    payload = f"{base_seed}\0{stage}\0{cycle_index}\0{sample_id}\0{domain}".encode()
-    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") & (2**63 - 1)
+    material = f"{base_seed}\0{stage}\0{cycle_index}\0{sample_id}\0{domain}"
+    return random.Random(material).randrange(2**63)
 
 
 def rng_identity(
@@ -156,25 +153,6 @@ def rng_identity(
         caption_seed=_domain_seed(base_seed, stage, cycle_index, sample_id, "caption"),
         crop_seed=_domain_seed(base_seed, stage, cycle_index, sample_id, "crop"),
     )
-
-
-def local_shard_order(
-    cache_root: Path,
-    manifest: DatasetManifest,
-    state: ShardRunState,
-) -> tuple[Path, ...]:
-    """Put an interrupted active shard first and omit completed shards."""
-
-    known = {shard.path for shard in manifest.shards}
-    if not set(state.completed).issubset(known) or state.active not in known | {None}:
-        raise PipelineSampleError("shard state does not match the manifest")
-    remaining = [
-        shard.path for shard in manifest.shards if shard.path not in state.completed
-    ]
-    if state.active is not None:
-        remaining.remove(state.active)
-        remaining.insert(0, state.active)
-    return tuple(cache_root / path for path in remaining)
 
 
 def _metadata(sample: Mapping[str, object]) -> Mapping[str, object]:
@@ -411,35 +389,6 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         pipeline._lease_managed = True
         return pipeline
 
-    def iter_leased_shards(
-        self,
-        coordinator: SingleProcessShardCoordinator,
-        shard_paths: tuple[str, ...],
-    ) -> Iterator[PipelineSample]:
-        """Consume cached shards under the durable at-least-once lease boundary."""
-
-        if (
-            type(shard_paths) is not tuple
-            or not shard_paths
-            or any(
-                type(path) is not str
-                or not path
-                or path != path.strip()
-                or Path(path).is_absolute()
-                for path in shard_paths
-            )
-            or len(set(shard_paths)) != len(shard_paths)
-        ):
-            raise PipelineSampleError("leased pipeline requires explicit shard paths")
-        for shard_path in shard_paths:
-            with coordinator.lease(shard_path) as cached:
-                if cached is None:
-                    continue
-                if cached.fetched.relative_path != shard_path:
-                    raise PipelineSampleError("cache returned a different leased shard")
-                record = coordinator.store.manifest.shard(shard_path)
-                yield from self._iter_paths((cached.fetched.path,), (record,))
-
     def __iter__(self) -> Iterator[PipelineSample]:
         if get_worker_info() is not None and not self._lease_managed:
             raise PipelineSampleError(
@@ -457,6 +406,5 @@ __all__ = [
     "RejectionObserver",
     "RngIdentity",
     "WebDatasetPipeline",
-    "local_shard_order",
     "rng_identity",
 ]

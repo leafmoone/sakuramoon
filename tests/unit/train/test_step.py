@@ -4,6 +4,7 @@ import pytest
 import torch
 from torch import nn
 
+import sakuramoon.train.step as step_module
 from sakuramoon.conditioning.style_resampler import StyleResampler
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import PackedDiT
@@ -115,10 +116,6 @@ def test_production_composite_locks_trainable_fqn_boundary() -> None:
     assert len(audit.specs) == 239
     assert len(audit.decay) == 126
     assert len(audit.sensitive) == 113
-    assert (
-        audit.schema_sha256
-        == "16a0887eb1b638bb42e5780d3a759e66a82f476221fd311f1f0ff9037a7682a6"
-    )
 
 
 def test_unequal_microbatches_match_merged_sample_mean_update() -> None:
@@ -251,6 +248,33 @@ def test_failed_optimizer_attempt_is_counted_and_cannot_continue() -> None:
         step.finish_update()
 
     assert step.state == SingleGpuUpdateState(1, 0, 0)
+    assert step.detection_phase == "optimizer"
+    with pytest.raises(RuntimeError, match="cannot continue"):
+        step.finish_update()
+
+
+def test_completion_failure_prevents_successful_update_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parameter = nn.Parameter(torch.tensor(0.0))
+    step = SingleGpuStep(
+        nn.ParameterList([parameter]),
+        _SgdAdapter([parameter]),
+        accumulation_steps=1,
+        state=SingleGpuUpdateState.initial(),
+    )
+    step.backward((parameter - 1.0).square().reshape(1))
+
+    def fail_completion(_device: torch.device) -> None:
+        raise RuntimeError("device completion failed")
+
+    monkeypatch.setattr(step_module, "_complete_device_work", fail_completion)
+    with pytest.raises(RuntimeError, match="completion failed"):
+        step.finish_update()
+
+    assert step.state == SingleGpuUpdateState(1, 0, 0)
+    assert step.detection_phase == "device_completion"
+    assert parameter.grad is None
     with pytest.raises(RuntimeError, match="cannot continue"):
         step.finish_update()
 
@@ -275,6 +299,7 @@ def test_post_step_zero_grad_failure_preserves_successful_mutation_state() -> No
 
     assert parameter.item() != 0.0
     assert step.state == SingleGpuUpdateState(1, 1, 1)
+    assert step.detection_phase == "zero_grad"
     with pytest.raises(RuntimeError, match="cannot continue"):
         step.finish_update()
 

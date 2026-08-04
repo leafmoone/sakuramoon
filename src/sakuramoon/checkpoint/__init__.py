@@ -1,4 +1,4 @@
-"""Strict single-GPU checkpoint save and restore."""
+"""Single-GPU checkpoint save and restore."""
 
 from sakuramoon.checkpoint.load import (
     discover_complete_checkpoints,
@@ -7,7 +7,6 @@ from sakuramoon.checkpoint.load import (
     load_model_only,
     load_raw_checkpoint,
 )
-from sakuramoon.checkpoint.pma import PMA_WINDOW, save_pma10, save_release
 from sakuramoon.checkpoint.policy import (
     FORCED_CHECKPOINT_REASONS,
     CheckpointCadence,
@@ -31,7 +30,6 @@ from sakuramoon.checkpoint.schema import (
 
 __all__ = [
     "FORCED_CHECKPOINT_REASONS",
-    "PMA_WINDOW",
     "CheckpointCadence",
     "CheckpointIdentity",
     "CheckpointKind",
@@ -49,7 +47,5 @@ __all__ = [
     "load_raw_checkpoint",
     "plan_raw_retention",
     "save_model_only",
-    "save_pma10",
     "save_raw_checkpoint",
-    "save_release",
 ]

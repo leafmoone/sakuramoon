@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 import sakuramoon.model.attention as attention_module
 from sakuramoon.model.attention import (
+    FA4_PACK_GQA,
     AcceptedCuSeqlens,
     DenseGQAAttention,
     FA4VarlenGQAAttention,
@@ -249,6 +250,56 @@ def test_full_fa4_attention_forward_backward_and_update() -> None:
     assert torch.isfinite(output).all()
     assert query_grad is not None and torch.isfinite(query_grad).all()
     assert not torch.equal(weight_before, module.q_proj.weight)
+
+
+def test_sm120_production_asymmetric_length_matrix_repeats_backward() -> None:
+    assert FA4_PACK_GQA is False
+    torch.manual_seed(457)  # pyright: ignore[reportUnknownMemberType]
+    length_pairs = (
+        (299, 774),
+        (774, 299),
+        (319, 320),
+        (383, 641),
+        (511, 769),
+    )
+
+    for _ in range(4):
+        for lengths in length_pairs:
+            total = sum(lengths)
+            boundaries = _validated_boundaries((0, lengths[0], total))
+            query = torch.randn(
+                total,
+                20,
+                128,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            )
+            key = torch.randn(
+                total,
+                5,
+                128,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            )
+            value = torch.randn(
+                total,
+                5,
+                128,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            )
+
+            output = fa4_varlen_attention(query, key, value, boundaries)
+            torch.cuda.synchronize()
+            output.float().square().mean().backward()  # pyright: ignore[reportUnknownMemberType]
+            torch.cuda.synchronize()
+
+            assert query.grad is not None and torch.isfinite(query.grad).all()
+            assert key.grad is not None and torch.isfinite(key.grad).all()
+            assert value.grad is not None and torch.isfinite(value.grad).all()
 
 
 @pytest.mark.parametrize("lengths", [(), (0,), (-1,), (True,)])

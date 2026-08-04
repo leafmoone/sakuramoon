@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+import sakuramoon.model.dit as dit_module
 from sakuramoon.model.dit import DenseDiT, PackedDiT
 from sakuramoon.model.growth import active_slot_ids, new_slot_ids, slot_growth
 from sakuramoon.model.output_head import FinalOutputHead
@@ -220,6 +221,77 @@ def test_dense_dit_predicts_only_latent_shape_and_records_metadata() -> None:
         "depth": 16,
         "stable_slot_count": 24,
     }
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_calls"),
+    [("none", 0), ("alternating", 8), ("all", 16)],
+)
+def test_dense_activation_checkpoint_policy_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    expected_calls: int,
+) -> None:
+    calls = 0
+
+    def observe(operation: object, *args: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        nonlocal calls
+        calls += 1
+        assert kwargs == {"preserve_rng_state": False, "use_reentrant": False}
+        assert callable(operation)
+        result = operation(*args)
+        assert isinstance(result, torch.Tensor)
+        return result
+
+    monkeypatch.setattr(dit_module, "_activation_checkpoint", observe)
+    model = _model(16)
+    model.set_activation_checkpoint_mode(mode)
+
+    model(*_inputs(), growth_alpha=1.0)
+
+    assert model.activation_checkpoint_mode == mode
+    assert calls == expected_calls
+
+
+def test_dense_activation_checkpoint_matches_forward_and_gradients() -> None:
+    torch.manual_seed(902)  # pyright: ignore[reportUnknownMemberType]
+    reference = _model(16)
+    with torch.no_grad():
+        for parameter in reference.parameters():
+            parameter.uniform_(-0.02, 0.02)
+    checkpointed = _model(16)
+    checkpointed.load_state_dict(reference.state_dict())
+    checkpointed.set_activation_checkpoint_mode("all")
+    inputs = _inputs()
+
+    reference_output = reference(*inputs, growth_alpha=1.0)
+    checkpointed_output = checkpointed(*inputs, growth_alpha=1.0)
+    reference_output.float().square().mean().backward()
+    checkpointed_output.float().square().mean().backward()
+
+    torch.testing.assert_close(checkpointed_output, reference_output, atol=0, rtol=0)
+    reference_parameters = dict(reference.named_parameters())
+    checkpointed_parameters = dict(checkpointed.named_parameters())
+    assert reference_parameters.keys() == checkpointed_parameters.keys()
+    for name, reference_parameter in reference_parameters.items():
+        expected = reference_parameter.grad
+        actual = checkpointed_parameters[name].grad
+        assert (expected is None) == (actual is None), name
+        if expected is not None and actual is not None:
+            torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+
+
+def test_activation_checkpoint_mode_is_runtime_only_and_validated() -> None:
+    model = _model(16)
+    artifact = model.artifact_config()
+    state_keys = model.state_dict().keys()
+
+    model.set_activation_checkpoint_mode("all")
+
+    assert model.artifact_config() == artifact
+    assert model.state_dict().keys() == state_keys
+    with pytest.raises(ValueError, match="activation checkpoint mode"):
+        model.set_activation_checkpoint_mode("unknown")
 
 
 def test_packed_and_dense_production_state_dicts_are_isomorphic() -> None:

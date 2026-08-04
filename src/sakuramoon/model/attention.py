@@ -20,6 +20,9 @@ from sakuramoon.conditioning.rope import QKRoPE2D
 FA4_QUERY_HEADS = 20
 FA4_KV_HEADS = 5
 FA4_HEAD_DIM = 128
+# flash-attn-4 beta24 faults on SM120 asymmetric varlen batches when this
+# layout optimization is enabled. Native 20Q/5KV GQA does not depend on it.
+FA4_PACK_GQA = False
 
 _ACCEPTED_BOUNDARY_CAPABILITY = object()
 
@@ -233,7 +236,7 @@ def fa4_varlen_attention(
         max_seqlen_q=accepted.max_seqlen,
         max_seqlen_k=accepted.max_seqlen,
         causal=False,
-        pack_gqa=True,
+        pack_gqa=FA4_PACK_GQA,
         deterministic=False,
         return_lse=False,
     )
@@ -495,6 +498,7 @@ class FA4VarlenGQAAttention(nn.Module):
 
 
 __all__ = [
+    "FA4_PACK_GQA",
     "DenseGQAAttention",
     "FA4VarlenGQAAttention",
     "ValidatedCuSeqlens",

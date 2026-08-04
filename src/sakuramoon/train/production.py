@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
-import secrets
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import NoReturn
 
 import torch
 
-from sakuramoon.checkpoint.load import read_raw_checkpoint_state
+from sakuramoon.checkpoint.load import (
+    load_inference_artifact,
+    read_raw_checkpoint_state,
+)
 from sakuramoon.checkpoint.policy import CheckpointCadence, CheckpointReason
 from sakuramoon.checkpoint.save import save_raw_checkpoint
 from sakuramoon.checkpoint.schema import (
@@ -28,7 +29,7 @@ from sakuramoon.config.assembly import (
     build_training_telemetry_from_config,
 )
 from sakuramoon.config.resolve import write_resolved_config
-from sakuramoon.config.schema import RuntimeConfig
+from sakuramoon.config.schema import EvaluationEnabledConfig, RuntimeConfig
 from sakuramoon.data.client import DataServiceClient
 from sakuramoon.data.production import ProductionPipelineFactory
 from sakuramoon.data.serialize import (
@@ -38,6 +39,7 @@ from sakuramoon.data.serialize import (
 )
 from sakuramoon.encoders.mage_vae import FrozenMageVAE, load_local_mage_vae
 from sakuramoon.encoders.qwen import QwenRuntime, load_local_qwen
+from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
 from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
 from sakuramoon.storage import repository_directory
@@ -46,7 +48,6 @@ from sakuramoon.train.preflight import (
     ProductionSingleGpuCheckpointPublisher,
     RestoredSingleGpuCheckpoint,
     build_single_gpu_preflight_checks,
-    build_single_gpu_preflight_workload,
     require_static_single_gpu_preflight,
     restore_single_gpu_checkpoint,
     run_single_gpu_preflight,
@@ -56,12 +57,13 @@ from sakuramoon.train.runtime import (
     SuccessfulTrainingObservation,
     require_checkpoint_cadence_binding,
     require_single_gpu_checkpoint_binding,
+    require_single_gpu_checkpoint_compatibility,
     require_single_gpu_config,
     run_single_gpu_training,
 )
 from sakuramoon.train.step import SingleGpuUpdateState, TrainableComposite
 
-_DEPENDENCY_LOCK = "uv.lock"
+
 class ProductionReadinessError(RuntimeError):
     """Canonical runtime bindings are absent and production must not guess them."""
 
@@ -87,7 +89,7 @@ class ProductionTrainingError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ProductionTrainingResult:
-    resolved_config_sha256: str
+    resolved_config: Path
     preflight_report: Path
     checkpoint_path: Path
     initial_successful_update: int
@@ -96,11 +98,7 @@ class ProductionTrainingResult:
 
     def __post_init__(self) -> None:
         if (
-            len(self.resolved_config_sha256) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in self.resolved_config_sha256
-            )
+            not self.resolved_config.is_absolute()
             or not self.preflight_report.is_absolute()
             or not self.checkpoint_path.is_absolute()
             or type(self.initial_successful_update) is not int
@@ -114,6 +112,10 @@ class ProductionTrainingResult:
 
 LearningRateForUpdate = Callable[[RuntimeConfig, int], float]
 ReadyQueueDepthObserver = Callable[[], int]
+
+
+def _log(message: str) -> None:
+    print(f"[train] {message}", flush=True)
 
 
 def _raise_preserving(
@@ -145,31 +147,20 @@ def _config_root(repository_root: Path, configured: Path) -> Path:
     return configured if configured.is_absolute() else repository_root / configured
 
 
-def _dependency_sha256(repository_root: Path) -> str:
-    dependency = repository_root / _DEPENDENCY_LOCK
-    if dependency.is_symlink() or not dependency.is_file():
-        raise ValueError("tracked dependency lock identity is unavailable")
-    payload = dependency.read_bytes()
-    digest = hashlib.sha256(payload).hexdigest()
-    if len(digest) != 64:
-        raise RuntimeError("dependency lock digest is invalid")
-    return digest
-
-
-def _require_exact_resume_path(checkpoint: Path) -> Path:
+def _require_exact_checkpoint_path(checkpoint: Path) -> Path:
     if not checkpoint.is_absolute():
         raise ConfigurationError(
-            "resume must name an exact absolute raw COMPLETE checkpoint directory"
+            "checkpoint must be an exact absolute raw COMPLETE directory"
         )
     current = Path(checkpoint.anchor)
     for part in checkpoint.parts[1:]:
         current /= part
         if current.is_symlink():
-            raise ConfigurationError("resume path may not contain symbolic links")
+            raise ConfigurationError("checkpoint path may not contain symbolic links")
     try:
         resolved = checkpoint.resolve(strict=True)
     except OSError as error:
-        raise ConfigurationError("resume checkpoint does not exist") from error
+        raise ConfigurationError("checkpoint does not exist") from error
     marker = resolved / "COMPLETE"
     if (
         resolved != checkpoint
@@ -178,7 +169,7 @@ def _require_exact_resume_path(checkpoint: Path) -> Path:
         or not marker.is_file()
     ):
         raise ConfigurationError(
-            "resume must name an exact absolute raw COMPLETE checkpoint directory"
+            "checkpoint must be an exact absolute raw COMPLETE directory"
         )
     try:
         complete = marker.read_bytes()
@@ -191,17 +182,8 @@ def _require_exact_resume_path(checkpoint: Path) -> Path:
 
 def _publish_resolved_config(loaded: LoadedConfig, repository_root: Path) -> Path:
     run_root = repository_directory(repository_root, loaded.config.paths.run_dir)
-    destination = run_root / f"resolved-{loaded.resolved_sha256}.toml"
-    expected = loaded.resolved_toml.encode("utf-8")
-    if destination.exists() or destination.is_symlink():
-        if destination.is_symlink() or not destination.is_file():
-            raise ValueError("resolved config artifact path is invalid")
-        if destination.read_bytes() != expected:
-            raise ValueError("existing resolved config artifact differs from identity")
-        return destination.resolve(strict=True)
-    observed = write_resolved_config(loaded.config, destination)
-    if observed != loaded.resolved_sha256 or destination.read_bytes() != expected:
-        raise RuntimeError("resolved config publication identity changed")
+    destination = run_root / "resolved.toml"
+    write_resolved_config(loaded.config, destination)
     return destination.resolve(strict=True)
 
 
@@ -396,26 +378,20 @@ def _bootstrap_checkpoint(
     loaded: LoadedConfig,
     *,
     checkpoint_root: Path,
-    dependency_sha256: str,
     module: TrainableComposite,
     optimizer: IsolatedAdamW8bit,
     wall_clock: float,
 ) -> RestoredSingleGpuCheckpoint:
-    if any(checkpoint_root.iterdir()):
+    identity = CheckpointIdentity("bootstrap", 0)
+    bootstrap = checkpoint_root / "ckpt_0_bootstrap"
+    entries = tuple(checkpoint_root.iterdir())
+    if entries == (bootstrap,) and (bootstrap / "COMPLETE").is_file():
+        _log("复用尚未开始训练的初始化状态")
+        return restore_single_gpu_checkpoint(bootstrap, module, optimizer, identity)
+    if entries:
         raise ConfigurationError(
             "fresh start requires an empty configured checkpoint directory"
         )
-    checkpoint_id = (
-        "bootstrap-"
-        + hashlib.sha256(loaded.config.run.run_id.encode("utf-8")).hexdigest()[:16]
-    )
-    identity = CheckpointIdentity(
-        checkpoint_id,
-        0,
-        loaded.resolved_sha256,
-        dependency_sha256,
-        optimizer.audit.schema_sha256,
-    )
     saved = save_raw_checkpoint(
         checkpoint_root,
         identity,
@@ -427,26 +403,38 @@ def _bootstrap_checkpoint(
     return restore_single_gpu_checkpoint(saved.path, module, optimizer, identity)
 
 
+def _resume_state_for_config(
+    config: RuntimeConfig,
+    state: RawCheckpointState,
+) -> RawCheckpointState:
+    """Extend a restored S0 budget when TOML requests a later terminal update."""
+
+    terminal = state.stage_budget.terminal_successful_update
+    configured = config.stage.planned_updates
+    if configured < terminal:
+        raise ValueError("configured planned updates cannot shrink checkpoint budget")
+    if configured == terminal:
+        return state
+    _log(f"扩展训练总步数: {terminal} -> {configured}")
+    return replace(
+        state,
+        stage_budget=StageBudgetCheckpointState(
+            state.stage_budget.start_successful_update,
+            configured,
+        ),
+    )
+
+
 def _restore_checkpoint(
     loaded: LoadedConfig,
     *,
     checkpoint: Path,
-    dependency_sha256: str,
     module: TrainableComposite,
     optimizer: IsolatedAdamW8bit,
     learning_rate_for_update: LearningRateForUpdate,
 ) -> RestoredSingleGpuCheckpoint:
     manifest, state = read_raw_checkpoint_state(checkpoint)
     identity = manifest.identity
-    expected = CheckpointIdentity(
-        identity.checkpoint_id,
-        identity.update,
-        loaded.resolved_sha256,
-        dependency_sha256,
-        optimizer.audit.schema_sha256,
-    )
-    if identity != expected:
-        raise ValueError("resume checkpoint identity differs from the current runtime")
     if state.trainer.successful_updates != identity.update:
         raise ValueError("resume checkpoint update differs from trainer state")
     require_checkpoint_cadence_binding(loaded.config, state)
@@ -462,7 +450,9 @@ def _restore_checkpoint(
     # The RAW loader compares every optimizer group field before mutation. Setting
     # the trusted expected rate here makes checkpoint LR drift a hard load failure.
     _set_optimizer_learning_rate(optimizer, expected_rate)
-    return restore_single_gpu_checkpoint(checkpoint, module, optimizer, expected)
+    restored = restore_single_gpu_checkpoint(checkpoint, module, optimizer, identity)
+    resumed_state = _resume_state_for_config(loaded.config, restored.state)
+    return replace(restored, state=resumed_state)
 
 
 def _runtime(
@@ -533,8 +523,8 @@ def _run_accepted_lifecycle(
     wall_clock: Callable[[], float],
 ) -> ProductionTrainingResult:
     config = loaded.config
+    _log("检查本地模型与运行目录")
     require_static_single_gpu_preflight(config, repository_root)
-    dependency_sha256 = _dependency_sha256(repository_root)
     checkpoint_root = repository_directory(repository_root, config.paths.checkpoint_dir)
     resolved_config_path = _publish_resolved_config(loaded, repository_root)
     artifact_root = repository_directory(repository_root, config.paths.artifact_dir)
@@ -550,11 +540,16 @@ def _run_accepted_lifecycle(
     torch.manual_seed(config.run.seed)  # pyright: ignore[reportUnknownMemberType]
     torch.cuda.default_generators[0].manual_seed(config.run.seed)
 
+    _log("加载 Qwen 文本编码器")
     qwen = load_local_qwen(repository_root, device)
+    _log("加载 Mage VAE")
     vae = load_local_mage_vae(repository_root, device)
+    _log(f"构建 {config.stage.depth} 层 DiT")
     module = build_trainable_composite_from_config(config, device=device)
+    _log("构建优化器")
     optimizer = _build_optimizer(config, module)
     if resume is None:
+        _log("创建全新训练状态")
         scheduler = _SuccessfulUpdateLrScheduler(
             config,
             optimizer,
@@ -565,16 +560,15 @@ def _run_accepted_lifecycle(
         restored = _bootstrap_checkpoint(
             loaded,
             checkpoint_root=checkpoint_root,
-            dependency_sha256=dependency_sha256,
             module=module,
             optimizer=optimizer,
             wall_clock=wall_clock(),
         )
     else:
+        _log(f"恢复训练状态: {resume}")
         restored = _restore_checkpoint(
             loaded,
             checkpoint=resume,
-            dependency_sha256=dependency_sha256,
             module=module,
             optimizer=optimizer,
             learning_rate_for_update=_s0_linear_warmup_learning_rate,
@@ -593,6 +587,7 @@ def _run_accepted_lifecycle(
         runtime_growth_alpha=restored.state.growth.alpha,
     )
     # No service connection may occur before exact RAW restore and full binding.
+    _log(f"连接数据服务: {config.data.service.socket_path}")
     client = DataServiceClient(
         Path(config.data.service.socket_path),
         worker_count=config.data.cache.persistent_workers_per_rank,
@@ -611,6 +606,10 @@ def _run_accepted_lifecycle(
             padding_token_id,
         ),
         rejection_observer=_reject_sample,
+    )
+    _log(
+        f"数据分桶已就绪: {config.data.buckets.shape_count} 个形状，"
+        f"batch={config.stage.local_batch}，accumulation={config.stage.accumulation}"
     )
     batches = factory.batches(client)
     primary: BaseException | None = None
@@ -633,12 +632,6 @@ def _run_accepted_lifecycle(
             accepted_checkpoint_ids=frozenset(),
             retention_slots=config.checkpoint.slots,
         )
-        workload = build_single_gpu_preflight_workload(
-            config,
-            runtime=runtime,
-            trainable_module=module,
-            optimizer=optimizer,
-        )
         plan = build_single_gpu_preflight_checks(
             loaded,
             repository_root=repository_root,
@@ -651,18 +644,18 @@ def _run_accepted_lifecycle(
             trainable_module=module,
             optimizer=optimizer,
             restored_checkpoint=restored,
-            workload=workload,
             checkpoint_publisher=publisher,
         )
         preflight_report = artifact_root / (
-            f"preflight-{restored.state.trainer.successful_updates}-"
-            f"{secrets.token_hex(8)}.json"
+            f"preflight-{restored.state.trainer.successful_updates}.json"
         )
+        _log("运行训练前检查")
         accepted = run_single_gpu_preflight(plan, preflight_report)
+        _log("训练前检查通过")
         initial_update = restored.state.trainer.successful_updates
         if preflight_only:
             result = ProductionTrainingResult(
-                loaded.resolved_sha256,
+                resolved_config_path,
                 preflight_report.resolve(strict=True),
                 restored.path,
                 initial_update,
@@ -679,10 +672,54 @@ def _run_accepted_lifecycle(
                     config,
                     repository_root=repository_root,
                     device=device,
-                    resolved_sha256=loaded.resolved_sha256,
                     context_provider=context_provider,
+                    resume_from_update=(initial_update if resume is not None else None),
                 )
+                evaluation_config = config.evaluation
+                if isinstance(evaluation_config, EvaluationEnabledConfig):
+                    evaluator: TrainingEvaluator | None = TrainingEvaluator(
+                        config,
+                        repository_root=repository_root,
+                        composite=module,
+                        qwen=qwen,
+                        vae=vae,
+                        device=device,
+                        growth_alpha=restored.state.growth.alpha,
+                    )
+                    evaluation_is_splits: int | None = evaluation_config.is_splits
+                else:
+                    evaluator = None
+                    evaluation_is_splits = None
+
+                def observe_successful_update(
+                    observation: SuccessfulTrainingObservation,
+                ) -> None:
+                    telemetry.observer(observation)
+                    update = observation.loop.update.state.successful_updates
+                    if evaluator is not None and evaluator.due(update):
+                        if evaluation_is_splits is None:
+                            raise RuntimeError("evaluation config is unavailable")
+                        evaluation = evaluator.evaluate(update)
+                        telemetry.submit_wandb_metrics(
+                            {
+                                "evaluation/fid": evaluation.fid,
+                                "evaluation/inception_score_mean": (
+                                    evaluation.inception_score_mean
+                                ),
+                                "evaluation/inception_score_std": (
+                                    evaluation.inception_score_std
+                                ),
+                                "evaluation/sample_count": evaluation.sample_count,
+                                "evaluation/is_splits": evaluation_is_splits,
+                            },
+                            successful_update=update,
+                        )
+
                 with telemetry:
+                    _log(
+                        f"开始训练: update {initial_update + 1} -> "
+                        f"{config.stage.planned_updates}"
+                    )
                     loop_result = run_single_gpu_training(
                         config,
                         preflight=accepted,
@@ -694,11 +731,11 @@ def _run_accepted_lifecycle(
                         checkpoint_publisher=publisher,
                         diagnostic_root=artifact_root / "diagnostics",
                         failure_id=lambda phase, state: (
-                            f"{phase}-{state.attempted_updates}-{secrets.token_hex(6)}"
+                            f"{phase}-{state.attempted_updates}"
                         ),
                         restored_checkpoint=restored,
                         phase_timer=telemetry.phase_timer,
-                        successful_update_observer=telemetry.observer,
+                        successful_update_observer=observe_successful_update,
                         forced_checkpoint=lambda update: (
                             CheckpointReason.STAGE_FINALIZE
                             if update
@@ -716,7 +753,7 @@ def _run_accepted_lifecycle(
                     "accepted production training failed"
                 ) from error
             result = ProductionTrainingResult(
-                loaded.resolved_sha256,
+                resolved_config_path,
                 preflight_report.resolve(strict=True),
                 verified_checkpoints[-1],
                 initial_update,
@@ -767,6 +804,7 @@ def run_production_single_gpu(
     if type(preflight_only) is not bool:
         raise TypeError("preflight_only must be a bool")
     root = _repository_root(repository_root)
+    _log(f"加载 TOML: {config_path}")
     loaded = load_config(
         config_path,
         config_root=_config_root(root, config_root),
@@ -777,7 +815,7 @@ def run_production_single_gpu(
         raise ConfigurationError(
             "resolved config is not an enabled production single-GPU S0 run"
         ) from error
-    exact_resume = None if resume is None else _require_exact_resume_path(resume)
+    exact_resume = None if resume is None else _require_exact_checkpoint_path(resume)
     try:
         return _run_accepted_lifecycle(
             loaded,
@@ -798,10 +836,82 @@ def run_production_single_gpu(
         ) from error
 
 
+def run_production_evaluation(
+    config_path: Path,
+    *,
+    config_root: Path,
+    repository_root: Path,
+    checkpoint: Path,
+) -> EvaluationResult:
+    """Evaluate one complete RAW checkpoint without restarting training."""
+
+    root = _repository_root(repository_root)
+    print(f"[eval] 加载 TOML: {config_path}", flush=True)
+    loaded = load_config(
+        config_path,
+        config_root=_config_root(root, config_root),
+    )
+    config = loaded.config
+    try:
+        require_single_gpu_config(config)
+    except ValueError as error:
+        raise ConfigurationError(
+            "evaluation requires the enabled single-GPU S0 config"
+        ) from error
+    if config.evaluation.enabled is not True:
+        raise ConfigurationError("evaluation is disabled in the resolved config")
+
+    exact_checkpoint = _require_exact_checkpoint_path(checkpoint)
+    require_static_single_gpu_preflight(config, root)
+    device = torch.device("cuda", 0)
+    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+        raise ValueError("evaluation requires exactly one visible CUDA device")
+    torch.cuda.set_device(device)
+    torch.manual_seed(config.run.seed)  # pyright: ignore[reportUnknownMemberType]
+    torch.cuda.default_generators[0].manual_seed(config.run.seed)
+
+    print(f"[eval] 检查最终模型: {exact_checkpoint}", flush=True)
+    manifest, state = read_raw_checkpoint_state(exact_checkpoint)
+    require_single_gpu_checkpoint_compatibility(
+        config,
+        state,
+        runtime_growth_alpha=state.growth.alpha,
+    )
+    update = state.trainer.successful_updates
+    if update <= 0 or update % config.evaluation.every_updates != 0:
+        raise ConfigurationError(
+            "checkpoint update is not scheduled for FID/IS evaluation"
+        )
+
+    print("[eval] 加载 Qwen 文本编码器", flush=True)
+    qwen = load_local_qwen(root, device)
+    print("[eval] 加载 Mage VAE", flush=True)
+    vae = load_local_mage_vae(root, device)
+    print(f"[eval] 加载 update {update} DiT", flush=True)
+    module = load_inference_artifact(
+        exact_checkpoint,
+        manifest.identity,
+        device=device,
+    )
+    if not isinstance(module, TrainableComposite):
+        raise TypeError("checkpoint does not contain the trainable composite")
+    evaluator = TrainingEvaluator(
+        config,
+        repository_root=root,
+        composite=module,
+        qwen=qwen,
+        vae=vae,
+        device=device,
+        growth_alpha=state.growth.alpha,
+    )
+    return evaluator.evaluate(update)
+
+
 __all__ = [
     "ProductionPreflightError",
     "ProductionReadinessError",
     "ProductionTrainingError",
     "ProductionTrainingResult",
+    "run_production_evaluation",
     "run_production_single_gpu",
 ]

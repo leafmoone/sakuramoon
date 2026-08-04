@@ -1,23 +1,21 @@
-"""Strict local IPC identities for the process-isolated data service."""
+"""Small JSON protocol shared by the local data service and trainer."""
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
-from dataclasses import dataclass
+import secrets
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
 from sakuramoon.data.manifest import ShardRecord
 
-SERVICE_PROTOCOL_VERSION = 3
+SERVICE_PROTOCOL_VERSION = 4
 MAX_SERVICE_FRAME_BYTES = 16 * 1024 * 1024
-_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
 class DataServiceProtocolError(RuntimeError):
-    """An IPC document or service identity is invalid."""
+    pass
 
 
 def canonical_json_bytes(payload: dict[str, object]) -> bytes:
@@ -26,42 +24,41 @@ def canonical_json_bytes(payload: dict[str, object]) -> bytes:
     )
 
 
-def _sha256(value: str, name: str) -> None:
-    if _HEX64.fullmatch(value) is None:
-        raise ValueError(f"{name} must be a lowercase SHA-256")
+def _nonempty(value: object, name: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(f"{name} must be nonempty text")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
 class DataServiceSessionIdentity:
-    manifest_id: str
+    dataset_id: str
     worker_count: int
+    session_id: str = field(default_factory=lambda: secrets.token_urlsafe(12))
 
     def __post_init__(self) -> None:
-        _sha256(self.manifest_id, "manifest_id")
+        _nonempty(self.dataset_id, "dataset_id")
+        _nonempty(self.session_id, "session_id")
         if type(self.worker_count) is not int or self.worker_count <= 0:
-            raise ValueError("data service session identity is invalid")
+            raise ValueError("data service worker count is invalid")
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "manifest_id": self.manifest_id,
+            "dataset_id": self.dataset_id,
+            "session_id": self.session_id,
             "worker_count": self.worker_count,
         }
-
-    @property
-    def sha256(self) -> str:
-        return hashlib.sha256(canonical_json_bytes(self.as_dict())).hexdigest()
 
     @classmethod
     def from_dict(cls, value: object) -> DataServiceSessionIdentity:
         document = _mapping(value, "session identity")
         _exact_keys(
-            document,
-            {"manifest_id", "worker_count"},
-            "session identity",
+            document, {"dataset_id", "session_id", "worker_count"}, "session identity"
         )
         try:
             return cls(
-                manifest_id=cast(str, document["manifest_id"]),
+                dataset_id=cast(str, document["dataset_id"]),
+                session_id=cast(str, document["session_id"]),
                 worker_count=cast(int, document["worker_count"]),
             )
         except (TypeError, ValueError):
@@ -73,18 +70,20 @@ class ShardLeaseDescriptor:
     lease_id: str
     worker_id: int
     cycle_index: int
-    state_identity: str
+    state_revision: int
     record: ShardRecord
     local_path: Path
 
     def __post_init__(self) -> None:
         if (
-            _HEX64.fullmatch(self.lease_id) is None
+            type(self.lease_id) is not str
+            or not self.lease_id
             or type(self.worker_id) is not int
             or self.worker_id < 0
             or type(self.cycle_index) is not int
             or self.cycle_index < 0
-            or _HEX64.fullmatch(self.state_identity) is None
+            or type(self.state_revision) is not int
+            or self.state_revision < 0
             or not self.local_path.is_absolute()
         ):
             raise ValueError("shard lease descriptor is invalid")
@@ -94,12 +93,8 @@ class ShardLeaseDescriptor:
             "cycle_index": self.cycle_index,
             "lease_id": self.lease_id,
             "local_path": str(self.local_path),
-            "record": {
-                "bytes": self.record.bytes,
-                "path": self.record.path,
-                "upstream_sha256": self.record.upstream_sha256,
-            },
-            "state_identity": self.state_identity,
+            "record": {"bytes": self.record.bytes, "path": self.record.path},
+            "state_revision": self.state_revision,
             "worker_id": self.worker_id,
         }
 
@@ -113,28 +108,22 @@ class ShardLeaseDescriptor:
                 "lease_id",
                 "local_path",
                 "record",
-                "state_identity",
+                "state_revision",
                 "worker_id",
             },
             "lease",
         )
         record = _mapping(document["record"], "lease record")
-        _exact_keys(
-            record,
-            {"bytes", "path", "upstream_sha256"},
-            "lease record",
-        )
+        _exact_keys(record, {"bytes", "path"}, "lease record")
         try:
             return cls(
                 lease_id=cast(str, document["lease_id"]),
                 worker_id=cast(int, document["worker_id"]),
                 cycle_index=cast(int, document["cycle_index"]),
-                state_identity=cast(str, document["state_identity"]),
+                state_revision=cast(int, document["state_revision"]),
                 local_path=Path(cast(str, document["local_path"])),
                 record=ShardRecord(
-                    path=cast(str, record["path"]),
-                    bytes=cast(int, record["bytes"]),
-                    upstream_sha256=cast(str, record["upstream_sha256"]),
+                    path=cast(str, record["path"]), bytes=cast(int, record["bytes"])
                 ),
             )
         except (TypeError, ValueError):
@@ -153,17 +142,12 @@ def _exact_keys(document: dict[str, Any], expected: set[str], name: str) -> None
 
 
 def parse_frame(payload: bytes) -> dict[str, Any]:
-    if (
-        not payload
-        or len(payload) > MAX_SERVICE_FRAME_BYTES
-        or not payload.endswith(b"\n")
-    ):
+    if not payload or len(payload) > MAX_SERVICE_FRAME_BYTES or not payload.endswith(b"\n"):
         raise DataServiceProtocolError("service frame size or terminator is invalid")
     try:
-        document = json.loads(payload)
+        return _mapping(json.loads(payload), "service frame")
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise DataServiceProtocolError("service frame is invalid JSON") from None
-    return _mapping(document, "service frame")
 
 
 __all__ = [

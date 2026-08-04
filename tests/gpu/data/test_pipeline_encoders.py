@@ -93,15 +93,11 @@ def test_real_pipeline_qwen_and_mage_encode_one_batch(tmp_path: Path) -> None:
             ShardRecord(
                 path=shard.name,
                 bytes=shard.stat().st_size,
-                upstream_sha256="1" * 64,
             ),
         ),
         metadata_adapter=_identity_metadata,
         metadata_fields=MetadataFieldMapping(
             id_field="id",
-            width_field="width",
-            height_field="height",
-            caption_available_field="caption_available",
         ),
         buckets=(BucketShape(512, 512),),
         min_crop_retention=0.8,
@@ -166,7 +162,6 @@ def test_real_modelscope_shard_pipeline_qwen_and_mage() -> None:
             ShardRecord(
                 path="data/1_2024/shard-000000.tar",
                 bytes=2146867200,
-                upstream_sha256="857a90de9f087e98ebd98244b3d211f8b719133e80e96eebb3c274c1e518cf97",
             ),
         ),
         metadata_adapter=adapt_modelscope_metadata,

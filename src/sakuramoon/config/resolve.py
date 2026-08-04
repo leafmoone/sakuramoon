@@ -1,8 +1,7 @@
-"""Deterministic resolved-config serialization and hashing."""
+"""Resolved-config serialization."""
 
 from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path
 
@@ -20,12 +19,8 @@ def resolved_config_bytes(config: RuntimeConfig) -> bytes:
     return tomli_w.dumps(redacted).encode("utf-8")
 
 
-def resolved_config_sha256(config: RuntimeConfig) -> str:
-    return hashlib.sha256(resolved_config_bytes(config)).hexdigest()
-
-
-def write_resolved_config(config: RuntimeConfig, destination: Path) -> str:
-    """Atomically write resolved TOML and return its SHA-256."""
+def write_resolved_config(config: RuntimeConfig, destination: Path) -> None:
+    """Atomically write resolved TOML."""
 
     lexical_destination = destination if destination.is_absolute() else Path.cwd() / destination
     if lexical_destination.is_symlink():
@@ -57,4 +52,3 @@ def write_resolved_config(config: RuntimeConfig, destination: Path) -> str:
     finally:
         if temporary.exists() and not temporary.is_symlink():
             temporary.unlink()
-    return hashlib.sha256(payload).hexdigest()

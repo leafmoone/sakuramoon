@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import random
@@ -218,7 +217,7 @@ def canonical_image_scan_report_bytes(report: ImageScanReport) -> bytes:
     ).encode()
 
 
-def write_image_scan_report(report: ImageScanReport, destination: Path) -> str:
+def write_image_scan_report(report: ImageScanReport, destination: Path) -> None:
     """Atomically replace one canonical, regenerable scan report."""
 
     payload = canonical_image_scan_report_bytes(report)
@@ -247,7 +246,6 @@ def write_image_scan_report(report: ImageScanReport, destination: Path) -> str:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
-    return hashlib.sha256(payload).hexdigest()
 
 
 def resize_and_crop(

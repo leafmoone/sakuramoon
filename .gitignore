@@ -9,6 +9,7 @@ id_ed25519
 
 # Python and uv
 .venv/
+/uv.lock
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -38,7 +39,7 @@ __pycache__/
 
 # Training and evaluation artifacts
 /artifacts/
-/checkpoints/
+/output_model/
 /outputs/
 /samples/
 /runs/
@@ -51,5 +52,5 @@ __pycache__/
 # Temporary files
 *.tmp
 *.partial
-._____temp/
 .ipynb_checkpoints/
+._____temp/

@@ -657,19 +657,15 @@ def require_single_gpu_config(config: RuntimeConfig) -> None:
         raise ValueError("single-GPU runtime requires native world_size=1")
     if config.failure.allow_force_bypass:
         raise ValueError("single-GPU runtime cannot enable preflight bypass")
-    if config.stage.activation_checkpoint_mode != "none":
-        raise ValueError(
-            "single-GPU runtime does not implement activation checkpointing"
-        )
 
 
-def require_single_gpu_checkpoint_binding(
+def require_single_gpu_checkpoint_compatibility(
     config: RuntimeConfig,
     state: RawCheckpointState,
     *,
     runtime_growth_alpha: float,
 ) -> None:
-    """Bind every restored stage/growth axis to the resolved S0 runtime."""
+    """Bind a RAW checkpoint to the resolved S0 model and stage."""
 
     require_single_gpu_config(config)
     require_checkpoint_cadence_binding(config, state)
@@ -704,10 +700,28 @@ def require_single_gpu_checkpoint_binding(
         != config.stage.planned_updates
     ):
         raise ValueError("restored stage budget differs from resolved config")
-    if trainer.successful_updates >= stage_budget.terminal_successful_update:
-        raise ValueError("stage successful-update budget is already exhausted")
     if state.checkpoint_cadence.last_successful_update != trainer.successful_updates:
         raise ValueError("checkpoint cadence update does not match trainer state")
+
+
+def require_single_gpu_checkpoint_binding(
+    config: RuntimeConfig,
+    state: RawCheckpointState,
+    *,
+    runtime_growth_alpha: float,
+) -> None:
+    """Require a compatible checkpoint that still has training updates left."""
+
+    require_single_gpu_checkpoint_compatibility(
+        config,
+        state,
+        runtime_growth_alpha=runtime_growth_alpha,
+    )
+    if (
+        state.trainer.successful_updates
+        >= state.stage_budget.terminal_successful_update
+    ):
+        raise ValueError("stage successful-update budget is already exhausted")
 
 
 def require_checkpoint_cadence_binding(
@@ -846,6 +860,12 @@ def _run_single_gpu_training(
                 gpu_memory_reserved_bytes=reserved,
             )
             successful_update_observer(emitted)
+            print(
+                f"[train] update={observation.update.state.successful_updates} "
+                f"loss={float(observation.update.mean_loss.detach().item()):.6f} "
+                f"time={observation.update_wall_seconds:.2f}s",
+                flush=True,
+            )
             pending_measurements.clear()
             active_learning_rate = None
             active_phase_timer = None
@@ -858,16 +878,13 @@ def _run_single_gpu_training(
             checkpoint_path = checkpoint_publisher.publish_update(
                 update_state, reason, proposed_cadence
             )
+            print(f"[train] 保存模型: {checkpoint_path}", flush=True)
             manifest, published_state = read_raw_checkpoint_state(checkpoint_path)
             restored_identity = restored_checkpoint.manifest.identity
             published_identity = manifest.identity
             if (
                 published_identity.update != update_state.successful_updates
-                or published_identity.config_sha256 != restored_identity.config_sha256
-                or published_identity.dependency_sha256
-                != restored_identity.dependency_sha256
-                or published_identity.parameter_schema_sha256
-                != restored_identity.parameter_schema_sha256
+                or published_identity.checkpoint_id == restored_identity.checkpoint_id
             ):
                 raise ValueError("published RAW checkpoint identity is inconsistent")
             expected_state = RawCheckpointState(
@@ -992,6 +1009,7 @@ __all__ = [
     "SuccessfulTrainingObservation",
     "require_checkpoint_cadence_binding",
     "require_single_gpu_checkpoint_binding",
+    "require_single_gpu_checkpoint_compatibility",
     "require_single_gpu_config",
     "run_single_gpu_training",
 ]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import os
 import re
 import tomllib
@@ -60,17 +59,15 @@ class UnresolvedConfigBinding:
 
 
 @dataclass(frozen=True)
-class InputFileDigest:
+class InputFile:
     path: str
-    sha256: str
 
 
 @dataclass(frozen=True)
 class LoadedConfig:
     config: RuntimeConfig
-    inputs: tuple[InputFileDigest, ...]
+    inputs: tuple[InputFile, ...]
     resolved_toml: str
-    resolved_sha256: str
 
 
 def _safe_validation_error(exc: ValidationError) -> ConfigurationError:
@@ -175,7 +172,7 @@ class _Loader:
             raise ConfigurationError("config root must be a non-symlink directory")
         self._active: list[Path] = []
         self._seen: set[Path] = set()
-        self.inputs: list[InputFileDigest] = []
+        self.inputs: list[InputFile] = []
 
     def load(self, requested: Path, *, including: Path | None = None) -> dict[str, Any]:
         relative = _requested_relative(self.root, requested)
@@ -216,12 +213,7 @@ class _Loader:
                     )
                 merged = _deep_merge(merged, self.load(include_path, including=path))
             merged = _deep_merge(merged, payload)
-            self.inputs.append(
-                InputFileDigest(
-                    path=path.relative_to(self.root).as_posix(),
-                    sha256=hashlib.sha256(raw_bytes).hexdigest(),
-                )
-            )
+            self.inputs.append(InputFile(path=path.relative_to(self.root).as_posix()))
             return merged
         finally:
             self._active.pop()
@@ -270,7 +262,7 @@ def load_config(
     config_root: Path,
     environment: Mapping[str, str] | None = None,
 ) -> LoadedConfig:
-    """Load, merge, strictly validate, redact, and hash a runtime config."""
+    """Load, merge, validate, and redact a runtime config."""
 
     loader = _Loader(config_root)
     payload = loader.load(config_path)
@@ -293,5 +285,4 @@ def load_config(
         config=config,
         inputs=tuple(loader.inputs),
         resolved_toml=resolved.decode("utf-8"),
-        resolved_sha256=hashlib.sha256(resolved).hexdigest(),
     )

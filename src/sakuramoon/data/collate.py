@@ -10,7 +10,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from multiprocessing.queues import Queue as MultiprocessingQueue
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import Any, Protocol, cast
 
 import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
@@ -23,7 +23,6 @@ from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.pipeline import (
     ImageAudit,
     PipelineSample,
-    PipelineSampleError,
     RngIdentity,
     WebDatasetPipeline,
 )
@@ -31,10 +30,6 @@ from sakuramoon.data.service_protocol import (
     DataServiceSessionIdentity,
     ShardLeaseDescriptor,
 )
-
-if TYPE_CHECKING:
-    from sakuramoon.data.state import SingleProcessShardCoordinator
-
 
 _WORKER_CONTEXT = mp.get_context("spawn")
 _MAX_TORCH_SEED = 2**64 - 1
@@ -518,134 +513,6 @@ def _build_batch_loader[BatchItem](
     )
 
 
-def iter_leased_batches(
-    pipeline: WebDatasetPipeline,
-    coordinator: SingleProcessShardCoordinator,
-    shard_paths: tuple[str, ...],
-    *,
-    batch_size: int,
-    worker_count: int,
-    ready_batches: int,
-    pin_memory: bool,
-    drop_last: bool,
-) -> Iterator[TrainingBatch]:
-    """Drain durable shard leases through the configured persistent workers.
-
-    The coordinator remains exclusively in the parent process.  Workers only
-    consume parent-prepared local files and return batches plus terminal
-    markers.  A shard is completed after its ordered done marker and bounded
-    completion-channel record have both arrived.
-    """
-
-    if worker_count != coordinator.store.worker_count:
-        raise CollateError(
-            "durable shard iteration worker_count must exactly match the state "
-            "worker_count; exactly one worker is only valid when schema v3 "
-            "worker_count is one (no fallback)"
-        )
-    if (
-        type(shard_paths) is not tuple
-        or not shard_paths
-        or any(type(path) is not str or not path for path in shard_paths)
-        or len(set(shard_paths)) != len(shard_paths)
-    ):
-        raise CollateError("durable shard iteration requires unique shard paths")
-    if type(batch_size) is not int or batch_size <= 0 or type(drop_last) is not bool:
-        raise CollateError("batch_size and drop_last are invalid")
-
-    requested = list(shard_paths)
-    recovered = tuple(coordinator.state.active_shards)
-    if any(path not in requested for path in recovered):
-        raise CollateError(
-            "all recovered active shards must be included for replay before new shards"
-        )
-    ordered_paths = list(dict.fromkeys((*recovered, *requested)))
-    dataset = _PersistentShardDataset(
-        pipeline,
-        batch_size=batch_size,
-        drop_last=drop_last,
-        worker_count=worker_count,
-    )
-    loader = _build_batch_loader(
-        dataset,
-        worker_count=worker_count,
-        ready_batches=ready_batches,
-        pin_memory=pin_memory,
-        worker_seed=pipeline.base_seed,
-        in_order=False,
-    )
-    iterator = iter(loader)
-    queued: dict[str, int] = {}
-    available_workers = list(range(worker_count))
-    completion_messages: dict[str, _WorkerCompletion] = {}
-    next_index = 0
-
-    def submit_available() -> None:
-        nonlocal next_index
-        while available_workers and next_index < len(ordered_paths):
-            worker_id = available_workers.pop(0)
-            shard_path = ordered_paths[next_index]
-            next_index += 1
-            cached = coordinator.prepare(shard_path)
-            if cached is None:
-                available_workers.append(worker_id)
-                continue
-            if cached.fetched.relative_path != shard_path:
-                raise PipelineSampleError("cache returned a different leased shard")
-            dataset.submit(
-                worker_id,
-                _ShardWork(
-                    shard_path=shard_path,
-                    local_path=cached.fetched.path,
-                    record=coordinator.store.manifest.shard(shard_path),
-                    cycle_index=pipeline.cycle_index,
-                ),
-            )
-            queued[shard_path] = worker_id
-
-    def finish_shard(shard_path: str) -> None:
-        completion = _completion_for(
-            dataset.completion_queue, completion_messages, shard_path
-        )
-        if not completion.normal:
-            raise CollateError(
-                f"persistent worker failed for shard {shard_path}: {completion.error}"
-            )
-        if shard_path not in queued:
-            raise CollateError("persistent worker completed an unknown shard")
-        worker_id = queued[shard_path]
-        if completion.worker_id != worker_id:
-            raise CollateError("persistent worker completion identity drifted")
-        coordinator.mark_completed(shard_path)
-        del queued[shard_path]
-        available_workers.append(worker_id)
-        submit_available()
-
-    try:
-        submit_available()
-        while queued:
-            item = next(iterator)
-            if isinstance(item, _WorkerBatch):
-                if queued.get(item.shard_path) != item.worker_id:
-                    raise CollateError("persistent worker returned an unknown shard")
-                yield item.batch
-            elif isinstance(item, _WorkerDone):
-                if queued.get(item.shard_path) != item.worker_id:
-                    raise CollateError("persistent worker done identity drifted")
-                finish_shard(item.shard_path)
-            else:
-                raise CollateError("persistent worker output channel is invalid")
-    finally:
-        # A stop command is best-effort.  _shutdown_workers also handles an
-        # interrupted or failed worker, while active state remains replayable.
-        for worker_id in range(worker_count):
-            try:
-                dataset.stop(worker_id, coordinator.store.manifest.shards[0])
-            except (queue.Full, IndexError):
-                continue
-        _shutdown_loader(loader, suppress_worker_failure=sys.exception() is not None)
-
-
 class DataLeaseClient(Protocol):
     identity: DataServiceSessionIdentity
 
@@ -830,6 +697,5 @@ __all__ = [
     "TrainingBatch",
     "bucketed_batches",
     "collate_samples",
-    "iter_leased_batches",
     "iter_service_batches",
 ]

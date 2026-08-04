@@ -19,6 +19,9 @@ class RemoteRun(Protocol):
     def log(self, data: Mapping[str, int | float], *, step: int) -> None: ...
 
 
+type _QueuedMetric = tuple[int, Mapping[str, int | float]]
+
+
 def is_retryable_remote_communication_error(error: BaseException) -> bool:
     """Classify only communication outages as durable-retry candidates."""
 
@@ -31,12 +34,13 @@ def is_retryable_remote_communication_error(error: BaseException) -> bool:
     return isinstance(error, (ConnectionError, CommError))
 
 
-def _retry_payload(metric: TrainingMetric, error: Exception) -> dict[str, object]:
+def _retry_payload(metric: _QueuedMetric, error: Exception) -> dict[str, object]:
+    successful_update, metrics = metric
     return {
         "schema_version": 1,
         "error_type": type(error).__name__,
-        "successful_update": metric.successful_update,
-        "metrics": metric.as_wandb_mapping(),
+        "successful_update": successful_update,
+        "metrics": dict(metrics),
     }
 
 
@@ -123,7 +127,7 @@ class AsyncWandbSink:
             raise ValueError("W&B queue capacity must be a positive integer")
         self.run = run
         self.retry = DurableJsonlSink(retry_path, fsync_every_records=1)
-        self._queue: queue.Queue[TrainingMetric | object] = queue.Queue(queue_capacity)
+        self._queue: queue.Queue[_QueuedMetric | object] = queue.Queue(queue_capacity)
         self._background_error: Exception | None = None
         self._closed = False
         self._worker = threading.Thread(
@@ -137,7 +141,7 @@ class AsyncWandbSink:
         if self._background_error is None:
             self._background_error = error
 
-    def _spill(self, metric: TrainingMetric, error: Exception) -> None:
+    def _spill(self, metric: _QueuedMetric, error: Exception) -> None:
         try:
             self.retry.write(_retry_payload(metric, error))
         except Exception as exc:  # noqa: BLE001 - background durability boundary
@@ -149,12 +153,10 @@ class AsyncWandbSink:
             try:
                 if item is self._STOP:
                     return
-                metric = cast(TrainingMetric, item)
+                metric = cast(_QueuedMetric, item)
+                successful_update, metrics = metric
                 try:
-                    self.run.log(
-                        metric.as_wandb_mapping(),
-                        step=metric.successful_update,
-                    )
+                    self.run.log(metrics, step=successful_update)
                 except Exception as exc:  # noqa: BLE001 - network boundary
                     if is_retryable_remote_communication_error(exc):
                         self._spill(metric, exc)
@@ -167,7 +169,7 @@ class AsyncWandbSink:
         if self._background_error is not None:
             raise RuntimeError("W&B remote sink failed") from self._background_error
 
-    def submit(self, metric: TrainingMetric) -> None:
+    def _submit(self, metric: _QueuedMetric) -> None:
         if self._closed:
             raise RuntimeError("W&B sink is closed")
         self._check_health()
@@ -176,6 +178,21 @@ class AsyncWandbSink:
         except queue.Full:
             self._spill(metric, RuntimeError("remote queue full"))
             self._check_health()
+
+    def submit(self, metric: TrainingMetric) -> None:
+        self._submit((metric.successful_update, metric.as_wandb_mapping()))
+
+    def submit_metrics(
+        self,
+        metrics: Mapping[str, int | float],
+        *,
+        successful_update: int,
+    ) -> None:
+        """Submit extra step-aligned metrics through the same retryable queue."""
+
+        payload = dict(metrics)
+        payload["successful_update"] = successful_update
+        self._submit((successful_update, payload))
 
     def drain(self) -> None:
         self._queue.join()

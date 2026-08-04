@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from typing import Literal
 
@@ -36,7 +34,6 @@ class ParameterSpec:
 @dataclass(frozen=True)
 class ParameterAudit:
     specs: tuple[ParameterSpec, ...]
-    schema_sha256: str
 
     @property
     def decay(self) -> tuple[ParameterSpec, ...]:
@@ -74,7 +71,6 @@ def audit_trainable_parameters(
     )
     identities: dict[int, str] = {}
     specs: list[ParameterSpec] = []
-    schema_rows: list[dict[str, object]] = []
     for name, parameter in named:
         previous = identities.setdefault(id(parameter), name)
         if previous != name:
@@ -123,24 +119,7 @@ def audit_trainable_parameters(
                 weight_decay=weight_decay,
             )
         )
-        schema_rows.append(
-            {
-                "name": name,
-                "shape": list(parameter.shape),
-                "dtype": str(parameter.dtype),
-                "group": group,
-                "weight_decay": weight_decay,
-            }
-        )
-    encoded = json.dumps(
-        schema_rows,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return ParameterAudit(
-        specs=tuple(specs),
-        schema_sha256=hashlib.sha256(encoded).hexdigest(),
-    )
+    return ParameterAudit(specs=tuple(specs))
 
 
 __all__ = [

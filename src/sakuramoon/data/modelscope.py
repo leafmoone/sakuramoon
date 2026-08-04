@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 import http.client
 import json
 import os
+import re
 import ssl
+import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -43,6 +46,10 @@ class DatasetTransportError(RuntimeError):
     """ModelScope listing or download failed."""
 
 
+class DatasetTransientError(DatasetTransportError):
+    """A temporary ModelScope failure that can resume from partial bytes."""
+
+
 class DatasetAuthenticationError(DatasetTransportError):
     """ModelScope authentication failed."""
 
@@ -55,12 +62,15 @@ class _RetryableRequestError(Exception):
     pass
 
 
+class _RangeUnsupportedError(DatasetTransportError):
+    pass
+
+
 @dataclass(frozen=True)
 class FetchedShard:
     path: Path
     relative_path: str
     bytes: int
-    sha256: str
     cache_hit: bool
 
 
@@ -73,6 +83,11 @@ class _Target:
 
 class _Writer(Protocol):
     def write(self, payload: bytes, /) -> int: ...
+
+
+DownloadProgress = Callable[[int, int, float, float], None]
+
+_CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
 
 
 def _repo_path(source: DatasetSourceIdentity) -> str:
@@ -101,7 +116,9 @@ class ModelScopeDatasetTransport:
             raise DatasetAuthenticationError("ModelScope token is missing") from None
         return cls(token, policy)
 
-    def _headers(self, target: _Target) -> dict[str, str]:
+    def _headers(
+        self, target: _Target, extra_headers: dict[str, str] | None = None
+    ) -> dict[str, str]:
         headers = {
             "Accept": "application/json, application/octet-stream",
             "Accept-Encoding": "identity",
@@ -110,11 +127,17 @@ class ModelScopeDatasetTransport:
         if target.authenticated:
             headers["Authorization"] = f"Bearer {self._token}"
             headers["Cookie"] = f"m_session_id={self._token}"
+        if extra_headers is not None:
+            headers.update(extra_headers)
         return headers
 
     @property
     def stream_chunk_bytes(self) -> int:
         return self._policy.stream_chunk_bytes
+
+    @property
+    def streams_per_shard(self) -> int:
+        return self._policy.streams_per_shard
 
     def _redirect(self, current: _Target, location: str) -> _Target:
         parsed = urlsplit(
@@ -138,7 +161,11 @@ class ModelScopeDatasetTransport:
             authenticated=current.authenticated and host == MODELSCOPE_DATASET_HOST,
         )
 
-    def _open(self, initial: _Target) -> tuple[http.client.HTTPResponse, Any]:
+    def _open(
+        self,
+        initial: _Target,
+        extra_headers: dict[str, str] | None = None,
+    ) -> tuple[http.client.HTTPResponse, Any]:
         target = initial
         for redirects in range(_MAX_REDIRECTS + 1):
             connection: http.client.HTTPSConnection | None = None
@@ -149,7 +176,11 @@ class ModelScopeDatasetTransport:
                     timeout=self._policy.connect_timeout_seconds,
                     context=ssl.create_default_context(),
                 )
-                connection.request("GET", target.request_target, headers=self._headers(target))
+                connection.request(
+                    "GET",
+                    target.request_target,
+                    headers=self._headers(target, extra_headers),
+                )
                 if connection.sock is not None:
                     connection.sock.settimeout(self._policy.read_timeout_seconds)
                 response = connection.getresponse()
@@ -167,13 +198,17 @@ class ModelScopeDatasetTransport:
             target = self._redirect(target, location)
         raise DatasetTransportError("ModelScope redirect limit exceeded")
 
-    def _with_retries(self, target: _Target) -> tuple[http.client.HTTPResponse, Any]:
+    def _with_retries(
+        self,
+        target: _Target,
+        extra_headers: dict[str, str] | None = None,
+    ) -> tuple[http.client.HTTPResponse, Any]:
         for attempt in range(self._policy.max_retries + 1):
             try:
-                response, connection = self._open(target)
+                response, connection = self._open(target, extra_headers)
             except _RetryableRequestError:
                 if attempt == self._policy.max_retries:
-                    raise DatasetTransportError("ModelScope request failed") from None
+                    raise DatasetTransientError("ModelScope request failed") from None
             else:
                 if response.status in (401, 403):
                     response.close()
@@ -184,9 +219,9 @@ class ModelScopeDatasetTransport:
                 response.close()
                 connection.close()
                 if attempt == self._policy.max_retries:
-                    raise DatasetTransportError("ModelScope retry limit exceeded")
+                    raise DatasetTransientError("ModelScope retry limit exceeded")
             time.sleep(self._policy.retry_backoff_seconds)
-        raise DatasetTransportError("ModelScope retry limit exceeded")
+        raise DatasetTransientError("ModelScope retry limit exceeded")
 
     def list_files(self, source: DatasetSourceIdentity) -> tuple[RemoteShardRecord, ...]:
         """List all WebDataset shards for the configured branch selector."""
@@ -226,11 +261,9 @@ class ModelScopeDatasetTransport:
                         continue
                     path = entry["Path"]
                     size = entry["Size"]
-                    sha256 = entry["Sha256"]
                     if (
                         not isinstance(path, str)
                         or type(size) is not int
-                        or not isinstance(sha256, str)
                     ):
                         raise TypeError
                     if not path.casefold().endswith((".tar", ".tar.gz", ".tgz")):
@@ -241,7 +274,6 @@ class ModelScopeDatasetTransport:
                         RemoteShardRecord(
                             path=path,
                             bytes=size,
-                            upstream_sha256=sha256.lower(),
                         )
                     )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -251,8 +283,27 @@ class ModelScopeDatasetTransport:
                 connection.close()
         raise DatasetTransportError("ModelScope listing exceeded configured page limit")
 
-    def download(self, manifest: DatasetManifest, shard: ShardRecord, output: _Writer) -> None:
-        """Stream one shard body into an already-open local file."""
+    def download(
+        self,
+        manifest: DatasetManifest,
+        shard: ShardRecord,
+        output: _Writer,
+        *,
+        start_offset: int = 0,
+        end_offset: int | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        """Stream one full file or byte range, resuming failed transfers."""
+
+        end = shard.bytes - 1 if end_offset is None else end_offset
+        if (
+            type(start_offset) is not int
+            or type(end) is not int
+            or start_offset < 0
+            or end < start_offset
+            or end >= shard.bytes
+        ):
+            raise DatasetTransportError("dataset shard byte range is invalid")
 
         query = urlencode({"Revision": manifest.source.revision, "FilePath": shard.path})
         target = _Target(
@@ -260,35 +311,80 @@ class ModelScopeDatasetTransport:
             f"/api/v1/datasets/{_repo_path(manifest.source)}/repo?{query}",
             True,
         )
-        response, connection = self._with_retries(target)
-        try:
-            if response.status == 404:
-                raise DatasetTransportError("dataset shard does not exist")
-            if response.status != 200:
-                raise DatasetTransportError("dataset shard download failed")
-            if response.getheader("Content-Encoding") not in (None, "identity"):
-                raise DatasetTransportError("compressed HTTP transfer is not supported")
-            while chunk := response.read(self._policy.stream_chunk_bytes):
-                output.write(chunk)
-        except (OSError, TimeoutError, http.client.HTTPException):
-            raise DatasetTransportError("dataset shard transfer failed") from None
-        finally:
-            response.close()
-            connection.close()
+        current = start_offset
+        transfer_failures = 0
+        while current <= end:
+            if cancelled is not None and cancelled():
+                raise DatasetTransportError("dataset shard download was cancelled")
+            ranged = current > 0 or end < shard.bytes - 1
+            headers = {"Range": f"bytes={current}-{end}"} if ranged else None
+            response, connection = self._with_retries(target, headers)
+            transfer_failed = False
+            try:
+                if response.status == 404:
+                    raise DatasetTransportError("dataset shard does not exist")
+                if ranged and response.status == 200:
+                    raise _RangeUnsupportedError(
+                        "ModelScope download endpoint ignored the byte range"
+                    )
+                if response.status not in ({206} if ranged else {200, 206}):
+                    raise DatasetTransportError("dataset shard download failed")
+                if response.status == 206:
+                    match = _CONTENT_RANGE.fullmatch(
+                        response.getheader("Content-Range") or ""
+                    )
+                    if (
+                        match is None
+                        or int(match.group(1)) != current
+                        or int(match.group(2)) != end
+                        or int(match.group(3)) != shard.bytes
+                    ):
+                        raise DatasetTransportError(
+                            "ModelScope returned an invalid byte range"
+                        )
+                if response.getheader("Content-Encoding") not in (None, "identity"):
+                    raise DatasetTransportError(
+                        "compressed HTTP transfer is not supported"
+                    )
+                while current <= end:
+                    if cancelled is not None and cancelled():
+                        raise DatasetTransportError(
+                            "dataset shard download was cancelled"
+                        )
+                    chunk = response.read(
+                        min(self._policy.stream_chunk_bytes, end - current + 1)
+                    )
+                    if not chunk:
+                        break
+                    if output.write(chunk) != len(chunk):
+                        raise DatasetTransportError("dataset shard write was incomplete")
+                    current += len(chunk)
+            except (OSError, TimeoutError, http.client.HTTPException):
+                transfer_failed = True
+            finally:
+                response.close()
+                connection.close()
+            if current > end:
+                return
+            if cancelled is not None and cancelled():
+                raise DatasetTransportError("dataset shard download was cancelled")
+            if transfer_failures >= self._policy.max_retries:
+                reason = "failed" if transfer_failed else "ended early"
+                raise DatasetTransientError(
+                    f"dataset shard transfer {reason}"
+                ) from None
+            transfer_failures += 1
+            time.sleep(self._policy.retry_backoff_seconds)
 
 
 def validate_remote_manifest(
     transport: ModelScopeDatasetTransport, manifest: DatasetManifest
 ) -> None:
-    """Require exact path, byte count and SHA equality with remote listing."""
+    """Require the configured shard paths and sizes to match the remote listing."""
 
-    expected = {
-        (item.path, item.bytes, item.upstream_sha256) for item in manifest.shards
-    }
+    expected = {(item.path, item.bytes) for item in manifest.shards}
     remote_files = transport.list_files(manifest.source)
-    observed = {
-        (item.path, item.bytes, item.upstream_sha256) for item in remote_files
-    }
+    observed = {(item.path, item.bytes) for item in remote_files}
     if len(remote_files) != len(manifest.shards) or observed != expected:
         raise ShardIntegrityError("remote dataset listing differs from manifest")
 
@@ -331,14 +427,8 @@ def ensure_dataset_manifest(
     return manifest
 
 
-def _verify_existing(path: Path, shard: ShardRecord, chunk_bytes: int) -> bool:
-    if not path.is_file() or path.stat().st_size != shard.bytes:
-        return False
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(chunk_bytes):
-            digest.update(chunk)
-    return digest.hexdigest() == shard.upstream_sha256
+def _verify_existing(path: Path, shard: ShardRecord) -> bool:
+    return path.is_file() and path.stat().st_size == shard.bytes
 
 
 def _fsync_directory(path: Path) -> None:
@@ -349,73 +439,194 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+class _TransferProgress:
+    def __init__(
+        self,
+        downloaded: int,
+        total: int,
+        callback: DownloadProgress | None,
+    ) -> None:
+        self.downloaded = downloaded
+        self.total = total
+        self.callback = callback
+        self.started = time.monotonic()
+        self.last_report = self.started
+        self.session_bytes = 0
+        self.lock = threading.Lock()
+        if downloaded and callback is not None:
+            callback(downloaded, total, 0.0, 0.0)
+
+    def add(self, size: int) -> None:
+        with self.lock:
+            self.downloaded += size
+            self.session_bytes += size
+            if self.downloaded > self.total:
+                raise ShardIntegrityError("downloaded shard is larger than manifest")
+            now = time.monotonic()
+            if self.callback is not None and (
+                now - self.last_report >= 5.0 or self.downloaded == self.total
+            ):
+                elapsed = max(now - self.started, 1e-6)
+                self.callback(
+                    self.downloaded,
+                    self.total,
+                    elapsed,
+                    self.session_bytes / elapsed,
+                )
+                self.last_report = now
+
+
+def _download_ranges(start: int, end: int, count: int) -> tuple[tuple[int, int], ...]:
+    remaining = end - start + 1
+    workers = min(count, remaining)
+    part_size = (remaining + workers - 1) // workers
+    return tuple(
+        (offset, min(offset + part_size - 1, end))
+        for offset in range(start, end + 1, part_size)
+    )
+
+
+def _range_path(partial: Path, start: int, end: int) -> Path:
+    return partial.with_name(f"{partial.name}.range-{start:012d}-{end:012d}")
+
+
+def _require_regular_partial(path: Path, *, maximum_bytes: int) -> int:
+    if path.is_symlink():
+        raise ShardIntegrityError("cache partial must not be a symlink")
+    if not path.exists():
+        return 0
+    if not path.is_file():
+        raise ShardIntegrityError("cache partial must be a regular file")
+    size = path.stat().st_size
+    if size > maximum_bytes:
+        raise ShardIntegrityError("cache partial is larger than its byte range")
+    return size
+
+
 def fetch_dataset_shard(
     transport: ModelScopeDatasetTransport,
     manifest: DatasetManifest,
     shard_path: str,
     cache_root: Path,
+    *,
+    progress: DownloadProgress | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> FetchedShard:
-    """Stream, verify and atomically publish one requested shard."""
+    """Resume and parallelize one shard before atomically publishing it."""
 
     shard = manifest.shard(shard_path)
     destination = cache_root / shard.path
     partial = destination.with_name(f"{destination.name}.partial")
+    assembly = destination.with_name(f"{destination.name}.partial.assembling")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if _verify_existing(destination, shard, transport.stream_chunk_bytes):
+    if _verify_existing(destination, shard):
         return FetchedShard(
             destination,
             shard.path,
             shard.bytes,
-            shard.upstream_sha256,
             True,
         )
     if destination.exists():
         raise ShardIntegrityError("cached shard differs from manifest")
+    prefix_bytes = _require_regular_partial(partial, maximum_bytes=shard.bytes)
+    if prefix_bytes < shard.bytes:
+        partial.touch(exist_ok=True)
+        ranges = _download_ranges(
+            prefix_bytes,
+            shard.bytes - 1,
+            transport.streams_per_shard,
+        )
+        parts = tuple(
+            (start, end, _range_path(partial, start, end))
+            for start, end in ranges
+        )
+        existing_part_bytes = 0
+        for start, end, path in parts:
+            existing_part_bytes += _require_regular_partial(
+                path,
+                maximum_bytes=end - start + 1,
+            )
+            path.touch(exist_ok=True)
+        tracker = _TransferProgress(
+            prefix_bytes + existing_part_bytes,
+            shard.bytes,
+            progress,
+        )
 
-    digest = hashlib.sha256()
-    written = 0
+        def download_part(start: int, end: int, path: Path) -> None:
+            existing = path.stat().st_size
+            if existing == end - start + 1:
+                return
+            with path.open("ab") as handle:
 
-    class _DigestWriter:
-        def write(self, payload: bytes) -> int:
-            nonlocal written
-            written += len(payload)
-            if written > shard.bytes:
-                raise ShardIntegrityError("downloaded shard is larger than manifest")
-            digest.update(payload)
-            return handle.write(payload)
+                class _PartWriter:
+                    def write(self, payload: bytes) -> int:
+                        written = handle.write(payload)
+                        tracker.add(written)
+                        return written
 
-    published = False
-    try:
-        with partial.open("wb") as handle:
-            transport.download(manifest, shard, _DigestWriter())
-            handle.flush()
-            os.fsync(handle.fileno())
-        if written != shard.bytes or digest.hexdigest() != shard.upstream_sha256:
-            raise ShardIntegrityError("downloaded shard differs from manifest")
-        os.replace(partial, destination)
-        published = True
-        _fsync_directory(destination.parent)
-    except Exception:
-        cleanup_error: OSError | None = None
-        if published:
-            try:
-                destination.unlink(missing_ok=True)
-                _fsync_directory(destination.parent)
-            except OSError as exc:
-                cleanup_error = exc
+                transport.download(
+                    manifest,
+                    shard,
+                    _PartWriter(),
+                    start_offset=start + existing,
+                    end_offset=end,
+                    cancelled=cancelled,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+
+        with ThreadPoolExecutor(
+            max_workers=len(parts),
+            thread_name_prefix="sakuramoon-shard-range",
+        ) as executor:
+            futures = [
+                executor.submit(download_part, start, end, path)
+                for start, end, path in parts
+            ]
+            for future in futures:
+                future.result()
+
+        if cancelled is not None and cancelled():
+            raise DatasetTransportError("dataset shard download was cancelled")
+        if any(path.stat().st_size != end - start + 1 for start, end, path in parts):
+            raise DatasetTransientError("dataset shard range download ended early")
+        if assembly.is_symlink() or (assembly.exists() and not assembly.is_file()):
+            raise ShardIntegrityError("cache assembly path is invalid")
         try:
-            partial.unlink(missing_ok=True)
-        except OSError as exc:
-            cleanup_error = cleanup_error or exc
-        if cleanup_error is not None:
-            raise DatasetTransportError(
-                "dataset shard publication rollback failed"
-            ) from None
-        raise
+            with assembly.open("wb") as output:
+                for source in (partial, *(path for _, _, path in parts)):
+                    if cancelled is not None and cancelled():
+                        raise DatasetTransportError(
+                            "dataset shard download was cancelled"
+                        )
+                    if not source.exists():
+                        continue
+                    with source.open("rb") as handle:
+                        while chunk := handle.read(16 * transport.stream_chunk_bytes):
+                            output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if assembly.stat().st_size != shard.bytes:
+                raise ShardIntegrityError(
+                    "assembled shard size differs from manifest"
+                )
+            os.replace(assembly, partial)
+            _fsync_directory(partial.parent)
+        except Exception:
+            assembly.unlink(missing_ok=True)
+            raise
+        for _, _, path in parts:
+            path.unlink(missing_ok=True)
+        _fsync_directory(partial.parent)
+
+    if partial.stat().st_size != shard.bytes:
+        raise ShardIntegrityError("downloaded shard size differs from manifest")
+    os.replace(partial, destination)
+    _fsync_directory(destination.parent)
     return FetchedShard(
         destination,
         shard.path,
         shard.bytes,
-        shard.upstream_sha256,
         False,
     )

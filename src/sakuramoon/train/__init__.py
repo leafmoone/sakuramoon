@@ -1,9 +1,4 @@
-"""Fail-closed single-GPU training primitives."""
-
-from sakuramoon.train.benchmark import (
-    MeasuredMicrobatch,
-    SingleGpuStepBenchmarkAdapter,
-)
+"""Single-GPU training primitives."""
 from sakuramoon.train.failures import FailureSnapshot, write_failure_bundle
 from sakuramoon.train.loop import (
     LoopResult,
@@ -11,17 +6,11 @@ from sakuramoon.train.loop import (
     SuccessfulLoopObservation,
 )
 from sakuramoon.train.preflight import (
-    PREFLIGHT_CHECKS,
     AcceptedPreflight,
-    PreflightCheckResult,
     PreflightError,
-    PreflightReport,
     ProductionSingleGpuCheckpointPublisher,
     RestoredSingleGpuCheckpoint,
-    SingleGpuPreflightPlan,
-    SingleGpuPreflightWorkload,
     build_single_gpu_preflight_checks,
-    build_single_gpu_preflight_workload,
     require_accepted_preflight,
     restore_single_gpu_checkpoint,
     run_single_gpu_preflight,
@@ -46,26 +35,19 @@ from sakuramoon.train.step import (
 )
 
 __all__ = [
-    "PREFLIGHT_CHECKS",
     "AcceptedPreflight",
     "CheckpointDecision",
     "CheckpointScheduler",
     "DenseDiTAdapter",
     "FailureSnapshot",
     "LoopResult",
-    "MeasuredMicrobatch",
-    "PreflightCheckResult",
     "PreflightError",
-    "PreflightReport",
     "PreparedTrainingBatch",
     "ProductionSingleGpuCheckpointPublisher",
     "RestoredSingleGpuCheckpoint",
     "RuntimeMeasurement",
     "SingleGpuBatchRuntime",
-    "SingleGpuPreflightPlan",
-    "SingleGpuPreflightWorkload",
     "SingleGpuStep",
-    "SingleGpuStepBenchmarkAdapter",
     "SingleGpuTrainingLoop",
     "SingleGpuUpdateResult",
     "SingleGpuUpdateState",
@@ -75,7 +57,6 @@ __all__ = [
     "TrainableComposite",
     "TrainableCompositeInputs",
     "build_single_gpu_preflight_checks",
-    "build_single_gpu_preflight_workload",
     "require_accepted_preflight",
     "require_single_gpu_config",
     "restore_single_gpu_checkpoint",

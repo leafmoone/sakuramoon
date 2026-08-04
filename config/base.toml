@@ -1,6 +1,3 @@
-# Canonical production base. Values prefixed REQUIRED_/BENCHMARK_ are explicit
-# S000 or immutable-input bindings; load_config rejects them until replaced by
-# measured/qualified values in a governed stage overlay.
 
 schema_version = 1
 
@@ -19,7 +16,7 @@ nfs_version = 3
 hard_mount = true
 minimum_free_gib = 50
 measured_raw_checkpoint_bytes = 5143061370
-checkpoint_copies = 3 # checkpoint.slots (2) plus one in-progress publishing copy
+checkpoint_copies = 3
 atomic_publish_probe = true
 
 [security]
@@ -74,15 +71,16 @@ read_timeout_seconds = "BENCHMARK_READ_TIMEOUT_SECONDS"
 max_retries = 3
 retry_backoff_seconds = 1.0
 stream_chunk_bytes = "BENCHMARK_STREAM_CHUNK_BYTES"
+streams_per_shard = "BENCHMARK_STREAMS_PER_SHARD"
 
 [data.loader]
 pin_memory = true
 drop_last = true
 
 [data.validation]
-selection_path = "data/validation-selection.json"
-shard_root = "data/validation-shards"
-shard_count = 2
+selection_path = "data/validation-cohorts/s0-validation-50k-v1/validation-selection.json"
+shard_root = "data/validation-cohorts/s0-validation-50k-v1/shards"
+shard_count = 7
 
 [data.image]
 exif_transpose = true
@@ -270,28 +268,14 @@ global_sample_mean = true
 kind = "raw"
 full_every_updates = 1000
 atomic_complete_marker = true
-checksum_required = true
 canonical_fqn = true
 
 [kernels]
-attention_backend = "fa4_varlen"
-production_attention_backend = "fa4_varlen"
-reference_attention_backend = "dense_sdpa_reference"
+attention_backend = "dense_sdpa_reference"
 dtype = "bfloat16"
 native_gqa = true
 repeat_kv_heads = false
 silent_fallback = false
-
-[compile]
-regional_enabled = false
-minimum_end_to_end_gain_percent = 3.0
-automatic_enable = false
-
-[profiling]
-enabled = false
-
-[benchmark]
-enabled = false
 
 [failure]
 stop_on_nonfinite = true
@@ -306,7 +290,7 @@ observer_queue_capacity = "BENCHMARK_METRIC_OBSERVER_QUEUE_CAPACITY"
 observer_event_timeout_seconds = "BENCHMARK_METRIC_EVENT_TIMEOUT_SECONDS"
 
 [wandb]
-enabled = true
+enabled = false
 project = "sakuramoon"
 entity = "2574905817leaf-jinan-university"
 offline_on_network_error = true

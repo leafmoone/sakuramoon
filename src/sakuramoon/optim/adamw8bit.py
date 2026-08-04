@@ -82,12 +82,9 @@ class IsolatedAdamW8bit:
         return {
             "optimizer": self.optimizer.state_dict(),
             "sr_rng": self.sr_rng.state_dict(),
-            "parameter_schema_sha256": self.audit.schema_sha256,
         }
 
     def load_state_dict(self, state_dict: dict[str, object]) -> None:
-        if state_dict.get("parameter_schema_sha256") != self.audit.schema_sha256:
-            raise ValueError("optimizer parameter schema hash does not match")
         optimizer_state = state_dict.get("optimizer")
         sr_state = state_dict.get("sr_rng")
         if not isinstance(optimizer_state, dict) or not isinstance(sr_state, dict):

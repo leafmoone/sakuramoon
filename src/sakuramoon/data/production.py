@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Never, SupportsIndex, cast
 
-from sakuramoon.config.resolve import resolved_config_sha256
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.buckets import generate_base_buckets, scale_buckets
 from sakuramoon.data.caption import (
@@ -39,9 +38,6 @@ class ProductionDataError(ValueError):
 
 PRODUCTION_METADATA_FIELDS = MetadataFieldMapping(
     id_field="id",
-    width_field="width",
-    height_field="height",
-    caption_available_field="caption_available",
 )
 
 
@@ -69,21 +65,9 @@ def _nested_mapping(raw: Mapping[str, object], key: str) -> Mapping[str, object]
 def adapt_modelscope_metadata(
     raw: Mapping[str, object],
 ) -> Mapping[str, object]:
-    """Project the real nested dataset fields used by D021 trusted parsing."""
+    """Project only metadata consumed by training."""
 
-    image = _nested_mapping(raw, "image")
-    captions = _nested_mapping(raw, "captions")
-    multicaptions = _nested_mapping(raw, "multicaptions")
-    caption_available = any(
-        type(value) is str and bool(value.strip())
-        for value in (*captions.values(), *multicaptions.values())
-    )
-    return {
-        "id": raw.get("id"),
-        "width": image.get("width"),
-        "height": image.get("height"),
-        "caption_available": caption_available,
-    }
+    return {"id": raw.get("id")}
 
 
 def _modelscope_tags(raw: Mapping[str, object], key: str) -> tuple[Tag, ...]:
@@ -98,9 +82,26 @@ def _modelscope_tags(raw: Mapping[str, object], key: str) -> tuple[Tag, ...]:
     return tuple(Tag(text=item, canonical=item) for item in cast(list[str], items))
 
 
-def _optional_text(mapping: Mapping[str, object], key: str) -> str | None:
+def _optional_text(
+    mapping: Mapping[str, object], key: str, *, group: str
+) -> str | None:
     value = mapping.get(key)
-    return value if type(value) is str and bool(value.strip()) else None
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise ProductionDataError(
+            f"ModelScope metadata {group}.{key} must be text or null"
+        )
+    stripped = value.strip()
+    return stripped or None
+
+
+def _short_vibes(multicaptions: Mapping[str, object]) -> str | None:
+    short = _optional_text(multicaptions, "short", group="multicaptions")
+    vibes = _optional_text(multicaptions, "vibes", group="multicaptions")
+    if short is not None and vibes is not None:
+        return f"{short}\n\n{vibes}"
+    return short or vibes
 
 
 def parse_modelscope_caption_fields(
@@ -109,8 +110,12 @@ def parse_modelscope_caption_fields(
     """Parse the governed real-dataset caption projection used by D014."""
 
     nsfw = raw.get("nsfw")
-    if type(nsfw) is not str:
-        raise ProductionDataError("ModelScope metadata nsfw must be a string")
+    if nsfw is None or (type(nsfw) is str and not nsfw.strip()):
+        nsfw_tags: tuple[Tag, ...] = ()
+    elif type(nsfw) is str:
+        nsfw_tags = (Tag(nsfw, nsfw),)
+    else:
+        raise ProductionDataError("ModelScope metadata nsfw must be text or null")
     captions = _nested_mapping(raw, "captions")
     multicaptions = _nested_mapping(raw, "multicaptions")
     dropout = _nested_mapping(raw, "dropout")
@@ -125,18 +130,18 @@ def parse_modelscope_caption_fields(
             "ModelScope metadata dropout.candidate_tags must contain only strings"
         )
     return CaptionFields(
-        nsfw=(Tag(nsfw, nsfw),),
+        nsfw=nsfw_tags,
         character=_modelscope_tags(raw, "character"),
         copyright=_modelscope_tags(raw, "copyright"),
         general=_modelscope_tags(raw, "general"),
         artists=_modelscope_tags(raw, "artist"),
         candidate_tags=frozenset(cast(list[str], candidate_items)),
         nl=NlCandidates(
-            None,
-            None,
-            _optional_text(multicaptions, "vibes"),
-            _optional_text(captions, "nl2"),
-            _optional_text(captions, "nl3"),
+            _optional_text(multicaptions, "long_names", group="multicaptions"),
+            _optional_text(multicaptions, "long_no_names", group="multicaptions"),
+            _short_vibes(multicaptions),
+            _optional_text(captions, "nl2", group="captions"),
+            _optional_text(captions, "nl3", group="captions"),
         ),
     )
 
@@ -188,26 +193,16 @@ class ConfiguredDataLoader:
 class ProductionBatchStreamIdentity:
     """Immutable identities accepted at the production data-to-train boundary."""
 
-    resolved_config_sha256: str
     loader: ConfiguredDataLoader
-    manifest_id: str
-    service_session_sha256: str
-    factory_identity: str
+    dataset_id: str
+    session_id: str
 
     def __post_init__(self) -> None:
-        digests = (
-            self.resolved_config_sha256,
-            self.manifest_id,
-            self.service_session_sha256,
-            self.factory_identity,
-        )
         if (
-            any(
-                type(value) is not str
-                or len(value) != 64
-                or any(character not in "0123456789abcdef" for character in value)
-                for value in digests
-            )
+            type(self.dataset_id) is not str
+            or not self.dataset_id
+            or type(self.session_id) is not str
+            or not self.session_id
             or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
                 self.loader, ConfiguredDataLoader
             )
@@ -405,11 +400,7 @@ class ProductionPipelineFactory:
             )
             or not callable(self.rejection_observer)
             or type(self.factory_identity) is not str
-            or len(self.factory_identity) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in self.factory_identity
-            )
+            or not self.factory_identity
         ):
             raise ProductionDataError("production pipeline factory fields are invalid")
         _require_spawn_serializable(self, "production pipeline factory")
@@ -522,11 +513,9 @@ class ProductionPipelineFactory:
         loader = self.loader
         loader.require_identity(client)
         identity = ProductionBatchStreamIdentity(
-            resolved_config_sha256=resolved_config_sha256(self.config),
             loader=loader,
-            manifest_id=client.identity.manifest_id,
-            service_session_sha256=client.identity.sha256,
-            factory_identity=self.factory_identity,
+            dataset_id=client.identity.dataset_id,
+            session_id=client.identity.session_id,
         )
         if client.health():
             return _issue_batch_stream(iter(()), identity)

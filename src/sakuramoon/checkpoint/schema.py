@@ -15,7 +15,6 @@ from sakuramoon.train.step import SingleGpuUpdateState
 SCHEMA_VERSION = 1
 RAW_SCHEMA_VERSION = 4
 MAX_MODEL_SHARD_BYTES = 2 * 1024**3
-_HEX64 = re.compile(r"[0-9a-f]{64}")
 _CHECKPOINT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
@@ -123,27 +122,16 @@ class CheckpointCadence:
         )
 
 
-def _require_hash(name: str, value: str) -> None:
-    if _HEX64.fullmatch(value) is None:
-        raise ValueError(f"{name} must be a lowercase SHA-256 hex digest")
-
-
 @dataclass(frozen=True, slots=True)
 class CheckpointIdentity:
     checkpoint_id: str
     update: int
-    config_sha256: str
-    dependency_sha256: str
-    parameter_schema_sha256: str
 
     def __post_init__(self) -> None:
         if _CHECKPOINT_ID.fullmatch(self.checkpoint_id) is None:
             raise ValueError("checkpoint_id is invalid")
         if type(self.update) is not int or self.update < 0:
             raise ValueError("checkpoint update must be a nonnegative integer")
-        _require_hash("config_sha256", self.config_sha256)
-        _require_hash("dependency_sha256", self.dependency_sha256)
-        _require_hash("parameter_schema_sha256", self.parameter_schema_sha256)
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,7 +252,6 @@ class RawCheckpointState:
 class FileRecord:
     path: str
     size: int
-    sha256: str
 
     def __post_init__(self) -> None:
         path = PurePosixPath(self.path)
@@ -277,7 +264,6 @@ class FileRecord:
             raise ValueError("checkpoint file path must be relative and normalized")
         if type(self.size) is not int or self.size < 0:
             raise ValueError("checkpoint file size must be nonnegative")
-        _require_hash("file sha256", self.sha256)
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,9 +291,6 @@ class CheckpointSaveResult:
 def identity_to_dict(identity: CheckpointIdentity) -> dict[str, object]:
     return {
         "checkpoint_id": identity.checkpoint_id,
-        "config_sha256": identity.config_sha256,
-        "dependency_sha256": identity.dependency_sha256,
-        "parameter_schema_sha256": identity.parameter_schema_sha256,
         "update": identity.update,
     }
 
@@ -315,7 +298,7 @@ def identity_to_dict(identity: CheckpointIdentity) -> dict[str, object]:
 def manifest_to_dict(manifest: CheckpointManifest) -> dict[str, object]:
     return {
         "files": [
-            {"path": record.path, "sha256": record.sha256, "size": record.size}
+            {"path": record.path, "size": record.size}
             for record in manifest.files
         ],
         "identity": identity_to_dict(manifest.identity),
@@ -346,36 +329,14 @@ def _has_schema_version(document: dict[str, Any], expected: int) -> bool:
 
 def identity_from_dict(value: object) -> CheckpointIdentity:
     document = _mapping(value, "checkpoint identity")
-    _exact_keys(
-        document,
-        {
-            "checkpoint_id",
-            "config_sha256",
-            "dependency_sha256",
-            "parameter_schema_sha256",
-            "update",
-        },
-        "checkpoint identity",
-    )
     try:
-        if not all(
-            isinstance(document[key], str)
-            for key in (
-                "checkpoint_id",
-                "config_sha256",
-                "dependency_sha256",
-                "parameter_schema_sha256",
-            )
-        ):
+        if not isinstance(document.get("checkpoint_id"), str):
             raise TypeError
         return CheckpointIdentity(
             checkpoint_id=cast(str, document["checkpoint_id"]),
             update=document["update"],
-            config_sha256=cast(str, document["config_sha256"]),
-            dependency_sha256=cast(str, document["dependency_sha256"]),
-            parameter_schema_sha256=cast(str, document["parameter_schema_sha256"]),
         )
-    except (TypeError, ValueError):
+    except (KeyError, TypeError, ValueError):
         raise CheckpointError("checkpoint identity is invalid") from None
 
 
@@ -402,16 +363,12 @@ def manifest_from_dict(value: object) -> CheckpointManifest:
     try:
         for raw_record in cast(list[object], raw_files):
             record = _mapping(raw_record, "checkpoint file record")
-            _exact_keys(record, {"path", "size", "sha256"}, "checkpoint file record")
-            if not isinstance(record["path"], str) or not isinstance(
-                record["sha256"], str
-            ):
+            if not isinstance(record.get("path"), str):
                 raise TypeError
             records.append(
                 FileRecord(
                     path=record["path"],
                     size=record["size"],
-                    sha256=record["sha256"],
                 )
             )
         return CheckpointManifest(
@@ -419,7 +376,7 @@ def manifest_from_dict(value: object) -> CheckpointManifest:
             identity=identity_from_dict(document["identity"]),
             files=tuple(records),
         )
-    except (TypeError, ValueError):
+    except (KeyError, TypeError, ValueError):
         raise CheckpointError("checkpoint manifest is invalid") from None
 
 

@@ -29,11 +29,9 @@ class _DepthIterator(Iterator[TrainingBatch]):
 
 def _stream_identity() -> ProductionBatchStreamIdentity:
     return ProductionBatchStreamIdentity(
-        resolved_config_sha256="1" * 64,
         loader=ConfiguredDataLoader(1, 1, 1, False, True),
-        manifest_id="2" * 64,
-        service_session_sha256="3" * 64,
-        factory_identity="4" * 64,
+        dataset_id="leafmoone/webdataset_danbooru@master",
+        session_id="test-session",
     )
 
 
@@ -42,7 +40,12 @@ def _real_row() -> dict[str, object]:
         "id": 71,
         "image": {"width": 832, "height": 1216},
         "captions": {"nl2": "A blue-haired character.", "nl3": ""},
-        "multicaptions": {"vibes": "soft light"},
+        "multicaptions": {
+            "long_names": "Alice in a blue dress.",
+            "long_no_names": None,
+            "short": "A blue-haired character.",
+            "vibes": "soft light",
+        },
         "tags": {
             "character": ["alice"],
             "copyright": ["original"],
@@ -62,27 +65,37 @@ def test_governed_modelscope_adapter_and_caption_parser() -> None:
 
     assert adapted == {
         "id": 71,
-        "width": 832,
-        "height": 1216,
-        "caption_available": True,
     }
     assert tuple(tag.text for tag in fields.nsfw) == ("safe",)
     assert tuple(tag.text for tag in fields.character) == ("alice",)
     assert tuple(tag.text for tag in fields.general) == ("blue_hair", "dress")
     assert tuple(tag.text for tag in fields.artists) == ("artist_name",)
     assert fields.candidate_tags == frozenset({"blue_hair"})
-    assert fields.nl.long_names is None and fields.nl.long_no_names is None
-    assert fields.nl.short_vibes == "soft light"
+    assert fields.nl.long_names == "Alice in a blue dress."
+    assert fields.nl.long_no_names is None
+    assert fields.nl.short_vibes == "A blue-haired character.\n\nsoft light"
     assert fields.nl.nl2 == "A blue-haired character."
     assert fields.nl.nl3 is None
 
 
-def test_governed_modelscope_parser_rejects_schema_drift() -> None:
-    missing_nested = _real_row()
-    missing_nested.pop("image")
-    with pytest.raises(ProductionDataError, match="image must be an object"):
-        adapt_modelscope_metadata(missing_nested)
+def test_modelscope_adapter_ignores_missing_declared_image_dimensions() -> None:
+    raw = _real_row()
+    raw["image"] = {"format": "webp", "width": None, "height": None}
 
+    assert adapt_modelscope_metadata(raw) == {"id": 71}
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_governed_modelscope_parser_accepts_empty_nsfw(value: object) -> None:
+    raw = _real_row()
+    raw["nsfw"] = value
+
+    fields = parse_modelscope_caption_fields(raw)
+
+    assert fields.nsfw == ()
+
+
+def test_governed_modelscope_parser_rejects_schema_drift() -> None:
     bad_tags = _real_row()
     tags = bad_tags["tags"]
     assert isinstance(tags, dict)
@@ -96,6 +109,48 @@ def test_governed_modelscope_parser_rejects_schema_drift() -> None:
     dropout["candidate_tags"] = ["valid", 2]
     with pytest.raises(ProductionDataError, match="only strings"):
         parse_modelscope_caption_fields(bad_candidate)
+
+    bad_nsfw = _real_row()
+    bad_nsfw["nsfw"] = 2
+    with pytest.raises(ProductionDataError, match="nsfw must be text or null"):
+        parse_modelscope_caption_fields(bad_nsfw)
+
+    bad_nl = _real_row()
+    multicaptions = bad_nl["multicaptions"]
+    assert isinstance(multicaptions, dict)
+    multicaptions["short"] = ["not", "text"]
+    with pytest.raises(
+        ProductionDataError, match=r"multicaptions\.short must be text or null"
+    ):
+        parse_modelscope_caption_fields(bad_nl)
+
+
+@pytest.mark.parametrize(
+    ("short", "vibes", "expected"),
+    [
+        (None, None, None),
+        ("", "  ", None),
+        ("short description", None, "short description"),
+        (None, "quiet mood", "quiet mood"),
+        (
+            " short description ",
+            " quiet mood ",
+            "short description\n\nquiet mood",
+        ),
+    ],
+)
+def test_governed_modelscope_parser_combines_short_and_vibes(
+    short: object, vibes: object, expected: str | None
+) -> None:
+    raw = _real_row()
+    multicaptions = raw["multicaptions"]
+    assert isinstance(multicaptions, dict)
+    multicaptions["short"] = short
+    multicaptions["vibes"] = vibes
+
+    fields = parse_modelscope_caption_fields(raw)
+
+    assert fields.nl.short_vibes == expected
 
 
 def test_accepted_stream_exposes_only_live_iterator_ready_batch_depth() -> None:

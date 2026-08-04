@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal, Protocol, cast
 
 import torch
 from torch import nn
+from torch.utils import checkpoint as torch_checkpoint
 
 from sakuramoon.conditioning.global_condition import (
+    BlockModulation,
     GlobalConditioner,
     GlobalConditionOutput,
 )
@@ -23,6 +27,133 @@ from sakuramoon.model.attention import (
 from sakuramoon.model.block import DiTBlock, PackedDiTBlock
 from sakuramoon.model.growth import active_slot_ids, slot_growth, slot_name
 from sakuramoon.model.output_head import FinalOutputHead
+
+ActivationCheckpointMode = Literal["none", "alternating", "all"]
+_ACTIVATION_CHECKPOINT_MODES = frozenset({"none", "alternating", "all"})
+
+
+class _ActivationCheckpoint(Protocol):
+    def __call__(
+        self,
+        function: Callable[..., torch.Tensor],
+        *args: torch.Tensor,
+        use_reentrant: bool,
+        preserve_rng_state: bool,
+    ) -> object: ...
+
+
+_activation_checkpoint = cast(
+    _ActivationCheckpoint,
+    torch_checkpoint.checkpoint,  # pyright: ignore[reportUnknownMemberType]
+)
+
+
+def _require_activation_checkpoint_mode(value: str) -> ActivationCheckpointMode:
+    if value not in _ACTIVATION_CHECKPOINT_MODES:
+        raise ValueError("activation checkpoint mode is invalid")
+    return cast(ActivationCheckpointMode, value)
+
+
+def _checkpoint_block_at(
+    mode: ActivationCheckpointMode,
+    active_index: int,
+    *,
+    training: bool,
+) -> bool:
+    if not training or not torch.is_grad_enabled() or mode == "none":
+        return False
+    return mode == "all" or active_index % 2 == 0
+
+
+def _checkpoint_tensor(
+    operation: Callable[..., torch.Tensor],
+    *inputs: torch.Tensor,
+) -> torch.Tensor:
+    result: object = _activation_checkpoint(
+        operation,
+        *inputs,
+        use_reentrant=False,
+        preserve_rng_state=False,
+    )
+    if not isinstance(result, torch.Tensor):
+        raise TypeError("activation-checkpointed DiT block returned a non-tensor")
+    return result
+
+
+def _dense_checkpoint_operation(
+    block: DiTBlock,
+    token_mask: torch.Tensor,
+    attention_mask: torch.Tensor,
+    coordinates: torch.Tensor,
+    *,
+    attention_growth: float,
+    mlp_growth: float,
+) -> Callable[..., torch.Tensor]:
+    def operation(
+        tokens: torch.Tensor,
+        attention_scale: torch.Tensor,
+        attention_shift: torch.Tensor,
+        attention_gate: torch.Tensor,
+        mlp_scale: torch.Tensor,
+        mlp_shift: torch.Tensor,
+        mlp_gate: torch.Tensor,
+    ) -> torch.Tensor:
+        return block(
+            tokens,
+            token_mask,
+            attention_mask,
+            coordinates,
+            BlockModulation(
+                attention_scale,
+                attention_shift,
+                attention_gate,
+                mlp_scale,
+                mlp_shift,
+                mlp_gate,
+            ),
+            attention_growth=attention_growth,
+            mlp_growth=mlp_growth,
+        )
+
+    return operation
+
+
+def _packed_checkpoint_operation(
+    block: PackedDiTBlock,
+    boundaries: AcceptedCuSeqlens,
+    coordinates: torch.Tensor,
+    sample_indices: torch.Tensor,
+    *,
+    attention_growth: float,
+    mlp_growth: float,
+) -> Callable[..., torch.Tensor]:
+    def operation(
+        tokens: torch.Tensor,
+        attention_scale: torch.Tensor,
+        attention_shift: torch.Tensor,
+        attention_gate: torch.Tensor,
+        mlp_scale: torch.Tensor,
+        mlp_shift: torch.Tensor,
+        mlp_gate: torch.Tensor,
+    ) -> torch.Tensor:
+        return block(
+            tokens,
+            boundaries,
+            coordinates,
+            sample_indices,
+            BlockModulation(
+                attention_scale,
+                attention_shift,
+                attention_gate,
+                mlp_scale,
+                mlp_shift,
+                mlp_gate,
+            ),
+            attention_growth=attention_growth,
+            mlp_growth=mlp_growth,
+        )
+
+    return operation
 
 
 @dataclass(frozen=True)
@@ -87,6 +218,7 @@ class DenseDiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.active_slot_ids = slots
+        self._activation_checkpoint_mode: ActivationCheckpointMode = "none"
         self._artifact_config: dict[str, object] = {
             "active_slot_ids": list(slots),
             "aspect_dim": aspect_dim,
@@ -168,6 +300,15 @@ class DenseDiT(nn.Module):
             weight_zero_init=output_weight_zero_init,
             bias_zero_init=output_bias_zero_init,
         )
+
+    @property
+    def activation_checkpoint_mode(self) -> ActivationCheckpointMode:
+        return self._activation_checkpoint_mode
+
+    def set_activation_checkpoint_mode(self, mode: str) -> None:
+        """Apply the explicit runtime-only block recomputation policy."""
+
+        self._activation_checkpoint_mode = _require_activation_checkpoint_mode(mode)
 
     def _prepare_tokens(
         self,
@@ -255,15 +396,42 @@ class DenseDiT(nn.Module):
         attention_mask = dense_attention_mask(token_mask)
         for active_index, slot_id in enumerate(self.active_slot_ids):
             growth = slot_growth(self.depth, slot_id, growth_alpha)
-            joint = self.blocks[slot_name(slot_id)](
-                joint,
-                token_mask,
-                attention_mask,
-                coordinates,
-                condition.block.for_active_index(active_index),
-                attention_growth=growth,
-                mlp_growth=growth,
-            )
+            block = self.blocks[slot_name(slot_id)]
+            modulation = condition.block.for_active_index(active_index)
+            if _checkpoint_block_at(
+                self._activation_checkpoint_mode,
+                active_index,
+                training=self.training,
+            ):
+                if not isinstance(block, DiTBlock):
+                    raise TypeError("dense DiT block registry is invalid")
+                joint = _checkpoint_tensor(
+                    _dense_checkpoint_operation(
+                        block,
+                        token_mask,
+                        attention_mask,
+                        coordinates,
+                        attention_growth=growth,
+                        mlp_growth=growth,
+                    ),
+                    joint,
+                    modulation.attention_scale,
+                    modulation.attention_shift,
+                    modulation.attention_gate,
+                    modulation.mlp_scale,
+                    modulation.mlp_shift,
+                    modulation.mlp_gate,
+                )
+            else:
+                joint = block(
+                    joint,
+                    token_mask,
+                    attention_mask,
+                    coordinates,
+                    modulation,
+                    attention_growth=growth,
+                    mlp_growth=growth,
+                )
         return DenseDiTFeatures(
             joint_hidden=joint,
             token_mask=token_mask,
@@ -366,6 +534,7 @@ class PackedDiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.active_slot_ids = slots
+        self._activation_checkpoint_mode: ActivationCheckpointMode = "none"
         self._artifact_config: dict[str, object] = {
             "active_slot_ids": list(slots),
             "aspect_dim": aspect_dim,
@@ -447,6 +616,15 @@ class PackedDiT(nn.Module):
             weight_zero_init=output_weight_zero_init,
             bias_zero_init=output_bias_zero_init,
         )
+
+    @property
+    def activation_checkpoint_mode(self) -> ActivationCheckpointMode:
+        return self._activation_checkpoint_mode
+
+    def set_activation_checkpoint_mode(self, mode: str) -> None:
+        """Apply the explicit runtime-only block recomputation policy."""
+
+        self._activation_checkpoint_mode = _require_activation_checkpoint_mode(mode)
 
     def prepare_packed_sequences(
         self,
@@ -532,15 +710,42 @@ class PackedDiT(nn.Module):
         joint = packed.tokens
         for active_index, slot_id in enumerate(self.active_slot_ids):
             growth = slot_growth(self.depth, slot_id, growth_alpha)
-            joint = self.blocks[slot_name(slot_id)](
-                joint,
-                boundaries,
-                coordinates,
-                sample_indices,
-                condition.block.for_active_index(active_index),
-                attention_growth=growth,
-                mlp_growth=growth,
-            )
+            block = self.blocks[slot_name(slot_id)]
+            modulation = condition.block.for_active_index(active_index)
+            if _checkpoint_block_at(
+                self._activation_checkpoint_mode,
+                active_index,
+                training=self.training,
+            ):
+                if not isinstance(block, PackedDiTBlock):
+                    raise TypeError("packed DiT block registry is invalid")
+                joint = _checkpoint_tensor(
+                    _packed_checkpoint_operation(
+                        block,
+                        boundaries,
+                        coordinates,
+                        sample_indices,
+                        attention_growth=growth,
+                        mlp_growth=growth,
+                    ),
+                    joint,
+                    modulation.attention_scale,
+                    modulation.attention_shift,
+                    modulation.attention_gate,
+                    modulation.mlp_scale,
+                    modulation.mlp_shift,
+                    modulation.mlp_gate,
+                )
+            else:
+                joint = block(
+                    joint,
+                    boundaries,
+                    coordinates,
+                    sample_indices,
+                    modulation,
+                    attention_growth=growth,
+                    mlp_growth=growth,
+                )
         return PackedDiTFeatures(
             joint_hidden=joint,
             packed=packed,

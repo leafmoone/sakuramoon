@@ -7,7 +7,7 @@ seed = 44
 
 [paths]
 run_dir = "runs/s0"
-checkpoint_dir = "checkpoints/s0"
+checkpoint_dir = "output_model/s0"
 artifact_dir = "artifacts/s0"
 
 [distributed]
@@ -17,26 +17,27 @@ frozen_encoders_outside_wrapper = true
 automatic_backend_fallback = false
 
 [checkpoint]
-full_every_updates = 1000
+full_every_updates = 100
 slots = 2
 
 [data.cache]
 low_watermark_gib = 32
 high_watermark_gib = 64
-download_concurrency = 2
-verified_shard_lookahead = 3
-persistent_workers_per_rank = 2
-ready_batches_per_rank = 2
+download_concurrency = 8
+verified_shard_lookahead = 50
+persistent_workers_per_rank = 4
+ready_batches_per_rank = 8
 
 [data.service]
 request_timeout_seconds = 30.0
-lease_channel_capacity = 2
-ack_channel_capacity = 2
+lease_channel_capacity = 4
+ack_channel_capacity = 4
 
 [data.transport]
 connect_timeout_seconds = 10.0
 read_timeout_seconds = 30.0
 stream_chunk_bytes = 1048576
+streams_per_shard = 4
 
 [growth]
 enabled = false
@@ -54,11 +55,11 @@ predecessor = ""
 world_size = 1
 depth = 16
 resolution = 256
-local_batch = 2
-accumulation = 4
-global_batch = 8
-activation_checkpoint_mode = "none"
-planned_updates = 1000
+local_batch = 40
+accumulation = 8
+global_batch = 320
+activation_checkpoint_mode = "all"
+planned_updates = 100000
 manual_finalize = true
 automatic_transition = false
 
@@ -71,5 +72,17 @@ observer_queue_capacity = 64
 observer_event_timeout_seconds = 30.0
 
 [wandb]
+enabled = true
 retry_jsonl_path = "artifacts/s0/wandb-retry.jsonl"
 queue_capacity = 64
+
+[evaluation]
+enabled = true
+every_updates = 1000
+sample_count = 1000
+batch_size = 64
+is_splits = 10
+prompt_path = "data/validation-cohorts/s0-validation-50k-v1/validation-prompts.json"
+validation_shard_root = "data/validation-cohorts/s0-validation-50k-v1/shards"
+output_dir = "output_model/evaluation/s0"
+sampling_profile = "preview"

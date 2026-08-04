@@ -3,99 +3,106 @@
 from __future__ import annotations
 
 import argparse
-import json
+import os
+import threading
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NoReturn
-
-from sakuramoon.config import ConfigurationError
-from sakuramoon.train.production import (
-    ProductionPreflightError,
-    ProductionReadinessError,
-    ProductionTrainingError,
-    run_production_single_gpu,
-)
 
 
-class _ArgumentError(ValueError):
-    pass
+def _configure_cuda_allocator() -> str:
+    """Enable expandable CUDA segments before importing Torch."""
 
-
-class _SafeParser(argparse.ArgumentParser):
-    def error(self, message: str) -> NoReturn:
-        del message
-        raise _ArgumentError("invalid arguments")
+    current = os.environ.get("PYTORCH_ALLOC_CONF", "")
+    options = [
+        option.strip()
+        for option in current.split(",")
+        if option.strip()
+        and not option.strip().startswith("expandable_segments:")
+    ]
+    options.append("expandable_segments:True")
+    configured = ",".join(options)
+    os.environ["PYTORCH_ALLOC_CONF"] = configured
+    return configured
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = _SafeParser(description="Run SakuraMoon single-GPU training")
+    parser = argparse.ArgumentParser(description="Run SakuraMoon single-GPU training")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--config-root", type=Path, default=Path("config"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument(
+        "--evaluate-only",
+        type=Path,
+        metavar="CHECKPOINT",
+        help="compute FID/IS from an existing complete checkpoint without training",
+    )
     return parser
 
 
-def _emit(payload: dict[str, object]) -> None:
-    print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
-
-
 def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.evaluate_only is not None and (
+        args.resume is not None or args.preflight_only
+    ):
+        parser.error("--evaluate-only cannot be combined with --resume or --preflight-only")
+    allocator_config = _configure_cuda_allocator()
+    prefix = "eval" if args.evaluate_only is not None else "train"
+    mode = "评估" if args.evaluate_only is not None else "训练"
+    print(f"[{prefix}] 进程已启动，配置: {args.config}", flush=True)
+    print(f"[{prefix}] CUDA allocator: {allocator_config}", flush=True)
+    print(f"[{prefix}] 正在加载 Torch、Transformers 和{mode}模块", flush=True)
+    import_finished = threading.Event()
+
+    def import_heartbeat() -> None:
+        elapsed = 0
+        while not import_finished.wait(10.0):
+            elapsed += 10
+            print(f"[{prefix}] {mode}模块仍在加载: {elapsed}s", flush=True)
+
+    heartbeat = threading.Thread(target=import_heartbeat, daemon=True)
+    heartbeat.start()
     try:
-        args = build_parser().parse_args(argv)
-        result = run_production_single_gpu(
+        from sakuramoon.train.production import (
+            run_production_evaluation,
+            run_production_single_gpu,
+        )
+    finally:
+        import_finished.set()
+        heartbeat.join()
+    print(f"[{prefix}] {mode}模块加载完成", flush=True)
+    if args.evaluate_only is not None:
+        evaluation = run_production_evaluation(
             args.config,
             config_root=args.config_root,
             repository_root=args.root,
-            resume=args.resume,
-            preflight_only=args.preflight_only,
+            checkpoint=args.evaluate_only,
         )
-    except (_ArgumentError, SystemExit):
-        _emit({"error": "invalid_arguments", "ok": False})
-        return 2
-    except ConfigurationError as error:
-        payload: dict[str, object] = {
-            "error": "configuration_invalid",
-            "ok": False,
-        }
-        if error.unresolved_bindings:
-            payload["unresolved_bindings"] = [
-                {
-                    "kind": binding.kind,
-                    "path": binding.path,
-                    "sentinel": binding.sentinel,
-                }
-                for binding in error.unresolved_bindings
-            ]
-        _emit(payload)
-        return 2
-    except ProductionReadinessError as error:
-        _emit(
-            {
-                "blockers": list(error.blockers),
-                "error": "production_readiness_blocked",
-                "ok": False,
-            }
+        print(
+            f"[eval] 完成: update={evaluation.update}, "
+            f"FID={evaluation.fid:.4f}, "
+            f"IS={evaluation.inception_score_mean:.4f}±"
+            f"{evaluation.inception_score_std:.4f}",
+            flush=True,
         )
-        return 2
-    except ProductionPreflightError:
-        _emit({"error": "training_preflight_failed", "ok": False})
-        return 1
-    except ProductionTrainingError:
-        _emit({"error": "training_failed", "ok": False})
-        return 1
-    _emit(
-        {
-            "checkpoint": str(result.checkpoint_path),
-            "final_successful_update": result.final_successful_update,
-            "initial_successful_update": result.initial_successful_update,
-            "ok": True,
-            "preflight_only": result.preflight_only,
-            "preflight_report": str(result.preflight_report),
-            "resolved_config_sha256": result.resolved_config_sha256,
-        }
+        print(f"[eval] 结果: {evaluation.result_path}", flush=True)
+        return 0
+    result = run_production_single_gpu(
+        args.config,
+        config_root=args.config_root,
+        repository_root=args.root,
+        resume=args.resume,
+        preflight_only=args.preflight_only,
     )
+    print(
+        f"[train] 完成: update {result.initial_successful_update} -> "
+        f"{result.final_successful_update}",
+        flush=True,
+    )
+    print(f"[train] 模型输出: {result.checkpoint_path}", flush=True)
+    print(f"[train] 预检报告: {result.preflight_report}", flush=True)
     return 0
 
 

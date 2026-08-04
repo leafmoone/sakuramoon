@@ -1,34 +1,44 @@
 # SakuraMoon
 
-SakuraMoon 是一个从零训练二次元文生图基础模型的本地工程。实现按
-[`IMPLEMENTATION_ROADMAP.md`](docs/model-architecture/progress/IMPLEMENTATION_ROADMAP.md)
-中的任务依赖顺序推进；每个任务经针对性验证后形成单独原子提交，低中风险任务在包末统一审查，高风险任务保持独立双审。
+本地文生图训练项目，仅保留模型、数据服务、训练、模型保存、采样和 FID/IS。
 
-## 规范来源
+## 目录
 
-实现依据按以下优先级解释，低优先级内容不得覆盖高优先级决定：
+```text
+config/                   TOML 运行配置
+src/sakuramoon/model/     DiT
+src/sakuramoon/encoders/  Qwen 与 VAE
+src/sakuramoon/data/      WebDataset 与数据服务
+src/sakuramoon/train/     训练循环
+src/sakuramoon/eval/      FID/IS
+output_model/             新模型与评估结果（运行后生成）
+```
 
-1. [`current/confirmed-decisions.md`](docs/model-architecture/current/confirmed-decisions.md)
-2. [`current/open-items.md`](docs/model-architecture/current/open-items.md)
-3. [`current/observability-and-evaluation.md`](docs/model-architecture/current/observability-and-evaluation.md) 等本地补充决定
-4. `docs/model-architecture/archive/` 中的历史组件页
+## 全新训练
 
-`archive/` 只用于追溯，不是配置来源。项目的模型架构文档入口是
-[`docs/model-architecture/README.md`](docs/model-architecture/README.md)；本工程不再调用或恢复 Notion MCP。
+先在终端 1 启动数据服务：
 
-## 工程约束
+```bash
+cd /root/shared-nvme/sakuramoon
+PYTHONPATH=src uv run --no-sync python -m sakuramoon.cli.data_service \
+  --config train_s0.toml \
+  --config-root /root/shared-nvme/sakuramoon/config \
+  --root /root/shared-nvme/sakuramoon
+```
 
-- 所有训练参数必须显式来自 `config/*.toml`，运行代码不得提供隐式训练默认值，也不得从历史候选方案补值。
-- 除 `all_condition=0.10` 外的 dropout 数值仍未决定；相关生产配置在用户明确决定前必须保持不可运行。
-- 环境和 Python 依赖统一由 `uv` 管理。R002 完成前不得假定环境已安装或锁定，也不得用临时安装替代锁文件。
-- 当前单卡 RTX 5090 证据只能关闭明确标为 CPU 或 1GPU 的门槛，不能替代任何 4GPU DDP、NCCL、吞吐或恢复验收。
-- 禁止静默 fallback，禁止自动改变 batch、world size、backend、LR 或绕过 preflight。
+数据服务就绪后，在终端 2 开始训练：
 
-## 资产与凭据
+```bash
+cd /root/shared-nvme/sakuramoon
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src uv run --no-sync python -m sakuramoon.cli.train \
+  --config train_s0.toml \
+  --config-root /root/shared-nvme/sakuramoon/config \
+  --root /root/shared-nvme/sakuramoon
+```
 
-`.env`、模型、数据库、数据集、缓存、参考仓库、checkpoint、W&B、profile 和训练产物均位于 Git 边界之外。Git 只保存可审计的来源、revision、哈希、schema、许可证与 manifest；详细规则见
-[`asset-policy.md`](docs/model-architecture/progress/asset-policy.md)。
+不要添加 `--resume`；运行命令使用 `--no-sync`，只用现有环境，不读取或生成
+项目锁。依赖声明只维护 `pyproject.toml`。模型写入 `output_model/s0/`。
 
-ModelScope 与 W&B 凭据只能通过环境变量注入。不得读取、打印、写入配置、日志、artifact 或提交本地 `.env` 中的值。
-
-协作和任务执行规则见 [`AGENTS.md`](AGENTS.md)。
+`config/train_s0.toml` 的 `[evaluation].every_updates` 控制 FID/IS 周期，默认
+为 1000 个成功 update。结果写入 `output_model/evaluation/s0/step-<update>.toml`
+和 `latest.toml`。

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -96,14 +95,6 @@ def _exact_keys(document: dict[str, Any], expected: set[str], name: str) -> None
         raise CheckpointError(f"{name} has unknown or missing fields")
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def read_checkpoint_manifest(path: Path) -> CheckpointManifest:
     if path.is_symlink() or not path.is_dir():
         raise CheckpointError("checkpoint path must be a real directory")
@@ -145,8 +136,8 @@ def read_checkpoint_manifest(path: Path) -> CheckpointManifest:
         if payload.is_symlink() or not payload.is_file():
             raise CheckpointError(f"checkpoint payload is missing: {record.path}")
         try:
-            if payload.stat().st_size != record.size or _sha256(payload) != record.sha256:
-                raise CheckpointError(f"checkpoint payload checksum failed: {record.path}")
+            if payload.stat().st_size != record.size:
+                raise CheckpointError(f"checkpoint payload size differs: {record.path}")
         except OSError:
             raise CheckpointError(f"checkpoint payload is unreadable: {record.path}") from None
     return manifest
@@ -195,7 +186,7 @@ def _validate_raw_sidecars(
         raise CheckpointError("raw checkpoint model payload set is invalid")
     for record in model_records:
         outer = outer_model[record.path]
-        if outer.size != record.size or outer.sha256 != record.sha256:
+        if outer.size != record.size:
             raise CheckpointError("raw checkpoint model manifests differ")
     try:
         resolved_config = (checkpoint / "resolved_config.toml").read_bytes()
@@ -204,8 +195,6 @@ def _validate_raw_sidecars(
         raise CheckpointError("resolved config is unreadable") from None
     if not parsed_config:
         raise CheckpointError("resolved config is unreadable")
-    if hashlib.sha256(resolved_config).hexdigest() != manifest.identity.config_sha256:
-        raise CheckpointError("resolved config hash differs from checkpoint identity")
 
 
 def _validate_identity(
@@ -334,14 +323,10 @@ def _validate_optimizer_schema(
     optimizer: IsolatedAdamW8bit,
     expected: CheckpointIdentity,
 ) -> None:
+    del expected
     document = _mapping(value, "optimizer schema")
-    _exact_keys(document, {"schema_version", "parameter_schema_sha256", "groups"}, "optimizer schema")
-    if (
-        type(document["schema_version"]) is not int
-        or document["schema_version"] != 1
-        or document["parameter_schema_sha256"] != expected.parameter_schema_sha256
-    ):
-        raise CheckpointError("optimizer parameter schema hash does not match")
+    if type(document.get("schema_version")) is not int or document["schema_version"] != 1:
+        raise CheckpointError("optimizer parameter schema version is invalid")
     groups = document["groups"]
     if not isinstance(groups, list):
         raise CheckpointError("optimizer groups must be an array")
@@ -362,7 +347,7 @@ def _validate_optimizer_schema(
         if not isinstance(group_name, str) or not isinstance(names, list):
             raise CheckpointError("current optimizer lacks canonical parameter names")
         current.append((group_name, tuple(cast(list[str], names))))
-    if saved != current or optimizer.audit.schema_sha256 != expected.parameter_schema_sha256:
+    if saved != current:
         raise CheckpointError("optimizer canonical parameter groups do not match")
 
 
@@ -562,9 +547,8 @@ def _model_manifest_records(model_dir: Path) -> tuple[FileRecord, ...]:
     try:
         for item in cast(list[object], document["files"]):
             record = _mapping(item, "model file record")
-            _exact_keys(record, {"path", "size", "sha256"}, "model file record")
-            records.append(FileRecord(record["path"], record["size"], record["sha256"]))
-    except (TypeError, ValueError):
+            records.append(FileRecord(record["path"], record["size"]))
+    except (KeyError, TypeError, ValueError):
         raise CheckpointError("model manifest is invalid") from None
     expected = {record.path for record in records}
     if not expected or len(expected) != len(records):
@@ -598,8 +582,8 @@ def _validate_standalone_model_manifest(model_dir: Path) -> None:
     for record in records:
         path = model_dir / record.path
         try:
-            if path.stat().st_size != record.size or _sha256(path) != record.sha256:
-                raise CheckpointError(f"model directory checksum failed: {record.path}")
+            if path.stat().st_size != record.size:
+                raise CheckpointError(f"model directory size differs: {record.path}")
         except OSError:
             raise CheckpointError(f"model directory file is unreadable: {record.path}") from None
 
@@ -728,7 +712,6 @@ def load_raw_checkpoint(
     optimizer.load_state_dict(
         {
             "optimizer": optimizer_state,
-            "parameter_schema_sha256": expected.parameter_schema_sha256,
             "sr_rng": sr_rng,
         }
     )

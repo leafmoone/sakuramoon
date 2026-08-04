@@ -3,21 +3,16 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import signal
 import threading
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NoReturn
 
-from sakuramoon.config import ConfigurationError, load_config
-from sakuramoon.data.cache import CacheQuota, ShardCache, ShardCacheError
-from sakuramoon.data.manifest import DatasetManifestError
+from sakuramoon.config import load_config
+from sakuramoon.data.cache import CacheQuota, ShardCache
 from sakuramoon.data.modelscope import (
     MODELSCOPE_TOKEN_ENVIRONMENT,
-    DatasetAuthenticationError,
-    DatasetTransportError,
     ModelScopeDatasetTransport,
     ensure_dataset_manifest,
 )
@@ -29,33 +24,24 @@ from sakuramoon.data.service import (
 )
 from sakuramoon.data.service_protocol import DataServiceSessionIdentity
 from sakuramoon.data.validation import (
-    ValidationSelectionError,
+    VALIDATION_SHARD_COUNT,
     ensure_validation_selection,
     prepare_validation_shards,
+    require_published_validation_shards,
 )
-from sakuramoon.storage import StorageValidationError, require_data_service_storage
-
-
-class _ArgumentError(ValueError):
-    pass
-
-
-class _SafeParser(argparse.ArgumentParser):
-    def error(self, message: str) -> NoReturn:
-        del message
-        raise _ArgumentError("invalid arguments")
+from sakuramoon.storage import require_data_service_storage
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = _SafeParser(description="Run the SakuraMoon dataset supply service")
+    parser = argparse.ArgumentParser(description="Run the SakuraMoon dataset supply service")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--config-root", type=Path, default=Path("config"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
     return parser
 
 
-def _emit(payload: dict[str, object]) -> None:
-    print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
+def _log(message: str) -> None:
+    print(f"[data-server] {message}", flush=True)
 
 
 def _root_path(root: Path, configured: str) -> Path:
@@ -72,109 +58,89 @@ def _root_path(root: Path, configured: str) -> Path:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    try:
-        args = build_parser().parse_args(argv)
-        loaded = load_config(args.config, config_root=args.config_root)
-        config = loaded.config
-        if config.security.modelscope_token_env != MODELSCOPE_TOKEN_ENVIRONMENT:
-            raise ConfigurationError("dataset credential variable is not approved")
-        root = args.root.resolve(strict=True)
-        require_data_service_storage(config, root)
-        manifest_path = _root_path(root, config.data.manifest.path)
-        transport = ModelScopeDatasetTransport.from_token_environment(
-            MODELSCOPE_TOKEN_ENVIRONMENT, config.data.transport
-        )
-        manifest = ensure_dataset_manifest(
-            transport,
-            manifest_path,
-            config.data.source,
-            initialize_if_missing=config.data.manifest.initialize_if_missing,
-            refresh_existing=config.data.manifest.refresh_existing,
-        )
-        validation_selection = ensure_validation_selection(
-            manifest,
-            _root_path(root, config.data.validation.selection_path),
-        )
+    args = build_parser().parse_args(argv)
+    _log(f"加载配置: {args.config}")
+    loaded = load_config(args.config, config_root=args.config_root)
+    config = loaded.config
+    root = args.root.resolve(strict=True)
+    require_data_service_storage(config, root)
+    _log("读取数据分片清单")
+    manifest_path = _root_path(root, config.data.manifest.path)
+    transport = ModelScopeDatasetTransport.from_token_environment(
+        MODELSCOPE_TOKEN_ENVIRONMENT, config.data.transport
+    )
+    _log("下载源: ModelScope HTTPS 直连（不使用 HTTP(S)_PROXY）")
+    manifest = ensure_dataset_manifest(
+        transport,
+        manifest_path,
+        config.data.source,
+        initialize_if_missing=config.data.manifest.initialize_if_missing,
+        refresh_existing=config.data.manifest.refresh_existing,
+    )
+    _log(f"数据分片: {len(manifest.shards)}")
+    validation_selection = ensure_validation_selection(
+        manifest,
+        _root_path(root, config.data.validation.selection_path),
+        expected_shard_count=config.data.validation.shard_count,
+    )
+    validation_root = _root_path(root, config.data.validation.shard_root)
+    if len(validation_selection.shards) >= VALIDATION_SHARD_COUNT:
+        require_published_validation_shards(manifest, validation_selection, validation_root)
+    else:
         prepare_validation_shards(
-            transport,
-            manifest,
-            validation_selection,
-            _root_path(root, config.data.validation.shard_root),
+            transport, manifest, validation_selection, validation_root
         )
-        cache = ShardCache(
-            _root_path(root, config.paths.cache_dir),
-            manifest,
-            transport,
-            CacheQuota(
-                config.data.cache.low_watermark_gib * 1024**3,
-                config.data.cache.high_watermark_gib * 1024**3,
-            ),
-        )
-        identity = DataServiceSessionIdentity(
-            manifest_id=manifest.manifest_id,
-            worker_count=config.data.cache.persistent_workers_per_rank,
-        )
-        service = DataSupplyService(
-            manifest,
-            validation_selection,
-            cache,
-            _root_path(root, config.data.service.mainset_path),
-            Path(config.data.service.ownership_lock_path),
-            identity,
-            DataServiceLimits(
-                download_concurrency=config.data.cache.download_concurrency,
-                verified_shard_lookahead=config.data.cache.verified_shard_lookahead,
-                lease_channel_capacity=config.data.service.lease_channel_capacity,
-                ack_channel_capacity=config.data.service.ack_channel_capacity,
-            ),
-        )
-        server = DataServiceServer(
-            service,
-            Path(config.data.service.socket_path),
-            request_timeout_seconds=config.data.service.request_timeout_seconds,
-        )
-        stopped = threading.Event()
+    _log(f"验证集分片: {len(validation_selection.shards)}")
+    cache = ShardCache(
+        _root_path(root, config.paths.cache_dir),
+        manifest,
+        transport,
+        CacheQuota(
+            config.data.cache.low_watermark_gib * 1024**3,
+            config.data.cache.high_watermark_gib * 1024**3,
+        ),
+    )
+    identity = DataServiceSessionIdentity(
+        dataset_id=manifest.dataset_id,
+        worker_count=config.data.cache.persistent_workers_per_rank,
+    )
+    service = DataSupplyService(
+        manifest,
+        validation_selection,
+        cache,
+        _root_path(root, config.data.service.mainset_path),
+        Path(config.data.service.ownership_lock_path),
+        identity,
+        DataServiceLimits(
+            download_concurrency=config.data.cache.download_concurrency,
+            verified_shard_lookahead=config.data.cache.verified_shard_lookahead,
+            lease_channel_capacity=config.data.service.lease_channel_capacity,
+            ack_channel_capacity=config.data.service.ack_channel_capacity,
+        ),
+    )
+    server = DataServiceServer(
+        service,
+        Path(config.data.service.socket_path),
+        request_timeout_seconds=config.data.service.request_timeout_seconds,
+    )
+    stopped = threading.Event()
 
-        def stop(_signum: int, _frame: object) -> None:
-            stopped.set()
+    def stop(_signum: int, _frame: object) -> None:
+        if stopped.is_set():
+            _log("再次收到停止信号，立即退出")
+            os._exit(130)
+        _log("收到停止信号，正在取消下载")
+        stopped.set()
 
-        signal.signal(signal.SIGINT, stop)
-        signal.signal(signal.SIGTERM, stop)
-        server.serve(
-            stopped,
-            ready_callback=lambda: _emit(
-                {
-                    "ok": True,
-                    "manifest_id": identity.manifest_id,
-                    "pid": os.getpid(),
-                    "service_sha256": identity.sha256,
-                    "status": "listening",
-                    "validation_selection_id": validation_selection.selection_id,
-                }
-            ),
-        )
-        return 0
-    except (_ArgumentError, SystemExit):
-        _emit({"error": "invalid_arguments", "ok": False})
-        return 2
-    except ConfigurationError:
-        _emit({"error": "configuration_invalid", "ok": False})
-        return 2
-    except DatasetAuthenticationError:
-        _emit({"error": "dataset_authentication_failed", "ok": False})
-        return 2
-    except DatasetManifestError:
-        _emit({"error": "dataset_manifest_invalid", "ok": False})
-        return 1
-    except (
-        DataServiceError,
-        ShardCacheError,
-        DatasetTransportError,
-        StorageValidationError,
-        ValidationSelectionError,
-    ):
-        _emit({"error": "data_service_failed", "ok": False})
-        return 1
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+    server.serve(
+        stopped,
+        ready_callback=lambda: _log(
+            f"监听 {config.data.service.socket_path}，PID={os.getpid()}"
+        ),
+    )
+    return 0
 
 
 if __name__ == "__main__":

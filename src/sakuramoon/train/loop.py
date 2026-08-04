@@ -199,18 +199,24 @@ class SingleGpuTrainingLoop[BatchT]:
                 accumulation_steps=self.accumulation_steps,
                 state=self.state,
             )
+            active_detection_boundary = "data"
             try:
                 for _ in range(self.accumulation_steps):
+                    active_detection_boundary = "data"
                     data_started = time.perf_counter_ns()
                     batch = next(iterator)
                     data_wait_seconds += (
                         time.perf_counter_ns() - data_started
                     ) / 1_000_000_000.0
+                    active_detection_boundary = "runtime"
                     per_sample_loss = self.loss_fn(batch)
+                    active_detection_boundary = "backward"
                     with self._record(phase_timer, "backward"):
                         step.backward(per_sample_loss)
+                active_detection_boundary = "update_finalize"
                 update = step.finish_update(phase_timer=phase_timer)
             except BaseException as exc:  # noqa: BLE001
+                detected_at = step.detection_phase or active_detection_boundary
                 cleanup_error: BaseException | None = None
                 try:
                     step.abort()
@@ -218,9 +224,9 @@ class SingleGpuTrainingLoop[BatchT]:
                     cleanup_error = error
                 self.state = step.state
                 if cleanup_error is None:
-                    self._raise_with_diagnostics("update", exc)
+                    self._raise_with_diagnostics(detected_at, exc)
                 assert cleanup_error is not None
-                self._raise_with_diagnostics("update", exc, cleanup_error)
+                self._raise_with_diagnostics(detected_at, exc, cleanup_error)
             self.state = update.state
             update_wall_seconds = (
                 time.perf_counter_ns() - update_wall_started

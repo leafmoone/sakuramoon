@@ -99,7 +99,6 @@ def test_parameter_audit_is_canonical_and_assigns_exact_decay() -> None:
     assert {spec.name for spec in audit.sensitive} == {"norm"}
     assert {spec.weight_decay for spec in audit.decay} == {0.01}
     assert {spec.weight_decay for spec in audit.sensitive} == {0.0}
-    assert len(audit.schema_sha256) == 64
 
 
 def test_full_16l_production_parameter_schema_is_locked() -> None:
@@ -116,10 +115,6 @@ def test_full_16l_production_parameter_schema_is_locked() -> None:
     assert len(audit.sensitive) == 93
     assert sum(spec.parameter.numel() for spec in audit.decay) == 1_216_675_840
     assert sum(spec.parameter.numel() for spec in audit.sensitive) == 23_090_304
-    assert (
-        audit.schema_sha256
-        == "31c9ab70087b0626f6fca1f25925b89a03a67850b1ce98859249ee464436ec78"
-    )
 
 
 def test_full_trainable_composite_uses_role_based_precision_groups() -> None:
@@ -149,10 +144,6 @@ def test_full_trainable_composite_uses_role_based_precision_groups() -> None:
     assert len(audit.sensitive) == 113
     assert sum(spec.parameter.numel() for spec in audit.decay) == 1_240_793_088
     assert sum(spec.parameter.numel() for spec in audit.sensitive) == 23_145_786
-    assert (
-        audit.schema_sha256
-        == "16a0887eb1b638bb42e5780d3a759e66a82f476221fd311f1f0ff9037a7682a6"
-    )
 
 
 def test_parameter_audit_rejects_fp32_matrix_projection() -> None:

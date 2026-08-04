@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, Self, cast
@@ -54,8 +53,8 @@ class RemoteRunFactory(Protocol):
         entity: str,
         run_id: str,
         run_directory: Path,
-        resolved_sha256: str,
         resume_policy: str,
+        resume_from_update: int | None,
     ) -> ManagedRemoteRun: ...
 
 
@@ -77,6 +76,11 @@ class RetryOnlyRemoteRun:
 
     def finish(self, exit_code: int | None = None) -> None:
         del exit_code
+
+
+class _NoopMetricSink:
+    def submit(self, metric: object) -> None:
+        del metric
 
 
 class _ResilientManagedRemoteRun:
@@ -108,29 +112,45 @@ def initialize_wandb_run(
     entity: str,
     run_id: str,
     run_directory: Path,
-    resolved_sha256: str,
     resume_policy: str,
+    resume_from_update: int | None,
 ) -> ManagedRemoteRun:
-    """Start or resume W&B, routing communication outages to durable retry."""
+    """Start W&B or truncate it to the restored checkpoint before resuming."""
 
     import wandb
     from wandb.errors import AuthenticationError, CommError
 
     if resume_policy != "allow":
         raise ValueError("W&B resume policy must be allow")
+    if resume_from_update is not None and (
+        type(resume_from_update) is not int or resume_from_update < 0
+    ):
+        raise ValueError("W&B resume update must be a non-negative integer")
     try:
-        run = wandb.init(
-            project=project,
-            entity=entity,
-            id=run_id,
-            name=run_id,
-            dir=str(run_directory),
-            config={"resolved_config_sha256": resolved_sha256},
-            mode="online",
-            resume="allow",
-            reinit="create_new",
-            save_code=False,
-        )
+        if resume_from_update is None:
+            run = wandb.init(
+                project=project,
+                entity=entity,
+                id=run_id,
+                name=run_id,
+                dir=str(run_directory),
+                mode="online",
+                resume="allow",
+                reinit="create_new",
+                save_code=False,
+            )
+        else:
+            run = wandb.init(
+                project=project,
+                entity=entity,
+                id=run_id,
+                name=run_id,
+                dir=str(run_directory),
+                mode="online",
+                resume_from=f"{run_id}?_step={resume_from_update}",
+                reinit="create_new",
+                save_code=False,
+            )
     except AuthenticationError:
         raise
     except (ConnectionError, CommError):
@@ -169,9 +189,9 @@ class TrainingTelemetryAssembly:
         *,
         phase_timer: PhaseTimer,
         observer: AsyncTrainingMetricObserver,
-        remote: AsyncWandbSink,
+        remote: AsyncWandbSink | None,
         local: DurableJsonlSink,
-        run: ManagedRemoteRun,
+        run: ManagedRemoteRun | None,
     ) -> None:
         self.phase_timer = phase_timer
         self.observer = observer
@@ -180,20 +200,40 @@ class TrainingTelemetryAssembly:
         self.run = run
         self._closed = False
 
+    def submit_wandb_metrics(
+        self,
+        metrics: Mapping[str, int | float],
+        *,
+        successful_update: int,
+    ) -> None:
+        """Upload non-training metrics when W&B is enabled."""
+
+        if self._closed:
+            raise RuntimeError("training telemetry is closed")
+        if self.remote is not None:
+            self.remote.submit_metrics(
+                metrics,
+                successful_update=successful_update,
+            )
+
     def close(self, *, exit_code: int = 0) -> None:
         if type(exit_code) is not int or exit_code not in {0, 1}:
             raise ValueError("telemetry exit_code must be zero or one")
         if self._closed:
             return
         self._closed = True
-        _close_components(
-            (
-                ("observer", self.observer.close),
-                ("remote", self.remote.close),
-                ("remote_run", lambda: self.run.finish(exit_code=exit_code)),
-                ("local", self.local.close),
+        components: list[tuple[str, Callable[[], None]]] = [
+            ("observer", self.observer.close)
+        ]
+        if self.remote is not None:
+            components.append(("remote", self.remote.close))
+        run = self.run
+        if run is not None:
+            components.append(
+                ("remote_run", lambda: run.finish(exit_code=exit_code))
             )
-        )
+        components.append(("local", self.local.close))
+        _close_components(tuple(components))
 
     def __enter__(self) -> Self:
         return self
@@ -234,8 +274,8 @@ def build_training_telemetry_from_config(
     *,
     repository_root: Path,
     device: torch.device,
-    resolved_sha256: str,
     context_provider: MetricContextProvider,
+    resume_from_update: int | None = None,
     remote_run_factory: RemoteRunFactory = initialize_wandb_run,
 ) -> TrainingTelemetryAssembly:
     """Build the complete local-first telemetry lifecycle from strict config."""
@@ -244,53 +284,55 @@ def build_training_telemetry_from_config(
         raise TypeError("resolved RuntimeConfig is required for telemetry assembly")
     if config.run.intent != "train":
         raise ValueError("training telemetry requires train intent")
-    if not config.wandb.enabled or not config.timing.enabled:
-        raise ValueError("production training requires W&B and timing enabled")
+    if not config.timing.enabled:
+        raise ValueError("training timing is disabled")
     _require_timing_phase_binding(config)
     if not callable(context_provider):
         raise TypeError("metric context provider must be callable")
-    if re.fullmatch(r"[0-9a-f]{64}", resolved_sha256) is None:
-        raise ValueError("resolved config SHA-256 is invalid")
 
-    run_directory = repository_directory(repository_root, config.paths.run_dir)
     local_path = _artifact_file(repository_root, config.logging.local_jsonl_path)
-    retry_path = _artifact_file(repository_root, config.wandb.retry_jsonl_path)
-    if local_path == retry_path:
-        raise ValueError("local metric and W&B retry paths must differ")
 
     run: ManagedRemoteRun | None = None
     local: DurableJsonlSink | None = None
     remote: AsyncWandbSink | None = None
     observer: AsyncTrainingMetricObserver | None = None
+    retry_path: Path | None = None
     try:
-        run = _ResilientManagedRemoteRun(
-            _require_managed_run(
-                remote_run_factory(
-                    project=config.wandb.project,
-                    entity=config.wandb.entity,
-                    run_id=config.run.run_id,
-                    run_directory=run_directory,
-                    resolved_sha256=resolved_sha256,
-                    resume_policy=config.wandb.resume_policy,
+        if config.wandb.enabled:
+            run_directory = repository_directory(repository_root, config.paths.run_dir)
+            retry_path = _artifact_file(repository_root, config.wandb.retry_jsonl_path)
+            if local_path == retry_path:
+                raise ValueError("local metric and W&B retry paths must differ")
+            run = _ResilientManagedRemoteRun(
+                _require_managed_run(
+                    remote_run_factory(
+                        project=config.wandb.project,
+                        entity=config.wandb.entity,
+                        run_id=config.run.run_id,
+                        run_directory=run_directory,
+                        resume_policy=config.wandb.resume_policy,
+                        resume_from_update=resume_from_update,
+                    )
                 )
             )
-        )
-        try:
-            replay_retry_queue(run, retry_path)
-        except BaseException as replay_error:
-            if not is_retryable_remote_communication_error(replay_error):
-                raise
+            try:
+                replay_retry_queue(run, retry_path)
+            except BaseException as replay_error:
+                if not is_retryable_remote_communication_error(replay_error):
+                    raise
         local = DurableJsonlSink(
             local_path,
             fsync_every_records=config.logging.flush_every_updates,
         )
-        remote = AsyncWandbSink(
-            run,
-            retry_path=retry_path,
-            queue_capacity=config.wandb.queue_capacity,
-        )
+        if run is not None:
+            assert retry_path is not None
+            remote = AsyncWandbSink(
+                run,
+                retry_path=retry_path,
+                queue_capacity=config.wandb.queue_capacity,
+            )
         observer = AsyncTrainingMetricObserver(
-            MetricsPublisher(local, remote),
+            MetricsPublisher(local, remote if remote is not None else _NoopMetricSink()),
             context_provider=context_provider,
             queue_capacity=config.logging.observer_queue_capacity,
             event_timeout_seconds=config.logging.observer_event_timeout_seconds,
@@ -334,10 +376,7 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
     head = model.head
     text = model.text
     style = model.style
-    backend = {
-        "fa4_varlen": "fa4_varlen",
-        "dense_sdpa_reference": "dense_sdpa",
-    }[config.kernels.attention_backend]
+    backend = "dense_sdpa"
     document: dict[str, object] = {
         "class": "TrainableComposite",
         "dit": {
@@ -415,6 +454,9 @@ def build_trainable_composite_from_config(
     observed: dict[str, Any] = export_trainable_composite(module)
     if observed != document:
         raise ValueError("assembled trainable composite differs from resolved config")
+    module.dit.set_activation_checkpoint_mode(
+        config.stage.activation_checkpoint_mode
+    )
     return module
 
 

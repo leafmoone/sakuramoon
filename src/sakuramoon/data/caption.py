@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import random
 from dataclasses import dataclass
 from typing import Literal
@@ -248,8 +247,7 @@ class CaptionPlan:
 
 
 def _seed(seed: int, domain: str) -> int:
-    payload = f"{seed}\0{domain}".encode()
-    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+    return random.Random(f"{seed}\0{domain}").getrandbits(64)
 
 
 def _drop(seed: int, domain: str, probability: float) -> bool:

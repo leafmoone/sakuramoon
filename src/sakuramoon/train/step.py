@@ -29,6 +29,11 @@ def _record_phase(timer: PhaseTimer | None, phase: str) -> Generator[None]:
         yield
 
 
+def _complete_device_work(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 @dataclass(frozen=True, slots=True)
 class TrainableCompositeInputs:
     qwen_states: torch.Tensor
@@ -179,6 +184,7 @@ class SingleGpuStep:
         self._loss_sum: torch.Tensor | None = None
         self._device: torch.device | None = None
         self._failed = False
+        self._detection_phase: str | None = None
 
     @property
     def state(self) -> SingleGpuUpdateState:
@@ -191,6 +197,12 @@ class SingleGpuStep:
     @property
     def pending_microbatches(self) -> int:
         return self._microbatches
+
+    @property
+    def detection_phase(self) -> str | None:
+        """Return the host boundary that observed failure, not a proven kernel origin."""
+
+        return self._detection_phase
 
     def backward(self, per_sample_loss: torch.Tensor) -> None:
         if self._failed:
@@ -207,6 +219,7 @@ class SingleGpuStep:
             raise ValueError("all accumulated losses must share one device")
         if not bool(torch.isfinite(per_sample_loss).all().item()):
             error = FloatingPointError("per-sample loss is nonfinite")
+            self._detection_phase = "backward"
             self._abort_preserving(error)
             raise error
 
@@ -214,6 +227,7 @@ class SingleGpuStep:
         try:
             loss_sum.backward()  # pyright: ignore[reportUnknownMemberType]
         except BaseException as error:
+            self._detection_phase = "backward"
             self._abort_preserving(error)
             raise
         self._loss_sum = (
@@ -250,13 +264,14 @@ class SingleGpuStep:
         self._abort_pending_update()
 
     def finish_update(
-        self, *, phase_timer: PhaseTimer | None = None
+        self,
+        *,
+        phase_timer: PhaseTimer | None = None,
     ) -> SingleGpuUpdateResult:
         if self._failed:
             raise RuntimeError("failed update state cannot continue")
         if self._microbatches != self.accumulation_steps or self._loss_sum is None:
             raise RuntimeError("update requires exactly the configured microbatch count")
-
         attempted = replace(
             self._state,
             attempted_updates=self._state.attempted_updates + 1,
@@ -272,9 +287,8 @@ class SingleGpuStep:
                     if parameter.grad is not None:
                         parameter.grad.mul_(gradient_scale)
                 clip = clip_grad_norm_fp32(parameters, max_norm=1.0)
-            with _record_phase(phase_timer, "optimizer"):
-                self.optimizer.step()
         except BaseException as error:
+            self._detection_phase = "clip"
             self._failed = True
             try:
                 with _record_phase(phase_timer, "zero_grad"):
@@ -282,6 +296,38 @@ class SingleGpuStep:
             except BaseException as cleanup_error:  # noqa: BLE001
                 raise BaseExceptionGroup(
                     "update failed and gradient cleanup failed",
+                    [error, cleanup_error],
+                ) from None
+            raise
+
+        try:
+            with _record_phase(phase_timer, "optimizer"):
+                self.optimizer.step()
+        except BaseException as error:
+            self._detection_phase = "optimizer"
+            self._failed = True
+            try:
+                with _record_phase(phase_timer, "zero_grad"):
+                    self.optimizer.zero_grad(set_to_none=True)
+            except BaseException as cleanup_error:  # noqa: BLE001
+                raise BaseExceptionGroup(
+                    "update failed and gradient cleanup failed",
+                    [error, cleanup_error],
+                ) from None
+            raise
+
+        assert self._device is not None
+        try:
+            _complete_device_work(self._device)
+        except BaseException as error:
+            self._detection_phase = "device_completion"
+            self._failed = True
+            try:
+                with _record_phase(phase_timer, "zero_grad"):
+                    self.optimizer.zero_grad(set_to_none=True)
+            except BaseException as cleanup_error:  # noqa: BLE001
+                raise BaseExceptionGroup(
+                    "device completion failed and gradient cleanup failed",
                     [error, cleanup_error],
                 ) from None
             raise
@@ -296,6 +342,7 @@ class SingleGpuStep:
             with _record_phase(phase_timer, "zero_grad"):
                 self.optimizer.zero_grad(set_to_none=True)
         except BaseException:
+            self._detection_phase = "zero_grad"
             self._failed = True
             raise
 
