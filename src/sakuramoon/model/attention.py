@@ -11,6 +11,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+try:
+    # DAS provides a Hygon/DCU-compatible FlashAttention 2 wheel.  Keep the
+    # import optional so the dense reference path remains usable elsewhere.
+    from flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
+except (ImportError, OSError):
+    _flash_attn_varlen_func = None
+
 from sakuramoon.conditioning.packing import (
     ValidatedCuSeqlens,
     build_validated_cu_seqlens,
@@ -251,6 +258,77 @@ def dense_attention_mask(token_mask: torch.Tensor) -> torch.Tensor:
     return token_mask[:, None, :, None] & token_mask[:, None, None, :]
 
 
+def _outer_mask_lengths(
+    attention_mask: torch.Tensor,
+) -> tuple[torch.Tensor, int] | None:
+    """Return valid-token lengths when a dense mask is an outer product.
+
+    FlashAttention varlen is mathematically equivalent to the dense attention
+    used by this project for masks produced by :func:`dense_attention_mask`.
+    Keep the check here so callers that provide a genuinely arbitrary dense
+    mask continue through the reference SDPA implementation.
+    """
+
+    query_valid = attention_mask.any(dim=-1).squeeze(1)
+    key_valid = attention_mask.any(dim=-2).squeeze(1)
+    if not torch.equal(query_valid, key_valid):
+        return None
+
+    row_counts = attention_mask.sum(dim=-1).squeeze(1)
+    expected_counts = query_valid.to(row_counts.dtype) * key_valid.sum(
+        dim=-1,
+        keepdim=True,
+    )
+    if not torch.equal(row_counts, expected_counts):
+        return None
+
+    lengths = query_valid.sum(dim=-1, dtype=torch.int32).contiguous()
+    if bool((lengths <= 0).any()):
+        return None
+    return lengths, int(lengths.max().item())
+
+
+def _flash_varlen_self_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    valid_tokens: torch.Tensor,
+    lengths: torch.Tensor,
+    max_seqlen: int,
+) -> torch.Tensor:
+    """Run DAS FlashAttention on packed valid tokens and restore BSHD layout."""
+
+    if _flash_attn_varlen_func is None:
+        raise RuntimeError("FlashAttention varlen kernel is not installed")
+    if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
+        raise ValueError("packed FlashAttention inputs must be BSHD tensors")
+
+    batch, _seqlen, _, _ = query.shape
+    cu_seqlens = torch.zeros(
+        batch + 1,
+        device=query.device,
+        dtype=torch.int32,
+    )
+    cu_seqlens[1:] = torch.cumsum(lengths, dim=0)
+    packed_query = query[valid_tokens].contiguous()
+    packed_key = key[valid_tokens].contiguous()
+    packed_value = value[valid_tokens].contiguous()
+    packed_output = _flash_attn_varlen_func(
+        packed_query,
+        packed_key,
+        packed_value,
+        cu_seqlens,
+        cu_seqlens,
+        max_seqlen,
+        max_seqlen,
+        dropout_p=0.0,
+        causal=False,
+    )
+    output = torch.zeros_like(query)
+    output[valid_tokens] = packed_output
+    return output
+
+
 class DenseGQAAttention(nn.Module):
     def __init__(
         self,
@@ -369,27 +447,40 @@ class DenseGQAAttention(nn.Module):
             key.flatten(0, 1),
             coordinates.flatten(0, 1),
         )
-        query = (
-            query.view(batch, length, self.q_heads, self.head_dim)
-            .transpose(1, 2)
-            .contiguous()
+        query = query.view(batch, length, self.q_heads, self.head_dim).contiguous()
+        key = key.view(batch, length, self.kv_heads, self.head_dim).contiguous()
+        value = value.view(batch, length, self.kv_heads, self.head_dim).contiguous()
+        outer_lengths = _outer_mask_lengths(attention_mask)
+        use_flash_varlen = (
+            _flash_attn_varlen_func is not None
+            and outer_lengths is not None
+            and query.device.type == "cuda"
+            and query.dtype in (torch.float16, torch.bfloat16)
+            # On HCU, packing/launch overhead dominates tiny eval batches.
+            and batch >= 8
         )
-        key = (
-            key.view(batch, length, self.kv_heads, self.head_dim)
-            .transpose(1, 2)
-            .contiguous()
-        )
-        value = value.transpose(1, 2).contiguous()
-        attended = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=False,
-            enable_gqa=True,
-        )
-        attended = attended.transpose(1, 2).reshape(batch, length, self.hidden_size)
+        if use_flash_varlen:
+            lengths, max_seqlen = outer_lengths
+            valid_tokens = attention_mask.any(dim=-1).squeeze(1)
+            attended = _flash_varlen_self_attention(
+                query,
+                key,
+                value,
+                valid_tokens,
+                lengths,
+                max_seqlen,
+            )
+        else:
+            attended = F.scaled_dot_product_attention(
+                query.transpose(1, 2).contiguous(),
+                key.transpose(1, 2).contiguous(),
+                value.transpose(1, 2).contiguous(),
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                is_causal=False,
+                enable_gqa=True,
+            ).transpose(1, 2).contiguous()
+        attended = attended.reshape(batch, length, self.hidden_size)
         gated = attended * torch.sigmoid(self.content_gate(tokens))
         output = self.out_proj(gated)
         valid_queries = attention_mask.any(dim=-1).squeeze(1)

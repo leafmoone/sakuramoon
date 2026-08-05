@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import os
@@ -14,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
-from urllib.parse import quote, urlencode, urljoin, urlsplit
+from urllib.parse import quote, unquote, urlencode, urljoin, urlsplit
 
 from sakuramoon.config import ConfigurationError, resolve_secret
 from sakuramoon.config.schema import DataSourceConfig, DataTransportConfig
@@ -170,12 +171,28 @@ class ModelScopeDatasetTransport:
         for redirects in range(_MAX_REDIRECTS + 1):
             connection: http.client.HTTPSConnection | None = None
             try:
-                connection = http.client.HTTPSConnection(
-                    target.host,
-                    _HTTPS_PORT,
-                    timeout=self._policy.connect_timeout_seconds,
-                    context=ssl.create_default_context(),
-                )
+                proxy_raw = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
+                proxy = urlsplit(proxy_raw) if proxy_raw else None
+                if proxy is not None and proxy.scheme in {"http", "https"} and proxy.hostname:
+                    proxy_headers: dict[str, str] = {}
+                    if proxy.username is not None:
+                        credentials = f"{unquote(proxy.username)}:{unquote(proxy.password or '')}"
+                        encoded = base64.b64encode(credentials.encode("utf-8")).decode("ascii")
+                        proxy_headers["Proxy-Authorization"] = f"Basic {encoded}"
+                    connection = http.client.HTTPSConnection(
+                        proxy.hostname,
+                        proxy.port or (443 if proxy.scheme == "https" else 80),
+                        timeout=self._policy.connect_timeout_seconds,
+                        context=ssl.create_default_context(),
+                    )
+                    connection.set_tunnel(target.host, _HTTPS_PORT, headers=proxy_headers)
+                else:
+                    connection = http.client.HTTPSConnection(
+                        target.host,
+                        _HTTPS_PORT,
+                        timeout=self._policy.connect_timeout_seconds,
+                        context=ssl.create_default_context(),
+                    )
                 connection.request(
                     "GET",
                     target.request_target,

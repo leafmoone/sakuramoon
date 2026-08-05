@@ -8,7 +8,7 @@ from collections.abc import Callable, Generator, Iterable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import Generic, NoReturn, TypeVar
 
 import torch
 from torch import nn
@@ -54,7 +54,10 @@ class SuccessfulLoopObservation:
             raise ValueError("update wall time must be a finite positive float")
 
 
-class SingleGpuTrainingLoop[BatchT]:
+BatchT = TypeVar("BatchT")
+
+
+class SingleGpuTrainingLoop(Generic[BatchT]):
     """Advance scheduler and checkpoint cadence only after successful updates."""
 
     def __init__(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -52,8 +53,12 @@ def audit_trainable_parameters(
 ) -> ParameterAudit:
     """Reject parameters outside the locked BF16-matrix/FP32-sensitive policy."""
 
-    if matrix_weight_decay != 0.01 or sensitive_weight_decay != 0.0:
-        raise ValueError("parameter decay values differ from the locked policy")
+    decay_values = (matrix_weight_decay, sensitive_weight_decay)
+    if any(
+        type(value) is not float or not math.isfinite(value) or not 0.0 <= value <= 1.0
+        for value in decay_values
+    ):
+        raise ValueError("parameter decay values must be finite TOML-style fractions")
     named = sorted(
         (
             (name, parameter)

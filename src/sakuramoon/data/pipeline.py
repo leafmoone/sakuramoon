@@ -16,7 +16,7 @@ import webdataset as wds
 from PIL import Image
 from torch.utils.data import IterableDataset, get_worker_info
 
-from sakuramoon.data.buckets import BucketShape, RejectionReason
+from sakuramoon.data.buckets import BucketShape
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
@@ -38,7 +38,7 @@ from sakuramoon.data.serialize import (
 
 CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
 MetadataAdapter = Callable[[Mapping[str, object]], Mapping[str, object]]
-RejectionObserver = Callable[[RejectionReason], None]
+RejectionObserver = Callable[[str], None]
 _IMAGE_KEYS = ("jpg", "jpeg", "png", "webp")
 
 
@@ -310,10 +310,14 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                     crop_seed=identity.crop_seed,
                 )
         except ImageRejected as error:
-            self.rejection_observer(cast(RejectionReason, error.reason))
+            self.rejection_observer(error.reason)
             return None
-        except (OSError, Image.DecompressionBombError):
-            raise PipelineSampleError("WebDataset image decode failed") from None
+        except (OSError, SyntaxError, Image.DecompressionBombError):
+            # A corrupt image is an individual bad sample, not a failed data
+            # service. Drop it so one malformed archive member cannot abort
+            # an otherwise healthy training run.
+            self.rejection_observer("decode_error")
+            return None
         assignment = processed.assignment
         return PipelineSample(
             sample_id=metadata.id,

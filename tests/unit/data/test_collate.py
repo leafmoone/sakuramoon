@@ -92,8 +92,29 @@ def test_collate_pads_eot_and_preserves_structured_metadata() -> None:
     assert sum(dropout_hits.values()) == 2
 
 
-def test_bucketed_batches_never_mix_image_or_text_buckets() -> None:
-    samples = (_sample(1), _sample(2, width=16), _sample(3), _sample(4, width=16))
+def test_collate_dynamically_right_pads_mixed_text_buckets() -> None:
+    short = _sample(1, dense_length=64)
+    long = _sample(2, dense_length=128)
+
+    batch = collate_samples((short, long))
+
+    assert batch.dense_length == 128
+    assert batch.input_ids.shape == (2, 128)
+    assert batch.input_ids[0, len(short.caption.input_ids) :].eq(248044).all()
+    assert batch.input_ids[1, len(long.caption.input_ids) :].eq(248044).all()
+    assert torch.equal(
+        batch.attention_mask.sum(dim=1),
+        torch.tensor([len(short.caption.input_ids), len(long.caption.input_ids)]),
+    )
+
+
+def test_bucketed_batches_mix_text_lengths_but_never_image_buckets() -> None:
+    samples = (
+        _sample(1, dense_length=64),
+        _sample(2, width=16, dense_length=128),
+        _sample(3, dense_length=128),
+        _sample(4, width=16, dense_length=64),
+    )
 
     batches = tuple(
         bucketed_batches(
@@ -105,8 +126,8 @@ def test_bucketed_batches_never_mix_image_or_text_buckets() -> None:
 
     assert len(batches) == 2
     assert {(batch.target_width, batch.dense_length) for batch in batches} == {
-        (8, 64),
-        (16, 64),
+        (8, 128),
+        (16, 128),
     }
 
 

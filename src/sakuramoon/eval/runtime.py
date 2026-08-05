@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import io
 import math
 import os
@@ -310,36 +311,40 @@ def _generate(
         .mul(127.5)
         .round()
         .clamp(0.0, 255.0)
-        .to(device="cpu", dtype=torch.uint8)
+        .to(dtype=torch.uint8)
     )
 
 
 class _InceptionModels:
-    def __init__(self) -> None:
+    def __init__(self, device: torch.device) -> None:
+        self.device = device
+        print(f"[eval] Inception 推理设备: {device}", flush=True)
         print("[eval] 加载标准 FID Inception 权重", flush=True)
         from pytorch_fid.inception import (  # pyright: ignore[reportMissingTypeStubs]
             InceptionV3,
         )
 
         block = InceptionV3.BLOCK_INDEX_BY_DIM[2048]
-        self.fid = cast(_FidExtractor, InceptionV3([block]).eval().to("cpu"))
+        self.fid = cast(_FidExtractor, InceptionV3([block]).eval().to(device))
         print("[eval] 加载 Inception Score 分类权重", flush=True)
         self.is_weights = Inception_V3_Weights.DEFAULT
-        self.classifier = inception_v3(weights=self.is_weights).eval().to("cpu")
+        self.classifier = inception_v3(weights=self.is_weights).eval().to(device)
 
     @torch.inference_mode()
     def features(self, images: torch.Tensor) -> torch.Tensor:
-        values = images.float().div(255.0)
+        values = images.float().div(255.0).to(self.device, non_blocking=True)
         result = self.fid(values)[0]
-        return result.flatten(1).cpu()
+        return result.flatten(1)
 
     @torch.inference_mode()
     def probabilities(self, images: torch.Tensor) -> torch.Tensor:
-        values = self.is_weights.transforms()(images.float().div(255.0))
+        values = self.is_weights.transforms()(images.float().div(255.0)).to(
+            self.device, non_blocking=True
+        )
         logits = self.classifier(values)
         if not isinstance(logits, torch.Tensor):
             raise EvaluationError("Inception classifier returned an invalid result")
-        return logits.softmax(dim=1).cpu()
+        return logits.softmax(dim=1)
 
 
 def _validation_images(root: Path, count: int, batch_size: int) -> list[torch.Tensor]:
@@ -389,18 +394,25 @@ def _validation_images(root: Path, count: int, batch_size: int) -> list[torch.Te
     return batches
 
 
-def _stage_cases(config: RuntimeConfig, path: Path, count: int) -> tuple[PromptCase, ...]:
+def _stage_cases(
+    path: Path,
+    count: int,
+    *,
+    resolution: int,
+) -> tuple[PromptCase, ...]:
+    if type(resolution) is not int or resolution <= 0 or resolution % 16:
+        raise EvaluationError("evaluation resolution must be a positive multiple of 16")
     print(f"[eval] 读取验证提示词: {path}", flush=True)
     manifest = PromptManifest.from_canonical_bytes(path.read_bytes())
     selected = manifest.cases[:count]
     if len(selected) != count:
         raise EvaluationError(f"validation prompts are incomplete: {len(selected)}/{count}")
-    scale = config.stage.resolution / 512.0
+    print(f"[eval] 统一 1:1 生成分辨率: {resolution}x{resolution}", flush=True)
     return tuple(
         dataclasses.replace(
             case,
-            height=max(16, round(case.height * scale / 16) * 16),
-            width=max(16, round(case.width * scale / 16) * 16),
+            height=resolution,
+            width=resolution,
         )
         for case in selected
     )
@@ -450,8 +462,127 @@ class TrainingEvaluator:
 
     def _models(self) -> _InceptionModels:
         if self._inception is None:
-            self._inception = _InceptionModels()
+            self._inception = _InceptionModels(self.device)
         return self._inception
+
+    def _checkpoint_fingerprint(self, update: int) -> str | None:
+        root = repository_directory(self.root, self.config.paths.checkpoint_dir)
+        candidates = tuple(
+            path
+            for path in root.glob(f"ckpt_{update}_*")
+            if path.is_dir()
+            and not path.is_symlink()
+            and (path / "COMPLETE").is_file()
+            and not (path / "COMPLETE").is_symlink()
+            and (path / "manifest.json").is_file()
+            and not (path / "manifest.json").is_symlink()
+        )
+        if len(candidates) != 1:
+            print(
+                f"[eval] update={update} 检查点不唯一，禁用生成特征缓存",
+                flush=True,
+            )
+            return None
+        checkpoint = candidates[0]
+        if (checkpoint / "COMPLETE").read_bytes() != b"complete\n":
+            print(
+                f"[eval] update={update} 检查点不完整，禁用生成特征缓存",
+                flush=True,
+            )
+            return None
+        return hashlib.sha256((checkpoint / "manifest.json").read_bytes()).hexdigest()
+
+    def _generated_cache_path(self, update: int, fingerprint: str) -> Path:
+        return self.output / "cache" / (
+            f"generated-step-{update}-{fingerprint[:16]}.pt"
+        )
+
+    def _load_generated_cache(
+        self,
+        update: int,
+        *,
+        fingerprint: str,
+        prompt_sha256: str,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        path = self._generated_cache_path(update, fingerprint)
+        if not path.is_file() or path.is_symlink():
+            return None
+        try:
+            raw = cast(
+                object,
+                torch.load(path, map_location="cpu", weights_only=True),
+            )
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if type(raw) is not dict:
+            return None
+        document = cast(dict[str, object], raw)
+        expected: dict[str, object] = {
+            "schema_version": 1,
+            "run_id": self.config.run.run_id,
+            "update": update,
+            "checkpoint_fingerprint": fingerprint,
+            "prompt_sha256": prompt_sha256,
+            "sample_count": self.evaluation.sample_count,
+            "resolution": self.config.stage.resolution,
+            "sampling_profile": self.evaluation.sampling_profile,
+        }
+        if any(document.get(key) != value for key, value in expected.items()):
+            return None
+        features = document.get("features")
+        probabilities = document.get("probabilities")
+        sample_count = self.evaluation.sample_count
+        if (
+            not isinstance(features, torch.Tensor)
+            or features.shape != (sample_count, 2048)
+            or not torch.is_floating_point(features)
+            or not isinstance(probabilities, torch.Tensor)
+            or probabilities.shape != (sample_count, 1000)
+            or not torch.is_floating_point(probabilities)
+            or not bool(torch.isfinite(features).all().item())
+            or not bool(torch.isfinite(probabilities).all().item())
+        ):
+            return None
+        print(f"[eval] 复用生成特征缓存: {path}", flush=True)
+        return (
+            features.to(self.device, non_blocking=True),
+            probabilities.to(self.device, non_blocking=True),
+        )
+
+    def _save_generated_cache(
+        self,
+        update: int,
+        *,
+        fingerprint: str,
+        prompt_sha256: str,
+        features: torch.Tensor,
+        probabilities: torch.Tensor,
+    ) -> None:
+        path = self._generated_cache_path(update, fingerprint)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            torch.save(
+                {
+                    "schema_version": 1,
+                    "run_id": self.config.run.run_id,
+                    "update": update,
+                    "checkpoint_fingerprint": fingerprint,
+                    "prompt_sha256": prompt_sha256,
+                    "sample_count": self.evaluation.sample_count,
+                    "resolution": self.config.stage.resolution,
+                    "sampling_profile": self.evaluation.sampling_profile,
+                    "features": features.detach().to("cpu").contiguous(),
+                    "probabilities": probabilities.detach().to("cpu").contiguous(),
+                },
+                temporary,
+            )
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        print(f"[eval] 已保存生成特征缓存: {path}", flush=True)
 
     def _real(self) -> FeatureStats:
         if self._real_stats is not None:
@@ -483,7 +614,15 @@ class TrainingEvaluator:
                 root, self.evaluation.sample_count, self.evaluation.batch_size
             )
         ]
-        self._real_stats = FeatureStats.from_features(torch.cat(features))
+        computed = FeatureStats.from_features(
+            torch.cat(features),
+            device=self.device,
+        )
+        self._real_stats = FeatureStats(
+            computed.count,
+            computed.mean.cpu(),
+            computed.covariance.cpu(),
+        )
         temporary = cache.with_name(f".{cache.name}.{os.getpid()}.tmp")
         torch.save(
             {
@@ -502,43 +641,85 @@ class TrainingEvaluator:
         print(f"[eval] update={update} 开始计算 FID/IS", flush=True)
         real = self._real()
         prompt_path = self.root / self.evaluation.prompt_path
-        cases = _stage_cases(self.config, prompt_path, self.evaluation.sample_count)
+        prompt_sha256 = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
+        cases = _stage_cases(
+            prompt_path,
+            self.evaluation.sample_count,
+            resolution=self.config.stage.resolution,
+        )
         groups: dict[tuple[int, int], list[PromptCase]] = {}
         for case in cases:
             groups.setdefault((case.height, case.width), []).append(case)
-        generated_features: list[torch.Tensor] = []
-        generated_probabilities: list[torch.Tensor] = []
-        was_training = self.composite.training
-        self.composite.eval()
-        try:
-            completed = 0
-            for group in groups.values():
-                for start in range(0, len(group), self.evaluation.batch_size):
-                    batch_cases = tuple(group[start : start + self.evaluation.batch_size])
-                    images = _generate(
-                        batch_cases,
-                        config=self.config,
-                        evaluation=self.evaluation,
-                        composite=self.composite,
-                        qwen=self.qwen,
-                        vae=self.vae,
-                        device=self.device,
-                        growth_alpha=self.growth_alpha,
-                    )
-                    generated_features.append(self._models().features(images))
-                    generated_probabilities.append(self._models().probabilities(images))
-                    completed += len(batch_cases)
-                    print(
-                        f"[eval] 已处理 {completed}/{self.evaluation.sample_count}",
-                        flush=True,
-                    )
-        finally:
-            self.composite.train(was_training)
-        generated = FeatureStats.from_features(torch.cat(generated_features))
-        score = inception_score(
-            torch.cat(generated_probabilities), splits=self.evaluation.is_splits
+        fingerprint = self._checkpoint_fingerprint(update)
+        cached = (
+            self._load_generated_cache(
+                update,
+                fingerprint=fingerprint,
+                prompt_sha256=prompt_sha256,
+            )
+            if fingerprint is not None
+            else None
         )
-        fid = frechet_inception_distance(generated, real)
+        if cached is None:
+            generated_features: list[torch.Tensor] = []
+            generated_probabilities: list[torch.Tensor] = []
+            was_training = self.composite.training
+            self.composite.eval()
+            try:
+                completed = 0
+                for group in groups.values():
+                    for start in range(0, len(group), self.evaluation.batch_size):
+                        batch_cases = tuple(
+                            group[start : start + self.evaluation.batch_size]
+                        )
+                        images = _generate(
+                            batch_cases,
+                            config=self.config,
+                            evaluation=self.evaluation,
+                            composite=self.composite,
+                            qwen=self.qwen,
+                            vae=self.vae,
+                            device=self.device,
+                            growth_alpha=self.growth_alpha,
+                        )
+                        generated_features.append(self._models().features(images))
+                        generated_probabilities.append(
+                            self._models().probabilities(images)
+                        )
+                        completed += len(batch_cases)
+                        print(
+                            f"[eval] 已处理 {completed}/{self.evaluation.sample_count}",
+                            flush=True,
+                        )
+            finally:
+                self.composite.train(was_training)
+            feature_values = torch.cat(generated_features)
+            probability_values = torch.cat(generated_probabilities)
+            if fingerprint is not None:
+                self._save_generated_cache(
+                    update,
+                    fingerprint=fingerprint,
+                    prompt_sha256=prompt_sha256,
+                    features=feature_values,
+                    probabilities=probability_values,
+                )
+        else:
+            feature_values, probability_values = cached
+        generated = FeatureStats.from_features(
+            feature_values,
+            device=self.device,
+        )
+        score = inception_score(
+            probability_values,
+            splits=self.evaluation.is_splits,
+            device=self.device,
+        )
+        print(
+            f"[eval] FID 矩阵运算设备: {self.device}; "
+            f"样本空间: {generated.count}x{generated.count}",
+            flush=True,
+        )
+        fid = frechet_inception_distance(generated, real, device=self.device)
         payload: dict[str, object] = {
             "schema_version": 1,
             "update": update,

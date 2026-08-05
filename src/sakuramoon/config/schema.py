@@ -93,7 +93,7 @@ FixedNegativePointEight = Annotated[ExactFloat, Field(ge=-0.8, le=-0.8)]
 FixedPointZeroFive = Annotated[ExactFloat, Field(ge=0.05, le=0.05)]
 FixedTwoPointNine = Annotated[ExactFloat, Field(ge=2.9, le=2.9)]
 FixedOptimizerEps = Annotated[ExactFloat, Field(ge=0.00000001, le=0.00000001)]
-FixedPointZeroOne = Annotated[ExactFloat, Field(ge=0.01, le=0.01)]
+WeightDecay = Annotated[ExactFloat, Field(ge=0.0, le=1.0)]
 FixedPointZeroTwo = Annotated[ExactFloat, Field(ge=0.02, le=0.02)]
 
 
@@ -526,10 +526,32 @@ class SamplingProfilesConfig(StrictModel):
         return self
 
 
+class TrainingSamplingConfig(StrictModel):
+    """Periodic image samples made from captions seen by the training loop."""
+
+    enabled: bool = True
+    every_updates: PositiveInt = 1000
+    image_count: PositiveInt = 5
+    output_subdir: Annotated[str, StringConstraints(min_length=1)] = "sample"
+
+    @model_validator(mode="after")
+    def validate_output_subdir(self) -> TrainingSamplingConfig:
+        path = PurePosixPath(self.output_subdir)
+        if (
+            path.is_absolute()
+            or not path.parts
+            or ".." in path.parts
+            or any(part in {"", "."} for part in path.parts)
+        ):
+            raise ValueError("training sample output_subdir must be repository-relative")
+        return self
+
+
 class SamplingConfig(StrictModel):
     profile: SamplingProfileName
     profiles: SamplingProfilesConfig
     state_dtype: Literal["float32"]
+    training: TrainingSamplingConfig = TrainingSamplingConfig()
 
     @property
     def selected(self) -> SamplingProfile:
@@ -572,8 +594,8 @@ class OptimizerConfig(StrictModel):
     eps: FixedOptimizerEps
     block_size: Literal[256]
     bf16_stochastic_round: Literal[True]
-    matrix_weight_decay: FixedPointZeroOne
-    sensitive_weight_decay: FixedZero
+    matrix_weight_decay: WeightDecay
+    sensitive_weight_decay: WeightDecay
 
     @model_validator(mode="after")
     def validate_betas(self) -> OptimizerConfig:

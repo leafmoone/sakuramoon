@@ -1,7 +1,13 @@
 extends = ["base.toml"]
 
+[sampling.training]
+enabled = true
+every_updates = 1000
+image_count = 5
+output_subdir = "sample"
+
 [run]
-run_id = "s0-production"
+run_id = "s0-production-bs64-acc4-20260804-r3"
 stage = "S0"
 seed = 44
 
@@ -21,17 +27,17 @@ full_every_updates = 100
 slots = 2
 
 [data.cache]
-low_watermark_gib = 32
-high_watermark_gib = 64
+low_watermark_gib = 192
+high_watermark_gib = 256
 download_concurrency = 8
-verified_shard_lookahead = 50
-persistent_workers_per_rank = 4
+verified_shard_lookahead = 48
+persistent_workers_per_rank = 8
 ready_batches_per_rank = 8
 
 [data.service]
 request_timeout_seconds = 30.0
-lease_channel_capacity = 4
-ack_channel_capacity = 4
+lease_channel_capacity = 24
+ack_channel_capacity = 24
 
 [data.transport]
 connect_timeout_seconds = 10.0
@@ -55,9 +61,9 @@ predecessor = ""
 world_size = 1
 depth = 16
 resolution = 256
-local_batch = 40
-accumulation = 8
-global_batch = 320
+local_batch = 128
+accumulation = 2
+global_batch = 256
 activation_checkpoint_mode = "all"
 planned_updates = 100000
 manual_finalize = true

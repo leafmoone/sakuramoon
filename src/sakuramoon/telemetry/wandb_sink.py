@@ -9,6 +9,7 @@ import queue
 import stat
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Self, cast
 
@@ -16,10 +17,17 @@ from sakuramoon.telemetry.metrics import DurableJsonlSink, TrainingMetric
 
 
 class RemoteRun(Protocol):
-    def log(self, data: Mapping[str, int | float], *, step: int) -> None: ...
+    def log(self, data: Mapping[str, object], *, step: int) -> None: ...
 
 
-type _QueuedMetric = tuple[int, Mapping[str, int | float]]
+_QueuedMetric = tuple[int, Mapping[str, int | float]]
+
+
+@dataclass(frozen=True, slots=True)
+class _QueuedMedia:
+    successful_update: int
+    image_paths: tuple[str, ...]
+    captions: tuple[str, ...]
 
 
 def is_retryable_remote_communication_error(error: BaseException) -> bool:
@@ -41,6 +49,16 @@ def _retry_payload(metric: _QueuedMetric, error: Exception) -> dict[str, object]
         "error_type": type(error).__name__,
         "successful_update": successful_update,
         "metrics": dict(metrics),
+    }
+
+
+def _media_retry_payload(media: _QueuedMedia, error: Exception) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "error_type": type(error).__name__,
+        "successful_update": media.successful_update,
+        "image_paths": list(media.image_paths),
+        "captions": list(media.captions),
     }
 
 
@@ -83,8 +101,56 @@ def _validate_retry_payload(payload: object) -> tuple[int, dict[str, int | float
     return successful_update, numeric
 
 
+def _validate_media_retry_payload(
+    payload: object,
+) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
+    if not isinstance(payload, dict):
+        raise TypeError("media retry record schema is invalid")
+    mapping = cast(dict[object, object], payload)
+    if set(mapping) != {
+        "schema_version",
+        "error_type",
+        "successful_update",
+        "image_paths",
+        "captions",
+    }:
+        raise ValueError("media retry record schema is invalid")
+    update = mapping["successful_update"]
+    error_type = mapping["error_type"]
+    paths = mapping["image_paths"]
+    captions = mapping["captions"]
+    if (
+        mapping["schema_version"] != 2
+        or type(update) is not int
+        or update <= 0
+        or not isinstance(error_type, str)
+        or not error_type.isidentifier()
+        or not isinstance(paths, list)
+        or not isinstance(captions, list)
+        or not paths
+        or len(paths) != len(captions)
+        or any(type(path) is not str or not path for path in paths)
+        or any(type(caption) is not str for caption in captions)
+    ):
+        raise ValueError("media retry record fields are invalid")
+    return update, tuple(cast(str, path) for path in paths), tuple(
+        cast(str, caption) for caption in captions
+    )
+
+
+def _media_mapping(media: _QueuedMedia) -> Mapping[str, object]:
+    import wandb
+
+    return {
+        "training_samples": [
+            wandb.Image(path, caption=caption)
+            for path, caption in zip(media.image_paths, media.captions, strict=True)
+        ]
+    }
+
+
 def replay_retry_queue(run: RemoteRun, path: Path) -> int:
-    """Replay a complete queue; retain it unchanged if any upload fails."""
+    """Replay numeric metrics and image samples; retain the queue on failure."""
 
     if path.is_symlink():
         raise ValueError("retry queue must be a regular file")
@@ -96,12 +162,22 @@ def replay_retry_queue(run: RemoteRun, path: Path) -> int:
     if stat.S_IMODE(metadata.st_mode) != 0o600:
         raise PermissionError("retry queue must use mode 0600")
     records = [
-        _validate_retry_payload(cast(object, json.loads(line)))
+        cast(object, json.loads(line))
         for line in path.read_text(encoding="utf-8").splitlines()
         if line
     ]
-    for step, metrics in records:
-        run.log(metrics, step=step)
+    for payload in records:
+        if isinstance(payload, dict) and payload.get("schema_version") == 1:
+            step, metrics = _validate_retry_payload(payload)
+            run.log(metrics, step=step)
+        elif isinstance(payload, dict) and payload.get("schema_version") == 2:
+            step, paths, captions = _validate_media_retry_payload(payload)
+            run.log(
+                _media_mapping(_QueuedMedia(step, paths, captions)),
+                step=step,
+            )
+        else:
+            raise ValueError("retry record schema version is invalid")
     path.unlink()
     directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -127,7 +203,9 @@ class AsyncWandbSink:
             raise ValueError("W&B queue capacity must be a positive integer")
         self.run = run
         self.retry = DurableJsonlSink(retry_path, fsync_every_records=1)
-        self._queue: queue.Queue[_QueuedMetric | object] = queue.Queue(queue_capacity)
+        self._queue: queue.Queue[_QueuedMetric | _QueuedMedia | object] = queue.Queue(
+            queue_capacity
+        )
         self._background_error: Exception | None = None
         self._closed = False
         self._worker = threading.Thread(
@@ -147,21 +225,36 @@ class AsyncWandbSink:
         except Exception as exc:  # noqa: BLE001 - background durability boundary
             self._set_background_error(exc)
 
+    def _spill_media(self, media: _QueuedMedia, error: Exception) -> None:
+        try:
+            self.retry.write(_media_retry_payload(media, error))
+        except Exception as exc:  # noqa: BLE001 - background durability boundary
+            self._set_background_error(exc)
+
     def _run(self) -> None:
         while True:
             item = self._queue.get()
             try:
                 if item is self._STOP:
                     return
-                metric = cast(_QueuedMetric, item)
-                successful_update, metrics = metric
-                try:
-                    self.run.log(metrics, step=successful_update)
-                except Exception as exc:  # noqa: BLE001 - network boundary
-                    if is_retryable_remote_communication_error(exc):
-                        self._spill(metric, exc)
-                    else:
-                        self._set_background_error(exc)
+                if isinstance(item, _QueuedMedia):
+                    try:
+                        self.run.log(_media_mapping(item), step=item.successful_update)
+                    except Exception as exc:  # noqa: BLE001 - network boundary
+                        if is_retryable_remote_communication_error(exc):
+                            self._spill_media(item, exc)
+                        else:
+                            self._set_background_error(exc)
+                else:
+                    metric = cast(_QueuedMetric, item)
+                    successful_update, metrics = metric
+                    try:
+                        self.run.log(metrics, step=successful_update)
+                    except Exception as exc:  # noqa: BLE001 - network boundary
+                        if is_retryable_remote_communication_error(exc):
+                            self._spill(metric, exc)
+                        else:
+                            self._set_background_error(exc)
             finally:
                 self._queue.task_done()
 
@@ -179,6 +272,16 @@ class AsyncWandbSink:
             self._spill(metric, RuntimeError("remote queue full"))
             self._check_health()
 
+    def _submit_media(self, media: _QueuedMedia) -> None:
+        if self._closed:
+            raise RuntimeError("W&B sink is closed")
+        self._check_health()
+        try:
+            self._queue.put_nowait(media)
+        except queue.Full:
+            self._spill_media(media, RuntimeError("remote queue full"))
+            self._check_health()
+
     def submit(self, metric: TrainingMetric) -> None:
         self._submit((metric.successful_update, metric.as_wandb_mapping()))
 
@@ -193,6 +296,30 @@ class AsyncWandbSink:
         payload = dict(metrics)
         payload["successful_update"] = successful_update
         self._submit((successful_update, payload))
+
+    def submit_images(
+        self,
+        image_paths: tuple[Path, ...],
+        captions: tuple[str, ...],
+        *,
+        successful_update: int,
+    ) -> None:
+        if (
+            type(successful_update) is not int
+            or successful_update <= 0
+            or not image_paths
+            or len(image_paths) != len(captions)
+            or any(not isinstance(path, Path) or not path.is_file() for path in image_paths)
+            or any(type(caption) is not str for caption in captions)
+        ):
+            raise ValueError("W&B sample image payload is invalid")
+        self._submit_media(
+            _QueuedMedia(
+                successful_update,
+                tuple(str(path) for path in image_paths),
+                captions,
+            )
+        )
 
     def drain(self) -> None:
         self._queue.join()

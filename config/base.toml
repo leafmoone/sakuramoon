@@ -222,6 +222,12 @@ t_eps = 0.05
 profile = "balanced"
 state_dtype = "float32"
 
+[sampling.training]
+enabled = true
+every_updates = 1000
+image_count = 5
+output_subdir = "sample"
+
 [sampling.profiles.preview]
 solver = "euler"
 steps = 28
@@ -245,18 +251,18 @@ conversion_order = "each_x_to_v_then_cfg"
 
 [optimizer]
 name = "torchao_adamw8bit"
-lr = 0.00002
+lr = 0.00005
 betas = [0.9, 0.95]
 eps = 0.00000001
 block_size = 256
 bf16_stochastic_round = true
-matrix_weight_decay = 0.01
+matrix_weight_decay = 0.0
 sensitive_weight_decay = 0.0
 
 [scheduler]
 name = "linear_warmup_constant"
 warmup_updates = 1000
-max_lr = 0.00002
+max_lr = 0.00005
 after_warmup = "constant"
 
 [gradient]

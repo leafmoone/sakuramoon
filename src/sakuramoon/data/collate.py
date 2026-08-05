@@ -1,4 +1,4 @@
-"""Bucketed dense-Qwen batches with bounded DataLoader prefetch."""
+"""Image-bucketed batches with dynamic right-padding and bounded prefetch."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from multiprocessing.queues import Queue as MultiprocessingQueue
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeVar, cast
 
 import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
@@ -26,6 +26,7 @@ from sakuramoon.data.pipeline import (
     RngIdentity,
     WebDatasetPipeline,
 )
+from sakuramoon.data.serialize import SerializedCaption
 from sakuramoon.data.service_protocol import (
     DataServiceSessionIdentity,
     ShardLeaseDescriptor,
@@ -60,6 +61,8 @@ class TrainingBatch:
     source_shards: tuple[str, ...]
     audits: tuple[ImageAudit, ...]
     rng_identities: tuple[RngIdentity, ...]
+    # Exact post-dropout/post-assembly captions are retained for periodic samples.
+    captions: tuple[SerializedCaption, ...] = ()
 
     def pin_memory(self) -> TrainingBatch:
         return replace(
@@ -161,13 +164,13 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
         self.multiprocessing_context = _WORKER_CONTEXT
         self.input_queues = tuple(
             cast(
-                MultiprocessingQueue[object],
+                MultiprocessingQueue,
                 self.multiprocessing_context.Queue(maxsize=1),
             )
             for _ in range(worker_count)
         )
         self.completion_queue = cast(
-            MultiprocessingQueue[object],
+            MultiprocessingQueue,
             self.multiprocessing_context.Queue(maxsize=worker_count),
         )
         self.input_queue_capacity = worker_count
@@ -254,7 +257,7 @@ def _shutdown_loader(
 
 
 def _completion_for(
-    completion_queue: MultiprocessingQueue[object],
+    completion_queue: MultiprocessingQueue,
     pending: dict[str, _WorkerCompletion],
     shard_path: str,
 ) -> _WorkerCompletion:
@@ -347,12 +350,12 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         or any(sample.padding_token_id != padding_token_id for sample in samples)
     ):
         raise CollateError("batch samples must share the framing padding token")
-    key = (first.target_height, first.target_width, first.caption.dense_length)
+    key = (first.target_height, first.target_width)
     if any(
-        (sample.target_height, sample.target_width, sample.caption.dense_length) != key
+        (sample.target_height, sample.target_width) != key
         for sample in samples
     ):
-        raise CollateError("batch samples must share image and Qwen dense buckets")
+        raise CollateError("batch samples must share one image bucket")
     if any(
         sample.image.shape != (3, first.target_height, first.target_width)
         or sample.image.dtype != torch.uint8
@@ -362,14 +365,17 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     _validate_main_indices(samples)
     active_style_sample_indices = _active_style_sample_indices(samples)
 
-    dense_length = first.caption.dense_length
+    # Right-pad only to the longest serialized Qwen bucket in this image batch.
+    # Valid token positions never move, and downstream attention masks remove the
+    # extra positions before trainable DiT packing.
+    dense_length = max(sample.caption.dense_length for sample in samples)
     input_ids = torch.full(
         (len(samples), dense_length), padding_token_id, dtype=torch.long
     )
     attention_mask = torch.zeros((len(samples), dense_length), dtype=torch.bool)
     for row, sample in enumerate(samples):
         length = len(sample.caption.input_ids)
-        if length > dense_length:
+        if length > sample.caption.dense_length:
             raise CollateError("serialized caption exceeds its dense bucket")
         input_ids[row, :length] = torch.tensor(
             sample.caption.input_ids, dtype=torch.long
@@ -415,6 +421,7 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         source_shards=tuple(sample.source_shard for sample in samples),
         audits=tuple(sample.audit for sample in samples),
         rng_identities=tuple(sample.rng for sample in samples),
+        captions=tuple(sample.caption for sample in samples),
     )
 
 
@@ -426,9 +433,9 @@ def bucketed_batches(
 ) -> Iterator[TrainingBatch]:
     if type(batch_size) is not int or batch_size <= 0 or type(drop_last) is not bool:
         raise CollateError("batch_size and drop_last are invalid")
-    pending: dict[tuple[int, int, int], list[PipelineSample]] = {}
+    pending: dict[tuple[int, int], list[PipelineSample]] = {}
     for sample in samples:
-        key = (sample.target_height, sample.target_width, sample.caption.dense_length)
+        key = (sample.target_height, sample.target_width)
         bucket = pending.setdefault(key, [])
         bucket.append(sample)
         if len(bucket) == batch_size:
@@ -469,7 +476,10 @@ class BucketedBatchDataset(IterableDataset[TrainingBatch]):
         )
 
 
-def _build_batch_loader[BatchItem](
+BatchItem = TypeVar("BatchItem")
+
+
+def _build_batch_loader(
     dataset: IterableDataset[BatchItem],
     *,
     worker_count: int,

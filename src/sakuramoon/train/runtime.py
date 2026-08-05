@@ -13,7 +13,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 import torch
 from torch import nn
@@ -30,6 +30,7 @@ from sakuramoon.data.production import (
     AcceptedProductionBatchStream,
     require_accepted_production_batch_stream,
 )
+from sakuramoon.data.serialize import SerializedCaption
 from sakuramoon.encoders.mage_vae import FrozenMageVAE
 from sakuramoon.encoders.qwen import FrozenQwenEncoder
 from sakuramoon.model.attention import (
@@ -69,7 +70,11 @@ if TYPE_CHECKING:
 
 class _Encoder(Protocol):
     def __call__(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        *,
+        dense_lengths: tuple[int, ...] | None = None,
     ) -> object: ...
 
 
@@ -124,9 +129,12 @@ class DenseDiTAdapter(nn.Module):
     def model_metadata(self) -> dict[str, int | str]:
         return self.model.model_metadata()
 
+
     def artifact_config(self) -> dict[str, object]:
         return self.model.artifact_config()
 
+
+ResultT = TypeVar("ResultT")
 
 class ActualDitFlopCounter:
     """Count executed DiT matmul FLOPs from live tensor and sequence shapes.
@@ -211,7 +219,7 @@ class ActualDitFlopCounter:
             raise TypeError("unsupported DiT attention module reached FLOP hook")
         self._add(4 * module.q_heads * module.head_dim * sequence_squares)
 
-    def measure[ResultT](self, operation: Callable[[], ResultT]) -> tuple[ResultT, int]:
+    def measure(self, operation: Callable[[], ResultT]) -> tuple[ResultT, int]:
         """Run one DiT forward and return its observed matmul FLOP count."""
 
         if not callable(operation):
@@ -254,6 +262,7 @@ class RuntimeMeasurement:
     low_noise_sample_count: torch.Tensor
     timesteps: torch.Tensor
     dropout_hits: CaptionDropoutCounts
+    captions: tuple[SerializedCaption, ...] = ()
 
     def detached(self) -> RuntimeMeasurement:
         """Drop the autograd graph before handing facts to an async observer."""
@@ -271,6 +280,7 @@ class RuntimeMeasurement:
             low_noise_sample_count=self.low_noise_sample_count.detach(),
             timesteps=self.timesteps.detach(),
             dropout_hits=self.dropout_hits,
+            captions=self.captions,
         )
 
 
@@ -414,6 +424,25 @@ class SingleGpuBatchRuntime:
         self.growth_alpha = growth_alpha
         self.dit_flop_counter = ActualDitFlopCounter(composite.dit)
 
+    def _encode_qwen(
+        self,
+        batch: TrainingBatch,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> object:
+        if not isinstance(self.qwen, FrozenQwenEncoder):
+            return self.qwen(input_ids, attention_mask)
+        dense_lengths = (
+            tuple(caption.dense_length for caption in batch.captions)
+            if len(batch.captions) == batch.images.shape[0]
+            else (batch.dense_length,) * batch.images.shape[0]
+        )
+        return self.qwen(
+            input_ids,
+            attention_mask,
+            dense_lengths=dense_lengths,
+        )
+
     def prepare(
         self, batch: TrainingBatch, *, phase_timer: PhaseTimer | None = None
     ) -> PreparedTrainingBatch:
@@ -482,10 +511,10 @@ class SingleGpuBatchRuntime:
                     self.device, dtype=torch.long, non_blocking=True
                 )
         if phase_timer is None:
-            qwen_output = self.qwen(input_ids, attention_mask)
+            qwen_output = self._encode_qwen(batch, input_ids, attention_mask)
         else:
             with phase_timer.record("qwen"):
-                qwen_output = self.qwen(input_ids, attention_mask)
+                qwen_output = self._encode_qwen(batch, input_ids, attention_mask)
         hidden_states = getattr(qwen_output, "hidden_states", None)
         if not isinstance(hidden_states, torch.Tensor):
             raise TypeError("Qwen output must expose hidden_states")
@@ -587,6 +616,7 @@ class SingleGpuBatchRuntime:
             low_noise_sample_count=loss.low_noise_sample_count,
             timesteps=prepared.inputs.timestep,
             dropout_hits=batch.dropout_hits,
+            captions=batch.captions,
         )
 
     def _loss(

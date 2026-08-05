@@ -72,6 +72,24 @@ def test_recursive_merge_replaces_arrays_before_strict_validation(
     assert str(first.value) == str(second.value)
 
 
+def test_weight_decay_is_a_bounded_runtime_hyperparameter(
+    tmp_path: Path,
+    valid_payload: dict[str, Any],
+    secret_environment: dict[str, str],
+) -> None:
+    payload = copy.deepcopy(valid_payload)
+    payload["optimizer"]["matrix_weight_decay"] = 0.125
+    payload["optimizer"]["sensitive_weight_decay"] = 0.25
+    _write_toml(tmp_path / "run.toml", payload)
+
+    loaded = load_config(
+        Path("run.toml"), config_root=tmp_path, environment=secret_environment
+    )
+
+    assert loaded.config.optimizer.matrix_weight_decay == 0.125
+    assert loaded.config.optimizer.sensitive_weight_decay == 0.25
+
+
 @pytest.mark.parametrize(
     ("files", "entry", "expected"),
     [

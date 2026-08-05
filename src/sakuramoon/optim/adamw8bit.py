@@ -1,7 +1,8 @@
-"""Locked TorchAO AdamW8bit with isolated stochastic-rounding RNG."""
+"""TorchAO AdamW8bit with isolated stochastic-rounding RNG."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Protocol, cast
 
@@ -172,7 +173,9 @@ def build_adamw8bit(
     sr_seed: int,
 ) -> IsolatedAdamW8bit:
     if (
-        lr != 2e-5
+        type(lr) is not float
+        or not math.isfinite(lr)
+        or lr <= 0.0
         or betas != (0.9, 0.95)
         or eps != 1e-8
         or block_size != 256

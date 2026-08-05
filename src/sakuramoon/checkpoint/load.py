@@ -455,6 +455,11 @@ def _validate_optimizer_state(
         if set(saved_group) != set(current_group):
             raise CheckpointError("optimizer parameter group fields do not match")
         for key in current_group:
+            # Learning rate and weight decay are runtime-controlled
+            # hyperparameters. Keep current config values while restoring
+            # moments and canonical parameter identity from the checkpoint.
+            if key in {"lr", "weight_decay"}:
+                continue
             if not _locked_value_equal(saved_group[key], current_group[key]):
                 raise CheckpointError(f"optimizer parameter group differs: {key}")
         raw_ids = current_group.get("params")
@@ -709,9 +714,29 @@ def load_raw_checkpoint(
     sr_rng = _load_sr_rng(train_state / "rng" / "optimizer_sr.safetensors", optimizer)
 
     _apply_model(checkpoint / "model", weight_map, current_model)
+    current_groups = cast(
+        list[object],
+        cast(dict[str, object], optimizer.optimizer.state_dict())["param_groups"],
+    )
+    saved_groups = cast(list[object], optimizer_state["param_groups"])
+    if len(saved_groups) != len(current_groups):
+        raise CheckpointError("optimizer state group count does not match")
+    runtime_optimizer_state = dict(optimizer_state)
+    runtime_optimizer_state["param_groups"] = [
+        {
+            **cast(dict[str, object], saved_group),
+            "lr": cast(dict[str, object], current_group)["lr"],
+            "weight_decay": cast(dict[str, object], current_group)[
+                "weight_decay"
+            ],
+        }
+        for saved_group, current_group in zip(
+            saved_groups, current_groups, strict=True
+        )
+    ]
     optimizer.load_state_dict(
         {
-            "optimizer": optimizer_state,
+            "optimizer": runtime_optimizer_state,
             "sr_rng": sr_rng,
         }
     )

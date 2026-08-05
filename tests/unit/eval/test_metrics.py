@@ -12,8 +12,8 @@ from sakuramoon.eval.metrics import (
     frechet_inception_distance,
     inception_score,
 )
-from sakuramoon.eval.runtime import _conditioning_inputs
-from sakuramoon.eval.spec import PromptCase
+from sakuramoon.eval.runtime import _conditioning_inputs, _stage_cases
+from sakuramoon.eval.spec import PromptCase, PromptManifest
 
 
 class _Tokenizer:
@@ -36,6 +36,22 @@ def test_fid_is_zero_for_identical_feature_statistics() -> None:
     stats = FeatureStats.from_features(features)
 
     assert frechet_inception_distance(stats, stats) == pytest.approx(0.0, abs=1e-10)
+
+
+def test_sample_space_fid_matches_covariance_space_fid() -> None:
+    generator = torch.Generator().manual_seed(7)
+    generated = FeatureStats.from_features(torch.randn(12, 8, generator=generator))
+    real = FeatureStats.from_features(torch.randn(12, 8, generator=generator))
+    covariance_only = FeatureStats(
+        generated.count,
+        generated.mean,
+        generated.covariance,
+    )
+
+    sample_space = frechet_inception_distance(generated, real)
+    covariance_space = frechet_inception_distance(covariance_only, real)
+
+    assert sample_space == pytest.approx(covariance_space, rel=1e-7, abs=1e-7)
 
 
 def test_inception_score_and_default_schedule() -> None:
@@ -78,3 +94,23 @@ def test_evaluation_uses_normal_caption_boundary_truncation() -> None:
     input_ids, attention_mask = inputs[:2]
     assert input_ids.shape == (2, 98)
     assert torch.equal(attention_mask.sum(dim=1), torch.tensor([39, 39]))
+
+
+def test_evaluation_stages_every_prompt_as_one_to_one(tmp_path) -> None:
+    path = tmp_path / "prompts.json"
+    path.write_bytes(
+        PromptManifest(
+            (
+                PromptCase("wide", "wide prompt", (), 1, 256, 512),
+                PromptCase("tall", "tall prompt", (), 2, 768, 384),
+            )
+        ).canonical_bytes()
+    )
+
+    cases = _stage_cases(path, 2, resolution=256)
+
+    assert [(case.height, case.width) for case in cases] == [(256, 256)] * 2
+    assert [(case.prompt_id, case.seed) for case in cases] == [
+        ("wide", 1),
+        ("tall", 2),
+    ]

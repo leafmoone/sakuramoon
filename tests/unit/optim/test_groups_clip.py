@@ -88,7 +88,7 @@ def test_parameter_audit_is_canonical_and_assigns_exact_decay() -> None:
     module = _PolicyModule()
     audit = audit_trainable_parameters(
         module,
-        matrix_weight_decay=0.01,
+        matrix_weight_decay=0.0,
         sensitive_weight_decay=0.0,
     )
 
@@ -97,8 +97,29 @@ def test_parameter_audit_is_canonical_and_assigns_exact_decay() -> None:
     )
     assert tuple(spec.name for spec in audit.decay) == ("matrix.weight",)
     assert {spec.name for spec in audit.sensitive} == {"norm"}
-    assert {spec.weight_decay for spec in audit.decay} == {0.01}
+    assert {spec.weight_decay for spec in audit.decay} == {0.0}
     assert {spec.weight_decay for spec in audit.sensitive} == {0.0}
+
+
+def test_parameter_audit_accepts_configured_decay_hyperparameters() -> None:
+    audit = audit_trainable_parameters(
+        _PolicyModule(),
+        matrix_weight_decay=0.125,
+        sensitive_weight_decay=0.25,
+    )
+
+    assert {spec.weight_decay for spec in audit.decay} == {0.125}
+    assert {spec.weight_decay for spec in audit.sensitive} == {0.25}
+
+
+@pytest.mark.parametrize("value", [True, -0.1, 1.1, float("inf"), float("nan")])
+def test_parameter_audit_rejects_invalid_decay_hyperparameters(value: object) -> None:
+    with pytest.raises(ValueError, match="decay"):
+        audit_trainable_parameters(
+            _PolicyModule(),
+            matrix_weight_decay=value,  # pyright: ignore[reportArgumentType]
+            sensitive_weight_decay=0.0,
+        )
 
 
 def test_full_16l_production_parameter_schema_is_locked() -> None:
@@ -106,7 +127,7 @@ def test_full_16l_production_parameter_schema_is_locked() -> None:
         model = _production_model()
     audit = audit_trainable_parameters(
         model,
-        matrix_weight_decay=0.01,
+        matrix_weight_decay=0.0,
         sensitive_weight_decay=0.0,
     )
 
@@ -122,7 +143,7 @@ def test_full_trainable_composite_uses_role_based_precision_groups() -> None:
         composite = _TrainableComposite()
     audit = audit_trainable_parameters(
         composite,
-        matrix_weight_decay=0.01,
+        matrix_weight_decay=0.0,
         sensitive_weight_decay=0.0,
     )
     specs = {spec.name: spec for spec in audit.specs}
@@ -152,7 +173,7 @@ def test_parameter_audit_rejects_fp32_matrix_projection() -> None:
     with pytest.raises(TypeError, match="requires torch.bfloat16"):
         audit_trainable_parameters(
             module,
-            matrix_weight_decay=0.01,
+            matrix_weight_decay=0.0,
             sensitive_weight_decay=0.0,
         )
 
@@ -167,7 +188,7 @@ def test_parameter_audit_rejects_unknown_ranked_gate_role() -> None:
     with pytest.raises(TypeError, match="no locked module role"):
         audit_trainable_parameters(
             module,
-            matrix_weight_decay=0.01,
+            matrix_weight_decay=0.0,
             sensitive_weight_decay=0.0,
         )
 
@@ -181,7 +202,7 @@ def test_parameter_audit_rejects_aliased_modules_by_fqn() -> None:
     with pytest.raises(ValueError, match="aliased"):
         audit_trainable_parameters(
             module,
-            matrix_weight_decay=0.01,
+            matrix_weight_decay=0.0,
             sensitive_weight_decay=0.0,
         )
 
@@ -193,7 +214,7 @@ def test_parameter_audit_rejects_bf16_sensitive_vectors() -> None:
     with pytest.raises(TypeError, match="requires torch.float32"):
         audit_trainable_parameters(
             module,
-            matrix_weight_decay=0.01,
+            matrix_weight_decay=0.0,
             sensitive_weight_decay=0.0,
         )
 

@@ -61,6 +61,7 @@ from sakuramoon.train.runtime import (
     require_single_gpu_config,
     run_single_gpu_training,
 )
+from sakuramoon.train.sampling import TrainingSampler
 from sakuramoon.train.step import SingleGpuUpdateState, TrainableComposite
 
 
@@ -690,12 +691,46 @@ def _run_accepted_lifecycle(
                 else:
                     evaluator = None
                     evaluation_is_splits = None
+                training_sampler = (
+                    TrainingSampler(
+                        config,
+                        repository_root=repository_root,
+                        composite=module,
+                        qwen=qwen,
+                        vae=vae,
+                        device=device,
+                        growth_alpha=restored.state.growth.alpha,
+                    )
+                    if config.sampling.training.enabled
+                    else None
+                )
 
                 def observe_successful_update(
                     observation: SuccessfulTrainingObservation,
                 ) -> None:
-                    telemetry.observer(observation)
                     update = observation.loop.update.state.successful_updates
+                    if training_sampler is not None and training_sampler.due(update):
+                        try:
+                            with observation.phase_timer.record("sample"):
+                                samples = training_sampler.sample(
+                                    update, observation.microbatches
+                                )
+                            if samples is not None:
+                                telemetry.submit_wandb_images(
+                                    samples.paths,
+                                    samples.captions,
+                                    successful_update=update,
+                                )
+                                telemetry.submit_wandb_metrics(
+                                    {"training_samples/count": len(samples.paths)},
+                                    successful_update=update,
+                                )
+                        except Exception as error:  # noqa: BLE001 - sampling is nonfatal
+                            _log(
+                                f"[sample] update={update} ???????: "
+                                f"{type(error).__name__}: {error}"
+                            )
+                    telemetry.observer(observation)
                     if evaluator is not None and evaluator.due(update):
                         if evaluation_is_splits is None:
                             raise RuntimeError("evaluation config is unavailable")

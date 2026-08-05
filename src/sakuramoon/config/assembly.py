@@ -87,7 +87,7 @@ class _ResilientManagedRemoteRun:
     def __init__(self, run: ManagedRemoteRun) -> None:
         self.run = run
 
-    def log(self, data: Mapping[str, int | float], *, step: int) -> None:
+    def log(self, data: Mapping[str, object], *, step: int) -> None:
         self.run.log(data, step=step)
 
     def finish(self, exit_code: int | None = None) -> None:
@@ -213,6 +213,24 @@ class TrainingTelemetryAssembly:
         if self.remote is not None:
             self.remote.submit_metrics(
                 metrics,
+                successful_update=successful_update,
+            )
+
+    def submit_wandb_images(
+        self,
+        image_paths: tuple[Path, ...],
+        captions: tuple[str, ...],
+        *,
+        successful_update: int,
+    ) -> None:
+        """Upload generated training samples when W&B is enabled."""
+
+        if self._closed:
+            raise RuntimeError("training telemetry is closed")
+        if self.remote is not None:
+            self.remote.submit_images(
+                image_paths,
+                captions,
                 successful_update=successful_update,
             )
 

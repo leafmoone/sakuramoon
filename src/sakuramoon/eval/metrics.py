@@ -28,36 +28,63 @@ class FeatureStats:
     count: int
     mean: torch.Tensor
     covariance: torch.Tensor
+    centered_features: torch.Tensor | None = None
 
     @classmethod
-    def from_features(cls, features: torch.Tensor) -> FeatureStats:
+    def from_features(
+        cls,
+        features: torch.Tensor,
+        *,
+        device: torch.device | None = None,
+    ) -> FeatureStats:
         if features.ndim != 2 or features.shape[0] < 2:
             raise ValueError("FID features must have shape [N,D] with N >= 2")
-        values = features.detach().to(device="cpu", dtype=torch.float64)
+        target = features.device if device is None else device
+        values = features.detach().to(device=target, dtype=torch.float64)
         if not bool(torch.isfinite(values).all().item()):
             raise ValueError("FID features contain nonfinite values")
         mean = values.mean(dim=0)
         centered = values - mean
         covariance = centered.T @ centered / (values.shape[0] - 1)
-        return cls(values.shape[0], mean, covariance)
+        return cls(values.shape[0], mean, covariance, centered)
 
 
-def frechet_inception_distance(generated: FeatureStats, real: FeatureStats) -> float:
+def frechet_inception_distance(
+    generated: FeatureStats,
+    real: FeatureStats,
+    *,
+    device: torch.device | None = None,
+) -> float:
     if generated.mean.shape != real.mean.shape:
         raise ValueError("generated and real feature dimensions differ")
-    eigenvalues, eigenvectors = _eigh(generated.covariance)
-    generated_root = (
-        eigenvectors
-        @ torch.diag(eigenvalues.clamp_min(0.0).sqrt())
-        @ eigenvectors.T
+    target = generated.mean.device if device is None else device
+    generated_mean = generated.mean.to(device=target, dtype=torch.float64)
+    generated_covariance = generated.covariance.to(
+        device=target,
+        dtype=torch.float64,
     )
-    middle = generated_root @ real.covariance @ generated_root
+    real_mean = real.mean.to(device=target, dtype=torch.float64)
+    real_covariance = real.covariance.to(device=target, dtype=torch.float64)
+    centered = generated.centered_features
+    if centered is None:
+        eigenvalues, eigenvectors = _eigh(generated_covariance)
+        generated_root = (
+            eigenvectors
+            @ torch.diag(eigenvalues.clamp_min(0.0).sqrt())
+            @ eigenvectors.T
+        )
+        middle = generated_root @ real_covariance @ generated_root
+    else:
+        if centered.shape != (generated.count, generated_mean.shape[0]):
+            raise ValueError("generated centered features have an invalid shape")
+        values = centered.to(device=target, dtype=torch.float64)
+        middle = values @ real_covariance @ values.T / (generated.count - 1)
     covariance_trace = _eigvalsh((middle + middle.T) * 0.5).clamp_min(0.0).sqrt().sum()
-    difference = generated.mean - real.mean
+    difference = generated_mean - real_mean
     value = (
         difference.square().sum()
-        + torch.trace(generated.covariance)
-        + torch.trace(real.covariance)
+        + torch.trace(generated_covariance)
+        + torch.trace(real_covariance)
         - 2.0 * covariance_trace
     )
     result = float(value.clamp_min(0.0).item())
@@ -74,7 +101,12 @@ class InceptionScore:
     sample_count: int
 
 
-def inception_score(probabilities: torch.Tensor, *, splits: int) -> InceptionScore:
+def inception_score(
+    probabilities: torch.Tensor,
+    *,
+    splits: int,
+    device: torch.device | None = None,
+) -> InceptionScore:
     if (
         probabilities.ndim != 2
         or probabilities.shape[0] < 2
@@ -84,7 +116,8 @@ def inception_score(probabilities: torch.Tensor, *, splits: int) -> InceptionSco
         or probabilities.shape[0] % splits
     ):
         raise ValueError("IS probabilities or split count are invalid")
-    values = probabilities.detach().to(device="cpu", dtype=torch.float64)
+    target = probabilities.device if device is None else device
+    values = probabilities.detach().to(device=target, dtype=torch.float64)
     values = values.clamp_min(torch.finfo(torch.float64).tiny)
     values /= values.sum(dim=1, keepdim=True)
     scores: list[torch.Tensor] = []
