@@ -131,6 +131,41 @@ def test_bucketed_batches_mix_text_lengths_but_never_image_buckets() -> None:
     }
 
 
+def test_length_sort_window_reduces_padding_without_mixing_image_buckets() -> None:
+    samples = tuple(
+        _sample(sample_id, dense_length=length)
+        for sample_id, length in enumerate((64, 128, 64, 128), start=1)
+    )
+
+    batches = tuple(
+        bucketed_batches(
+            samples,
+            batch_size=2,
+            drop_last=True,
+            length_sort_window_batches=2,
+        )
+    )
+
+    assert len(batches) == 2
+    assert sorted(batch.dense_length for batch in batches) == [64, 128]
+    assert all(batch.images.shape[0] == 2 for batch in batches)
+
+
+def test_length_sort_window_has_a_strict_per_image_bound() -> None:
+    from sakuramoon.data.collate import (  # pyright: ignore[reportPrivateUsage]
+        _LengthAwareBatcher,
+    )
+
+    batcher = _LengthAwareBatcher(batch_size=2, window_batches=2)
+    assert not batcher.add(_sample(1, dense_length=128))
+    assert not batcher.add(_sample(2, dense_length=64))
+    assert not batcher.add(_sample(3, dense_length=128))
+    batches = batcher.add(_sample(4, dense_length=64))
+
+    assert len(batches) == 2
+    assert sorted(batch.dense_length for batch in batches) == [64, 128]
+
+
 def test_collate_rejects_mixed_bucket() -> None:
     with pytest.raises(CollateError, match="share"):
         collate_samples((_sample(1), _sample(2, width=16)))

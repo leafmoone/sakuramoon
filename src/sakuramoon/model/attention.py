@@ -1,11 +1,9 @@
-"""Dense reference and FA4 varlen grouped-query attention."""
+"""Dense reference and DAS FlashAttention-2 varlen grouped-query attention."""
 
 from __future__ import annotations
 
-import importlib
 from dataclasses import dataclass, field
 from itertools import accumulate
-from typing import Protocol, cast
 
 import torch
 import torch.nn.functional as F
@@ -163,31 +161,18 @@ def accepted_sample_indices(boundaries: AcceptedCuSeqlens) -> torch.Tensor:
     )
 
 
-class _FA4VarlenCallable(Protocol):
-    def __call__(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        *,
-        cu_seqlens_q: torch.Tensor,
-        cu_seqlens_k: torch.Tensor,
-        max_seqlen_q: int,
-        max_seqlen_k: int,
-        causal: bool,
-        pack_gqa: bool,
-        deterministic: bool,
-        return_lse: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
-
-
 def fa4_varlen_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     boundaries: AcceptedCuSeqlens,
 ) -> torch.Tensor:
-    """Run the locked FA4 self-attention kernel on padding-free sequences."""
+    """Run the installed DAS FlashAttention-2 kernel on packed sequences.
+
+    The public function name is retained for checkpoint/test compatibility with
+    the original FA4 implementation; the DTK branch deliberately uses the DAS
+    ``flash_attn_varlen_func`` ABI instead of ``flash_attn.cute``.
+    """
 
     total_tokens = query.shape[0] if query.ndim == 3 else -1
     if query.shape != (total_tokens, FA4_QUERY_HEADS, FA4_HEAD_DIM):
@@ -196,9 +181,9 @@ def fa4_varlen_attention(
     if key.shape != expected_kv_shape or value.shape != expected_kv_shape:
         raise ValueError("key and value must have shape [T,5,128]")
     if any(tensor.dtype != torch.bfloat16 for tensor in (query, key, value)):
-        raise TypeError("FA4 production attention requires BF16 query, key, and value")
+        raise TypeError("packed production attention requires BF16 query, key, and value")
     if not all(tensor.is_cuda for tensor in (query, key, value)):
-        raise ValueError("FA4 production attention requires CUDA tensors")
+        raise ValueError("packed production attention requires CUDA tensors")
     if key.device != query.device or value.device != query.device:
         raise ValueError("query, key, and value must share one CUDA device")
     accepted = _require_accepted_boundaries(boundaries)
@@ -223,32 +208,24 @@ def fa4_varlen_attention(
     if not all(tensor.is_contiguous() for tensor in (query, key, value)):
         raise ValueError("FA4 query, key, and value must be contiguous")
 
-    try:
-        fa4_module = importlib.import_module("flash_attn.cute")
-    except ImportError as exc:
+    if _flash_attn_varlen_func is None:
         raise RuntimeError(
-            "flash-attn-4 is required for the fa4_varlen backend"
-        ) from exc
-    flash_attn_varlen_func = cast(
-        _FA4VarlenCallable,
-        fa4_module.flash_attn_varlen_func,
-    )
-
-    output, _lse = flash_attn_varlen_func(
+            "DAS flash-attn with flash_attn_varlen_func is required for packed attention"
+        )
+    output = _flash_attn_varlen_func(
         query,
         key,
         value,
-        cu_seqlens_q=boundary_tensor,
-        cu_seqlens_k=boundary_tensor,
-        max_seqlen_q=accepted.max_seqlen,
-        max_seqlen_k=accepted.max_seqlen,
+        boundary_tensor,
+        boundary_tensor,
+        accepted.max_seqlen,
+        accepted.max_seqlen,
+        dropout_p=0.0,
         causal=False,
-        pack_gqa=FA4_PACK_GQA,
         deterministic=False,
-        return_lse=False,
     )
     if output.shape != query.shape or output.dtype != torch.bfloat16:
-        raise RuntimeError("FA4 returned an unexpected output shape or dtype")
+        raise RuntimeError("DAS FlashAttention returned an unexpected output shape or dtype")
     return output
 
 
@@ -488,7 +465,7 @@ class DenseGQAAttention(nn.Module):
 
 
 class FA4VarlenGQAAttention(nn.Module):
-    """Production DiT attention over T024 padding-free packed tokens."""
+    """Production DiT attention over padding-free tokens using DAS FA2."""
 
     def __init__(
         self,
@@ -515,10 +492,10 @@ class FA4VarlenGQAAttention(nn.Module):
             or head_dim != FA4_HEAD_DIM
         ):
             raise ValueError(
-                "FA4 production attention is locked to d=2560, 20Q/5KV, head_dim=128"
+                "packed attention is locked to d=2560, 20Q/5KV, head_dim=128"
             )
         if linear_dtype != torch.bfloat16:
-            raise ValueError("FA4 production projections require BF16")
+            raise ValueError("packed production projections require BF16")
         if projection_bias or dropout != 0.0:
             raise ValueError("DiT attention requires bias=false and dropout=0")
         self.hidden_size = hidden_size
@@ -565,7 +542,7 @@ class FA4VarlenGQAAttention(nn.Module):
         if tokens.ndim != 2 or tokens.shape[-1] != self.hidden_size:
             raise ValueError("tokens must have shape [T,2560]")
         if tokens.dtype != torch.bfloat16 or not tokens.is_cuda:
-            raise ValueError("FA4 production tokens must be CUDA BF16")
+            raise ValueError("packed production tokens must be CUDA BF16")
         if (
             coordinates.shape != (tokens.shape[0], 2)
             or coordinates.dtype != torch.float32

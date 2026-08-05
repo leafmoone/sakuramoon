@@ -153,6 +153,7 @@ class ConfiguredDataLoader:
     ready_batches: int
     pin_memory: bool
     drop_last: bool
+    length_sort_window_batches: int = 1
 
     @classmethod
     def from_config(cls, config: RuntimeConfig) -> ConfiguredDataLoader:
@@ -166,6 +167,7 @@ class ConfiguredDataLoader:
             ready_batches=config.data.cache.ready_batches_per_rank,
             pin_memory=config.data.loader.pin_memory,
             drop_last=config.data.loader.drop_last,
+            length_sort_window_batches=config.data.loader.length_sort_window_batches,
         )
 
     def require_identity(self, client: DataLeaseClient) -> None:
@@ -186,6 +188,7 @@ class ConfiguredDataLoader:
             ready_batches=self.ready_batches,
             pin_memory=self.pin_memory,
             drop_last=self.drop_last,
+            length_sort_window_batches=self.length_sort_window_batches,
         )
 
 
@@ -507,7 +510,7 @@ class ProductionPipelineFactory:
         return pipeline
 
     def batches(self, client: DataLeaseClient) -> AcceptedProductionBatchStream:
-        """Consume service leases using only the five resolved loader controls."""
+        """Consume service leases using only the resolved loader controls."""
 
         self._require_governed_issuance()
         loader = self.loader

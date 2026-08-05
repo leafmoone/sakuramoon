@@ -390,6 +390,10 @@ class SingleGpuBatchRuntime:
         t_eps: float,
         noise_observation_boundary: float,
         growth_alpha: float,
+        torch_compile_enabled: bool = False,
+        torch_compile_backend: str = "inductor",
+        torch_compile_mode: str = "default",
+        torch_compile_dynamic: bool = False,
     ) -> None:
         if device.type != "cuda" or not torch.cuda.is_available():
             raise ValueError("single-GPU production runtime requires CUDA")
@@ -411,6 +415,14 @@ class SingleGpuBatchRuntime:
                 raise ValueError(f"{name} must be a finite TOML float")
         if type(growth_alpha) is not float or not 0.0 <= growth_alpha <= 1.0:
             raise ValueError("growth_alpha must be a float in [0,1]")
+        if (
+            type(torch_compile_enabled) is not bool
+            or torch_compile_backend != "inductor"
+            or torch_compile_mode
+            not in {"default", "reduce-overhead", "max-autotune-no-cudagraphs"}
+            or type(torch_compile_dynamic) is not bool
+        ):
+            raise ValueError("torch.compile configuration is invalid")
         self.qwen = qwen
         self.vae = vae
         self.composite = composite
@@ -423,6 +435,32 @@ class SingleGpuBatchRuntime:
         self.noise_observation_boundary = noise_observation_boundary
         self.growth_alpha = growth_alpha
         self.dit_flop_counter = ActualDitFlopCounter(composite.dit)
+        self._compiled_dit_forward = (
+            torch.compile(
+                composite.forward_dit,
+                backend=torch_compile_backend,
+                mode=torch_compile_mode,
+                dynamic=torch_compile_dynamic,
+                fullgraph=False,
+            )
+            if torch_compile_enabled
+            else None
+        )
+
+    def _forward_dit(
+        self,
+        inputs: TrainableCompositeInputs,
+        conditioning: tuple[object, object],
+    ) -> tuple[torch.Tensor, ...]:
+        operation = self._compiled_dit_forward
+        if operation is None:
+            return self.composite.forward_dit(inputs, conditioning)  # pyright: ignore[reportArgumentType]
+        result = operation(inputs, conditioning)
+        if not isinstance(result, tuple) or not all(
+            isinstance(item, torch.Tensor) for item in result
+        ):
+            raise TypeError("compiled DiT returned an invalid prediction tuple")
+        return result
 
     def _encode_qwen(
         self,
@@ -574,17 +612,23 @@ class SingleGpuBatchRuntime:
         self, batch: TrainingBatch, *, phase_timer: PhaseTimer | None = None
     ) -> RuntimeMeasurement:
         prepared = self.prepare(batch, phase_timer=phase_timer)
-        if phase_timer is None:
+        if phase_timer is None and self._compiled_dit_forward is None:
             predictions, dit_flops = self.dit_flop_counter.measure(
                 lambda: self.composite(prepared.inputs)
             )
         else:
-            with phase_timer.record("conditioning"):
+            if phase_timer is None:
                 conditioning = self.composite.forward_conditioning(prepared.inputs)
-            with phase_timer.record("dit_forward"):
                 predictions, dit_flops = self.dit_flop_counter.measure(
-                    lambda: self.composite.forward_dit(prepared.inputs, conditioning)
+                    lambda: self._forward_dit(prepared.inputs, conditioning)
                 )
+            else:
+                with phase_timer.record("conditioning"):
+                    conditioning = self.composite.forward_conditioning(prepared.inputs)
+                with phase_timer.record("dit_forward"):
+                    predictions, dit_flops = self.dit_flop_counter.measure(
+                        lambda: self._forward_dit(prepared.inputs, conditioning)
+                    )
         if len(predictions) != len(prepared.clean_latents):
             raise ValueError("DiT prediction count differs from latent batch")
         if phase_timer is None:

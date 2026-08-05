@@ -143,6 +143,7 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
         *,
         batch_size: int,
         drop_last: bool,
+        length_sort_window_batches: int,
         worker_count: int,
     ) -> None:
         super().__init__()
@@ -150,6 +151,8 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
             type(batch_size) is not int
             or batch_size <= 0
             or type(drop_last) is not bool
+            or type(length_sort_window_batches) is not int
+            or not 1 <= length_sort_window_batches <= 8
             or type(worker_count) is not int
             or worker_count <= 0
         ):
@@ -157,6 +160,7 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
         self.pipeline = pipeline
         self.batch_size = batch_size
         self.drop_last = drop_last
+        self.length_sort_window_batches = length_sort_window_batches
         self.worker_count = worker_count
         # A command slot per worker prevents unbounded shard prefetch.  The
         # completion queue has the same bound because each active shard emits
@@ -199,6 +203,10 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
             raise CollateError("persistent shard dataset requires DataLoader workers")
         worker_id = info.id
         worker_pid = os.getpid()
+        cross_shard_batcher = _LengthAwareBatcher(
+            batch_size=self.batch_size,
+            window_batches=self.length_sort_window_batches,
+        )
         while True:
             command = self.input_queues[worker_id].get()
             if not isinstance(command, _ShardWork):
@@ -211,14 +219,29 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
                     (command.record,),
                     cycle_index=command.cycle_index,
                 )
-                for batch in bucketed_batches(
-                    shard_pipeline._iter_paths(  # pyright: ignore[reportPrivateUsage]
-                        (command.local_path,), (command.record,)
-                    ),
-                    batch_size=self.batch_size,
-                    drop_last=self.drop_last,
-                ):
-                    yield _WorkerBatch(worker_id, worker_pid, command.shard_path, batch)
+                samples = shard_pipeline._iter_paths(  # pyright: ignore[reportPrivateUsage]
+                    (command.local_path,), (command.record,)
+                )
+                if self.drop_last:
+                    # Keep decoded tails in the persistent worker so image/length
+                    # grouping spans shard boundaries without retaining shard files.
+                    for sample in samples:
+                        for batch in cross_shard_batcher.add(sample):
+                            yield _WorkerBatch(
+                                worker_id, worker_pid, command.shard_path, batch
+                            )
+                else:
+                    # Variable tail batches retain their historical per-shard
+                    # semantics. Production training uses drop_last=true.
+                    for batch in bucketed_batches(
+                        samples,
+                        batch_size=self.batch_size,
+                        drop_last=False,
+                        length_sort_window_batches=self.length_sort_window_batches,
+                    ):
+                        yield _WorkerBatch(
+                            worker_id, worker_pid, command.shard_path, batch
+                        )
             except BaseException as error:
                 # Never let worker failures publish durable state.  The
                 # completion message is bounded and only carries diagnostics.
@@ -425,25 +448,95 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     )
 
 
+class _LengthAwareBatcher:
+    """Bounded sortish batching within each image shape.
+
+    A window of N complete batches is sorted by declared Qwen dense length before
+    collation. This limits padding while retaining a strict upper memory bound and
+    avoiding the unbounded tails created by exact image-by-text bucket products.
+    """
+
+    def __init__(self, *, batch_size: int, window_batches: int) -> None:
+        if (
+            type(batch_size) is not int
+            or batch_size <= 0
+            or type(window_batches) is not int
+            or not 1 <= window_batches <= 8
+        ):
+            raise CollateError("length-aware batcher fields are invalid")
+        self.batch_size = batch_size
+        self.window_batches = window_batches
+        self._window_size = batch_size * window_batches
+        self._pending: dict[tuple[int, int], list[PipelineSample]] = {}
+
+    @staticmethod
+    def _sort_key(sample: PipelineSample) -> tuple[int, int, int, int, str]:
+        return (
+            sample.caption.dense_length,
+            sample.rng.cycle_index,
+            sample.rng.caption_seed,
+            sample.sample_id,
+            sample.source_shard,
+        )
+
+    def _full_window(
+        self, samples: list[PipelineSample]
+    ) -> tuple[TrainingBatch, ...]:
+        ordered = sorted(samples, key=self._sort_key)
+        groups = [
+            tuple(ordered[start : start + self.batch_size])
+            for start in range(0, self._window_size, self.batch_size)
+        ]
+        # Do not emit monotonically short-to-long windows. The deterministic
+        # rotation preserves replayability while distributing compute shapes.
+        rotation = sum(sample.rng.caption_seed for sample in ordered) % len(groups)
+        groups = groups[rotation:] + groups[:rotation]
+        return tuple(collate_samples(group) for group in groups)
+
+    def add(self, sample: PipelineSample) -> tuple[TrainingBatch, ...]:
+        key = (sample.target_height, sample.target_width)
+        bucket = self._pending.setdefault(key, [])
+        bucket.append(sample)
+        if len(bucket) < self._window_size:
+            return ()
+        if len(bucket) != self._window_size:
+            raise CollateError("length-aware pending window exceeded its bound")
+        del self._pending[key]
+        return self._full_window(bucket)
+
+    def finish(self, *, drop_last: bool) -> tuple[TrainingBatch, ...]:
+        if type(drop_last) is not bool:
+            raise CollateError("drop_last must be an exact boolean")
+        if drop_last:
+            self._pending.clear()
+            return ()
+        batches: list[TrainingBatch] = []
+        for key in sorted(self._pending):
+            ordered = sorted(self._pending[key], key=self._sort_key)
+            for start in range(0, len(ordered), self.batch_size):
+                batches.append(
+                    collate_samples(tuple(ordered[start : start + self.batch_size]))
+                )
+        self._pending.clear()
+        return tuple(batches)
+
+
 def bucketed_batches(
     samples: Iterable[PipelineSample],
     *,
     batch_size: int,
     drop_last: bool,
+    length_sort_window_batches: int = 1,
 ) -> Iterator[TrainingBatch]:
     if type(batch_size) is not int or batch_size <= 0 or type(drop_last) is not bool:
         raise CollateError("batch_size and drop_last are invalid")
-    pending: dict[tuple[int, int], list[PipelineSample]] = {}
+    batcher = _LengthAwareBatcher(
+        batch_size=batch_size,
+        window_batches=length_sort_window_batches,
+    )
     for sample in samples:
-        key = (sample.target_height, sample.target_width)
-        bucket = pending.setdefault(key, [])
-        bucket.append(sample)
-        if len(bucket) == batch_size:
-            yield collate_samples(tuple(bucket))
-            del pending[key]
-    if not drop_last:
-        for key in sorted(pending):
-            yield collate_samples(tuple(pending[key]))
+        yield from batcher.add(sample)
+    yield from batcher.finish(drop_last=drop_last)
 
 
 class BucketedBatchDataset(IterableDataset[TrainingBatch]):
@@ -594,6 +687,7 @@ def iter_service_batches(
     ready_batches: int,
     pin_memory: bool,
     drop_last: bool,
+    length_sort_window_batches: int = 1,
 ) -> ServiceBatchIterator:
     """Drain service-issued leases without owning service/cache/state in trainer."""
 
@@ -610,6 +704,7 @@ def iter_service_batches(
         pipeline,
         batch_size=batch_size,
         drop_last=drop_last,
+        length_sort_window_batches=length_sort_window_batches,
         worker_count=worker_count,
     )
     loader = _build_batch_loader(

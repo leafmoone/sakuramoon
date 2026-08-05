@@ -42,6 +42,7 @@ from sakuramoon.encoders.qwen import QwenRuntime, load_local_qwen
 from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
 from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
+from sakuramoon.optim.dtk import configure_tunableop
 from sakuramoon.storage import repository_directory
 from sakuramoon.telemetry.observer import UpdateMetricContext
 from sakuramoon.train.preflight import (
@@ -478,6 +479,10 @@ def _runtime(
         t_eps=config.timestep.t_eps,
         noise_observation_boundary=config.logging.noise_observation_boundary,
         growth_alpha=restored.state.growth.alpha,
+        torch_compile_enabled=config.kernels.torch_compile_enabled,
+        torch_compile_backend=config.kernels.torch_compile_backend,
+        torch_compile_mode=config.kernels.torch_compile_mode,
+        torch_compile_dynamic=config.kernels.torch_compile_dynamic,
     )
 
 
@@ -541,8 +546,26 @@ def _run_accepted_lifecycle(
     torch.manual_seed(config.run.seed)  # pyright: ignore[reportUnknownMemberType]
     torch.cuda.default_generators[0].manual_seed(config.run.seed)
 
+    tunable_state = configure_tunableop(
+        repository_root,
+        config.paths.run_dir,
+        enabled=config.kernels.tunableop_enabled,
+        tuning=config.kernels.tunableop_tuning,
+        record_untuned=config.kernels.tunableop_record_untuned,
+        max_tuning_duration_ms=config.kernels.tunableop_max_tuning_duration_ms,
+    )
+    if tunable_state.enabled:
+        _log(
+            "TunableOp enabled "
+            f"(tuning={tunable_state.tuning}, loaded={tunable_state.loaded_results})"
+        )
+
     _log("加载 Qwen 文本编码器")
-    qwen = load_local_qwen(repository_root, device)
+    qwen = load_local_qwen(
+        repository_root,
+        device,
+        attention_backend=config.kernels.qwen_attention_backend,
+    )
     _log("加载 Mage VAE")
     vae = load_local_mage_vae(repository_root, device)
     _log(f"构建 {config.stage.depth} 层 DiT")
@@ -905,6 +928,15 @@ def run_production_evaluation(
     torch.manual_seed(config.run.seed)  # pyright: ignore[reportUnknownMemberType]
     torch.cuda.default_generators[0].manual_seed(config.run.seed)
 
+    configure_tunableop(
+        root,
+        config.paths.run_dir,
+        enabled=config.kernels.tunableop_enabled,
+        tuning=False,
+        record_untuned=False,
+        max_tuning_duration_ms=config.kernels.tunableop_max_tuning_duration_ms,
+    )
+
     print(f"[eval] 检查最终模型: {exact_checkpoint}", flush=True)
     manifest, state = read_raw_checkpoint_state(exact_checkpoint)
     require_single_gpu_checkpoint_compatibility(
@@ -919,7 +951,11 @@ def run_production_evaluation(
         )
 
     print("[eval] 加载 Qwen 文本编码器", flush=True)
-    qwen = load_local_qwen(root, device)
+    qwen = load_local_qwen(
+        root,
+        device,
+        attention_backend=config.kernels.qwen_attention_backend,
+    )
     print("[eval] 加载 Mage VAE", flush=True)
     vae = load_local_mage_vae(root, device)
     print(f"[eval] 加载 update {update} DiT", flush=True)

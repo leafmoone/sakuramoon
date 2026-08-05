@@ -235,6 +235,7 @@ class DataTransportConfig(StrictModel):
 class DataLoaderConfig(StrictModel):
     pin_memory: bool
     drop_last: bool
+    length_sort_window_batches: Annotated[int, Field(ge=1, le=8)] = 1
 
 
 class DataValidationConfig(StrictModel):
@@ -671,7 +672,18 @@ class StageConfig(StrictModel):
 
 
 class KernelsConfig(StrictModel):
-    attention_backend: Literal["dense_sdpa_reference"]
+    attention_backend: Literal["dense_sdpa_reference", "das_fa2_varlen"]
+    qwen_attention_backend: Literal["sdpa", "flash_attention_2"] = "sdpa"
+    tunableop_enabled: bool = False
+    tunableop_tuning: bool = False
+    tunableop_record_untuned: bool = False
+    tunableop_max_tuning_duration_ms: Annotated[int, Field(ge=1, le=1000)] = 50
+    torch_compile_enabled: bool = False
+    torch_compile_backend: Literal["inductor"] = "inductor"
+    torch_compile_mode: Literal[
+        "default", "reduce-overhead", "max-autotune-no-cudagraphs"
+    ] = "default"
+    torch_compile_dynamic: bool = False
     dtype: Literal["bfloat16"]
     native_gqa: Literal[True]
     repeat_kv_heads: Literal[False]

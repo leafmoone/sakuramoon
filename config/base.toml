@@ -76,6 +76,7 @@ streams_per_shard = "BENCHMARK_STREAMS_PER_SHARD"
 [data.loader]
 pin_memory = true
 drop_last = true
+length_sort_window_batches = 2
 
 [data.validation]
 selection_path = "data/validation-cohorts/s0-validation-50k-v1/validation-selection.json"
@@ -277,7 +278,16 @@ atomic_complete_marker = true
 canonical_fqn = true
 
 [kernels]
-attention_backend = "dense_sdpa_reference"
+attention_backend = "das_fa2_varlen"
+qwen_attention_backend = "flash_attention_2"
+tunableop_enabled = false
+tunableop_tuning = false
+tunableop_record_untuned = false
+tunableop_max_tuning_duration_ms = 50
+torch_compile_enabled = false
+torch_compile_backend = "inductor"
+torch_compile_mode = "default"
+torch_compile_dynamic = false
 dtype = "bfloat16"
 native_gqa = true
 repeat_kv_heads = false

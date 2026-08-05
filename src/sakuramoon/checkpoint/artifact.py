@@ -15,6 +15,11 @@ from sakuramoon.train.step import TrainableComposite
 _DTYPES = {"bfloat16": torch.bfloat16, "float32": torch.float32}
 _ROOT_KEYS = {"class", "dit", "text", "style"}
 _DIT_META_KEYS = {"active_slot_ids", "attention_backend"}
+_STATE_COMPATIBLE_ATTENTION_BACKENDS = {
+    "dense_sdpa",
+    "fa4_varlen",
+    "das_fa2_varlen",
+}
 
 
 def _mapping(value: object, name: str) -> dict[str, Any]:
@@ -103,7 +108,7 @@ def build_trainable_composite(
         raise ValueError("DiT active slots are invalid")
     backend = dit_config.get("attention_backend")
     dit_class: type[DenseDiT | PackedDiT]
-    if backend == "fa4_varlen":
+    if backend in {"fa4_varlen", "das_fa2_varlen"}:
         dit_class = PackedDiT
     elif backend == "dense_sdpa":
         dit_class = DenseDiT
@@ -135,8 +140,37 @@ def build_trainable_composite(
     return module
 
 
+def architectures_share_parameter_contract(left: object, right: object) -> bool:
+    """Compare artifacts while treating parameter-free attention backends alike."""
+
+    try:
+        left_document = _mapping(left, "left model architecture")
+        right_document = _mapping(right, "right model architecture")
+        left_dit = _mapping(left_document.get("dit"), "left DiT architecture")
+        right_dit = _mapping(right_document.get("dit"), "right DiT architecture")
+    except TypeError:
+        return False
+    left_backend = left_dit.get("attention_backend")
+    right_backend = right_dit.get("attention_backend")
+    if (
+        left_backend not in _STATE_COMPATIBLE_ATTENTION_BACKENDS
+        or right_backend not in _STATE_COMPATIBLE_ATTENTION_BACKENDS
+    ):
+        return False
+    normalized_left = {
+        **left_document,
+        "dit": {**left_dit, "attention_backend": "state_compatible_gqa"},
+    }
+    normalized_right = {
+        **right_document,
+        "dit": {**right_dit, "attention_backend": "state_compatible_gqa"},
+    }
+    return normalized_left == normalized_right
+
+
 __all__ = [
     "active_slot_ids_from_module",
+    "architectures_share_parameter_contract",
     "build_trainable_composite",
     "export_trainable_composite",
     "validate_optimizer_coverage",

@@ -22,7 +22,7 @@ from sakuramoon.model.attention import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is required"
+    not torch.cuda.is_available(), reason="a CUDA-compatible HCU is required"
 )
 
 BUCKETS_512 = (
@@ -124,9 +124,11 @@ def _validated_boundaries(
     )
 
 
-def test_locked_fa4_varlen_matches_dense_and_isolates_samples() -> None:
-    assert importlib.metadata.version("flash-attn-4") == "4.0.0b24"
-    assert importlib.metadata.version("nvidia-cutlass-dsl") == "4.6.0.dev0"
+def test_locked_das_fa2_varlen_matches_dense_and_isolates_samples() -> None:
+    assert (
+        importlib.metadata.version("flash-attn")
+        == "2.8.3+das.opt1.dtk2604.torch290"
+    )
     torch.manual_seed(123)  # pyright: ignore[reportUnknownMemberType]
     lengths = (113, 197)
     offsets = (0, lengths[0], sum(lengths))
@@ -171,8 +173,8 @@ def test_locked_fa4_varlen_matches_dense_and_isolates_samples() -> None:
         and dense_key_grad is not None
         and dense_value_grad is not None
     )
-    assert (output.float() - dense_output.float()).abs().max().item() <= 0.004
-    assert abs(loss.item() - dense_loss.item()) <= 3e-7
+    assert (output.float() - dense_output.float()).abs().max().item() <= 0.008
+    assert abs(loss.item() - dense_loss.item()) <= 5e-7
     assert (query_grad.float() - dense_query_grad.float()).abs().max().item() <= 1e-7
     assert (key_grad.float() - dense_key_grad.float()).abs().max().item() <= 3e-6
     assert (value_grad.float() - dense_value_grad.float()).abs().max().item() <= 3e-6
@@ -390,17 +392,21 @@ def test_unaccepted_public_boundaries_cannot_reach_native_kernel(
     query = torch.zeros(2, 20, 128, dtype=torch.bfloat16, device="cuda")
     key = torch.zeros(2, 5, 128, dtype=torch.bfloat16, device="cuda")
     boundaries = build_validated_cu_seqlens((2,), device=torch.device("cuda"))
-    native_imports: list[str] = []
+    native_calls: list[object] = []
 
-    def record_native_import(name: str) -> object:
-        native_imports.append(name)
-        raise AssertionError("native module must not be imported")
+    def record_native_call(*args: object, **kwargs: object) -> object:
+        native_calls.append((args, kwargs))
+        raise AssertionError("native kernel must not be called")
 
-    monkeypatch.setattr(attention_module.importlib, "import_module", record_native_import)
+    monkeypatch.setattr(
+        attention_module,
+        "_flash_attn_varlen_func",
+        record_native_call,
+    )
 
     with pytest.raises(TypeError, match="accepted at the packed entry"):
         fa4_varlen_attention(query, key, torch.zeros_like(key), boundaries)  # pyright: ignore[reportArgumentType]
-    assert native_imports == []
+    assert native_calls == []
 
 
 def test_sample_routing_uses_the_accepted_host_identity() -> None:

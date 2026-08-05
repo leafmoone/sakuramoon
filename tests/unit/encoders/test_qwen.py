@@ -106,6 +106,24 @@ def test_groups_dense_buckets_and_restores_original_row_order() -> None:
     assert output.attention_mask is mask
 
 
+def test_homogeneous_dense_batch_uses_one_full_batch_forward() -> None:
+    backend = _FakeQwen()
+    encoder = FrozenQwenEncoder(backend)
+    input_ids = torch.arange(4 * 98, dtype=torch.long).reshape(4, 98)
+    mask = torch.ones_like(input_ids, dtype=torch.bool)
+
+    output = encoder(
+        input_ids,
+        mask,
+        dense_lengths=(98, 98, 98, 98),
+        dense_group_size=2,
+    )
+
+    assert backend.calls == 1
+    assert backend.input_shapes == [(4, 98)]
+    assert output.hidden_states.shape == (4, 98, 7, 2048)
+
+
 def test_rejects_dense_bucket_that_truncates_valid_tokens() -> None:
     backend = _FakeQwen()
     encoder = FrozenQwenEncoder(backend)

@@ -305,4 +305,4 @@ def test_packed_and_dense_production_state_dicts_are_isomorphic() -> None:
     assert {
         name: (tensor.shape, tensor.dtype) for name, tensor in dense_state.items()
     } == {name: (tensor.shape, tensor.dtype) for name, tensor in packed_state.items()}
-    assert packed.model_metadata()["attention_backend"] == "fa4_varlen"
+    assert packed.model_metadata()["attention_backend"] == "das_fa2_varlen"

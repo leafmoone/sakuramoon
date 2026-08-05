@@ -33,7 +33,7 @@ from sakuramoon.encoders.mage_vae import load_local_mage_vae
 from sakuramoon.encoders.qwen import load_local_qwen
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is required"
+    not torch.cuda.is_available(), reason="a CUDA-compatible HCU is required"
 )
 
 
@@ -82,7 +82,11 @@ def _write_shard(path: Path) -> None:
 def test_real_pipeline_qwen_and_mage_encode_one_batch(tmp_path: Path) -> None:
     repository_root = Path(__file__).parents[3]
     device = torch.device("cuda", 0)
-    qwen = load_local_qwen(repository_root, device)
+    qwen = load_local_qwen(
+        repository_root,
+        device,
+        attention_backend="flash_attention_2",
+    )
     vae = load_local_mage_vae(repository_root, device)
     shard = tmp_path / "sample.tar"
     _write_shard(shard)
@@ -141,7 +145,11 @@ def test_real_modelscope_shard_pipeline_qwen_and_mage() -> None:
     shard = Path(shard_value)
     repository_root = Path(__file__).parents[3]
     device = torch.device("cuda", 0)
-    qwen = load_local_qwen(repository_root, device)
+    qwen = load_local_qwen(
+        repository_root,
+        device,
+        attention_backend="flash_attention_2",
+    )
     vae = load_local_mage_vae(repository_root, device)
     nl = NlDropoutProbabilities(0.3, 0.3, 0.3, 0.3, 0.3)
     probabilities = CaptionDropoutProbabilities(0.1, 0.2, 0.1, 0.1, 0.1, 0.3, nl)

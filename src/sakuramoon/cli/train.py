@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import threading
 from collections.abc import Sequence
 from pathlib import Path
@@ -23,6 +24,15 @@ def _configure_cuda_allocator() -> str:
     configured = ",".join(options)
     os.environ["PYTORCH_ALLOC_CONF"] = configured
     return configured
+
+
+def _install_shutdown_signal_handlers() -> None:
+    """Make background/nohup jobs interruptible so owned workers are closed."""
+
+    # Non-interactive shells may start background jobs with SIGINT ignored.
+    # Python preserves that inherited disposition unless it is reset here.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,4 +117,5 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    _install_shutdown_signal_handlers()
     raise SystemExit(main())

@@ -16,6 +16,7 @@ from torch import nn
 
 from sakuramoon.checkpoint.artifact import (
     active_slot_ids_from_module,
+    architectures_share_parameter_contract,
     build_trainable_composite,
     export_trainable_composite,
     validate_optimizer_coverage,
@@ -261,7 +262,9 @@ def _validate_model_tensors(
 ) -> tuple[dict[str, str], dict[str, torch.Tensor]]:
     architecture = _validate_model_config(model_dir / "config.json", expected, kind)
     try:
-        if export_trainable_composite(module) != architecture:
+        if not architectures_share_parameter_contract(
+            export_trainable_composite(module), architecture
+        ):
             raise CheckpointError("model architecture differs from artifact")
     except (TypeError, ValueError):
         raise CheckpointError("target is not the artifact trainable composite") from None

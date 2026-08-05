@@ -394,7 +394,11 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
     head = model.head
     text = model.text
     style = model.style
-    backend = "dense_sdpa"
+    backend = (
+        "das_fa2_varlen"
+        if config.kernels.attention_backend == "das_fa2_varlen"
+        else "dense_sdpa"
+    )
     document: dict[str, object] = {
         "class": "TrainableComposite",
         "dit": {

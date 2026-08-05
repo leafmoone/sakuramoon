@@ -210,13 +210,16 @@ class FrozenQwenEncoder(nn.Module):
             if type(dense_group_size) is not int or dense_group_size <= 0:
                 raise ValueError("dense_group_size must be a positive integer")
             self._validate_declared_lengths(attention_mask, dense_lengths)
-            groups = self._chunk_rows(dense_lengths, dense_group_size)
-            if len(groups) == 1:
-                length, _rows = groups[0]
+            homogeneous_length = dense_lengths[0]
+            if all(length == homogeneous_length for length in dense_lengths):
+                # A length-aware data batch can use one large Qwen launch and
+                # avoid index_select/index_copy plus four BS32 forwards.
                 selected = self._forward_selected(
-                    input_ids[:, :length], attention_mask[:, :length]
+                    input_ids[:, :homogeneous_length],
+                    attention_mask[:, :homogeneous_length],
                 )
             else:
+                groups = self._chunk_rows(dense_lengths, dense_group_size)
                 selected: torch.Tensor | None = None
                 for length, rows in groups:
                     row_indices = torch.tensor(
@@ -245,11 +248,18 @@ class FrozenQwenEncoder(nn.Module):
         )
 
 
-def load_local_qwen(repository_root: Path, device: torch.device) -> QwenRuntime:
+def load_local_qwen(
+    repository_root: Path,
+    device: torch.device,
+    *,
+    attention_backend: str = "sdpa",
+) -> QwenRuntime:
     """Load the fixed local text model without creating the visual tower."""
 
     if device.type != "cuda":
         raise ValueError("the production Qwen encoder requires a CUDA device")
+    if attention_backend not in {"sdpa", "flash_attention_2"}:
+        raise ValueError("Qwen attention backend is invalid")
     model_path = require_local_qwen(repository_root)
     if not is_fast_path_available:
         warnings.warn(
@@ -271,6 +281,7 @@ def load_local_qwen(repository_root: Path, device: torch.device) -> QwenRuntime:
         config=config,
         local_files_only=True,
         trust_remote_code=False,
+        attn_implementation=attention_backend,
         dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
     )

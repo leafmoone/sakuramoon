@@ -538,7 +538,7 @@ class PackedDiT(nn.Module):
         self._artifact_config: dict[str, object] = {
             "active_slot_ids": list(slots),
             "aspect_dim": aspect_dim,
-            "attention_backend": "fa4_varlen",
+            "attention_backend": "das_fa2_varlen",
             "attention_dropout": attention_dropout,
             "condition_hidden_size": condition_hidden_size,
             "depth": depth,
@@ -838,7 +838,7 @@ class PackedDiT(nn.Module):
             "out_channels": self.output_head.out_channels,
             "depth": self.depth,
             "stable_slot_count": 24,
-            "attention_backend": "fa4_varlen",
+            "attention_backend": "das_fa2_varlen",
         }
 
     def artifact_config(self) -> dict[str, object]:

@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
 import wandb
 
-from sakuramoon.cli.train import _configure_cuda_allocator
+from sakuramoon.cli.train import (
+    _configure_cuda_allocator,
+    _install_shutdown_signal_handlers,
+)
 from sakuramoon.config.assembly import initialize_wandb_run
 
 
@@ -28,6 +32,23 @@ def test_cuda_allocator_enables_expandable_segments(monkeypatch: Any) -> None:
 
     assert configured == "max_split_size_mb:128,expandable_segments:True"
     assert os.environ["PYTORCH_ALLOC_CONF"] == configured
+
+
+def test_background_training_resets_interrupt_and_termination_signals(
+    monkeypatch: Any,
+) -> None:
+    observed: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        "sakuramoon.cli.train.signal.signal",
+        lambda number, handler: observed.append((number, handler)),
+    )
+
+    _install_shutdown_signal_handlers()
+
+    assert observed == [
+        (signal.SIGINT, signal.default_int_handler),
+        (signal.SIGTERM, signal.default_int_handler),
+    ]
 
 
 def test_wandb_resume_truncates_to_checkpoint(
