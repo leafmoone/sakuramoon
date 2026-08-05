@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, Self, cast
+from uuid import uuid4
 
 import torch
 
@@ -115,7 +116,7 @@ def initialize_wandb_run(
     resume_policy: str,
     resume_from_update: int | None,
 ) -> ManagedRemoteRun:
-    """Start W&B or truncate it to the restored checkpoint before resuming."""
+    """Start W&B, using a grouped continuation run for checkpoint resumes."""
 
     import wandb
     from wandb.errors import AuthenticationError, CommError
@@ -140,14 +141,22 @@ def initialize_wandb_run(
                 save_code=False,
             )
         else:
+            suffix = f"-u{resume_from_update}-{uuid4().hex[:8]}"
+            continuation_id = f"{run_id[: 128 - len(suffix)]}{suffix}"
             run = wandb.init(
                 project=project,
                 entity=entity,
-                id=run_id,
-                name=run_id,
+                id=continuation_id,
+                name=continuation_id,
+                group=run_id,
+                job_type="train-continuation",
+                config={
+                    "source_run_id": run_id,
+                    "resume_from_update": resume_from_update,
+                },
                 dir=str(run_directory),
                 mode="online",
-                resume_from=f"{run_id}?_step={resume_from_update}",
+                resume="never",
                 reinit="create_new",
                 save_code=False,
             )

@@ -51,7 +51,7 @@ def test_background_training_resets_interrupt_and_termination_signals(
     ]
 
 
-def test_wandb_resume_truncates_to_checkpoint(
+def test_wandb_resume_creates_grouped_continuation_run(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -62,6 +62,10 @@ def test_wandb_resume_truncates_to_checkpoint(
         return _FakeRun()
 
     monkeypatch.setattr(wandb, "init", fake_init)
+    monkeypatch.setattr(
+        "sakuramoon.config.assembly.uuid4",
+        lambda: type("_Uuid", (), {"hex": "0123456789abcdef"})(),
+    )
 
     initialize_wandb_run(
         project="sakuramoon",
@@ -72,5 +76,12 @@ def test_wandb_resume_truncates_to_checkpoint(
         resume_from_update=1200,
     )
 
-    assert captured["resume_from"] == "s0-production?_step=1200"
-    assert "resume" not in captured
+    assert captured["id"] == "s0-production-u1200-01234567"
+    assert captured["name"] == captured["id"]
+    assert captured["group"] == "s0-production"
+    assert captured["job_type"] == "train-continuation"
+    assert captured["resume"] == "never"
+    assert captured["config"] == {
+        "source_run_id": "s0-production",
+        "resume_from_update": 1200,
+    }
