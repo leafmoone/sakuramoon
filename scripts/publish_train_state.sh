@@ -9,6 +9,7 @@ umask 077
 # are never staged or published.
 REPO_ID="${REPO_ID:-leafmoone/sm_train_state}"
 REPO_TYPE="model"
+REPO_PATH="${REPO_PATH:-s0}"
 SOURCE_ROOT="${SOURCE_ROOT:-/root/private_data/sakuramoon/output_model/s0}"
 PROJECT_ROOT="${PROJECT_ROOT:-/root/private_data/sakuramoon}"
 STATE_ROOT="${STATE_ROOT:-/root/private_data/.sm-train-state-publisher}"
@@ -16,7 +17,7 @@ INTERVAL_SECONDS="${INTERVAL_SECONDS:-600}"
 UPLOAD_WORKERS="${UPLOAD_WORKERS:-4}"
 MS_HUB_BIN="${MS_HUB_BIN:-${PROJECT_ROOT}/.venv/bin/ms-hub}"
 LOG_FILE="${LOG_FILE:-${STATE_ROOT}/publisher.log}"
-LAST_PUBLISHED="${LAST_PUBLISHED:-${STATE_ROOT}/last-published-tree.txt}"
+LAST_PUBLISHED="${LAST_PUBLISHED:-${STATE_ROOT}/last-published-s0.txt}"
 
 if [[ ! "${INTERVAL_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'INTERVAL_SECONDS must be a positive integer\n' >&2
@@ -142,7 +143,7 @@ verify_remote_checkpoints() {
   local candidate="$1" verify_dir name expected actual
   local -a remote_files=()
   while IFS= read -r name; do
-    remote_files+=("${name}/COMPLETE" "${name}/manifest.json")
+    remote_files+=("${REPO_PATH}/${name}/COMPLETE" "${REPO_PATH}/${name}/manifest.json")
   done < <(find "${candidate}" -mindepth 1 -maxdepth 1 -type d \
     -name 'ckpt_*' -printf '%f\n' | sort -V)
   ((${#remote_files[@]} > 0)) || return 1
@@ -155,14 +156,14 @@ verify_remote_checkpoints() {
     return 1
   fi
   while IFS= read -r name; do
-    if [[ ! -f "${verify_dir}/${name}/COMPLETE" ]] \
-      || ! grep -qx 'complete' "${verify_dir}/${name}/COMPLETE" \
-      || [[ ! -f "${verify_dir}/${name}/manifest.json" ]]; then
+    if [[ ! -f "${verify_dir}/${REPO_PATH}/${name}/COMPLETE" ]] \
+      || ! grep -qx 'complete' "${verify_dir}/${REPO_PATH}/${name}/COMPLETE" \
+      || [[ ! -f "${verify_dir}/${REPO_PATH}/${name}/manifest.json" ]]; then
       remove_workdir "${verify_dir}"
       return 1
     fi
     expected="$(sha256sum "${candidate}/${name}/manifest.json" | cut -d' ' -f1)"
-    actual="$(sha256sum "${verify_dir}/${name}/manifest.json" | cut -d' ' -f1)"
+    actual="$(sha256sum "${verify_dir}/${REPO_PATH}/${name}/manifest.json" | cut -d' ' -f1)"
     if [[ "${actual}" != "${expected}" ]]; then
       remove_workdir "${verify_dir}"
       return 1
@@ -197,9 +198,9 @@ publish_if_changed() {
   fi
   checkpoint_count="$(find "${candidate}" -mindepth 1 -maxdepth 1 \
     -type d -name 'ckpt_*' | wc -l)"
-  log "mirroring ${checkpoint_count} checkpoint directories from ${SOURCE_ROOT} to ${REPO_ID} root"
-  if ! "${MS_HUB_BIN}" upload "${REPO_ID}" "${candidate}" \
-    --repo-type "${REPO_TYPE}" --sync --use-cache \
+  log "mirroring ${checkpoint_count} checkpoint directories from ${SOURCE_ROOT} to ${REPO_ID}/${REPO_PATH}"
+  if ! "${MS_HUB_BIN}" upload "${REPO_ID}" "${candidate}" "${REPO_PATH}" \
+    --repo-type "${REPO_TYPE}" --use-cache \
     --max-workers "${UPLOAD_WORKERS}" --disable-tqdm \
     --exclude '.ms_upload_cache/**' \
     --commit-message "training state tree ${identity:0:12}" \

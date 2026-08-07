@@ -17,8 +17,8 @@ checkpoint_dir = "output_model/s0"
 artifact_dir = "artifacts/s0"
 
 [distributed]
-backend = "native"
-world_size = 1
+backend = "accelerate"
+world_size = 2
 frozen_encoders_outside_wrapper = true
 automatic_backend_fallback = false
 
@@ -58,12 +58,13 @@ copy_old_slots = false
 name = "S0"
 enabled = true
 predecessor = ""
-world_size = 1
+world_size = 2
 depth = 16
 resolution = 256
 local_batch = 128
 accumulation = 2
-global_batch = 256
+# base_lr=0.00005 at reference_batch=256 -> actual_lr=0.0001 for global_batch=512.
+global_batch = 512
 activation_checkpoint_mode = "all"
 planned_updates = 100000
 manual_finalize = true

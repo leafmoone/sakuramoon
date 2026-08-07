@@ -339,7 +339,7 @@ class ModelScopeDatasetTransport:
             transfer_failed = False
             try:
                 if response.status == 404:
-                    raise DatasetTransportError("dataset shard does not exist")
+                    raise _RetryableRequestError
                 if ranged and response.status == 200:
                     raise _RangeUnsupportedError(
                         "ModelScope download endpoint ignored the byte range"
@@ -376,7 +376,12 @@ class ModelScopeDatasetTransport:
                     if output.write(chunk) != len(chunk):
                         raise DatasetTransportError("dataset shard write was incomplete")
                     current += len(chunk)
-            except (OSError, TimeoutError, http.client.HTTPException):
+            except (
+                OSError,
+                TimeoutError,
+                http.client.HTTPException,
+                _RetryableRequestError,
+            ):
                 transfer_failed = True
             finally:
                 response.close()

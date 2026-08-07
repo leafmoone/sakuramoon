@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -533,7 +534,11 @@ def _load_sr_rng(path: Path, optimizer: IsolatedAdamW8bit) -> dict[str, object]:
         raise CheckpointError("optimizer SR RNG state is invalid")
     saved_index = int(device_index.item())
     current_index = optimizer.sr_rng.device.index
-    if saved_index != current_index:
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    remapping_rank_zero = (
+        local_rank > 0 and saved_index == 0 and current_index == local_rank
+    )
+    if saved_index != current_index and not remapping_rank_zero:
         raise CheckpointError("optimizer SR RNG device does not match")
     if state.shape != optimizer.sr_rng.state.shape:
         raise CheckpointError("optimizer SR RNG shape does not match")
@@ -713,6 +718,12 @@ def load_raw_checkpoint(
         rank_rng = load_file(train_state / "rng" / "rank-0.safetensors", device="cpu")
     except Exception:  # noqa: BLE001 - normalize Safetensors loader errors
         raise CheckpointError("rank RNG file is unreadable") from None
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if local_rank > 0 and torch.cuda.is_available():
+        rank_rng = dict(rank_rng)
+        rank_rng["cuda_device_index"] = torch.tensor(
+            torch.cuda.current_device(), dtype=torch.int64
+        )
     validate_rank_rng(rank_rng)
     sr_rng = _load_sr_rng(train_state / "rng" / "optimizer_sr.safetensors", optimizer)
 

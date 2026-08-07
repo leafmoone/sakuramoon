@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Protocol
@@ -170,14 +170,24 @@ class SingleGpuStep:
         *,
         accumulation_steps: int,
         state: SingleGpuUpdateState,
+        effective_sample_multiplier: int = 1,
+        backward: Callable[[torch.Tensor], None] | None = None,
     ) -> None:
         if type(accumulation_steps) is not int or accumulation_steps <= 0:
             raise ValueError("accumulation_steps must be a positive integer")
         if not any(parameter.requires_grad for parameter in module.parameters()):
             raise ValueError("training module has no trainable parameters")
+        if (
+            type(effective_sample_multiplier) is not int
+            or effective_sample_multiplier <= 0
+            or (backward is not None and not callable(backward))
+        ):
+            raise ValueError("distributed step controls are invalid")
         self.module = module
         self.optimizer = optimizer
         self.accumulation_steps = accumulation_steps
+        self.effective_sample_multiplier = effective_sample_multiplier
+        self._backward = backward
         self._state: SingleGpuUpdateState = state
         self._microbatches = 0
         self._samples = 0
@@ -225,7 +235,10 @@ class SingleGpuStep:
 
         loss_sum = per_sample_loss.sum()
         try:
-            loss_sum.backward()  # pyright: ignore[reportUnknownMemberType]
+            if self._backward is None:
+                loss_sum.backward()  # pyright: ignore[reportUnknownMemberType]
+            else:
+                self._backward(loss_sum)
         except BaseException as error:
             self._detection_phase = "backward"
             self._abort_preserving(error)
@@ -335,7 +348,10 @@ class SingleGpuStep:
         successful = replace(
             attempted,
             successful_updates=attempted.successful_updates + 1,
-            effective_samples=attempted.effective_samples + self._samples,
+            effective_samples=(
+                attempted.effective_samples
+                + self._samples * self.effective_sample_multiplier
+            ),
         )
         self._state = successful
         try:

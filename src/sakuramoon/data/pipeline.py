@@ -356,6 +356,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             "empty_check": True,
         }
         if self._lease_managed:
+            # The data service already assigns disjoint shards to every global
+            # rank/worker pair. WebDataset must not split the one-shard lease
+            # again based on RANK/WORLD_SIZE inherited by spawned workers.
+            options["nodesplitter"] = None
             options["workersplitter"] = None
         dataset = factory(urls, **options)
         for raw_sample in dataset:

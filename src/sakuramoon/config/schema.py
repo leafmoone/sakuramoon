@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import PurePosixPath
 from typing import Annotated, Literal, cast
@@ -588,7 +589,9 @@ class CfgConfig(StrictModel):
 
 class OptimizerConfig(StrictModel):
     name: Literal["torchao_adamw8bit"]
-    lr: PositiveFloat
+    base_lr: PositiveFloat
+    reference_batch: PositiveInt
+    lr_scaling: Literal["linear_global_batch"]
     betas: Annotated[
         tuple[ExactFloat, ExactFloat], BeforeValidator(_toml_array_to_tuple)
     ]
@@ -608,7 +611,6 @@ class OptimizerConfig(StrictModel):
 class SchedulerConfig(StrictModel):
     name: Literal["linear_warmup_constant"]
     warmup_updates: PositiveInt
-    max_lr: PositiveFloat
     after_warmup: Literal["constant"]
 
 
@@ -619,7 +621,7 @@ class GradientConfig(StrictModel):
 
 
 class DistributedConfig(StrictModel):
-    backend: Literal["native", "ddp"]
+    backend: Literal["native", "accelerate", "ddp"]
     world_size: Annotated[int, Field(ge=1, le=4)]
     frozen_encoders_outside_wrapper: Literal[True]
     automatic_backend_fallback: Literal[False]
@@ -795,10 +797,21 @@ class RuntimeConfig(StrictModel):
     timing: TimingConfig
     evaluation: EvaluationConfig
 
+    def scaled_learning_rate(self) -> float:
+        """Return the JLT-style LR for the configured effective global batch."""
+
+        learning_rate = (
+            self.optimizer.base_lr
+            * self.stage.global_batch
+            / self.optimizer.reference_batch
+        )
+        if not math.isfinite(learning_rate) or learning_rate <= 0.0:
+            raise ValueError("scaled optimizer learning rate must be finite and positive")
+        return learning_rate
+
     @model_validator(mode="after")
     def validate_cross_table_contract(self) -> RuntimeConfig:
-        if self.scheduler.max_lr != self.optimizer.lr:
-            raise ValueError("scheduler.max_lr and optimizer.lr must match")
+        self.scaled_learning_rate()
         if self.run.stage != self.stage.name:
             raise ValueError("run.stage and stage.name must match")
         if self.run.intent == "template":
@@ -808,9 +821,19 @@ class RuntimeConfig(StrictModel):
                 )
         elif not self.stage.enabled:
             raise ValueError("selected stage must be enabled")
-        expected_backend = "native" if self.stage.name == "S0" else "ddp"
-        if self.distributed.backend != expected_backend:
+        accepted_backends = (
+            {"native", "accelerate"} if self.stage.name == "S0" else {"ddp"}
+        )
+        if self.distributed.backend not in accepted_backends:
             raise ValueError("distributed backend does not match the selected stage")
+        if self.stage.name == "S0" and (
+            (self.distributed.backend == "native" and self.distributed.world_size != 1)
+            or (
+                self.distributed.backend == "accelerate"
+                and self.distributed.world_size <= 1
+            )
+        ):
+            raise ValueError("S0 distributed backend and world size are inconsistent")
         if self.distributed.world_size != self.stage.world_size:
             raise ValueError("distributed and stage world_size must match")
         if self.growth.enabled != (self.stage.name in {"G1", "G2"}):

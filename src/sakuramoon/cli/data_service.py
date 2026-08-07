@@ -102,7 +102,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     identity = DataServiceSessionIdentity(
         dataset_id=manifest.dataset_id,
-        worker_count=config.data.cache.persistent_workers_per_rank,
+        worker_count=(
+            config.data.cache.persistent_workers_per_rank
+            * config.distributed.world_size
+        ),
     )
     service = DataSupplyService(
         manifest,

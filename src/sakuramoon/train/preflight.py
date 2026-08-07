@@ -392,8 +392,13 @@ def build_single_gpu_preflight_checks(
             restored_checkpoint.state,
             runtime_growth_alpha=runtime.growth_alpha,
         )
-        if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-            raise RuntimeError("training requires exactly one visible CUDA device")
+        expected_devices = loaded.config.distributed.world_size
+        if (
+            not torch.cuda.is_available()
+            or torch.cuda.device_count() != expected_devices
+            or int(runtime.device.index or 0) >= expected_devices
+        ):
+            raise RuntimeError("training accelerator topology differs from config")
 
     def frozen_encoders() -> None:
         for name, encoder in (("Qwen", qwen), ("VAE", vae)):
@@ -470,7 +475,7 @@ def run_single_gpu_preflight(
             restored = plan.bindings.restored
             report = PreflightReport(
                 schema_version=1,
-                hardware="1GPU",
+                hardware=f"{plan.bindings.config.distributed.world_size}GPU",
                 passed=False,
                 dataset_id=plan.dataset_id,
                 checkpoint_id=restored.manifest.identity.checkpoint_id,
@@ -485,7 +490,7 @@ def run_single_gpu_preflight(
     restored = plan.bindings.restored
     report = PreflightReport(
         schema_version=1,
-        hardware="1GPU",
+        hardware=f"{plan.bindings.config.distributed.world_size}GPU",
         passed=True,
         dataset_id=plan.dataset_id,
         checkpoint_id=restored.manifest.identity.checkpoint_id,

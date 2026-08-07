@@ -14,6 +14,7 @@ from typing import Protocol, cast
 
 import tomli_w
 import torch
+from accelerate import Accelerator
 from PIL import Image
 from torch.nn import functional
 from torchvision.models import (  # pyright: ignore[reportMissingTypeStubs]
@@ -418,6 +419,21 @@ def _stage_cases(
     )
 
 
+def _rank_case_bounds(
+    count: int,
+    batch_size: int,
+    *,
+    rank: int,
+    world_size: int,
+) -> tuple[int, int]:
+    batch_count = (count + batch_size - 1) // batch_size
+    if world_size > batch_count:
+        raise EvaluationError("evaluation has fewer batches than distributed ranks")
+    start_batch = batch_count * rank // world_size
+    end_batch = batch_count * (rank + 1) // world_size
+    return start_batch * batch_size, min(end_batch * batch_size, count)
+
+
 def _write_toml(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -442,6 +458,7 @@ class TrainingEvaluator:
         vae: FrozenMageVAE,
         device: torch.device,
         growth_alpha: float,
+        accelerator: Accelerator | None = None,
     ) -> None:
         if config.evaluation.enabled is not True:
             raise ValueError("TrainingEvaluator requires evaluation.enabled=true")
@@ -453,6 +470,12 @@ class TrainingEvaluator:
         self.vae = vae
         self.device = device
         self.growth_alpha = growth_alpha
+        self.accelerator = accelerator
+        self.rank = 0 if accelerator is None else accelerator.process_index
+        self.world_size = 1 if accelerator is None else accelerator.num_processes
+        self.is_main_process = (
+            True if accelerator is None else accelerator.is_main_process
+        )
         self.output = repository_directory(repository_root, self.evaluation.output_dir)
         self._inception: _InceptionModels | None = None
         self._real_stats: FeatureStats | None = None
@@ -464,6 +487,11 @@ class TrainingEvaluator:
         if self._inception is None:
             self._inception = _InceptionModels(self.device)
         return self._inception
+
+    def _gather(self, values: torch.Tensor) -> torch.Tensor:
+        if self.accelerator is None:
+            return values
+        return cast(torch.Tensor, self.accelerator.gather(values))
 
     def _checkpoint_fingerprint(self, update: int) -> str | None:
         root = repository_directory(self.root, self.config.paths.checkpoint_dir)
@@ -635,11 +663,14 @@ class TrainingEvaluator:
         os.replace(temporary, cache)
         return self._real_stats
 
-    def evaluate(self, update: int) -> EvaluationResult:
+    def evaluate(self, update: int) -> EvaluationResult | None:
         if not self.due(update):
             raise ValueError("evaluation update is not due")
-        print(f"[eval] update={update} 开始计算 FID/IS", flush=True)
-        real = self._real()
+        print(
+            f"[eval] update={update} rank={self.rank}/{self.world_size} "
+            "开始计算 FID/IS",
+            flush=True,
+        )
         prompt_path = self.root / self.evaluation.prompt_path
         prompt_sha256 = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
         cases = _stage_cases(
@@ -647,9 +678,6 @@ class TrainingEvaluator:
             self.evaluation.sample_count,
             resolution=self.config.stage.resolution,
         )
-        groups: dict[tuple[int, int], list[PromptCase]] = {}
-        for case in cases:
-            groups.setdefault((case.height, case.width), []).append(case)
         fingerprint = self._checkpoint_fingerprint(update)
         cached = (
             self._load_generated_cache(
@@ -657,12 +685,42 @@ class TrainingEvaluator:
                 fingerprint=fingerprint,
                 prompt_sha256=prompt_sha256,
             )
-            if fingerprint is not None
+            if self.is_main_process and fingerprint is not None
             else None
         )
-        if cached is None:
+        cache_flags = self._gather(
+            torch.tensor(
+                [int(cached is not None)],
+                dtype=torch.int64,
+                device=self.device,
+            )
+        )
+        if bool(cache_flags[0].item()):
+            if not self.is_main_process:
+                return None
+            if cached is None:
+                raise EvaluationError("rank zero generated cache state is inconsistent")
+            feature_values, probability_values = cached
+        else:
+            local_start, local_end = _rank_case_bounds(
+                len(cases),
+                self.evaluation.batch_size,
+                rank=self.rank,
+                world_size=self.world_size,
+            )
+            local_cases = cases[local_start:local_end]
+            groups: dict[tuple[int, int], list[PromptCase]] = {}
+            for case in local_cases:
+                groups.setdefault((case.height, case.width), []).append(case)
             generated_features: list[torch.Tensor] = []
             generated_probabilities: list[torch.Tensor] = []
+            local_feature_values = torch.empty(
+                (0, 2048), dtype=torch.float32, device=self.device
+            )
+            local_probability_values = torch.empty(
+                (0, 1000), dtype=torch.float32, device=self.device
+            )
+            local_error: Exception | None = None
             was_training = self.composite.training
             self.composite.eval()
             try:
@@ -688,13 +746,76 @@ class TrainingEvaluator:
                         )
                         completed += len(batch_cases)
                         print(
-                            f"[eval] 已处理 {completed}/{self.evaluation.sample_count}",
+                            f"[eval] rank={self.rank} 已处理 "
+                            f"{completed}/{len(local_cases)}",
                             flush=True,
                         )
+                local_feature_values = torch.cat(generated_features)
+                local_probability_values = torch.cat(generated_probabilities)
+                if local_feature_values.shape != (len(local_cases), 2048):
+                    raise EvaluationError("generated FID features have an invalid shape")
+                if local_probability_values.shape != (len(local_cases), 1000):
+                    raise EvaluationError(
+                        "generated IS probabilities have an invalid shape"
+                    )
+            except Exception as error:  # noqa: BLE001 - synchronize rank failures
+                local_error = error
             finally:
                 self.composite.train(was_training)
-            feature_values = torch.cat(generated_features)
-            probability_values = torch.cat(generated_probabilities)
+
+            failure_flags = self._gather(
+                torch.tensor(
+                    [int(local_error is not None)],
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+            )
+            if bool(failure_flags.any().item()):
+                if local_error is not None:
+                    raise local_error
+                raise EvaluationError("evaluation generation failed on another rank")
+
+            rank_bounds = tuple(
+                _rank_case_bounds(
+                    len(cases),
+                    self.evaluation.batch_size,
+                    rank=process_index,
+                    world_size=self.world_size,
+                )
+                for process_index in range(self.world_size)
+            )
+            rank_counts = tuple(end - start for start, end in rank_bounds)
+            max_rank_count = max(rank_counts)
+            padded_features = functional.pad(
+                local_feature_values,
+                (0, 0, 0, max_rank_count - len(local_cases)),
+            )
+            padded_probabilities = functional.pad(
+                local_probability_values,
+                (0, 0, 0, max_rank_count - len(local_cases)),
+            )
+            gathered_features = self._gather(padded_features)
+            gathered_probabilities = self._gather(padded_probabilities)
+            if not self.is_main_process:
+                return None
+            feature_chunks = gathered_features.reshape(
+                self.world_size, max_rank_count, 2048
+            )
+            probability_chunks = gathered_probabilities.reshape(
+                self.world_size, max_rank_count, 1000
+            )
+            feature_values = torch.cat(
+                tuple(
+                    feature_chunks[index, :count]
+                    for index, count in enumerate(rank_counts)
+                )
+            )
+            probability_values = torch.cat(
+                tuple(
+                    probability_chunks[index, :count]
+                    for index, count in enumerate(rank_counts)
+                )
+            )
             if fingerprint is not None:
                 self._save_generated_cache(
                     update,
@@ -703,8 +824,7 @@ class TrainingEvaluator:
                     features=feature_values,
                     probabilities=probability_values,
                 )
-        else:
-            feature_values, probability_values = cached
+        real = self._real()
         generated = FeatureStats.from_features(
             feature_values,
             device=self.device,

@@ -43,7 +43,12 @@ DETAILED_TIMING_PHASES = (
     "sample",
 )
 TIMING_PHASES = frozenset((*CORE_TIMING_PHASES, *DETAILED_TIMING_PHASES))
-TRAINING_METRIC_SCHEMA_VERSION = 2
+NOISE_T_BIN_COUNT = 20
+NOISE_T_BIN_LABELS = tuple(
+    f"bin_{index:02d}_t{index * 5:03d}_{(index + 1) * 5:03d}"
+    for index in range(NOISE_T_BIN_COUNT)
+)
+TRAINING_METRIC_SCHEMA_VERSION = 3
 DROPOUT_KEYS = (
     "all_condition",
     "nsfw",
@@ -84,6 +89,8 @@ class TrainingMetric:
     low_noise_loss: float
     high_noise_sample_count: int
     low_noise_sample_count: int
+    t_bin_losses: tuple[float, ...]
+    t_bin_sample_counts: tuple[int, ...]
     pre_clip_grad_norm: float
     post_clip_grad_norm: float
     clip_fraction: float
@@ -112,6 +119,19 @@ class TrainingMetric:
             _finite_float(name, getattr(self, name), minimum=0.0)
         for name in ("high_noise_sample_count", "low_noise_sample_count"):
             _nonnegative_int(name, getattr(self, name))
+        if (
+            type(self.t_bin_losses) is not tuple
+            or type(self.t_bin_sample_counts) is not tuple
+            or len(self.t_bin_losses) != NOISE_T_BIN_COUNT
+            or len(self.t_bin_sample_counts) != NOISE_T_BIN_COUNT
+        ):
+            raise ValueError("t-bin metrics must contain exactly 20 bins")
+        for index, value in enumerate(self.t_bin_losses):
+            _finite_float(f"t_bin_losses[{index}]", value, minimum=0.0)
+        for index, value in enumerate(self.t_bin_sample_counts):
+            _nonnegative_int(f"t_bin_sample_counts[{index}]", value)
+            if value == 0 and self.t_bin_losses[index] != 0.0:
+                raise ValueError("empty t-bin loss must be zero")
         for name in (
             "pre_clip_grad_norm",
             "post_clip_grad_norm",
@@ -154,6 +174,8 @@ class TrainingMetric:
             != self.effective_batch
         ):
             raise ValueError("noise bucket sample counts must equal effective batch")
+        if sum(self.t_bin_sample_counts) != self.effective_batch:
+            raise ValueError("t-bin sample counts must equal effective batch")
         if self.high_noise_sample_count == 0 and self.high_noise_loss != 0.0:
             raise ValueError("empty high-noise bucket loss must be zero")
         if self.low_noise_sample_count == 0 and self.low_noise_loss != 0.0:
@@ -194,6 +216,12 @@ class TrainingMetric:
             "low_noise_loss": self.low_noise_loss,
             "high_noise_sample_count": self.high_noise_sample_count,
             "low_noise_sample_count": self.low_noise_sample_count,
+            "train_loss_by_t": dict(
+                zip(NOISE_T_BIN_LABELS, self.t_bin_losses, strict=True)
+            ),
+            "train_count_by_t": dict(
+                zip(NOISE_T_BIN_LABELS, self.t_bin_sample_counts, strict=True)
+            ),
             "pre_clip_grad_norm": self.pre_clip_grad_norm,
             "post_clip_grad_norm": self.post_clip_grad_norm,
             "clip_fraction": self.clip_fraction,
@@ -226,6 +254,30 @@ class TrainingMetric:
         )
         payload.update(
             {f"phase_seconds/{key}": value for key, value in self.phase_seconds.items()}
+        )
+        # Do not publish an empty bin as a numeric zero.  A zero would be
+        # interpreted by W&B as an observed loss and would pull sparse
+        # high-timestep curves down artificially.  Keep the count metric
+        # below so an empty bin remains visible and auditable.
+        payload.update(
+            {
+                f"train_loss_by_t/{label}": loss
+                for label, loss, count in zip(
+                    NOISE_T_BIN_LABELS,
+                    self.t_bin_losses,
+                    self.t_bin_sample_counts,
+                    strict=True,
+                )
+                if count > 0
+            }
+        )
+        payload.update(
+            {
+                f"train_count_by_t/{label}": value
+                for label, value in zip(
+                    NOISE_T_BIN_LABELS, self.t_bin_sample_counts, strict=True
+                )
+            }
         )
         return payload
 
@@ -322,6 +374,8 @@ __all__ = [
     "CORE_TIMING_PHASES",
     "DETAILED_TIMING_PHASES",
     "DROPOUT_KEYS",
+    "NOISE_T_BIN_COUNT",
+    "NOISE_T_BIN_LABELS",
     "TIMING_PHASES",
     "TRAINING_METRIC_SCHEMA_VERSION",
     "DurableJsonlSink",

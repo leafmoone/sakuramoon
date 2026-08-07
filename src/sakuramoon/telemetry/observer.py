@@ -15,6 +15,7 @@ import torch
 
 from sakuramoon.telemetry.metrics import (
     DROPOUT_KEYS,
+    NOISE_T_BIN_COUNT,
     TIMING_PHASES,
     MetricsPublisher,
     TrainingMetric,
@@ -96,6 +97,61 @@ def _noise_bucket(
     if loss_sum < 0.0:
         raise ValueError(f"{loss_attribute} must be nonnegative")
     return (loss_sum / sample_count if sample_count else 0.0), sample_count
+
+
+def _timestep_bin_stats(
+    observation: SuccessfulTrainingObservation,
+) -> tuple[tuple[float, ...], tuple[int, ...]]:
+    """Aggregate the existing per-sample losses into fixed 0.05-wide t bins.
+
+    This is telemetry-only: it consumes the detached loss vector already
+    produced for the update and never runs another model operation.
+    """
+
+    loss_sums = torch.zeros(NOISE_T_BIN_COUNT, dtype=torch.float64)
+    sample_counts = torch.zeros(NOISE_T_BIN_COUNT, dtype=torch.int64)
+    for index, measurement in enumerate(observation.microbatches):
+        losses = measurement.per_sample_loss.detach().to(
+            device="cpu", dtype=torch.float64
+        )
+        timesteps = measurement.timesteps.detach().to(
+            device="cpu", dtype=torch.float32
+        )
+        if (
+            losses.ndim != 1
+            or timesteps.ndim != 1
+            or losses.numel() == 0
+            or losses.numel() != timesteps.numel()
+        ):
+            raise ValueError(
+                f"microbatches[{index}] loss/timestep vectors are inconsistent"
+            )
+        if not bool(torch.isfinite(losses).all().item()):
+            raise ValueError(f"microbatches[{index}].per_sample_loss must be finite")
+        if bool((losses < 0.0).any().item()):
+            raise ValueError(f"microbatches[{index}].per_sample_loss must be nonnegative")
+        if not bool(torch.isfinite(timesteps).all().item()):
+            raise ValueError(f"microbatches[{index}].timesteps must be finite")
+        if bool(((timesteps < 0.0) | (timesteps > 1.0)).any().item()):
+            raise ValueError(f"microbatches[{index}].timesteps must be in [0,1]")
+
+        bin_indices = torch.floor(timesteps * NOISE_T_BIN_COUNT).to(torch.int64)
+        bin_indices.clamp_(min=0, max=NOISE_T_BIN_COUNT - 1)
+        loss_sums.scatter_add_(0, bin_indices, losses)
+        sample_counts += torch.bincount(
+            bin_indices, minlength=NOISE_T_BIN_COUNT
+        )
+
+    if int(sample_counts.sum().item()) != observation.loop.update.effective_samples:
+        raise ValueError("t-bin sample counts differ from effective batch")
+    losses = tuple(
+        float(loss_sums[index].item() / sample_counts[index].item())
+        if int(sample_counts[index].item())
+        else 0.0
+        for index in range(NOISE_T_BIN_COUNT)
+    )
+    counts = tuple(int(value.item()) for value in sample_counts)
+    return losses, counts
 
 
 def _dropout_counts(
@@ -181,6 +237,7 @@ def build_training_metric(
         loss_attribute="low_noise_loss_sum",
         count_attribute="low_noise_sample_count",
     )
+    t_bin_losses, t_bin_sample_counts = _timestep_bin_stats(observation)
     timestep_min, timestep_max, timestep_mean, timestep_std = _timestep_summary(
         observation
     )
@@ -196,6 +253,8 @@ def build_training_metric(
         low_noise_loss=low_noise_loss,
         high_noise_sample_count=high_noise_count,
         low_noise_sample_count=low_noise_count,
+        t_bin_losses=t_bin_losses,
+        t_bin_sample_counts=t_bin_sample_counts,
         pre_clip_grad_norm=_scalar_float(
             "clip.pre_clip_norm", update.clip.pre_clip_norm
         ),

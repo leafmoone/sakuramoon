@@ -90,6 +90,23 @@ def test_weight_decay_is_a_bounded_runtime_hyperparameter(
     assert loaded.config.optimizer.sensitive_weight_decay == 0.25
 
 
+def test_jlt_learning_rate_scales_with_effective_global_batch(
+    tmp_path: Path,
+    valid_payload: dict[str, Any],
+    secret_environment: dict[str, str],
+) -> None:
+    _write_toml(tmp_path / "run.toml", valid_payload)
+
+    loaded = load_config(
+        Path("run.toml"), config_root=tmp_path, environment=secret_environment
+    )
+
+    assert loaded.config.optimizer.base_lr == 5e-5
+    assert loaded.config.optimizer.reference_batch == 256
+    assert loaded.config.stage.global_batch == 512
+    assert loaded.config.scaled_learning_rate() == 1e-4
+
+
 @pytest.mark.parametrize(
     ("files", "entry", "expected"),
     [

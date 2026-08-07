@@ -6,10 +6,14 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Self, cast
 
 import torch
+from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
+from torch import nn
 
 from sakuramoon.checkpoint.load import (
     load_inference_artifact,
@@ -30,7 +34,7 @@ from sakuramoon.config.assembly import (
 )
 from sakuramoon.config.resolve import write_resolved_config
 from sakuramoon.config.schema import EvaluationEnabledConfig, RuntimeConfig
-from sakuramoon.data.client import DataServiceClient
+from sakuramoon.data.client import DataServiceClient, RankedDataServiceClient
 from sakuramoon.data.production import ProductionPipelineFactory
 from sakuramoon.data.serialize import (
     EXPECTED_PREFIX_TOKENS,
@@ -45,6 +49,7 @@ from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
 from sakuramoon.optim.dtk import configure_tunableop
 from sakuramoon.storage import repository_directory
 from sakuramoon.telemetry.observer import UpdateMetricContext
+from sakuramoon.telemetry.timers import PhaseTimer
 from sakuramoon.train.preflight import (
     ProductionSingleGpuCheckpointPublisher,
     RestoredSingleGpuCheckpoint,
@@ -195,7 +200,7 @@ def _build_optimizer(
     optimizer = config.optimizer
     return build_adamw8bit(
         module,
-        lr=optimizer.lr,
+        lr=config.scaled_learning_rate(),
         betas=optimizer.betas,
         eps=optimizer.eps,
         block_size=optimizer.block_size,
@@ -289,7 +294,7 @@ def _s0_linear_warmup_learning_rate(config: RuntimeConfig, update: int) -> float
     """Return the TOML-bound S0 LR for the next successful-update attempt."""
 
     scheduler = config.scheduler
-    max_lr = scheduler.max_lr
+    max_lr = config.scaled_learning_rate()
     warmup_updates = scheduler.warmup_updates
     if (
         scheduler.name != "linear_warmup_constant"
@@ -297,7 +302,6 @@ def _s0_linear_warmup_learning_rate(config: RuntimeConfig, update: int) -> float
         or type(max_lr) is not float
         or not math.isfinite(max_lr)
         or max_lr <= 0.0
-        or max_lr != config.optimizer.lr
         or type(warmup_updates) is not int
         or warmup_updates <= 0
     ):
@@ -415,16 +419,29 @@ def _resume_state_for_config(
     configured = config.stage.planned_updates
     if configured < terminal:
         raise ValueError("configured planned updates cannot shrink checkpoint budget")
-    if configured == terminal:
-        return state
-    _log(f"扩展训练总步数: {terminal} -> {configured}")
-    return replace(
-        state,
-        stage_budget=StageBudgetCheckpointState(
-            state.stage_budget.start_successful_update,
-            configured,
-        ),
-    )
+    resumed = state
+    if state.growth.world_size != config.stage.world_size:
+        if not (
+            state.growth.world_size == 1
+            and config.distributed.backend == "accelerate"
+            and config.stage.world_size == 2
+        ):
+            raise ValueError("unsupported checkpoint world-size transition")
+        _log("迁移检查点拓扑: world_size 1 -> 2")
+        resumed = replace(
+            resumed,
+            growth=replace(state.growth, world_size=config.stage.world_size),
+        )
+    if configured != terminal:
+        _log(f"扩展训练总步数: {terminal} -> {configured}")
+        resumed = replace(
+            resumed,
+            stage_budget=StageBudgetCheckpointState(
+                state.stage_budget.start_successful_update,
+                configured,
+            ),
+        )
+    return resumed
 
 
 def _restore_checkpoint(
@@ -463,6 +480,7 @@ def _runtime(
     qwen: QwenRuntime,
     vae: FrozenMageVAE,
     module: TrainableComposite,
+    forward_module: nn.Module | None,
     restored: RestoredSingleGpuCheckpoint,
     device: torch.device,
 ) -> SingleGpuBatchRuntime:
@@ -471,6 +489,7 @@ def _runtime(
         qwen=qwen.encoder,
         vae=vae,
         composite=module,
+        forward_module=forward_module,
         device=device,
         generator=torch.cuda.default_generators[index],
         p_mean=config.timestep.p_mean,
@@ -490,10 +509,12 @@ class _ProductionMetricContext:
     def __init__(
         self,
         ready_queue_depth: ReadyQueueDepthObserver,
+        world_size: int = 1,
     ) -> None:
         if not callable(ready_queue_depth):
             raise TypeError("live ready-queue observer must be callable")
         self.ready_queue_depth = ready_queue_depth
+        self.world_size = world_size
 
     def __call__(
         self, observation: SuccessfulTrainingObservation
@@ -507,12 +528,72 @@ class _ProductionMetricContext:
         return UpdateMetricContext(
             dit_flops=dit_flops,
             samples_per_second=(
-                observation.loop.update.effective_samples
+                observation.loop.update.effective_samples * self.world_size
                 / observation.loop.update_wall_seconds
             ),
             ready_queue_depth=depth,
             supplemental_phase_seconds={},
         )
+
+
+class _NoopTelemetry:
+    """Keep non-main ranks timed without duplicating logs or W&B runs."""
+
+    def __init__(self, device: torch.device) -> None:
+        self.phase_timer = PhaseTimer(device=device)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def observer(self, _observation: SuccessfulTrainingObservation) -> None:
+        return None
+
+    def submit_wandb_images(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def submit_wandb_metrics(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+class _AccelerateCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
+    """Let rank zero publish once while every rank verifies the same checkpoint."""
+
+    def __init__(
+        self,
+        delegate: ProductionSingleGpuCheckpointPublisher,
+        accelerator: Accelerator,
+    ) -> None:
+        self._delegate = delegate
+        self._accelerator = accelerator
+
+    def publish_update(
+        self,
+        state: SingleGpuUpdateState,
+        reason: CheckpointReason,
+        cadence: CheckpointCadence,
+    ) -> Path:
+        value = [
+            str(self._delegate.publish_update(state, reason, cadence))
+            if self._accelerator.is_main_process
+            else ""
+        ]
+        torch.distributed.broadcast_object_list(value, src=0)
+        if not value[0]:
+            raise RuntimeError("rank zero did not publish a checkpoint path")
+        return Path(value[0]).resolve(strict=True)
+
+    def apply_verified_retention(
+        self,
+        checkpoint: Path,
+        manifest: object,
+        state: RawCheckpointState,
+    ) -> None:
+        if self._accelerator.is_main_process:
+            self._delegate.apply_verified_retention(checkpoint, manifest, state)  # type: ignore[arg-type]
+        self._accelerator.wait_for_everyone()
 
 
 def _reject_sample(_reason: str) -> None:
@@ -529,22 +610,62 @@ def _run_accepted_lifecycle(
     wall_clock: Callable[[], float],
 ) -> ProductionTrainingResult:
     config = loaded.config
+    accelerator = (
+        Accelerator(
+            mixed_precision="no",
+            kwargs_handlers=[
+                DistributedDataParallelKwargs(find_unused_parameters=False),
+                InitProcessGroupKwargs(timeout=timedelta(minutes=30)),
+            ],
+        )
+        if config.distributed.backend == "accelerate"
+        else None
+    )
+    rank = 0 if accelerator is None else accelerator.process_index
+    is_main_process = accelerator is None or accelerator.is_main_process
+    if accelerator is not None and (
+        accelerator.num_processes != config.distributed.world_size
+        or accelerator.device.type != "cuda"
+    ):
+        raise ValueError("Accelerate launch topology differs from resolved config")
     _log("检查本地模型与运行目录")
     require_static_single_gpu_preflight(config, repository_root)
     checkpoint_root = repository_directory(repository_root, config.paths.checkpoint_dir)
-    resolved_config_path = _publish_resolved_config(loaded, repository_root)
+    if is_main_process:
+        resolved_config_path = _publish_resolved_config(loaded, repository_root)
+    else:
+        resolved_config_path = (
+            repository_directory(repository_root, config.paths.run_dir)
+            / "resolved.toml"
+        )
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    resolved_config_path = resolved_config_path.resolve(strict=True)
     artifact_root = repository_directory(repository_root, config.paths.artifact_dir)
-    device = torch.device("cuda", 0)
+    device = (
+        torch.device("cuda", 0) if accelerator is None else accelerator.device
+    )
     if (
         not torch.cuda.is_available()
-        or torch.cuda.device_count() != 1
+        or torch.cuda.device_count() != config.distributed.world_size
+        or int(device.index or 0) != rank
     ):
         raise ValueError(
-            "production S0 requires exactly one visible CUDA device at index zero"
+            "production S0 accelerator visibility differs from rank topology"
         )
     torch.cuda.set_device(device)
-    torch.manual_seed(config.run.seed)  # pyright: ignore[reportUnknownMemberType]
-    torch.cuda.default_generators[0].manual_seed(config.run.seed)
+    process_seed = config.run.seed + rank * 1_000_003
+    torch.manual_seed(process_seed)  # pyright: ignore[reportUnknownMemberType]
+    torch.cuda.default_generators[int(device.index or 0)].manual_seed(process_seed)
+
+    if is_main_process:
+        _log(
+            "learning-rate scaling: "
+            f"base_lr={config.optimizer.base_lr:.8g}, "
+            f"reference_batch={config.optimizer.reference_batch}, "
+            f"effective_global_batch={config.stage.global_batch}, "
+            f"actual_lr={config.scaled_learning_rate():.8g}"
+        )
 
     tunable_state = configure_tunableop(
         repository_root,
@@ -610,12 +731,42 @@ def _run_accepted_lifecycle(
         restored.state,
         runtime_growth_alpha=restored.state.growth.alpha,
     )
+    if accelerator is not None and rank > 0:
+        resumed_seed = (
+            config.run.seed
+            + rank * 1_000_003
+            + restored.state.trainer.successful_updates
+        )
+        torch.manual_seed(resumed_seed)  # pyright: ignore[reportUnknownMemberType]
+        torch.cuda.default_generators[int(device.index or 0)].manual_seed(resumed_seed)
+    if accelerator is None:
+        forward_module: nn.Module = module
+    else:
+        prepared_module, prepared_optimizer = accelerator.prepare(
+            module,
+            optimizer.optimizer,
+        )
+        forward_module = cast(nn.Module, prepared_module)
+        optimizer.optimizer = prepared_optimizer  # type: ignore[assignment]
     # No service connection may occur before exact RAW restore and full binding.
     _log(f"连接数据服务: {config.data.service.socket_path}")
-    client = DataServiceClient(
+    service_client = DataServiceClient(
         Path(config.data.service.socket_path),
-        worker_count=config.data.cache.persistent_workers_per_rank,
+        worker_count=(
+            config.data.cache.persistent_workers_per_rank
+            * config.distributed.world_size
+        ),
         request_timeout_seconds=config.data.service.request_timeout_seconds,
+    )
+    client = (
+        service_client
+        if accelerator is None
+        else RankedDataServiceClient(
+            service_client,
+            rank=rank,
+            workers_per_rank=config.data.cache.persistent_workers_per_rank,
+            world_size=config.distributed.world_size,
+        )
     )
     padding_token_id = qwen.tokenizer.pad_token_id
     if type(padding_token_id) is not int:
@@ -644,10 +795,11 @@ def _run_accepted_lifecycle(
             qwen=qwen,
             vae=vae,
             module=module,
+            forward_module=forward_module,
             restored=restored,
             device=device,
         )
-        publisher = ProductionSingleGpuCheckpointPublisher(
+        base_publisher = ProductionSingleGpuCheckpointPublisher(
             checkpoint_root=checkpoint_root,
             resolved_config=loaded.resolved_toml.encode("utf-8"),
             module=module,
@@ -655,6 +807,11 @@ def _run_accepted_lifecycle(
             restored_checkpoint=restored,
             accepted_checkpoint_ids=frozenset(),
             retention_slots=config.checkpoint.slots,
+        )
+        publisher = (
+            base_publisher
+            if accelerator is None
+            else _AccelerateCheckpointPublisher(base_publisher, accelerator)
         )
         plan = build_single_gpu_preflight_checks(
             loaded,
@@ -671,7 +828,8 @@ def _run_accepted_lifecycle(
             checkpoint_publisher=publisher,
         )
         preflight_report = artifact_root / (
-            f"preflight-{restored.state.trainer.successful_updates}.json"
+            f"preflight-{restored.state.trainer.successful_updates}"
+            f"{'' if is_main_process else f'-rank{rank}'}.json"
         )
         _log("运行训练前检查")
         accepted = run_single_gpu_preflight(plan, preflight_report)
@@ -690,14 +848,21 @@ def _run_accepted_lifecycle(
             verified_checkpoints: list[Path] = []
             try:
                 context_provider = _ProductionMetricContext(
-                    batches.ready_batch_depth_snapshot
+                    batches.ready_batch_depth_snapshot,
+                    world_size=config.distributed.world_size,
                 )
-                telemetry = build_training_telemetry_from_config(
-                    config,
-                    repository_root=repository_root,
-                    device=device,
-                    context_provider=context_provider,
-                    resume_from_update=(initial_update if resume is not None else None),
+                telemetry = (
+                    build_training_telemetry_from_config(
+                        config,
+                        repository_root=repository_root,
+                        device=device,
+                        context_provider=context_provider,
+                        resume_from_update=(
+                            initial_update if resume is not None else None
+                        ),
+                    )
+                    if is_main_process
+                    else _NoopTelemetry(device)
                 )
                 evaluation_config = config.evaluation
                 if isinstance(evaluation_config, EvaluationEnabledConfig):
@@ -709,6 +874,7 @@ def _run_accepted_lifecycle(
                         vae=vae,
                         device=device,
                         growth_alpha=restored.state.growth.alpha,
+                        accelerator=accelerator,
                     )
                     evaluation_is_splits: int | None = evaluation_config.is_splits
                 else:
@@ -724,7 +890,7 @@ def _run_accepted_lifecycle(
                         device=device,
                         growth_alpha=restored.state.growth.alpha,
                     )
-                    if config.sampling.training.enabled
+                    if is_main_process and config.sampling.training.enabled
                     else None
                 )
 
@@ -758,20 +924,25 @@ def _run_accepted_lifecycle(
                         if evaluation_is_splits is None:
                             raise RuntimeError("evaluation config is unavailable")
                         evaluation = evaluator.evaluate(update)
-                        telemetry.submit_wandb_metrics(
-                            {
-                                "evaluation/fid": evaluation.fid,
-                                "evaluation/inception_score_mean": (
-                                    evaluation.inception_score_mean
-                                ),
-                                "evaluation/inception_score_std": (
-                                    evaluation.inception_score_std
-                                ),
-                                "evaluation/sample_count": evaluation.sample_count,
-                                "evaluation/is_splits": evaluation_is_splits,
-                            },
-                            successful_update=update,
-                        )
+                        if is_main_process:
+                            if evaluation is None:
+                                raise RuntimeError("rank zero evaluation is unavailable")
+                            telemetry.submit_wandb_metrics(
+                                {
+                                    "evaluation/fid": evaluation.fid,
+                                    "evaluation/inception_score_mean": (
+                                        evaluation.inception_score_mean
+                                    ),
+                                    "evaluation/inception_score_std": (
+                                        evaluation.inception_score_std
+                                    ),
+                                    "evaluation/sample_count": evaluation.sample_count,
+                                    "evaluation/is_splits": evaluation_is_splits,
+                                },
+                                successful_update=update,
+                            )
+                    if accelerator is not None:
+                        accelerator.wait_for_everyone()
 
                 with telemetry:
                     _log(
@@ -787,7 +958,9 @@ def _run_accepted_lifecycle(
                         batches=batches,
                         scheduler_step=scheduler,
                         checkpoint_publisher=publisher,
-                        diagnostic_root=artifact_root / "diagnostics",
+                        diagnostic_root=(
+                            artifact_root / "diagnostics" / f"rank-{rank}"
+                        ),
                         failure_id=lambda phase, state: (
                             f"{phase}-{state.attempted_updates}"
                         ),
@@ -801,6 +974,15 @@ def _run_accepted_lifecycle(
                             else None
                         ),
                         verified_checkpoint_observer=verified_checkpoints.append,
+                        backward=(
+                            None if accelerator is None else accelerator.backward
+                        ),
+                        no_sync=(
+                            None
+                            if accelerator is None
+                            else lambda: accelerator.no_sync(forward_module)
+                        ),
+                        log_updates=is_main_process,
                     )
                 if not verified_checkpoints:
                     raise RuntimeError(
@@ -975,7 +1157,10 @@ def run_production_evaluation(
         device=device,
         growth_alpha=state.growth.alpha,
     )
-    return evaluator.evaluate(update)
+    result = evaluator.evaluate(update)
+    if result is None:
+        raise RuntimeError("single-process evaluation returned no result")
+    return result
 
 
 __all__ = [

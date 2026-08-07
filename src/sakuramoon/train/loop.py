@@ -86,6 +86,9 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         update_started: Callable[[PhaseTimer | None], None] | None = None,
         successful_update_observer: Callable[[SuccessfulLoopObservation], None]
         | None = None,
+        effective_sample_multiplier: int = 1,
+        backward: Callable[[torch.Tensor], None] | None = None,
+        no_sync: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> None:
         if (
             type(target_successful_updates) is not int
@@ -98,6 +101,9 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.accumulation_steps = accumulation_steps
+        self.effective_sample_multiplier = effective_sample_multiplier
+        self.backward = backward
+        self.no_sync = no_sync
         self.target_successful_updates = target_successful_updates
         self.checkpoint_every_successful_updates = checkpoint_every_successful_updates
         self.scheduler_step = scheduler_step
@@ -201,21 +207,30 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                 self.optimizer,
                 accumulation_steps=self.accumulation_steps,
                 state=self.state,
+                effective_sample_multiplier=self.effective_sample_multiplier,
+                backward=self.backward,
             )
             active_detection_boundary = "data"
             try:
-                for _ in range(self.accumulation_steps):
+                for microbatch_index in range(self.accumulation_steps):
                     active_detection_boundary = "data"
                     data_started = time.perf_counter_ns()
                     batch = next(iterator)
                     data_wait_seconds += (
                         time.perf_counter_ns() - data_started
                     ) / 1_000_000_000.0
-                    active_detection_boundary = "runtime"
-                    per_sample_loss = self.loss_fn(batch)
-                    active_detection_boundary = "backward"
-                    with self._record(phase_timer, "backward"):
-                        step.backward(per_sample_loss)
+                    sync_context = (
+                        self.no_sync()
+                        if self.no_sync is not None
+                        and microbatch_index < self.accumulation_steps - 1
+                        else nullcontext()
+                    )
+                    with sync_context:
+                        active_detection_boundary = "runtime"
+                        per_sample_loss = self.loss_fn(batch)
+                        active_detection_boundary = "backward"
+                        with self._record(phase_timer, "backward"):
+                            step.backward(per_sample_loss)
                 active_detection_boundary = "update_finalize"
                 update = step.finish_update(phase_timer=phase_timer)
             except BaseException as exc:  # noqa: BLE001

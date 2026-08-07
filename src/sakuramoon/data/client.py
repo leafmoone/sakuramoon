@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -155,4 +156,58 @@ class DataServiceClient:
         if set(response) != {"ok"}:
             raise DataServiceUnavailable("data service ACK response is invalid")
 
-__all__ = ["DataServiceClient", "DataServiceUnavailable"]
+
+class RankedDataServiceClient:
+    """Expose one rank's local worker IDs over a shared global service session."""
+
+    def __init__(
+        self,
+        delegate: DataServiceClient,
+        *,
+        rank: int,
+        workers_per_rank: int,
+        world_size: int,
+    ) -> None:
+        if (
+            type(rank) is not int
+            or type(workers_per_rank) is not int
+            or type(world_size) is not int
+            or not 0 <= rank < world_size
+            or workers_per_rank <= 0
+            or delegate.identity.worker_count != workers_per_rank * world_size
+        ):
+            raise ValueError("ranked data service topology is invalid")
+        self._delegate = delegate
+        self._offset = rank * workers_per_rank
+        self._workers_per_rank = workers_per_rank
+        self._leases: dict[str, ShardLeaseDescriptor] = {}
+        self.identity = DataServiceSessionIdentity(
+            dataset_id=delegate.identity.dataset_id,
+            worker_count=workers_per_rank,
+            session_id=delegate.identity.session_id,
+        )
+
+    def health(self) -> bool:
+        return self._delegate.health()
+
+    def lease(self, worker_id: int) -> ShardLeaseDescriptor | None:
+        if type(worker_id) is not int or not 0 <= worker_id < self._workers_per_rank:
+            raise DataServiceUnavailable("rank-local worker ID is invalid")
+        descriptor = self._delegate.lease(self._offset + worker_id)
+        if descriptor is None:
+            return None
+        self._leases[descriptor.lease_id] = descriptor
+        return replace(descriptor, worker_id=worker_id)
+
+    def acknowledge(self, descriptor: ShardLeaseDescriptor) -> None:
+        original = self._leases.pop(descriptor.lease_id, None)
+        if original is None or replace(original, worker_id=descriptor.worker_id) != descriptor:
+            raise DataServiceUnavailable("rank-local lease identity changed")
+        self._delegate.acknowledge(original)
+
+
+__all__ = [
+    "DataServiceClient",
+    "DataServiceUnavailable",
+    "RankedDataServiceClient",
+]

@@ -252,7 +252,10 @@ conversion_order = "each_x_to_v_then_cfg"
 
 [optimizer]
 name = "torchao_adamw8bit"
-lr = 0.00005
+# JLT-style scaling: actual_lr = base_lr * stage.global_batch / reference_batch.
+base_lr = 0.00005
+reference_batch = 256
+lr_scaling = "linear_global_batch"
 betas = [0.9, 0.95]
 eps = 0.00000001
 block_size = 256
@@ -263,7 +266,6 @@ sensitive_weight_decay = 0.0
 [scheduler]
 name = "linear_warmup_constant"
 warmup_updates = 1000
-max_lr = 0.00005
 after_warmup = "constant"
 
 [gradient]

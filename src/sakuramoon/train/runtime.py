@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
@@ -382,6 +383,7 @@ class SingleGpuBatchRuntime:
         qwen: FrozenQwenEncoder | _Encoder,
         vae: FrozenMageVAE | _Vae,
         composite: TrainableComposite,
+        forward_module: nn.Module | None = None,
         device: torch.device,
         generator: torch.Generator,
         p_mean: float,
@@ -426,6 +428,7 @@ class SingleGpuBatchRuntime:
         self.qwen = qwen
         self.vae = vae
         self.composite = composite
+        self.forward_module = composite if forward_module is None else forward_module
         self.device = device
         self.generator = generator
         self.p_mean = p_mean
@@ -446,6 +449,8 @@ class SingleGpuBatchRuntime:
             if torch_compile_enabled
             else None
         )
+        if self.forward_module is not composite and self._compiled_dit_forward is not None:
+            raise ValueError("distributed forward cannot use the single-rank compile path")
 
     def _forward_dit(
         self,
@@ -612,7 +617,14 @@ class SingleGpuBatchRuntime:
         self, batch: TrainingBatch, *, phase_timer: PhaseTimer | None = None
     ) -> RuntimeMeasurement:
         prepared = self.prepare(batch, phase_timer=phase_timer)
-        if phase_timer is None and self._compiled_dit_forward is None:
+        if self.forward_module is not self.composite:
+            predictions, dit_flops = self.dit_flop_counter.measure(
+                lambda: self.forward_module(
+                    prepared.inputs,
+                    phase_timer=phase_timer,
+                )
+            )
+        elif phase_timer is None and self._compiled_dit_forward is None:
             predictions, dit_flops = self.dit_flop_counter.measure(
                 lambda: self.composite(prepared.inputs)
             )
@@ -716,19 +728,20 @@ class SingleGpuBatchRuntime:
 
 
 def require_single_gpu_config(config: RuntimeConfig) -> None:
-    """Reject every topology except the explicitly approved S0 single card."""
+    """Accept the governed S0 native or Accelerate topology."""
 
     if (
         config.run.intent != "train"
         or config.run.stage != "S0"
         or not config.stage.enabled
-        or config.stage.world_size != 1
+        or config.stage.world_size not in {1, 2}
     ):
         raise ValueError(
-            "the single-GPU runtime accepts only train-intent enabled S0 topology"
+            "the production runtime accepts only governed train-intent S0 topology"
         )
-    if config.distributed.backend != "native" or config.distributed.world_size != 1:
-        raise ValueError("single-GPU runtime requires native world_size=1")
+    topology = (config.distributed.backend, config.distributed.world_size)
+    if topology not in {("native", 1), ("accelerate", 2)}:
+        raise ValueError("production runtime requires native/1 or accelerate/2")
     if config.failure.allow_force_bypass:
         raise ValueError("single-GPU runtime cannot enable preflight bypass")
 
@@ -860,6 +873,9 @@ def _run_single_gpu_training(
     verified_checkpoint_observer: Callable[[Path], None] | None = None,
     forced_checkpoint: Callable[[int], CheckpointReason | None] | None = None,
     clock: Callable[[], float] | None = None,
+    backward: Callable[[torch.Tensor], None] | None = None,
+    no_sync: Callable[[], AbstractContextManager[None]] | None = None,
+    log_updates: bool = True,
 ) -> LoopResult:
     """Run the locked loop after all ownership and assembly objects are ready."""
 
@@ -934,12 +950,13 @@ def _run_single_gpu_training(
                 gpu_memory_reserved_bytes=reserved,
             )
             successful_update_observer(emitted)
-            print(
-                f"[train] update={observation.update.state.successful_updates} "
-                f"loss={float(observation.update.mean_loss.detach().item()):.6f} "
-                f"time={observation.update_wall_seconds:.2f}s",
-                flush=True,
-            )
+            if log_updates:
+                print(
+                    f"[train] update={observation.update.state.successful_updates} "
+                    f"loss={float(observation.update.mean_loss.detach().item()):.6f} "
+                    f"time={observation.update_wall_seconds:.2f}s",
+                    flush=True,
+                )
             pending_measurements.clear()
             active_learning_rate = None
             active_phase_timer = None
@@ -952,7 +969,8 @@ def _run_single_gpu_training(
             checkpoint_path = checkpoint_publisher.publish_update(
                 update_state, reason, proposed_cadence
             )
-            print(f"[train] 保存模型: {checkpoint_path}", flush=True)
+            if log_updates:
+                print(f"[train] 保存模型: {checkpoint_path}", flush=True)
             manifest, published_state = read_raw_checkpoint_state(checkpoint_path)
             restored_identity = restored_checkpoint.manifest.identity
             published_identity = manifest.identity
@@ -965,7 +983,12 @@ def _run_single_gpu_training(
                 trainer=update_state,
                 growth=raw_state.growth,
                 stage_budget=stage_budget,
-                checkpoint_cadence=proposed_cadence,
+                checkpoint_cadence=replace(
+                    proposed_cadence,
+                    last_wall_clock_unix_seconds=(
+                        published_state.checkpoint_cadence.last_wall_clock_unix_seconds
+                    ),
+                ),
             )
             if published_state != expected_state:
                 raise ValueError("published RAW checkpoint state is inconsistent")
@@ -996,6 +1019,9 @@ def _run_single_gpu_training(
             phase_timer=phase_timer,
             update_started=update_started,
             successful_update_observer=observe_update,
+            effective_sample_multiplier=config.distributed.world_size,
+            backward=backward,
+            no_sync=no_sync,
         )
         result = loop.run(stream)
     except BaseException as error:  # noqa: BLE001
@@ -1036,12 +1062,17 @@ def run_single_gpu_training(
     verified_checkpoint_observer: Callable[[Path], None] | None = None,
     forced_checkpoint: Callable[[int], CheckpointReason | None] | None = None,
     clock: Callable[[], float] | None = None,
+    backward: Callable[[torch.Tensor], None] | None = None,
+    no_sync: Callable[[], AbstractContextManager[None]] | None = None,
+    log_updates: bool = True,
 ) -> LoopResult:
     """Run production training with the exact publisher accepted by preflight."""
 
     from sakuramoon.train.preflight import ProductionSingleGpuCheckpointPublisher
 
-    if type(checkpoint_publisher) is not ProductionSingleGpuCheckpointPublisher:
+    if not isinstance(
+        checkpoint_publisher, ProductionSingleGpuCheckpointPublisher
+    ):
         stream = require_accepted_production_batch_stream(batches)
         publisher_error = TypeError(
             "production training requires ProductionSingleGpuCheckpointPublisher"
@@ -1071,6 +1102,9 @@ def run_single_gpu_training(
         verified_checkpoint_observer=verified_checkpoint_observer,
         forced_checkpoint=forced_checkpoint,
         clock=clock,
+        backward=backward,
+        no_sync=no_sync,
+        log_updates=log_updates,
     )
 
 
