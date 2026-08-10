@@ -60,7 +60,7 @@ ready_batches_per_rank = "BENCHMARK_READY_BATCHES_PER_RANK"
 [data.service]
 socket_path = "/run/sakuramoon/data-service.sock"
 ownership_lock_path = "/run/sakuramoon/data-service.lock"
-mainset_path = "cache/data-service-mainset.json"
+mainset_path = "/root/private_data/sakuramoon/config/data-service-mainset.json"
 request_timeout_seconds = "BENCHMARK_SERVICE_REQUEST_TIMEOUT_SECONDS"
 lease_channel_capacity = "BENCHMARK_LEASE_CHANNEL_CAPACITY"
 ack_channel_capacity = "BENCHMARK_ACK_CHANNEL_CAPACITY"

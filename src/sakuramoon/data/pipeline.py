@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
 import random
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -40,6 +41,69 @@ CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
 MetadataAdapter = Callable[[Mapping[str, object]], Mapping[str, object]]
 RejectionObserver = Callable[[str], None]
 _IMAGE_KEYS = ("jpg", "jpeg", "png", "webp")
+_MAX_DECODE_PIXELS = 100_000_000
+_MAX_DECODE_DIMENSION = 32_768
+_DRAFT_DECODE_MIN_PIXELS = int(
+    os.environ.get("SAKURAMOON_DRAFT_DECODE_MIN_PIXELS", "16000000")
+)
+_SAMPLE_TRACE_PATH = "/root/sakuramoon-logs/sample-trace.log"
+
+def _trace_sample(source_shard: str, sample_id: int, status: str) -> None:
+    try:
+        with open(_SAMPLE_TRACE_PATH, "a", encoding="utf-8") as fh:
+            fh.write(f"{source_shard}\t{sample_id}\t{status}\n")
+    except OSError:
+        pass
+
+
+def _probe_image_dimensions(image_bytes: bytes) -> tuple[int, int]:
+    """Read header dimensions without decoding pixel data.
+
+    Used only for the decode guard, whose pixel and dimension limits are
+    invariant under EXIF rotation.
+    """
+
+    try:
+        import imagesize
+    except ImportError:
+        pass
+    else:
+        try:
+            width, height = imagesize.get(io.BytesIO(image_bytes))
+        except (OSError, ValueError, SyntaxError, TypeError):
+            width = height = 0
+        if width > 0 and height > 0:
+            return width, height
+    with Image.open(io.BytesIO(image_bytes)) as probe:
+        return probe.width, probe.height
+
+
+def _source_dimensions(decoded: Image.Image) -> tuple[int, int]:
+    """True post-EXIF dimensions matching ``ImageOps.exif_transpose``."""
+
+    width, height = decoded.size
+    if decoded.getexif().get(0x0112, 1) in (5, 6, 7, 8):
+        width, height = height, width
+    return width, height
+
+
+def _draft_request_size(buckets: tuple[BucketShape, ...]) -> tuple[int, int]:
+    """Request a reduced JPEG decode at twice the largest training bucket."""
+
+    return (
+        2 * max(shape.width for shape in buckets),
+        2 * max(shape.height for shape in buckets),
+    )
+
+
+def _should_draft_decode(
+    decoded: Image.Image, source_width: int, source_height: int
+) -> bool:
+    """Draft-scale only large JPEGs; other formats always decode in full."""
+
+    if decoded.format != "JPEG":
+        return False
+    return source_width * source_height >= _DRAFT_DECODE_MIN_PIXELS
 
 
 class PipelineSampleError(ValueError):
@@ -300,25 +364,61 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             fields, self.probabilities, seed=identity.caption_seed
         )
         caption = serialize_caption(plan, self.tokenizer, self.framing)
+        image_bytes = _image_bytes(sample)
         try:
-            with Image.open(io.BytesIO(_image_bytes(sample))) as decoded:
+            probe_width, probe_height = _probe_image_dimensions(image_bytes)
+            if (
+                probe_width * probe_height > _MAX_DECODE_PIXELS
+                or max(probe_width, probe_height) > _MAX_DECODE_DIMENSION
+            ):
+                # Extreme decode-cost ceiling: beyond this, full decode spikes
+                # worker CPU/RAM for a negligible number of samples. The earlier
+                # training-stall hypothesis was disproven (NCCL comms), so these
+                # images are otherwise trainable after resize like any other.
+                print(
+                    f"[data] skip pathological image "
+                    f"{probe_width}x{probe_height} "
+                    f"pixels={probe_width * probe_height}",
+                    flush=True,
+                )
+                _trace_sample(shard_record.path, metadata.id, "skip_oversized")
+                self.rejection_observer("decode_error")
+                return None
+            with Image.open(io.BytesIO(image_bytes)) as decoded:
+                source_width, source_height = _source_dimensions(decoded)
+                if _should_draft_decode(decoded, probe_width, probe_height):
+                    decoded.draft("RGB", _draft_request_size(self.buckets))
                 decoded.load()
+                image_mode = decoded.mode
                 processed = prepare_image(
                     decoded,
                     self.buckets,
                     min_crop_retention=self.min_crop_retention,
                     crop_seed=identity.crop_seed,
+                    source_size=(source_width, source_height),
                 )
         except ImageRejected as error:
+            _trace_sample(shard_record.path, metadata.id, f"reject:{error.reason}")
             self.rejection_observer(error.reason)
             return None
-        except (OSError, SyntaxError, Image.DecompressionBombError):
+        except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
             # A corrupt image is an individual bad sample, not a failed data
             # service. Drop it so one malformed archive member cannot abort
             # an otherwise healthy training run.
+            _trace_sample(shard_record.path, metadata.id, "decode_error")
             self.rejection_observer("decode_error")
             return None
         assignment = processed.assignment
+        _trace_sample(
+            shard_record.path,
+            metadata.id,
+            "ok"
+            + f" mode={image_mode}"
+            + f" src={assignment.source_width}x{assignment.source_height}"
+            + f" resized={assignment.resized_width}x{assignment.resized_height}"
+            + f" bucket={assignment.bucket.width}x{assignment.bucket.height}"
+            + f" cap={len(caption.input_ids)}",
+        )
         return PipelineSample(
             sample_id=metadata.id,
             source_shard=shard_record.path,
@@ -337,6 +437,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             rng=identity,
             padding_token_id=self.framing.padding_token_id,
         )
+
 
     def _iter_paths(
         self,

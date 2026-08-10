@@ -253,13 +253,33 @@ def resize_and_crop(
     assignment: BucketAssignment,
     *,
     crop_seed: int,
+    source_size: tuple[int, int] | None = None,
 ) -> ProcessedImage:
-    """Resize by cover and choose one deterministic uniform crop offset."""
+    """Resize by cover and choose one deterministic uniform crop offset.
+
+    ``source_size`` carries the true (post-EXIF) dimensions when the image was
+    already draft-scaled during JPEG load. When omitted, the decoded image is
+    required to match the bucket assignment exactly.
+    """
 
     if type(crop_seed) is not int:
         raise ValueError("crop seed must be an integer")
-    if image.size != (assignment.source_width, assignment.source_height):
-        raise ValueError("image dimensions differ from the bucket assignment")
+    if source_size is None:
+        if image.size != (assignment.source_width, assignment.source_height):
+            raise ValueError("image dimensions differ from the bucket assignment")
+    else:
+        source_width, source_height = source_size
+        if (
+            type(source_width) is not int
+            or type(source_height) is not int
+            or source_width <= 0
+            or source_height <= 0
+        ):
+            raise ValueError("source size must be positive integers")
+        if image.width > source_width or image.height > source_height:
+            raise ValueError("decoded image exceeds the source dimensions")
+        if abs(image.width / image.height - source_width / source_height) > 1e-3:
+            raise ValueError("decoded image aspect differs from the source")
     resized = image.resize(
         (assignment.resized_width, assignment.resized_height),
         resample=Image.Resampling.LANCZOS,
@@ -286,16 +306,38 @@ def prepare_image(
     *,
     min_crop_retention: float,
     crop_seed: int,
+    source_size: tuple[int, int] | None = None,
 ) -> ProcessedImage:
-    """Normalize, route, resize, and crop one decoded image."""
+    """Normalize, route, resize, and crop one decoded image.
+
+    ``source_size`` is the true post-EXIF dimension pair from the image
+    header. It is required when the loaded image was draft-scaled; otherwise
+    the normalized decoded dimensions are used.
+    """
 
     normalized = normalize_image(image)
+    if source_size is None:
+        source_width, source_height = normalized.width, normalized.height
+    else:
+        source_width, source_height = source_size
+        if (
+            type(source_width) is not int
+            or type(source_height) is not int
+            or source_width <= 0
+            or source_height <= 0
+        ):
+            raise ValueError("source size must be positive integers")
     assignment = assign_bucket(
-        normalized.width,
-        normalized.height,
+        source_width,
+        source_height,
         buckets,
         min_crop_retention=min_crop_retention,
     )
     if isinstance(assignment, BucketRejection):
         raise ImageRejected(assignment.reason)
-    return resize_and_crop(normalized, assignment, crop_seed=crop_seed)
+    return resize_and_crop(
+        normalized,
+        assignment,
+        crop_seed=crop_seed,
+        source_size=(source_width, source_height),
+    )

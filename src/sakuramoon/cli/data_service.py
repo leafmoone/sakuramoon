@@ -44,11 +44,17 @@ def _log(message: str) -> None:
     print(f"[data-server] {message}", flush=True)
 
 
-def _root_path(root: Path, configured: str) -> Path:
+def _root_path(
+    root: Path, configured: str, *, allow_absolute: bool = False
+) -> Path:
     try:
         base = root.resolve(strict=True)
         relative = Path(configured)
-        if relative.is_absolute() or ".." in relative.parts:
+        if relative.is_absolute():
+            if not allow_absolute:
+                raise ValueError
+            return relative.absolute()
+        if ".." in relative.parts:
             raise ValueError
         candidate = base / relative
         candidate.resolve(strict=False).relative_to(base)
@@ -69,7 +75,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     transport = ModelScopeDatasetTransport.from_token_environment(
         MODELSCOPE_TOKEN_ENVIRONMENT, config.data.transport
     )
-    _log("下载源: ModelScope HTTPS 直连（不使用 HTTP(S)_PROXY）")
+    _log("下载源: ModelScope（自动使用 https_proxy/HTTPS_PROXY 环境变量，未设置则直连）")
     manifest = ensure_dataset_manifest(
         transport,
         manifest_path,
@@ -111,7 +117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest,
         validation_selection,
         cache,
-        _root_path(root, config.data.service.mainset_path),
+        _root_path(root, config.data.service.mainset_path, allow_absolute=True),
         Path(config.data.service.ownership_lock_path),
         identity,
         DataServiceLimits(

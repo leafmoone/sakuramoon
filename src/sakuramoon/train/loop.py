@@ -1,6 +1,7 @@
 """Successful-update-driven single-GPU training loop."""
 
 from __future__ import annotations
+import os
 
 import math
 import time
@@ -219,6 +220,21 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                     data_wait_seconds += (
                         time.perf_counter_ns() - data_started
                     ) / 1_000_000_000.0
+                    try:
+                        with open(
+                            "/root/sakuramoon-logs/batch-trace.log", "a", encoding="utf-8"
+                        ) as bfh:
+                            bfh.write(
+                                "[batch] upd=" + str(self.state.successful_updates + 1)
+                                + " rank=" + os.environ.get("LOCAL_RANK", "?")
+                                + " mb=" + str(microbatch_index)
+                                + " tgt=" + str(getattr(batch, "target_height", "?"))
+                                + "x" + str(getattr(batch, "target_width", "?"))
+                                + " dense=" + str(getattr(batch, "dense_length", "?"))
+                                + " ids=" + str(getattr(batch, "sample_ids", None)) + "\n"
+                            )
+                    except Exception:
+                        pass
                     sync_context = (
                         self.no_sync()
                         if self.no_sync is not None

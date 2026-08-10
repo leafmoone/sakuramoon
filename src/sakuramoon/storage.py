@@ -82,13 +82,21 @@ def mount_identity(path: Path) -> MountIdentity:
     return max(candidates, key=lambda item: len(item.mount_point.parts))
 
 
-def repository_directory(root: Path, configured: str) -> Path:
+def repository_directory(
+    root: Path, configured: str, *, allow_absolute: bool = False
+) -> Path:
     """Resolve and create one repository-relative directory."""
 
     try:
         base = root.resolve(strict=True)
         relative = Path(configured)
-        if relative.is_absolute() or ".." in relative.parts:
+        if relative.is_absolute():
+            if not allow_absolute:
+                raise ValueError
+            resolved = relative.resolve(strict=False)
+            resolved.mkdir(parents=True, exist_ok=True)
+            return resolved.resolve(strict=True)
+        if ".." in relative.parts:
             raise ValueError
         candidate = base / relative
         candidate.mkdir(parents=True, exist_ok=True)
@@ -99,11 +107,15 @@ def repository_directory(root: Path, configured: str) -> Path:
     return resolved
 
 
-def repository_file_parent(root: Path, configured: str) -> Path:
+def repository_file_parent(
+    root: Path, configured: str, *, allow_absolute: bool = False
+) -> Path:
     relative = Path(configured)
     if not relative.name:
         raise StorageValidationError("configured repository file is invalid")
-    return repository_directory(root, str(relative.parent))
+    return repository_directory(
+        root, str(relative.parent), allow_absolute=allow_absolute
+    )
 
 
 def require_host_local_runtime(socket_path: Path, ownership_path: Path) -> MountIdentity:
@@ -157,7 +169,9 @@ def require_data_service_storage(
             (
                 repository_directory(repository_root, config.paths.cache_dir),
                 repository_file_parent(
-                    repository_root, config.data.service.mainset_path
+                    repository_root,
+                    config.data.service.mainset_path,
+                    allow_absolute=True,
                 ),
             )
         )

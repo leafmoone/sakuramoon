@@ -649,7 +649,6 @@ class PackedDiT(nn.Module):
         if text_tokens.dtype != expected_dtype or style_tokens.dtype != expected_dtype:
             raise ValueError("text, style, and DiT linear weights must share dtype")
 
-        image_tokens: list[torch.Tensor] = []
         image_shapes: list[tuple[int, int]] = []
         for latent in latents:
             if (
@@ -662,17 +661,39 @@ class PackedDiT(nn.Module):
                     "each latent must be [input_channels,H,W] on the token device and dtype"
                 )
             _, height, width = latent.shape
-            projected = self.input_projection(
-                latent.permute(1, 2, 0).reshape(height * width, latent.shape[0])
-            )
-            image_tokens.append(self.modality(projected, "image"))
             image_shapes.append((height, width))
+
+        if (
+            not self.training
+            and not torch.is_grad_enabled()
+            and len(set(image_shapes)) == 1
+        ):
+            height, width = image_shapes[0]
+            latent_batch = torch.stack(latents)
+            projected = self.input_projection(
+                latent_batch.permute(0, 2, 3, 1).reshape(
+                    batch * height * width, latent_batch.shape[1]
+                )
+            ).reshape(batch, height * width, self.hidden_size)
+            image_tokens = tuple(self.modality(projected, "image").unbind(0))
+        else:
+            image_tokens = tuple(
+                self.modality(
+                    self.input_projection(
+                        latent.permute(1, 2, 0).reshape(
+                            height * width, latent.shape[0]
+                        )
+                    ),
+                    "image",
+                )
+                for latent, (height, width) in zip(latents, image_shapes, strict=True)
+            )
         return pack_sequences(
             self.modality(text_tokens, "text"),
             text_mask,
             text_lengths,
             self.modality(style_tokens, "style"),
-            tuple(image_tokens),
+            image_tokens,
             tuple(image_shapes),
         )
 

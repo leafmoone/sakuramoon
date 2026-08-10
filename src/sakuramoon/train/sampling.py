@@ -401,11 +401,11 @@ class TrainingSampler:
                 ordinal=ordinal,
                 sample_id=sample_id,
                 caption=caption,
-                height=height,
-                width=width,
+                height=self.config.stage.resolution,
+                width=self.config.stage.resolution,
                 seed=selector.randrange(2**63),
             )
-            for ordinal, (sample_id, caption, height, width) in enumerate(selected)
+            for ordinal, (sample_id, caption, _height, _width) in enumerate(selected)
         )
         grouped: dict[tuple[int, int], list[TrainingSampleItem]] = defaultdict(list)
         for item in items:
