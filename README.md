@@ -1,6 +1,7 @@
 # SakuraMoon
 
-本地文生图训练项目，仅保留模型、数据服务、训练、模型保存、采样和 FID/IS。
+本地文生图训练项目，仅保留模型、数据服务、训练、模型保存、采样和
+FID/IS/KID/CMMD 评估。
 
 ## 目录
 
@@ -10,7 +11,7 @@ src/sakuramoon/model/     DiT
 src/sakuramoon/encoders/  Qwen 与 VAE
 src/sakuramoon/data/      WebDataset 与数据服务
 src/sakuramoon/train/     训练循环
-src/sakuramoon/eval/      FID/IS
+src/sakuramoon/eval/      FID/IS/KID/CMMD 与 VAE 重建评估
 output_model/             新模型与评估结果（运行后生成）
 ```
 
@@ -86,6 +87,29 @@ STATE_ROOT=/root/.sm-train-state-publisher \
 
 ## 评估
 
-`config/train_s0.toml` 的 `[evaluation].every_updates` 控制 FID/IS 周期，默认
-为 1000 个成功 update。结果写入 `output_model/evaluation/s0/step-<update>.toml`
-和 `latest.toml`。
+`config/train_s0.toml` 的 `[evaluation].every_updates` 控制 FID/IS/KID/CMMD
+周期，默认每 1000 个成功 update 运行一次。四项生成指标复用同一批生成图；
+真实验证集的 Inception feature、CLIP feature 和 Inception logits 按数据指纹、
+样本数与分辨率一次性缓存到
+`output_model/evaluation/s0/cache/real-features-*.pt`。结果写入
+`output_model/evaluation/s0/step-<update>.toml` 和 `latest.toml`。缓存契约或
+验证集发生变化时不会静默复用不匹配的缓存。
+
+VAE 重建评估必须只暴露一张 GPU，并从验证集抽取两个互不重叠的确定性子集：
+第一组计算 reconstruction FID、LPIPS、PSNR 与 MS-SSIM，第二组计算
+real-real FID。示例：
+
+```bash
+cd /root/private_data/sakuramoon
+.venv/bin/python -u -m sakuramoon.cli.vae_reconstruction \
+  --config train_s0.toml \
+  --config-root /root/private_data/sakuramoon/config \
+  --root /sakuramoon-runtime \
+  --sample-count 512 \
+  --batch-size 16 \
+  --comparison-count 16
+```
+
+结果、逐样本元数据、重建图片和对比网格默认写入
+`output_model/evaluation/vae-reconstruction/`。缺失模型、样本不足、两个子集
+重叠、非有限指标或输出冲突都会直接失败，不会缩小样本或静默跳过。

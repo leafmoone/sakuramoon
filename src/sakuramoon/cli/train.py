@@ -17,8 +17,7 @@ def _configure_cuda_allocator() -> str:
     options = [
         option.strip()
         for option in current.split(",")
-        if option.strip()
-        and not option.strip().startswith("expandable_segments:")
+        if option.strip() and not option.strip().startswith("expandable_segments:")
     ]
     options.append("expandable_segments:True")
     configured = ",".join(options)
@@ -46,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--evaluate-only",
         type=Path,
         metavar="CHECKPOINT",
-        help="compute FID/IS from an existing complete checkpoint without training",
+        help="compute FID/IS/KID/CMMD from a complete checkpoint without training",
     )
     return parser
 
@@ -57,7 +56,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.evaluate_only is not None and (
         args.resume is not None or args.preflight_only
     ):
-        parser.error("--evaluate-only cannot be combined with --resume or --preflight-only")
+        parser.error(
+            "--evaluate-only cannot be combined with --resume or --preflight-only"
+        )
     allocator_config = _configure_cuda_allocator()
     prefix = "eval" if args.evaluate_only is not None else "train"
     mode = "评估" if args.evaluate_only is not None else "训练"
@@ -90,11 +91,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             repository_root=args.root,
             checkpoint=args.evaluate_only,
         )
+        if evaluation is None:
+            return 0
         print(
             f"[eval] 完成: update={evaluation.update}, "
             f"FID={evaluation.fid:.4f}, "
             f"IS={evaluation.inception_score_mean:.4f}±"
-            f"{evaluation.inception_score_std:.4f}",
+            f"{evaluation.inception_score_std:.4f}, "
+            f"KID={evaluation.kid_mean:.6f}±{evaluation.kid_std:.6f}, "
+            f"CMMD={evaluation.cmmd:.6f}, "
+            f"generated={evaluation.sample_count}, "
+            f"real={evaluation.real_sample_count}",
             flush=True,
         )
         print(f"[eval] 结果: {evaluation.result_path}", flush=True)

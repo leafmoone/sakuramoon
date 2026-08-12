@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Protocol
 import torch
 from torch import nn
 
-from sakuramoon.assets import require_local_qwen, require_local_vae
+from sakuramoon.assets import require_local_clip, require_local_qwen, require_local_vae
 from sakuramoon.checkpoint.policy import CheckpointReason
 from sakuramoon.checkpoint.schema import (
     CheckpointCadence,
@@ -63,9 +63,7 @@ def require_logging_checkpoint_contracts(
     """Create the configured model and log directories."""
 
     require_single_gpu_config(config)
-    checkpoint_root = repository_directory(
-        repository_root, config.paths.checkpoint_dir
-    )
+    checkpoint_root = repository_directory(repository_root, config.paths.checkpoint_dir)
     local_parent = repository_file_parent(
         repository_root, config.logging.local_jsonl_path
     )
@@ -88,6 +86,8 @@ def require_static_single_gpu_preflight(
     require_logging_checkpoint_contracts(config, repository_root)
     require_local_qwen(repository_root)
     require_local_vae(repository_root)
+    if config.evaluation.enabled is True:
+        require_local_clip(repository_root)
 
 
 class _SingleGpuCheckpointPublisher(Protocol):
@@ -323,7 +323,10 @@ def require_accepted_preflight(
         (restored, bindings.restored),
         (checkpoint_publisher, bindings.checkpoint_publisher),
     )
-    if any(requested is not None and requested is not bound for requested, bound in expected):
+    if any(
+        requested is not None and requested is not bound
+        for requested, bound in expected
+    ):
         raise PreflightError("training resources differ from the passed preflight")
 
 
@@ -445,9 +448,7 @@ def build_single_gpu_preflight_checks(
 
 def _write_report(report: PreflightReport, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(
-        f".{destination.name}.{secrets.token_hex(6)}.tmp"
-    )
+    temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(6)}.tmp")
     payload = json.dumps(asdict(report), ensure_ascii=False, separators=(",", ":"))
     try:
         with temporary.open("x", encoding="utf-8") as handle:

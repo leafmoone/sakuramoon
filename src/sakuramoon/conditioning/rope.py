@@ -11,35 +11,100 @@ from sakuramoon.conditioning.norm import FP32RMSNorm
 from sakuramoon.conditioning.packing import PackedSequences
 
 
+def full_canvas_crop_coordinates(
+    token_height: int,
+    token_width: int,
+    *,
+    full_height: int,
+    full_width: int,
+    crop_box: tuple[int, int, int, int],
+    device: torch.device,
+) -> torch.Tensor:
+    """Map crop-token centers into one area-normalized full-canvas frame."""
+
+    for name, value in (
+        ("token_height", token_height),
+        ("token_width", token_width),
+        ("full_height", full_height),
+        ("full_width", full_width),
+    ):
+        if value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if len(crop_box) != 4:
+        raise ValueError("crop_box must contain four coordinates")
+    left, top, right, bottom = crop_box
+    if not (0 <= left < right <= full_width and 0 <= top < bottom <= full_height):
+        raise ValueError("crop_box must be nonempty and contained by the full canvas")
+    crop_height = bottom - top
+    crop_width = right - left
+    if crop_height % token_height or crop_width % token_width:
+        raise ValueError(
+            "crop dimensions must divide exactly into the image token grid"
+        )
+    pixel_stride_y = crop_height // token_height
+    pixel_stride_x = crop_width // token_width
+    if pixel_stride_y != pixel_stride_x:
+        raise ValueError("image token cells must have one equal integer pixel stride")
+
+    y_radius = math.sqrt(full_height / full_width)
+    x_radius = math.sqrt(full_width / full_height)
+    y_pixels = (
+        top
+        + (torch.arange(token_height, device=device, dtype=torch.float32) + 0.5)
+        * pixel_stride_y
+    )
+    x_pixels = (
+        left
+        + (torch.arange(token_width, device=device, dtype=torch.float32) + 0.5)
+        * pixel_stride_x
+    )
+    y = (2.0 * y_pixels / full_height - 1.0) * y_radius
+    x = (2.0 * x_pixels / full_width - 1.0) * x_radius
+    grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
+    return torch.stack((grid_y.flatten(), grid_x.flatten()), dim=-1)
+
+
 def image_coordinates(
     height: int,
     width: int,
     *,
     device: torch.device,
 ) -> torch.Tensor:
-    if height <= 0 or width <= 0:
-        raise ValueError("image token grid dimensions must be positive")
-    y_radius = math.sqrt(height / width)
-    x_radius = math.sqrt(width / height)
-    y = (2.0 * (torch.arange(height, device=device, dtype=torch.float32) + 0.5) / height - 1.0) * y_radius
-    x = (2.0 * (torch.arange(width, device=device, dtype=torch.float32) + 0.5) / width - 1.0) * x_radius
-    grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
-    return torch.stack((grid_y.flatten(), grid_x.flatten()), dim=-1)
+    return full_canvas_crop_coordinates(
+        height,
+        width,
+        full_height=height,
+        full_width=width,
+        crop_box=(0, 0, width, height),
+        device=device,
+    )
 
 
-def packed_coordinates(packed: PackedSequences) -> torch.Tensor:
+def packed_coordinates(
+    packed: PackedSequences,
+    image_coordinate_maps: tuple[torch.Tensor, ...],
+) -> torch.Tensor:
+    if len(image_coordinate_maps) != len(packed.spans):
+        raise ValueError("one image coordinate map is required for every packed sample")
     coordinates = torch.zeros(
         packed.tokens.shape[0],
         2,
         dtype=torch.float32,
         device=packed.tokens.device,
     )
-    for spans, (height, width) in zip(packed.spans, packed.image_shapes, strict=True):
-        coordinates[spans.image.start : spans.image.end] = image_coordinates(
-            height,
-            width,
-            device=packed.tokens.device,
+    for sample_index, (spans, (height, width), image_map) in enumerate(
+        zip(
+            packed.spans,
+            packed.image_shapes,
+            image_coordinate_maps,
+            strict=True,
         )
+    ):
+        if image_map.shape != (height * width, 2):
+            raise ValueError(
+                f"image coordinate map {sample_index} has the wrong token-grid shape"
+            )
+        coordinates[spans.image.start : spans.image.end] = image_map
     return coordinates
 
 
@@ -130,4 +195,9 @@ class QKRoPE2D(nn.Module):
         )
 
 
-__all__ = ["QKRoPE2D", "image_coordinates", "packed_coordinates"]
+__all__ = [
+    "QKRoPE2D",
+    "full_canvas_crop_coordinates",
+    "image_coordinates",
+    "packed_coordinates",
+]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import tomli_w
@@ -202,6 +202,29 @@ def test_loader_never_reads_dotenv(
 
     with pytest.raises(ConfigurationError, match="MODELSCOPE_API_TOKEN"):
         load_config(Path("run.toml"), config_root=tmp_path, environment={})
+
+
+def test_explicit_offline_load_skips_only_secret_presence_validation(
+    tmp_path: Path,
+    valid_payload: dict[str, Any],
+) -> None:
+    _write_toml(tmp_path / "run.toml", valid_payload)
+
+    loaded = load_config(
+        Path("run.toml"),
+        config_root=tmp_path,
+        environment={},
+        validate_secrets=False,
+    )
+
+    assert loaded.config.run.run_id == valid_payload["run"]["run_id"]
+    with pytest.raises(TypeError, match="validate_secrets"):
+        load_config(
+            Path("run.toml"),
+            config_root=tmp_path,
+            environment={},
+            validate_secrets=cast(Any, 0),
+        )
 
 
 def test_environment_values_do_not_appear_in_result(

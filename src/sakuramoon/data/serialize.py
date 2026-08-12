@@ -56,6 +56,7 @@ class FramingContract:
 
 @dataclass(frozen=True)
 class SerializedCaption:
+    plan: CaptionPlan
     text: str
     input_ids: tuple[int, ...]
     attention_mask: tuple[bool, ...]
@@ -187,6 +188,9 @@ def serialize_caption(
         if not removed:
             raise CaptionSerializationError("fixed framing exceeds the condition limit")
 
+    resolved_plan = current_plan()
+    if render_caption_segments(resolved_plan) != (body, artist_text):
+        raise RuntimeError("resolved caption plan differs from serialized segments")
     input_ids = prefix_ids + body_ids + suffix_ids + artist_ids
     if framing.padding_token_id in input_ids:
         raise CaptionSerializationError("padding token appears in the valid Qwen sequence")
@@ -195,6 +199,7 @@ def serialize_caption(
     artist_indices = tuple(range(main_length, len(input_ids)))
     condition_bucket = _bucket_for(condition_tokens)
     return SerializedCaption(
+        plan=resolved_plan,
         text=SYSTEM_PREFIX + body + MAIN_SUFFIX + artist_text,
         input_ids=input_ids,
         attention_mask=(True,) * len(input_ids),
@@ -203,9 +208,9 @@ def serialize_caption(
         artist_token_indices=artist_indices,
         artist_mask=(True,) * len(artist_indices),
         use_null_style=not bool(artist_indices),
-        all_condition_dropped=plan.all_condition_dropped,
-        dropout_hits=plan.dropout_hits,
-        selected_nl=plan.selected_nl if nl_text is not None else None,
+        all_condition_dropped=resolved_plan.all_condition_dropped,
+        dropout_hits=resolved_plan.dropout_hits,
+        selected_nl=resolved_plan.selected_nl,
         body=body,
         artist_text=artist_text,
         condition_tokens=condition_tokens,

@@ -13,7 +13,12 @@ from sakuramoon.conditioning.packing import (
     dense_reference_mask,
     pack_sequences,
 )
-from sakuramoon.conditioning.rope import QKRoPE2D, image_coordinates, packed_coordinates
+from sakuramoon.conditioning.rope import (
+    QKRoPE2D,
+    full_canvas_crop_coordinates,
+    image_coordinates,
+    packed_coordinates,
+)
 
 
 def _packed():
@@ -128,9 +133,73 @@ def test_area_normalized_coordinates_and_text_style_zero_coordinates() -> None:
         torch.tensor([[0.0, -math.sqrt(2.0) / 2.0], [0.0, math.sqrt(2.0) / 2.0]]),
     )
     packed = _packed()
-    coordinates = packed_coordinates(packed)
+    coordinates = packed_coordinates(packed, (square, wide))
     assert torch.count_nonzero(coordinates[packed.spans[0].text.start : packed.spans[0].style.end]) == 0
     torch.testing.assert_close(coordinates[packed.spans[0].image.start : packed.spans[0].image.end], square)
+
+
+def test_crop_coordinates_use_the_resized_full_canvas_frame() -> None:
+    device = torch.device("cpu")
+    full_crop = full_canvas_crop_coordinates(
+        2,
+        4,
+        full_height=4,
+        full_width=8,
+        crop_box=(0, 0, 8, 4),
+        device=device,
+    )
+    torch.testing.assert_close(full_crop, image_coordinates(2, 4, device=device))
+
+    shifted_crop = full_canvas_crop_coordinates(
+        2,
+        4,
+        full_height=8,
+        full_width=12,
+        crop_box=(4, 2, 12, 6),
+        device=device,
+    )
+    expected_y = torch.tensor((-0.25, 0.25)) * math.sqrt(2.0 / 3.0)
+    expected_x = torch.tensor((-1.0 / 6.0, 1.0 / 6.0, 0.5, 5.0 / 6.0)) * math.sqrt(
+        3.0 / 2.0
+    )
+    grid_y, grid_x = torch.meshgrid(expected_y, expected_x, indexing="ij")
+    torch.testing.assert_close(
+        shifted_crop,
+        torch.stack((grid_y.flatten(), grid_x.flatten()), dim=-1),
+    )
+
+
+@pytest.mark.parametrize(
+    ("crop_box", "error"),
+    [
+        ((0, 0, 9, 4), "contained"),
+        ((0, 0, 7, 4), "divide exactly"),
+        ((0, 0, 8, 2), "equal integer pixel stride"),
+    ],
+)
+def test_full_canvas_coordinates_fail_fast_on_invalid_geometry(
+    crop_box: tuple[int, int, int, int], error: str
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        full_canvas_crop_coordinates(
+            2,
+            2 if crop_box == (0, 0, 8, 2) else 4,
+            full_height=4,
+            full_width=8,
+            crop_box=crop_box,
+            device=torch.device("cpu"),
+        )
+
+
+def test_packed_coordinates_require_one_exact_map_per_sample() -> None:
+    packed = _packed()
+    square = image_coordinates(2, 2, device=torch.device("cpu"))
+    wide = image_coordinates(1, 2, device=torch.device("cpu"))
+
+    with pytest.raises(ValueError, match="every packed sample"):
+        packed_coordinates(packed, (square,))
+    with pytest.raises(ValueError, match="token-grid shape"):
+        packed_coordinates(packed, (square[:3], wide))
 
 
 def test_qk_norm_precedes_rope_and_kv_heads_are_not_repeated() -> None:

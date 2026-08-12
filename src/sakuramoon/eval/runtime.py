@@ -1,30 +1,21 @@
-"""Periodic in-process FID and Inception Score evaluation."""
+"""Periodic in-process FID, IS, KID, and CMMD evaluation."""
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
-import io
 import math
 import os
-import tarfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import cast
 
 import tomli_w
 import torch
 from accelerate import Accelerator
-from PIL import Image
 from torch.nn import functional
-from torchvision.models import (  # pyright: ignore[reportMissingTypeStubs]
-    Inception_V3_Weights,
-    inception_v3,
-)
-from torchvision.transforms import (  # pyright: ignore[reportMissingTypeStubs]
-    functional as vision_functional,
-)
 
+from sakuramoon.conditioning.rope import image_coordinates
 from sakuramoon.config.schema import EvaluationEnabledConfig, RuntimeConfig
 from sakuramoon.data.caption import CaptionDropoutHits, CaptionPlan
 from sakuramoon.data.serialize import (
@@ -37,10 +28,24 @@ from sakuramoon.data.serialize import (
 )
 from sakuramoon.encoders.mage_vae import FrozenMageVAE
 from sakuramoon.encoders.qwen import QwenRuntime
+from sakuramoon.eval.features import (
+    CLIP_EMBEDDING_DIM,
+    CLIP_MODEL_ID,
+    FEATURE_CACHE_SCHEMA_VERSION,
+    INCEPTION_FEATURE_DIM,
+    INCEPTION_LOGIT_DIM,
+    REAL_PREPROCESSING_ID,
+    EvaluationFeatureModels,
+    ImageFeatureBatch,
+    validation_dataset_fingerprint,
+    validation_image_batches,
+)
 from sakuramoon.eval.metrics import (
     FeatureStats,
+    clip_maximum_mean_discrepancy,
     frechet_inception_distance,
     inception_score,
+    kernel_inception_distance,
 )
 from sakuramoon.eval.spec import PromptCase, PromptManifest
 from sakuramoon.objective.flow import guided_velocity
@@ -53,17 +58,17 @@ class EvaluationError(RuntimeError):
     pass
 
 
-class _FidExtractor(Protocol):
-    def __call__(self, images: torch.Tensor) -> list[torch.Tensor]: ...
-
-
 @dataclass(frozen=True, slots=True)
 class EvaluationResult:
     update: int
     fid: float
     inception_score_mean: float
     inception_score_std: float
+    kid_mean: float
+    kid_std: float
+    cmmd: float
     sample_count: int
+    real_sample_count: int
     result_path: Path
 
 
@@ -142,7 +147,9 @@ def _conditioning_inputs(
 ]:
     encoder = cast(TokenEncoder, tokenizer)
     padding_token_id = getattr(encoder, "pad_token_id", None)
-    if type(padding_token_id) is not int or not callable(getattr(encoder, "encode", None)):
+    if type(padding_token_id) is not int or not callable(
+        getattr(encoder, "encode", None)
+    ):
         raise EvaluationError("Qwen tokenizer is unavailable")
     framing = FramingContract(
         EXPECTED_PREFIX_TOKENS, EXPECTED_SUFFIX_TOKENS, padding_token_id
@@ -197,9 +204,7 @@ def _conditioning_inputs(
     )
 
 
-def _initial_noise(
-    cases: tuple[PromptCase, ...], device: torch.device
-) -> torch.Tensor:
+def _initial_noise(cases: tuple[PromptCase, ...], device: torch.device) -> torch.Tensor:
     images: list[torch.Tensor] = []
     for case in cases:
         generator = torch.Generator(device=device)
@@ -265,6 +270,11 @@ def _generate(
         )
         for _ in range(branch_count)
     )
+    coordinate_map = image_coordinates(
+        height // 16,
+        width // 16,
+        device=device,
+    )
     inputs = TrainableCompositeInputs(
         qwen_states=qwen_states,
         main_token_indices=main_indices,
@@ -275,6 +285,7 @@ def _generate(
         use_null_style=use_null,
         active_style_sample_indices=active_style,
         latents=placeholders,
+        image_coordinates=(coordinate_map,) * branch_count,
         timestep=torch.zeros(branch_count, dtype=torch.float32, device=device),
         size_scale=size_scale,
         aspect=aspect,
@@ -316,85 +327,6 @@ def _generate(
     )
 
 
-class _InceptionModels:
-    def __init__(self, device: torch.device) -> None:
-        self.device = device
-        print(f"[eval] Inception 推理设备: {device}", flush=True)
-        print("[eval] 加载标准 FID Inception 权重", flush=True)
-        from pytorch_fid.inception import (  # pyright: ignore[reportMissingTypeStubs]
-            InceptionV3,
-        )
-
-        block = InceptionV3.BLOCK_INDEX_BY_DIM[2048]
-        self.fid = cast(_FidExtractor, InceptionV3([block]).eval().to(device))
-        print("[eval] 加载 Inception Score 分类权重", flush=True)
-        self.is_weights = Inception_V3_Weights.DEFAULT
-        self.classifier = inception_v3(weights=self.is_weights).eval().to(device)
-
-    @torch.inference_mode()
-    def features(self, images: torch.Tensor) -> torch.Tensor:
-        values = images.float().div(255.0).to(self.device, non_blocking=True)
-        result = self.fid(values)[0]
-        return result.flatten(1)
-
-    @torch.inference_mode()
-    def probabilities(self, images: torch.Tensor) -> torch.Tensor:
-        values = self.is_weights.transforms()(images.float().div(255.0)).to(
-            self.device, non_blocking=True
-        )
-        logits = self.classifier(values)
-        if not isinstance(logits, torch.Tensor):
-            raise EvaluationError("Inception classifier returned an invalid result")
-        return logits.softmax(dim=1)
-
-
-def _validation_images(root: Path, count: int, batch_size: int) -> list[torch.Tensor]:
-    batches: list[torch.Tensor] = []
-    current: list[torch.Tensor] = []
-    observed = 0
-    archives = sorted(root.rglob("*.tar"))
-    if not archives:
-        raise EvaluationError(f"validation tar files are absent: {root}")
-    for archive in archives:
-        with tarfile.open(archive, "r:*") as handle:
-            for member in handle:
-                if observed >= count:
-                    break
-                if not member.isfile() or Path(member.name).suffix.casefold() not in {
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".webp",
-                }:
-                    continue
-                source = handle.extractfile(member)
-                if source is None:
-                    continue
-                try:
-                    with Image.open(io.BytesIO(source.read())) as image:
-                        tensor = vision_functional.pil_to_tensor(image.convert("RGB"))
-                except (OSError, ValueError):
-                    continue
-                tensor = functional.interpolate(
-                    tensor.unsqueeze(0).float(),
-                    size=(299, 299),
-                    mode="bilinear",
-                    align_corners=False,
-                ).squeeze(0).to(torch.uint8)
-                current.append(tensor)
-                observed += 1
-                if len(current) == batch_size:
-                    batches.append(torch.stack(current))
-                    current = []
-            if observed >= count:
-                break
-    if current:
-        batches.append(torch.stack(current))
-    if observed != count:
-        raise EvaluationError(f"validation images are incomplete: {observed}/{count}")
-    return batches
-
-
 def _stage_cases(
     path: Path,
     count: int,
@@ -407,7 +339,9 @@ def _stage_cases(
     manifest = PromptManifest.from_canonical_bytes(path.read_bytes())
     selected = manifest.cases[:count]
     if len(selected) != count:
-        raise EvaluationError(f"validation prompts are incomplete: {len(selected)}/{count}")
+        raise EvaluationError(
+            f"validation prompts are incomplete: {len(selected)}/{count}"
+        )
     print(f"[eval] 统一 1:1 生成分辨率: {resolution}x{resolution}", flush=True)
     return tuple(
         dataclasses.replace(
@@ -477,16 +411,16 @@ class TrainingEvaluator:
             True if accelerator is None else accelerator.is_main_process
         )
         self.output = repository_directory(repository_root, self.evaluation.output_dir)
-        self._inception: _InceptionModels | None = None
-        self._real_stats: FeatureStats | None = None
+        self._feature_models: EvaluationFeatureModels | None = None
+        self._real_features: ImageFeatureBatch | None = None
 
     def due(self, update: int) -> bool:
         return update > 0 and update % self.evaluation.every_updates == 0
 
-    def _models(self) -> _InceptionModels:
-        if self._inception is None:
-            self._inception = _InceptionModels(self.device)
-        return self._inception
+    def _models(self) -> EvaluationFeatureModels:
+        if self._feature_models is None:
+            self._feature_models = EvaluationFeatureModels(self.root, self.device)
+        return self._feature_models
 
     def _gather(self, values: torch.Tensor) -> torch.Tensor:
         if self.accelerator is None:
@@ -521,8 +455,13 @@ class TrainingEvaluator:
         return hashlib.sha256((checkpoint / "manifest.json").read_bytes()).hexdigest()
 
     def _generated_cache_path(self, update: int, fingerprint: str) -> Path:
-        return self.output / "cache" / (
-            f"generated-step-{update}-{fingerprint[:16]}.pt"
+        return (
+            self.output
+            / "cache"
+            / (
+                f"generated-features-v{FEATURE_CACHE_SCHEMA_VERSION}-step-{update}-"
+                f"{fingerprint[:16]}.pt"
+            )
         )
 
     def _load_generated_cache(
@@ -531,22 +470,24 @@ class TrainingEvaluator:
         *,
         fingerprint: str,
         prompt_sha256: str,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+    ) -> ImageFeatureBatch | None:
         path = self._generated_cache_path(update, fingerprint)
-        if not path.is_file() or path.is_symlink():
+        if not path.exists():
             return None
+        if not path.is_file() or path.is_symlink():
+            raise EvaluationError("generated feature cache is not a regular file")
         try:
             raw = cast(
                 object,
                 torch.load(path, map_location="cpu", weights_only=True),
             )
-        except (OSError, RuntimeError, ValueError):
-            return None
+        except (OSError, RuntimeError, ValueError) as error:
+            raise EvaluationError("generated feature cache cannot be loaded") from error
         if type(raw) is not dict:
-            return None
+            raise EvaluationError("generated feature cache document is invalid")
         document = cast(dict[str, object], raw)
         expected: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
             "run_id": self.config.run.run_id,
             "update": update,
             "checkpoint_fingerprint": fingerprint,
@@ -554,28 +495,27 @@ class TrainingEvaluator:
             "sample_count": self.evaluation.sample_count,
             "resolution": self.config.stage.resolution,
             "sampling_profile": self.evaluation.sampling_profile,
+            "clip_model_id": CLIP_MODEL_ID,
+            "preprocessing": REAL_PREPROCESSING_ID,
         }
         if any(document.get(key) != value for key, value in expected.items()):
-            return None
-        features = document.get("features")
-        probabilities = document.get("probabilities")
-        sample_count = self.evaluation.sample_count
-        if (
-            not isinstance(features, torch.Tensor)
-            or features.shape != (sample_count, 2048)
-            or not torch.is_floating_point(features)
-            or not isinstance(probabilities, torch.Tensor)
-            or probabilities.shape != (sample_count, 1000)
-            or not torch.is_floating_point(probabilities)
-            or not bool(torch.isfinite(features).all().item())
-            or not bool(torch.isfinite(probabilities).all().item())
+            raise EvaluationError("generated feature cache metadata differs")
+        inception = document.get("inception_features")
+        clip = document.get("clip_features")
+        logits = document.get("inception_logits")
+        if not all(
+            isinstance(value, torch.Tensor) for value in (inception, clip, logits)
         ):
-            return None
-        print(f"[eval] 复用生成特征缓存: {path}", flush=True)
-        return (
-            features.to(self.device, non_blocking=True),
-            probabilities.to(self.device, non_blocking=True),
+            raise EvaluationError("generated feature cache tensors are missing")
+        bundle = ImageFeatureBatch(
+            cast(torch.Tensor, inception),
+            cast(torch.Tensor, clip),
+            cast(torch.Tensor, logits),
         )
+        if bundle.count != self.evaluation.sample_count:
+            raise EvaluationError("generated feature cache count differs")
+        print(f"[eval] reusing generated feature cache: {path}", flush=True)
+        return bundle.to(self.device)
 
     def _save_generated_cache(
         self,
@@ -583,16 +523,16 @@ class TrainingEvaluator:
         *,
         fingerprint: str,
         prompt_sha256: str,
-        features: torch.Tensor,
-        probabilities: torch.Tensor,
+        features: ImageFeatureBatch,
     ) -> None:
         path = self._generated_cache_path(update, fingerprint)
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        cpu_features = features.cpu()
         try:
             torch.save(
                 {
-                    "schema_version": 1,
+                    "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
                     "run_id": self.config.run.run_id,
                     "update": update,
                     "checkpoint_fingerprint": fingerprint,
@@ -600,8 +540,11 @@ class TrainingEvaluator:
                     "sample_count": self.evaluation.sample_count,
                     "resolution": self.config.stage.resolution,
                     "sampling_profile": self.evaluation.sampling_profile,
-                    "features": features.detach().to("cpu").contiguous(),
-                    "probabilities": probabilities.detach().to("cpu").contiguous(),
+                    "clip_model_id": CLIP_MODEL_ID,
+                    "preprocessing": REAL_PREPROCESSING_ID,
+                    "inception_features": cpu_features.inception_features,
+                    "clip_features": cpu_features.clip_features,
+                    "inception_logits": cpu_features.inception_logits,
                 },
                 temporary,
             )
@@ -610,65 +553,105 @@ class TrainingEvaluator:
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
-        print(f"[eval] 已保存生成特征缓存: {path}", flush=True)
+        print(f"[eval] saved generated feature cache: {path}", flush=True)
 
-    def _real(self) -> FeatureStats:
-        if self._real_stats is not None:
-            return self._real_stats
-        cache = self.output / f"real-stats-{self.evaluation.sample_count}.pt"
-        if cache.is_file() and not cache.is_symlink():
-            document = cast(
-                object, torch.load(cache, map_location="cpu", weights_only=True)
+    def _real(self) -> ImageFeatureBatch:
+        if self._real_features is not None:
+            return self._real_features
+        shard_root = self.root / self.evaluation.validation_shard_root
+        selection_path = self.root / self.config.data.validation.selection_path
+        dataset_fingerprint = validation_dataset_fingerprint(shard_root, selection_path)
+        real_sample_count = self.evaluation.resolved_real_sample_count
+        cache = (
+            self.output
+            / "cache"
+            / (
+                f"real-features-v{FEATURE_CACHE_SCHEMA_VERSION}-n"
+                f"{real_sample_count}-r{self.config.stage.resolution}-"
+                f"{dataset_fingerprint[:16]}.pt"
             )
-            if isinstance(document, dict):
-                fields = cast(dict[str, object], document)
-                count = fields.get("count")
-                mean = fields.get("mean")
-                covariance = fields.get("covariance")
-                if (
-                    type(count) is int
-                    and count == self.evaluation.sample_count
-                    and isinstance(mean, torch.Tensor)
-                    and isinstance(covariance, torch.Tensor)
-                ):
-                    self._real_stats = FeatureStats(count, mean, covariance)
-                    print(f"[eval] 使用真实集统计缓存: {cache}", flush=True)
-                    return self._real_stats
-        print("[eval] 首次计算真实验证集 Inception 统计", flush=True)
-        root = self.root / self.evaluation.validation_shard_root
-        features = [
-            self._models().features(batch)
-            for batch in _validation_images(
-                root, self.evaluation.sample_count, self.evaluation.batch_size
+        )
+        expected: dict[str, object] = {
+            "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
+            "dataset_fingerprint": dataset_fingerprint,
+            "sample_count": real_sample_count,
+            "resolution": self.config.stage.resolution,
+            "clip_model_id": CLIP_MODEL_ID,
+            "preprocessing": REAL_PREPROCESSING_ID,
+        }
+        if cache.exists():
+            if not cache.is_file() or cache.is_symlink():
+                raise EvaluationError("real feature cache is not a regular file")
+            try:
+                raw = cast(
+                    object,
+                    torch.load(cache, map_location="cpu", weights_only=True),
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                raise EvaluationError("real feature cache cannot be loaded") from error
+            if type(raw) is not dict:
+                raise EvaluationError("real feature cache document is invalid")
+            document = cast(dict[str, object], raw)
+            if any(document.get(key) != value for key, value in expected.items()):
+                raise EvaluationError("real feature cache metadata differs")
+            inception = document.get("real_inception_features")
+            clip = document.get("real_clip_features")
+            logits = document.get("real_inception_logits")
+            if not all(
+                isinstance(value, torch.Tensor) for value in (inception, clip, logits)
+            ):
+                raise EvaluationError("real feature cache tensors are missing")
+            loaded = ImageFeatureBatch(
+                cast(torch.Tensor, inception),
+                cast(torch.Tensor, clip),
+                cast(torch.Tensor, logits),
             )
-        ]
-        computed = FeatureStats.from_features(
-            torch.cat(features),
-            device=self.device,
+            if loaded.count != real_sample_count:
+                raise EvaluationError("real feature cache count differs")
+            self._real_features = loaded.to(self.device)
+            print(f"[eval] using real feature cache: {cache}", flush=True)
+            return self._real_features
+
+        print("[eval] computing one-time real Inception/CLIP/logit cache", flush=True)
+        batches = validation_image_batches(
+            shard_root,
+            real_sample_count,
+            self.evaluation.batch_size,
+            output_size=self.config.stage.resolution,
         )
-        self._real_stats = FeatureStats(
-            computed.count,
-            computed.mean.cpu(),
-            computed.covariance.cpu(),
+        computed = ImageFeatureBatch.concatenate(
+            tuple(self._models().extract(batch.images) for batch in batches)
         )
+        if computed.count != real_sample_count:
+            raise EvaluationError("computed real feature count differs")
+        cpu_features = computed.cpu()
+        cache.parent.mkdir(parents=True, exist_ok=True)
         temporary = cache.with_name(f".{cache.name}.{os.getpid()}.tmp")
-        torch.save(
-            {
-                "count": self._real_stats.count,
-                "mean": self._real_stats.mean,
-                "covariance": self._real_stats.covariance,
-            },
-            temporary,
-        )
-        os.replace(temporary, cache)
-        return self._real_stats
+        try:
+            torch.save(
+                {
+                    **expected,
+                    "real_inception_features": cpu_features.inception_features,
+                    "real_clip_features": cpu_features.clip_features,
+                    "real_inception_logits": cpu_features.inception_logits,
+                },
+                temporary,
+            )
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            os.replace(temporary, cache)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self._real_features = computed
+        print(f"[eval] saved real feature cache: {cache}", flush=True)
+        return self._real_features
 
     def evaluate(self, update: int) -> EvaluationResult | None:
         if not self.due(update):
             raise ValueError("evaluation update is not due")
         print(
             f"[eval] update={update} rank={self.rank}/{self.world_size} "
-            "开始计算 FID/IS",
+            "开始计算 FID/IS/KID/CMMD",
             flush=True,
         )
         prompt_path = self.root / self.evaluation.prompt_path
@@ -700,7 +683,7 @@ class TrainingEvaluator:
                 return None
             if cached is None:
                 raise EvaluationError("rank zero generated cache state is inconsistent")
-            feature_values, probability_values = cached
+            feature_values = cached
         else:
             local_start, local_end = _rank_case_bounds(
                 len(cases),
@@ -712,14 +695,8 @@ class TrainingEvaluator:
             groups: dict[tuple[int, int], list[PromptCase]] = {}
             for case in local_cases:
                 groups.setdefault((case.height, case.width), []).append(case)
-            generated_features: list[torch.Tensor] = []
-            generated_probabilities: list[torch.Tensor] = []
-            local_feature_values = torch.empty(
-                (0, 2048), dtype=torch.float32, device=self.device
-            )
-            local_probability_values = torch.empty(
-                (0, 1000), dtype=torch.float32, device=self.device
-            )
+            generated_features: list[ImageFeatureBatch] = []
+            local_feature_values: ImageFeatureBatch | None = None
             local_error: Exception | None = None
             was_training = self.composite.training
             self.composite.eval()
@@ -740,24 +717,18 @@ class TrainingEvaluator:
                             device=self.device,
                             growth_alpha=self.growth_alpha,
                         )
-                        generated_features.append(self._models().features(images))
-                        generated_probabilities.append(
-                            self._models().probabilities(images)
-                        )
+                        generated_features.append(self._models().extract(images))
                         completed += len(batch_cases)
                         print(
                             f"[eval] rank={self.rank} 已处理 "
                             f"{completed}/{len(local_cases)}",
                             flush=True,
                         )
-                local_feature_values = torch.cat(generated_features)
-                local_probability_values = torch.cat(generated_probabilities)
-                if local_feature_values.shape != (len(local_cases), 2048):
-                    raise EvaluationError("generated FID features have an invalid shape")
-                if local_probability_values.shape != (len(local_cases), 1000):
-                    raise EvaluationError(
-                        "generated IS probabilities have an invalid shape"
-                    )
+                local_feature_values = ImageFeatureBatch.concatenate(
+                    tuple(generated_features)
+                )
+                if local_feature_values.count != len(local_cases):
+                    raise EvaluationError("generated feature count is invalid")
             except Exception as error:  # noqa: BLE001 - synchronize rank failures
                 local_error = error
             finally:
@@ -774,6 +745,8 @@ class TrainingEvaluator:
                 if local_error is not None:
                     raise local_error
                 raise EvaluationError("evaluation generation failed on another rank")
+            if local_feature_values is None:
+                raise RuntimeError("local generated features are unavailable")
 
             rank_bounds = tuple(
                 _rank_case_bounds(
@@ -786,67 +759,116 @@ class TrainingEvaluator:
             )
             rank_counts = tuple(end - start for start, end in rank_bounds)
             max_rank_count = max(rank_counts)
-            padded_features = functional.pad(
-                local_feature_values,
+            padded_inception = functional.pad(
+                local_feature_values.inception_features,
                 (0, 0, 0, max_rank_count - len(local_cases)),
             )
-            padded_probabilities = functional.pad(
-                local_probability_values,
+            padded_clip = functional.pad(
+                local_feature_values.clip_features,
                 (0, 0, 0, max_rank_count - len(local_cases)),
             )
-            gathered_features = self._gather(padded_features)
-            gathered_probabilities = self._gather(padded_probabilities)
+            padded_logits = functional.pad(
+                local_feature_values.inception_logits,
+                (0, 0, 0, max_rank_count - len(local_cases)),
+            )
+            gathered_inception = self._gather(padded_inception)
+            gathered_clip = self._gather(padded_clip)
+            gathered_logits = self._gather(padded_logits)
             if not self.is_main_process:
                 return None
-            feature_chunks = gathered_features.reshape(
-                self.world_size, max_rank_count, 2048
+            inception_chunks = gathered_inception.reshape(
+                self.world_size, max_rank_count, INCEPTION_FEATURE_DIM
             )
-            probability_chunks = gathered_probabilities.reshape(
-                self.world_size, max_rank_count, 1000
+            clip_chunks = gathered_clip.reshape(
+                self.world_size, max_rank_count, CLIP_EMBEDDING_DIM
             )
-            feature_values = torch.cat(
-                tuple(
-                    feature_chunks[index, :count]
-                    for index, count in enumerate(rank_counts)
-                )
+            logit_chunks = gathered_logits.reshape(
+                self.world_size, max_rank_count, INCEPTION_LOGIT_DIM
             )
-            probability_values = torch.cat(
-                tuple(
-                    probability_chunks[index, :count]
-                    for index, count in enumerate(rank_counts)
-                )
+            feature_values = ImageFeatureBatch(
+                torch.cat(
+                    tuple(
+                        inception_chunks[index, :count]
+                        for index, count in enumerate(rank_counts)
+                    )
+                ),
+                torch.cat(
+                    tuple(
+                        clip_chunks[index, :count]
+                        for index, count in enumerate(rank_counts)
+                    )
+                ),
+                torch.cat(
+                    tuple(
+                        logit_chunks[index, :count]
+                        for index, count in enumerate(rank_counts)
+                    )
+                ),
             )
+            if feature_values.count != self.evaluation.sample_count:
+                raise EvaluationError("gathered generated feature count differs")
             if fingerprint is not None:
                 self._save_generated_cache(
                     update,
                     fingerprint=fingerprint,
                     prompt_sha256=prompt_sha256,
                     features=feature_values,
-                    probabilities=probability_values,
                 )
         real = self._real()
         generated = FeatureStats.from_features(
-            feature_values,
+            feature_values.inception_features,
             device=self.device,
         )
+        real_stats = FeatureStats.from_features(
+            real.inception_features,
+            device=self.device,
+        )
+        probability_values = feature_values.inception_logits.softmax(dim=1)
         score = inception_score(
             probability_values,
             splits=self.evaluation.is_splits,
             device=self.device,
         )
+        fid_dimension = (
+            generated.count
+            if generated.centered_features is not None
+            else generated.covariance.shape[0]
+        )
         print(
             f"[eval] FID 矩阵运算设备: {self.device}; "
-            f"样本空间: {generated.count}x{generated.count}",
+            f"特征空间: {fid_dimension}x{fid_dimension}",
             flush=True,
         )
-        fid = frechet_inception_distance(generated, real, device=self.device)
+        fid = frechet_inception_distance(generated, real_stats, device=self.device)
+        kid_seed = ((self.config.run.seed << 32) ^ update) % (2**63)
+        kid = kernel_inception_distance(
+            feature_values.inception_features,
+            real.inception_features,
+            subsets=self.evaluation.kid_subsets,
+            subset_size=self.evaluation.kid_subset_size,
+            seed=kid_seed,
+            device=self.device,
+        )
+        cmmd = clip_maximum_mean_discrepancy(
+            feature_values.clip_features,
+            real.clip_features,
+            device=self.device,
+        )
         payload: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 3,
             "update": update,
             "fid": fid,
             "inception_score_mean": score.mean,
             "inception_score_std": score.std,
+            "kid_mean": kid.mean,
+            "kid_std": kid.std,
+            "kid_subsets": kid.subsets,
+            "kid_subset_size": kid.subset_size,
+            "kid_seed": kid_seed,
+            "cmmd": cmmd,
+            "cmmd_clip_model": CLIP_MODEL_ID,
             "sample_count": score.sample_count,
+            "real_sample_count": real.count,
             "is_splits": score.splits,
             "sampling_profile": self.evaluation.sampling_profile,
         }
@@ -854,7 +876,9 @@ class TrainingEvaluator:
         _write_toml(result_path, payload)
         _write_toml(self.output / "latest.toml", payload)
         print(
-            f"[eval] 完成: FID={fid:.4f}, IS={score.mean:.4f}±{score.std:.4f}",
+            f"[eval] complete: FID={fid:.4f}, "
+            f"IS={score.mean:.4f}±{score.std:.4f}, "
+            f"KID={kid.mean:.6f}±{kid.std:.6f}, CMMD={cmmd:.6f}",
             flush=True,
         )
         return EvaluationResult(
@@ -862,7 +886,11 @@ class TrainingEvaluator:
             fid,
             score.mean,
             score.std,
+            kid.mean,
+            kid.std,
+            cmmd,
             score.sample_count,
+            real.count,
             result_path,
         )
 

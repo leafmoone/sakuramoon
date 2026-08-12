@@ -533,7 +533,7 @@ class TrainingSamplingConfig(StrictModel):
 
     enabled: bool = True
     every_updates: PositiveInt = 1000
-    image_count: PositiveInt = 5
+    image_count: PositiveInt = 12
     output_subdir: Annotated[str, StringConstraints(min_length=1)] = "sample"
 
     @model_validator(mode="after")
@@ -545,7 +545,9 @@ class TrainingSamplingConfig(StrictModel):
             or ".." in path.parts
             or any(part in {"", "."} for part in path.parts)
         ):
-            raise ValueError("training sample output_subdir must be repository-relative")
+            raise ValueError(
+                "training sample output_subdir must be repository-relative"
+            )
         return self
 
 
@@ -745,22 +747,48 @@ class EvaluationEnabledConfig(StrictModel):
     enabled: Literal[True]
     every_updates: PositiveInt = 1000
     sample_count: PositiveInt
+    real_sample_count: PositiveInt
     batch_size: PositiveInt
     is_splits: PositiveInt
+    kid_subsets: PositiveInt = 100
+    kid_subset_size: PositiveInt = 100
     prompt_path: Annotated[str, StringConstraints(min_length=1)]
     validation_shard_root: Annotated[str, StringConstraints(min_length=1)]
     output_dir: Annotated[str, StringConstraints(min_length=1)]
     sampling_profile: Literal["preview", "balanced", "reference"]
 
+    @model_validator(mode="before")
+    @classmethod
+    def default_real_sample_count(cls, value: object) -> object:
+        if type(value) is not dict:
+            return value
+        payload = cast(dict[str, object], value)
+        if "real_sample_count" in payload or "sample_count" not in payload:
+            return value
+        return {
+            **payload,
+            "real_sample_count": payload["sample_count"],
+        }
+
     @model_validator(mode="after")
     def validate_evaluation(self) -> EvaluationEnabledConfig:
         if self.sample_count < 2 or self.sample_count % self.is_splits:
-            raise ValueError("evaluation sample_count must divide evenly into IS splits")
+            raise ValueError(
+                "evaluation sample_count must divide evenly into IS splits"
+            )
+        if self.kid_subset_size < 2 or self.kid_subset_size > min(
+            self.sample_count, self.resolved_real_sample_count
+        ):
+            raise ValueError("evaluation KID subset size exceeds the sample count")
         for value in (self.prompt_path, self.validation_shard_root, self.output_dir):
             path = PurePosixPath(value)
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError("evaluation paths must be repository-relative")
         return self
+
+    @property
+    def resolved_real_sample_count(self) -> int:
+        return self.real_sample_count
 
 
 EvaluationConfig = Annotated[
@@ -806,7 +834,9 @@ class RuntimeConfig(StrictModel):
             / self.optimizer.reference_batch
         )
         if not math.isfinite(learning_rate) or learning_rate <= 0.0:
-            raise ValueError("scaled optimizer learning rate must be finite and positive")
+            raise ValueError(
+                "scaled optimizer learning rate must be finite and positive"
+            )
         return learning_rate
 
     @model_validator(mode="after")

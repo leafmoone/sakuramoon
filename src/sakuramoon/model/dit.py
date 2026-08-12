@@ -17,7 +17,7 @@ from sakuramoon.conditioning.global_condition import (
 )
 from sakuramoon.conditioning.modality import ModalityEmbedding
 from sakuramoon.conditioning.packing import PackedSequences, pack_sequences
-from sakuramoon.conditioning.rope import image_coordinates, packed_coordinates
+from sakuramoon.conditioning.rope import packed_coordinates
 from sakuramoon.model.attention import (
     AcceptedCuSeqlens,
     accept_fa4_boundaries,
@@ -316,6 +316,7 @@ class DenseDiT(nn.Module):
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
         style_tokens: torch.Tensor,
+        image_coordinate_maps: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, tuple[int, int]]:
         if latent.ndim != 4 or latent.shape[1] != self.input_projection.in_features:
             raise ValueError("latent must have shape [B,input_channels,H,W]")
@@ -335,6 +336,10 @@ class DenseDiT(nn.Module):
         ):
             raise ValueError(
                 "latent, text, style, and DiT linear weights must share dtype"
+            )
+        if image_coordinate_maps.shape != (batch, height * width, 2):
+            raise ValueError(
+                "image_coordinate_maps must have shape [B,H*W,2] for the latent grid"
             )
         image_tokens = latent.permute(0, 2, 3, 1).reshape(
             batch,
@@ -362,11 +367,7 @@ class DenseDiT(nn.Module):
             dtype=torch.float32,
         )
         image_start = text_tokens.shape[1] + 4
-        coordinates[:, image_start:] = image_coordinates(
-            height,
-            width,
-            device=latent.device,
-        )
+        coordinates[:, image_start:] = image_coordinate_maps
         return joint, token_mask, coordinates, image_start, (height, width)
 
     def forward_features(
@@ -379,6 +380,7 @@ class DenseDiT(nn.Module):
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
         *,
+        image_coordinates: torch.Tensor,
         growth_alpha: float,
     ) -> DenseDiTFeatures:
         joint, token_mask, coordinates, image_start, image_shape = self._prepare_tokens(
@@ -386,6 +388,7 @@ class DenseDiT(nn.Module):
             text_tokens,
             text_mask,
             style_tokens,
+            image_coordinates,
         )
         condition = self.conditioner(
             timestep,
@@ -450,6 +453,7 @@ class DenseDiT(nn.Module):
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
         *,
+        image_coordinates: torch.Tensor,
         growth_alpha: float,
     ) -> torch.Tensor:
         features = self.forward_features(
@@ -460,6 +464,7 @@ class DenseDiT(nn.Module):
             timestep,
             size_scale,
             aspect,
+            image_coordinates=image_coordinates,
             growth_alpha=growth_alpha,
         )
         height, width = features.image_shape
@@ -708,6 +713,7 @@ class PackedDiT(nn.Module):
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
         *,
+        image_coordinates: tuple[torch.Tensor, ...],
         growth_alpha: float,
     ) -> PackedDiTFeatures:
         if packed.tokens.ndim != 2 or packed.tokens.shape[-1] != self.hidden_size:
@@ -720,7 +726,7 @@ class PackedDiT(nn.Module):
             batch_size=len(packed.spans),
             device=packed.tokens.device,
         )
-        coordinates = packed_coordinates(packed)
+        coordinates = packed_coordinates(packed, image_coordinates)
         sample_indices = self._sample_indices(boundaries)
         condition = self.conditioner(
             timestep,
@@ -813,6 +819,7 @@ class PackedDiT(nn.Module):
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
         *,
+        image_coordinates: tuple[torch.Tensor, ...],
         growth_alpha: float,
     ) -> tuple[torch.Tensor, ...]:
         return self.predict_from_features(
@@ -821,6 +828,7 @@ class PackedDiT(nn.Module):
                 timestep,
                 size_scale,
                 aspect,
+                image_coordinates=image_coordinates,
                 growth_alpha=growth_alpha,
             )
         )
@@ -836,6 +844,7 @@ class PackedDiT(nn.Module):
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
         *,
+        image_coordinates: tuple[torch.Tensor, ...],
         growth_alpha: float,
     ) -> tuple[torch.Tensor, ...]:
         packed = self.prepare_packed_sequences(
@@ -850,6 +859,7 @@ class PackedDiT(nn.Module):
             timestep,
             size_scale,
             aspect,
+            image_coordinates=image_coordinates,
             growth_alpha=growth_alpha,
         )
 

@@ -51,7 +51,9 @@ class UnresolvedConfigBinding:
         prefix = self.sentinel.partition("_")[0].lower()
         if (
             not self.path
-            or re.fullmatch(r"(?:BENCHMARK|DECISION|REQUIRED)_[A-Z0-9_]+", self.sentinel)
+            or re.fullmatch(
+                r"(?:BENCHMARK|DECISION|REQUIRED)_[A-Z0-9_]+", self.sentinel
+            )
             is None
             or prefix != self.kind
         ):
@@ -72,7 +74,9 @@ class LoadedConfig:
 
 def _safe_validation_error(exc: ValidationError) -> ConfigurationError:
     lines: list[str] = []
-    for error in exc.errors(include_url=False, include_context=False, include_input=False):
+    for error in exc.errors(
+        include_url=False, include_context=False, include_input=False
+    ):
         location = ".".join(str(part) for part in error["loc"]) or "<root>"
         lines.append(f"{location}: {error['msg']} [{error['type']}]")
     return ConfigurationError("configuration validation failed:\n" + "\n".join(lines))
@@ -104,7 +108,9 @@ def _validate_path_components(root: Path, relative: Path) -> Path:
     for part in relative.parts:
         current /= part
         if current.is_symlink():
-            raise ConfigurationError(f"config symlink is forbidden: {relative.as_posix()}")
+            raise ConfigurationError(
+                f"config symlink is forbidden: {relative.as_posix()}"
+            )
     try:
         resolved = current.resolve(strict=True)
     except OSError as exc:
@@ -142,9 +148,7 @@ def _deep_merge(
         base_is_table = isinstance(base_value, Mapping)
         overlay_is_table = isinstance(overlay_value, Mapping)
         if base_is_table != overlay_is_table:
-            raise ConfigurationError(
-                f"table/scalar merge conflict at {child_location}"
-            )
+            raise ConfigurationError(f"table/scalar merge conflict at {child_location}")
         if base_is_table:
             merged[key] = _deep_merge(
                 cast(Mapping[str, Any], base_value),
@@ -163,7 +167,9 @@ class _Loader:
         for part in lexical_root.parts[1:]:
             current /= part
             if current.is_symlink():
-                raise ConfigurationError("config root may not contain symlink components")
+                raise ConfigurationError(
+                    "config root may not contain symlink components"
+                )
         try:
             self.root = lexical_root.resolve(strict=True)
         except OSError as exc:
@@ -180,7 +186,9 @@ class _Loader:
             relative = including.parent.relative_to(self.root) / relative
         path = _validate_path_components(self.root, relative)
         if path in self._active:
-            chain = [item.relative_to(self.root).as_posix() for item in (*self._active, path)]
+            chain = [
+                item.relative_to(self.root).as_posix() for item in (*self._active, path)
+            ]
             raise ConfigurationError(f"extends cycle: {' -> '.join(chain)}")
         if path in self._seen:
             raise ConfigurationError(
@@ -200,7 +208,9 @@ class _Loader:
             if type(raw_includes) is not list or any(
                 type(item) is not str for item in cast(list[object], raw_includes)
             ):
-                raise ConfigurationError("extends must be an array of relative TOML paths")
+                raise ConfigurationError(
+                    "extends must be an array of relative TOML paths"
+                )
             includes = cast(list[str], raw_includes)
             if len(includes) != len(set(includes)):
                 raise ConfigurationError("extends contains duplicate paths")
@@ -234,13 +244,17 @@ def _validate_secret_environment(
         )
 
 
-def resolve_secret(name: str, environment: Mapping[str, str] | None = None) -> SecretStr:
+def resolve_secret(
+    name: str, environment: Mapping[str, str] | None = None
+) -> SecretStr:
     """Resolve one named variable without persisting or rendering its value."""
 
     selected = os.environ if environment is None else environment
     value = selected.get(name)
     if not value:
-        raise ConfigurationError(f"required secret environment variable is missing: {name}")
+        raise ConfigurationError(
+            f"required secret environment variable is missing: {name}"
+        )
     return SecretStr(value)
 
 
@@ -261,8 +275,12 @@ def load_config(
     *,
     config_root: Path,
     environment: Mapping[str, str] | None = None,
+    validate_secrets: bool = True,
 ) -> LoadedConfig:
     """Load, merge, validate, and redact a runtime config."""
+
+    if type(validate_secrets) is not bool:
+        raise TypeError("validate_secrets must be a bool")
 
     loader = _Loader(config_root)
     payload = loader.load(config_path)
@@ -279,7 +297,11 @@ def load_config(
         config = RuntimeConfig.model_validate(payload)
     except ValidationError as exc:
         raise _safe_validation_error(exc) from None
-    _validate_secret_environment(config, os.environ if environment is None else environment)
+    if validate_secrets:
+        _validate_secret_environment(
+            config,
+            os.environ if environment is None else environment,
+        )
     resolved = resolved_config_bytes(config)
     return LoadedConfig(
         config=config,

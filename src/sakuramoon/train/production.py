@@ -133,6 +133,44 @@ def _raise_preserving(
     raise primary
 
 
+def _evaluate_and_release_process_group(
+    evaluator: TrainingEvaluator,
+    update: int,
+    accelerator: Accelerator | None,
+) -> EvaluationResult | None:
+    """Release distributed ranks without a post-generation collective."""
+
+    result: EvaluationResult | None = None
+    primary: Exception | None = None
+    try:
+        result = evaluator.evaluate(update)
+    except Exception as error:  # noqa: BLE001 - preserve evaluator failure
+        primary = error
+
+    cleanup: Exception | None = None
+    if accelerator is not None:
+        try:
+            if not torch.distributed.is_initialized():
+                raise RuntimeError(
+                    "distributed evaluation process group is not initialized"
+                )
+            print(
+                "[eval] releasing distributed process group without final collective",
+                flush=True,
+            )
+            torch.distributed.destroy_process_group()
+        except Exception as error:  # noqa: BLE001 - preserve cleanup failure
+            cleanup = error
+
+    if primary is not None:
+        _raise_preserving(
+            "evaluation and process-group cleanup failed", primary, cleanup
+        )
+    if cleanup is not None:
+        raise cleanup
+    return result
+
+
 def _repository_root(path: Path) -> Path:
     if not path.is_absolute():
         raise ValueError("repository root must be absolute")
@@ -528,7 +566,8 @@ class _ProductionMetricContext:
         return UpdateMetricContext(
             dit_flops=dit_flops,
             samples_per_second=(
-                observation.loop.update.effective_samples * self.world_size
+                observation.loop.update.effective_samples
+                * self.world_size
                 / observation.loop.update_wall_seconds
             ),
             ready_queue_depth=depth,
@@ -642,9 +681,7 @@ def _run_accepted_lifecycle(
         accelerator.wait_for_everyone()
     resolved_config_path = resolved_config_path.resolve(strict=True)
     artifact_root = repository_directory(repository_root, config.paths.artifact_dir)
-    device = (
-        torch.device("cuda", 0) if accelerator is None else accelerator.device
-    )
+    device = torch.device("cuda", 0) if accelerator is None else accelerator.device
     if (
         not torch.cuda.is_available()
         or torch.cuda.device_count() != config.distributed.world_size
@@ -899,26 +936,19 @@ def _run_accepted_lifecycle(
                 ) -> None:
                     update = observation.loop.update.state.successful_updates
                     if training_sampler is not None and training_sampler.due(update):
-                        try:
-                            with observation.phase_timer.record("sample"):
-                                samples = training_sampler.sample(
-                                    update, observation.microbatches
-                                )
-                            if samples is not None:
-                                telemetry.submit_wandb_images(
-                                    samples.paths,
-                                    samples.captions,
-                                    successful_update=update,
-                                )
-                                telemetry.submit_wandb_metrics(
-                                    {"training_samples/count": len(samples.paths)},
-                                    successful_update=update,
-                                )
-                        except Exception as error:  # noqa: BLE001 - sampling is nonfatal
-                            _log(
-                                f"[sample] update={update} ???????: "
-                                f"{type(error).__name__}: {error}"
+                        with observation.phase_timer.record("sample"):
+                            samples = training_sampler.sample(
+                                update, observation.microbatches
                             )
+                        telemetry.submit_wandb_images(
+                            samples.paths,
+                            samples.captions,
+                            successful_update=update,
+                        )
+                        telemetry.submit_wandb_metrics(
+                            {"training_samples/count": len(samples.paths)},
+                            successful_update=update,
+                        )
                     telemetry.observer(observation)
                     if evaluator is not None and evaluator.due(update):
                         if evaluation_is_splits is None:
@@ -926,7 +956,9 @@ def _run_accepted_lifecycle(
                         evaluation = evaluator.evaluate(update)
                         if is_main_process:
                             if evaluation is None:
-                                raise RuntimeError("rank zero evaluation is unavailable")
+                                raise RuntimeError(
+                                    "rank zero evaluation is unavailable"
+                                )
                             telemetry.submit_wandb_metrics(
                                 {
                                     "evaluation/fid": evaluation.fid,
@@ -936,7 +968,13 @@ def _run_accepted_lifecycle(
                                     "evaluation/inception_score_std": (
                                         evaluation.inception_score_std
                                     ),
+                                    "evaluation/kid_mean": evaluation.kid_mean,
+                                    "evaluation/kid_std": evaluation.kid_std,
+                                    "evaluation/cmmd": evaluation.cmmd,
                                     "evaluation/sample_count": evaluation.sample_count,
+                                    "evaluation/real_sample_count": (
+                                        evaluation.real_sample_count
+                                    ),
                                     "evaluation/is_splits": evaluation_is_splits,
                                 },
                                 successful_update=update,
@@ -1082,7 +1120,7 @@ def run_production_evaluation(
     config_root: Path,
     repository_root: Path,
     checkpoint: Path,
-) -> EvaluationResult:
+) -> EvaluationResult | None:
     """Evaluate one complete RAW checkpoint without restarting training."""
 
     root = _repository_root(repository_root)
@@ -1103,12 +1141,31 @@ def run_production_evaluation(
 
     exact_checkpoint = _require_exact_checkpoint_path(checkpoint)
     require_static_single_gpu_preflight(config, root)
-    device = torch.device("cuda", 0)
-    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-        raise ValueError("evaluation requires exactly one visible CUDA device")
+    accelerator = (
+        Accelerator(
+            mixed_precision="no",
+            kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(minutes=30))],
+        )
+        if config.distributed.backend == "accelerate"
+        else None
+    )
+    rank = 0 if accelerator is None else accelerator.process_index
+    if accelerator is not None and (
+        accelerator.num_processes != config.distributed.world_size
+        or accelerator.device.type != "cuda"
+    ):
+        raise ValueError("evaluation launch topology differs from resolved config")
+    device = torch.device("cuda", 0) if accelerator is None else accelerator.device
+    if (
+        not torch.cuda.is_available()
+        or torch.cuda.device_count() != config.distributed.world_size
+        or int(device.index or 0) != rank
+    ):
+        raise ValueError("evaluation accelerator visibility differs from rank topology")
     torch.cuda.set_device(device)
-    torch.manual_seed(config.run.seed)  # pyright: ignore[reportUnknownMemberType]
-    torch.cuda.default_generators[0].manual_seed(config.run.seed)
+    process_seed = config.run.seed + rank * 1_000_003
+    torch.manual_seed(process_seed)  # pyright: ignore[reportUnknownMemberType]
+    torch.cuda.default_generators[int(device.index or 0)].manual_seed(process_seed)
 
     configure_tunableop(
         root,
@@ -1156,10 +1213,13 @@ def run_production_evaluation(
         vae=vae,
         device=device,
         growth_alpha=state.growth.alpha,
+        accelerator=accelerator,
     )
-    result = evaluator.evaluate(update)
-    if result is None:
-        raise RuntimeError("single-process evaluation returned no result")
+    result = _evaluate_and_release_process_group(
+        evaluator, update, accelerator
+    )
+    if accelerator is None and result is None:
+        raise RuntimeError("native evaluation returned no result")
     return result
 
 

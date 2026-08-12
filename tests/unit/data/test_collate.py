@@ -8,7 +8,11 @@ import pytest
 import torch
 from torch.utils.data import DataLoader, get_worker_info
 
-from sakuramoon.data.caption import CAPTION_DROPOUT_KEYS, CaptionDropoutHits
+from sakuramoon.data.caption import (
+    CAPTION_DROPOUT_KEYS,
+    CaptionDropoutHits,
+    CaptionPlan,
+)
 from sakuramoon.data.collate import (
     BucketedBatchDataset,
     CollateError,
@@ -24,7 +28,32 @@ from sakuramoon.telemetry.metrics import DROPOUT_KEYS
 
 def _sample(sample_id: int, *, width: int = 8, dense_length: int = 64) -> PipelineSample:
     input_ids = (10, 11, 12) if sample_id % 2 else (20, 21)
+    dropout_hits = CaptionDropoutHits(
+        all_condition=False,
+        nsfw=False,
+        character=False,
+        copyright=False,
+        general=bool(sample_id % 2),
+        artist=bool(sample_id % 2),
+        candidate_source=False,
+        long_names=False,
+        long_no_names=False,
+        short_vibes=False,
+        nl2=False,
+        nl3=False,
+    )
     caption = SerializedCaption(
+        plan=CaptionPlan(
+            nsfw=(),
+            character=(),
+            copyright=(),
+            general=(),
+            artists=(),
+            nl_text=None,
+            selected_nl=None,
+            all_condition_dropped=False,
+            dropout_hits=dropout_hits,
+        ),
         text="test",
         input_ids=input_ids,
         attention_mask=(True,) * len(input_ids),
@@ -34,20 +63,7 @@ def _sample(sample_id: int, *, width: int = 8, dense_length: int = 64) -> Pipeli
         artist_mask=(),
         use_null_style=True,
         all_condition_dropped=False,
-        dropout_hits=CaptionDropoutHits(
-            all_condition=False,
-            nsfw=False,
-            character=False,
-            copyright=False,
-            general=bool(sample_id % 2),
-            artist=bool(sample_id % 2),
-            candidate_source=False,
-            long_names=False,
-            long_no_names=False,
-            short_vibes=False,
-            nl2=False,
-            nl3=False,
-        ),
+        dropout_hits=dropout_hits,
         selected_nl=None,
         body="",
         artist_text="",

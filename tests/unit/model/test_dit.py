@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import sakuramoon.model.dit as dit_module
+from sakuramoon.conditioning.rope import image_coordinates
 from sakuramoon.model.dit import DenseDiT, PackedDiT
 from sakuramoon.model.growth import active_slot_ids, new_slot_ids, slot_growth
 from sakuramoon.model.output_head import FinalOutputHead
@@ -89,6 +90,10 @@ def _inputs() -> tuple[torch.Tensor, ...]:
     )
 
 
+def _image_coordinate_maps() -> torch.Tensor:
+    return image_coordinates(2, 2, device=torch.device("cpu")).unsqueeze(0)
+
+
 def test_stable_slot_sets_insert_four_blocks_at_each_growth() -> None:
     assert active_slot_ids(16) == (
         0,
@@ -151,8 +156,16 @@ def test_alpha_zero_new_slots_preserve_old_hidden_function(
     target_model.load_state_dict(target)
     inputs = _inputs()
 
-    source_features = source_model.forward_features(*inputs, growth_alpha=1.0)
-    target_features = target_model.forward_features(*inputs, growth_alpha=0.0)
+    source_features = source_model.forward_features(
+        *inputs,
+        image_coordinates=_image_coordinate_maps(),
+        growth_alpha=1.0,
+    )
+    target_features = target_model.forward_features(
+        *inputs,
+        image_coordinates=_image_coordinate_maps(),
+        growth_alpha=0.0,
+    )
 
     torch.testing.assert_close(
         source_features.joint_hidden, target_features.joint_hidden
@@ -211,7 +224,11 @@ def test_output_head_restores_heterogeneous_packed_image_spans() -> None:
 
 def test_dense_dit_predicts_only_latent_shape_and_records_metadata() -> None:
     model = _model(16)
-    output = model(*_inputs(), growth_alpha=1.0)
+    output = model(
+        *_inputs(),
+        image_coordinates=_image_coordinate_maps(),
+        growth_alpha=1.0,
+    )
 
     assert output.shape == (1, 8, 2, 2)
     assert torch.count_nonzero(output) == 0
@@ -247,7 +264,11 @@ def test_dense_activation_checkpoint_policy_is_explicit(
     model = _model(16)
     model.set_activation_checkpoint_mode(mode)
 
-    model(*_inputs(), growth_alpha=1.0)
+    model(
+        *_inputs(),
+        image_coordinates=_image_coordinate_maps(),
+        growth_alpha=1.0,
+    )
 
     assert model.activation_checkpoint_mode == mode
     assert calls == expected_calls
@@ -264,8 +285,16 @@ def test_dense_activation_checkpoint_matches_forward_and_gradients() -> None:
     checkpointed.set_activation_checkpoint_mode("all")
     inputs = _inputs()
 
-    reference_output = reference(*inputs, growth_alpha=1.0)
-    checkpointed_output = checkpointed(*inputs, growth_alpha=1.0)
+    reference_output = reference(
+        *inputs,
+        image_coordinates=_image_coordinate_maps(),
+        growth_alpha=1.0,
+    )
+    checkpointed_output = checkpointed(
+        *inputs,
+        image_coordinates=_image_coordinate_maps(),
+        growth_alpha=1.0,
+    )
     reference_output.float().square().mean().backward()
     checkpointed_output.float().square().mean().backward()
 
@@ -279,6 +308,24 @@ def test_dense_activation_checkpoint_matches_forward_and_gradients() -> None:
         assert (expected is None) == (actual is None), name
         if expected is not None and actual is not None:
             torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+
+
+def test_dense_dit_has_no_coordinate_fallback() -> None:
+    model = _model(16)
+
+    with pytest.raises(TypeError, match="image_coordinates"):
+        model(*_inputs(), growth_alpha=1.0)  # pyright: ignore[reportCallIssue]
+
+
+def test_dense_dit_rejects_invalid_coordinate_shape() -> None:
+    model = _model(16)
+
+    with pytest.raises(ValueError, match="shape"):
+        model(
+            *_inputs(),
+            image_coordinates=torch.zeros(1, 3, 2),
+            growth_alpha=1.0,
+        )
 
 
 def test_activation_checkpoint_mode_is_runtime_only_and_validated() -> None:

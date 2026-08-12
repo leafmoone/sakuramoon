@@ -45,6 +45,7 @@ class TrainableCompositeInputs:
     use_null_style: torch.Tensor
     active_style_sample_indices: torch.Tensor
     latents: tuple[torch.Tensor, ...]
+    image_coordinates: tuple[torch.Tensor, ...]
     timestep: torch.Tensor
     size_scale: torch.Tensor
     aspect: torch.Tensor
@@ -98,6 +99,7 @@ class TrainableComposite(nn.Module):
                 inputs.timestep,
                 inputs.size_scale,
                 inputs.aspect,
+                image_coordinates=torch.stack(inputs.image_coordinates),
                 growth_alpha=inputs.growth_alpha,
             )
             return tuple(dense_predictions.unbind(0))
@@ -110,6 +112,7 @@ class TrainableComposite(nn.Module):
             inputs.timestep,
             inputs.size_scale,
             inputs.aspect,
+            image_coordinates=inputs.image_coordinates,
             growth_alpha=inputs.growth_alpha,
         )
 

@@ -1,4 +1,4 @@
-"""FID and Inception Score math."""
+"""Strict distribution metrics for image-generation evaluation."""
 
 from __future__ import annotations
 
@@ -46,7 +46,11 @@ class FeatureStats:
         mean = values.mean(dim=0)
         centered = values - mean
         covariance = centered.T @ centered / (values.shape[0] - 1)
-        return cls(values.shape[0], mean, covariance, centered)
+        # The sample-space FID identity is cheaper only while N <= D. Retaining
+        # centered [N,D] features for large evaluations would make the later
+        # eigendecomposition N x N (50k x 50k for FID-50k).
+        retained = centered if values.shape[0] <= values.shape[1] else None
+        return cls(values.shape[0], mean, covariance, retained)
 
 
 def frechet_inception_distance(
@@ -101,6 +105,153 @@ class InceptionScore:
     sample_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class KernelDistance:
+    mean: float
+    std: float
+    subsets: int
+    subset_size: int
+
+
+def _feature_matrix(
+    name: str,
+    features: torch.Tensor,
+    *,
+    device: torch.device | None,
+) -> torch.Tensor:
+    if features.ndim != 2 or features.shape[0] < 2 or features.shape[1] < 1:
+        raise ValueError(f"{name} features must have shape [N,D] with N >= 2")
+    target = features.device if device is None else device
+    values = features.detach().to(device=target, dtype=torch.float64)
+    if not bool(torch.isfinite(values).all().item()):
+        raise ValueError(f"{name} features contain nonfinite values")
+    return values
+
+
+def kernel_inception_distance(
+    generated_features: torch.Tensor,
+    real_features: torch.Tensor,
+    *,
+    subsets: int,
+    subset_size: int,
+    seed: int,
+    device: torch.device | None = None,
+) -> KernelDistance:
+    """Return unbiased cubic-polynomial MMD over deterministic random subsets."""
+
+    generated = _feature_matrix("generated KID", generated_features, device=device)
+    real = _feature_matrix("real KID", real_features, device=device)
+    if generated.shape[1] != real.shape[1]:
+        raise ValueError("generated and real KID feature dimensions differ")
+    if type(subsets) is not int or subsets <= 0:
+        raise ValueError("KID subset count must be a positive integer")
+    if (
+        type(subset_size) is not int
+        or subset_size < 2
+        or subset_size > min(generated.shape[0], real.shape[0])
+    ):
+        raise ValueError("KID subset size is outside the available sample range")
+    if type(seed) is not int or not 0 <= seed < 2**63:
+        raise ValueError("KID seed must be a 63-bit nonnegative integer")
+
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    dimension = float(generated.shape[1])
+    estimates: list[torch.Tensor] = []
+    for _ in range(subsets):
+        generated_indices = torch.randperm(
+            generated.shape[0], generator=generator, device="cpu"
+        )[:subset_size].to(generated.device)
+        real_indices = torch.randperm(real.shape[0], generator=generator, device="cpu")[
+            :subset_size
+        ].to(real.device)
+        generated_subset = generated.index_select(0, generated_indices)
+        real_subset = real.index_select(0, real_indices)
+        generated_kernel = (
+            generated_subset @ generated_subset.T / dimension + 1.0
+        ) ** 3
+        real_kernel = (real_subset @ real_subset.T / dimension + 1.0) ** 3
+        cross_kernel = (generated_subset @ real_subset.T / dimension + 1.0) ** 3
+        denominator = subset_size * (subset_size - 1)
+        estimate = (
+            (generated_kernel.sum() - generated_kernel.diagonal().sum()) / denominator
+            + (real_kernel.sum() - real_kernel.diagonal().sum()) / denominator
+            - 2.0 * cross_kernel.mean()
+        )
+        estimates.append(estimate)
+    values = torch.stack(estimates)
+    mean = float(values.mean().item())
+    std = float(values.std(unbiased=False).item())
+    if not math.isfinite(mean) or not math.isfinite(std):
+        raise FloatingPointError("KID is nonfinite")
+    return KernelDistance(mean, std, subsets, subset_size)
+
+
+CMMD_SIGMA = 10.0
+CMMD_SCALE = 1000.0
+
+
+def _rbf_kernel_sum(
+    first: torch.Tensor,
+    second: torch.Tensor,
+    *,
+    sigma: float,
+    block_size: int,
+) -> torch.Tensor:
+    total = torch.zeros((), dtype=torch.float64, device=first.device)
+    gamma = 1.0 / (2.0 * sigma * sigma)
+    for first_start in range(0, first.shape[0], block_size):
+        first_block = first[first_start : first_start + block_size]
+        first_norm = first_block.square().sum(dim=1, keepdim=True)
+        for second_start in range(0, second.shape[0], block_size):
+            second_block = second[second_start : second_start + block_size]
+            second_norm = second_block.square().sum(dim=1).unsqueeze(0)
+            distances = (
+                first_norm + second_norm - 2.0 * (first_block @ second_block.T)
+            ).clamp_min(0.0)
+            total += torch.exp(-gamma * distances).sum()
+    return total
+
+
+def clip_maximum_mean_discrepancy(
+    generated_features: torch.Tensor,
+    real_features: torch.Tensor,
+    *,
+    device: torch.device | None = None,
+    block_size: int = 1024,
+) -> float:
+    """Compute official CMMD: biased Gaussian-RBF MMD, sigma 10, scale 1000."""
+
+    generated = _feature_matrix("generated CMMD", generated_features, device=device)
+    real = _feature_matrix("real CMMD", real_features, device=device)
+    if generated.shape[1] != real.shape[1]:
+        raise ValueError("generated and real CMMD feature dimensions differ")
+    if type(block_size) is not int or block_size <= 0:
+        raise ValueError("CMMD block size must be a positive integer")
+    for name, values in (("generated", generated), ("real", real)):
+        norms = torch.linalg.vector_norm(values, dim=1)
+        if not bool(
+            torch.allclose(norms, torch.ones_like(norms), atol=1e-5, rtol=1e-5)
+        ):
+            raise ValueError(f"{name} CMMD CLIP features must be L2-normalized")
+
+    generated_sum = _rbf_kernel_sum(
+        generated, generated, sigma=CMMD_SIGMA, block_size=block_size
+    )
+    real_sum = _rbf_kernel_sum(real, real, sigma=CMMD_SIGMA, block_size=block_size)
+    cross_sum = _rbf_kernel_sum(
+        generated, real, sigma=CMMD_SIGMA, block_size=block_size
+    )
+    value = CMMD_SCALE * (
+        generated_sum / (generated.shape[0] ** 2)
+        + real_sum / (real.shape[0] ** 2)
+        - 2.0 * cross_sum / (generated.shape[0] * real.shape[0])
+    )
+    result = max(0.0, float(value.item()))
+    if not math.isfinite(result):
+        raise FloatingPointError("CMMD is nonfinite")
+    return result
+
+
 def inception_score(
     probabilities: torch.Tensor,
     *,
@@ -135,8 +286,13 @@ def inception_score(
 
 
 __all__ = [
+    "CMMD_SCALE",
+    "CMMD_SIGMA",
     "FeatureStats",
     "InceptionScore",
+    "KernelDistance",
+    "clip_maximum_mean_discrepancy",
     "frechet_inception_distance",
     "inception_score",
+    "kernel_inception_distance",
 ]

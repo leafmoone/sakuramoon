@@ -154,9 +154,10 @@ class PromptCase:
                 and all(type(tag) is Tag for tag in getattr(plan, field))
                 for field in _CAPTION_TAG_FIELDS
             )
-            has_content = any(
-                getattr(plan, field) for field in _CAPTION_TAG_FIELDS
-            ) or plan.nl_text is not None
+            has_content = (
+                any(getattr(plan, field) for field in _CAPTION_TAG_FIELDS)
+                or plan.nl_text is not None
+            )
             if (
                 type(plan) is not CaptionPlan
                 or not typed_tags
@@ -191,7 +192,9 @@ class PromptManifest:
         if type(self.cases) is not tuple or any(
             type(case) is not PromptCase for case in self.cases
         ):
-            raise TypeError("prompt manifest cases must be an immutable PromptCase tuple")
+            raise TypeError(
+                "prompt manifest cases must be an immutable PromptCase tuple"
+            )
         if not self.cases:
             raise ValueError("prompt manifest must not be empty")
         identifiers = tuple(case.prompt_id for case in self.cases)
@@ -255,9 +258,7 @@ class PromptManifest:
                 PromptCase(
                     prompt_id=cast(str, case["prompt_id"]),
                     prompt=cast(str, case["prompt"]),
-                    conditions=tuple(
-                        cast(str, value) for value in condition_values
-                    ),
+                    conditions=tuple(cast(str, value) for value in condition_values),
                     seed=cast(int, case["seed"]),
                     height=cast(int, case["height"]),
                     width=cast(int, case["width"]),

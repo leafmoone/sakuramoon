@@ -24,8 +24,9 @@ from sakuramoon.checkpoint.policy import (
     CheckpointReason,
 )
 from sakuramoon.checkpoint.schema import CheckpointManifest, RawCheckpointState
+from sakuramoon.conditioning.rope import full_canvas_crop_coordinates
 from sakuramoon.config.schema import RuntimeConfig
-from sakuramoon.data.caption import CaptionDropoutCounts
+from sakuramoon.data.caption import CaptionDropoutCounts, CaptionPlan
 from sakuramoon.data.collate import TrainingBatch
 from sakuramoon.data.production import (
     AcceptedProductionBatchStream,
@@ -111,6 +112,7 @@ class DenseDiTAdapter(nn.Module):
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
         *,
+        image_coordinates: tuple[torch.Tensor, ...],
         growth_alpha: float,
     ) -> tuple[torch.Tensor, ...]:
         del text_lengths
@@ -123,6 +125,7 @@ class DenseDiTAdapter(nn.Module):
             timestep,
             size_scale,
             aspect,
+            image_coordinates=torch.stack(image_coordinates),
             growth_alpha=growth_alpha,
         )
         return tuple(predictions.unbind(0))
@@ -263,7 +266,8 @@ class RuntimeMeasurement:
     low_noise_sample_count: torch.Tensor
     timesteps: torch.Tensor
     dropout_hits: CaptionDropoutCounts
-    captions: tuple[SerializedCaption, ...] = ()
+    captions: tuple[SerializedCaption, ...]
+    caption_plans: tuple[CaptionPlan, ...]
 
     def detached(self) -> RuntimeMeasurement:
         """Drop the autograd graph before handing facts to an async observer."""
@@ -282,6 +286,7 @@ class RuntimeMeasurement:
             timesteps=self.timesteps.detach(),
             dropout_hits=self.dropout_hits,
             captions=self.captions,
+            caption_plans=self.caption_plans,
         )
 
 
@@ -356,8 +361,17 @@ def _require_batch(batch: TrainingBatch) -> None:
         raise ValueError("main token length count differs from images")
     if len(batch.source_shards) != batch.images.shape[0]:
         raise ValueError("source shard count differs from images")
+    if len(batch.audits) != batch.images.shape[0]:
+        raise ValueError("image audit count differs from images")
+    if len(batch.captions) != batch.images.shape[0]:
+        raise ValueError("structured caption count differs from images")
     if batch.target_height <= 0 or batch.target_width <= 0:
         raise ValueError("training target dimensions must be positive")
+    if tuple(batch.images.shape[-2:]) != (
+        batch.target_height,
+        batch.target_width,
+    ):
+        raise ValueError("training image shape differs from its target canvas")
 
 
 def _size_conditions(
@@ -372,6 +386,40 @@ def _size_conditions(
         torch.full((count,), size_scale, device=device, dtype=torch.float32),
         torch.full((count,), aspect, device=device, dtype=torch.float32),
     )
+
+
+def _full_canvas_coordinate_maps(
+    batch: TrainingBatch,
+    *,
+    token_height: int,
+    token_width: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, ...]:
+    maps: list[torch.Tensor] = []
+    for sample_index, audit in enumerate(batch.audits):
+        try:
+            coordinates = full_canvas_crop_coordinates(
+                token_height,
+                token_width,
+                full_height=audit.resized_height,
+                full_width=audit.resized_width,
+                crop_box=audit.crop_box,
+                device=device,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"image audit {sample_index} cannot define full-canvas coordinates"
+            ) from error
+        left, top, right, bottom = audit.crop_box
+        if (bottom - top, right - left) != (
+            batch.target_height,
+            batch.target_width,
+        ):
+            raise ValueError(
+                f"image audit {sample_index} crop differs from the training target"
+            )
+        maps.append(coordinates)
+    return tuple(maps)
 
 
 class SingleGpuBatchRuntime:
@@ -577,6 +625,12 @@ class SingleGpuBatchRuntime:
         )
         if tuple(clean.shape) != expected or clean.dtype != torch.bfloat16:
             raise ValueError("Mage-VAE returned an unexpected latent contract")
+        image_coordinates = _full_canvas_coordinate_maps(
+            batch,
+            token_height=clean.shape[-2],
+            token_width=clean.shape[-1],
+            device=clean.device,
+        )
 
         timestep = sample_jlt_timesteps(
             clean.shape[0],
@@ -602,6 +656,7 @@ class SingleGpuBatchRuntime:
             use_null_style=use_null_style,
             active_style_sample_indices=active_style_sample_indices,
             latents=tuple(item for item in state.unbind(0)),
+            image_coordinates=image_coordinates,
             timestep=timestep,
             size_scale=size_scale,
             aspect=aspect,
@@ -673,6 +728,7 @@ class SingleGpuBatchRuntime:
             timesteps=prepared.inputs.timestep,
             dropout_hits=batch.dropout_hits,
             captions=batch.captions,
+            caption_plans=tuple(caption.plan for caption in batch.captions),
         )
 
     def _loss(
