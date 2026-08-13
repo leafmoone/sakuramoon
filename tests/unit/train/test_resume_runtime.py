@@ -11,12 +11,24 @@ from typing import Any
 import pytest
 import wandb
 
+from sakuramoon.checkpoint.policy import CheckpointCadence, CheckpointReason
+from sakuramoon.checkpoint.schema import (
+    GrowthCheckpointState,
+    RawCheckpointState,
+    StageBudgetCheckpointState,
+)
 from sakuramoon.cli.train import (
     _configure_cuda_allocator,
     _configure_torchinductor_cache,
     _install_shutdown_signal_handlers,
 )
+from sakuramoon.config import load_config
 from sakuramoon.config.assembly import initialize_wandb_run
+from sakuramoon.model.growth import active_slot_ids
+from sakuramoon.train.production import _resume_state_for_config
+from sakuramoon.train.step import SingleGpuUpdateState
+
+REPOSITORY_ROOT = Path(__file__).parents[3]
 
 
 class _FakeRun:
@@ -95,6 +107,72 @@ def test_background_training_resets_interrupt_and_termination_signals(
         (signal.SIGINT, signal.default_int_handler),
         (signal.SIGTERM, signal.default_int_handler),
     ]
+
+
+def test_resume_rebinds_only_checkpoint_cadence_policy() -> None:
+    config = load_config(
+        Path("train_s0.toml"),
+        config_root=REPOSITORY_ROOT / "config",
+        environment={
+            "MODELSCOPE_API_TOKEN": "synthetic-modelscope-secret",
+            "WANDB_API_KEY": "synthetic-wandb-secret",
+        },
+    ).config
+    trainer = SingleGpuUpdateState(
+        attempted_updates=28_300,
+        successful_updates=28_300,
+        effective_samples=13_216_000,
+    )
+    growth = GrowthCheckpointState(
+        active_slot_ids=active_slot_ids(config.stage.depth),
+        alpha=1.0,
+        stage=config.stage.name,
+        world_size=config.stage.world_size,
+        resolution=config.stage.resolution,
+        ramp_start_successful_update=None,
+        ramp_updates=None,
+    )
+    budget = StageBudgetCheckpointState(
+        start_successful_update=0,
+        terminal_successful_update=config.stage.planned_updates,
+    )
+    persisted = RawCheckpointState(
+        trainer=trainer,
+        growth=growth,
+        stage_budget=budget,
+        checkpoint_cadence=CheckpointCadence(
+            last_successful_update=trainer.successful_updates,
+            last_wall_clock_unix_seconds=123.5,
+            every_successful_updates=100,
+        ),
+    )
+
+    resumed = _resume_state_for_config(config, persisted)
+
+    assert resumed.trainer is trainer
+    assert resumed.growth is growth
+    assert resumed.stage_budget is budget
+    assert resumed.checkpoint_cadence == CheckpointCadence(
+        last_successful_update=28_300,
+        last_wall_clock_unix_seconds=123.5,
+        every_successful_updates=500,
+    )
+    assert (
+        resumed.checkpoint_cadence.due(
+            successful_update=28_499,
+            wall_clock_unix_seconds=124.0,
+        )
+        is None
+    )
+    assert (
+        resumed.checkpoint_cadence.due(
+            successful_update=28_500,
+            wall_clock_unix_seconds=124.0,
+        )
+        is CheckpointReason.UPDATE_CADENCE
+    )
+    assert config.evaluation.enabled is True
+    assert config.evaluation.every_updates == 5_000
 
 
 def test_wandb_resume_creates_grouped_continuation_run(

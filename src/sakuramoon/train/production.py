@@ -65,7 +65,6 @@ from sakuramoon.train.runtime import (
     SingleGpuBatchRuntime,
     SuccessfulTrainingObservation,
     compile_packed_dit_blocks,
-    require_checkpoint_cadence_binding,
     require_distributed_forward_module,
     require_single_gpu_checkpoint_binding,
     require_single_gpu_checkpoint_compatibility,
@@ -456,7 +455,7 @@ def _resume_state_for_config(
     config: RuntimeConfig,
     state: RawCheckpointState,
 ) -> RawCheckpointState:
-    """Extend a restored S0 budget when TOML requests a later terminal update."""
+    """Apply explicit governed resume-policy changes to a validated RAW state."""
 
     terminal = state.stage_budget.terminal_successful_update
     configured = config.stage.planned_updates
@@ -484,6 +483,20 @@ def _resume_state_for_config(
                 configured,
             ),
         )
+    persisted_interval = state.checkpoint_cadence.every_successful_updates
+    configured_interval = config.checkpoint.full_every_updates
+    if configured_interval != persisted_interval:
+        _log(
+            "重绑定检查点保存周期: "
+            f"{persisted_interval} -> {configured_interval} successful updates"
+        )
+        resumed = replace(
+            resumed,
+            checkpoint_cadence=replace(
+                resumed.checkpoint_cadence,
+                every_successful_updates=configured_interval,
+            ),
+        )
     return resumed
 
 
@@ -499,7 +512,6 @@ def _restore_checkpoint(
     identity = manifest.identity
     if state.trainer.successful_updates != identity.update:
         raise ValueError("resume checkpoint update differs from trainer state")
-    require_checkpoint_cadence_binding(loaded.config, state)
     expected_rate = learning_rate_for_update(
         loaded.config, state.trainer.successful_updates + 1
     )

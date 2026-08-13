@@ -23,7 +23,7 @@ frozen_encoders_outside_wrapper = true
 automatic_backend_fallback = false
 
 [checkpoint]
-full_every_updates = 100
+full_every_updates = 500
 slots = 2
 
 [data.cache]
@@ -89,7 +89,7 @@ queue_capacity = 64
 
 [evaluation]
 enabled = true
-every_updates = 1000
+every_updates = 5000
 sample_count = 1000
 real_sample_count = 34849
 batch_size = 64
