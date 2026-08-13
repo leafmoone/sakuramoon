@@ -1058,7 +1058,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--devices", nargs="+", default=("cuda:0", "cuda:1")
     )
-    run.add_argument("--batch-size", type=int, default=64)
+    run.add_argument("--batch-size", type=int, default=128)
     run.add_argument("--download-concurrency", type=int, default=8)
     run.add_argument("--no-progress-timeout", type=float, default=300.0)
     run.add_argument("--start-index", type=int, default=0)
@@ -1077,7 +1077,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "upload-one":
         return _upload_child(args.path, args.remote_path, args.expected_size)
     if (
-        args.batch_size != 64
+        args.batch_size != 128
         or tuple(args.devices) != ("cuda:0", "cuda:1")
         or args.download_concurrency != 8
         or args.no_progress_timeout != 300.0

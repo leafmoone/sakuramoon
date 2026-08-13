@@ -86,7 +86,7 @@ def test_watchdog_terminates_silent_child() -> None:
 
 def _pipeline_args(tmp_path: Path) -> Namespace:
     return Namespace(
-        batch_size=64,
+        batch_size=128,
         cache_root=tmp_path / "cache",
         database=tmp_path / "metadata.db",
         devices=("cuda:0", "cuda:1"),
