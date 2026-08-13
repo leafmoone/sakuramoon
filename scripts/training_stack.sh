@@ -32,7 +32,7 @@ STACK_LOCK_FILE="${RUN_ROOT}/training-stack.lock"
 
 CHECKPOINT_ROOT=''
 DATA_SOCKET=''
-WORLD_SIZE=''
+CONFIG_WORLD_SIZE=''
 DEVICE_LIST=''
 RESOLVED_PID=''
 
@@ -206,12 +206,12 @@ PY
     || die "config contract returned ${#values[@]} fields instead of 3"
   CHECKPOINT_ROOT="${values[0]}"
   DATA_SOCKET="${values[1]}"
-  WORLD_SIZE="${values[2]}"
+  CONFIG_WORLD_SIZE="${values[2]}"
   [[ "${CHECKPOINT_ROOT}" == /* ]] || die "checkpoint root is not absolute"
   [[ "${DATA_SOCKET}" == /* ]] || die "data socket path is not absolute"
-  validate_integer WORLD_SIZE "${WORLD_SIZE}"
-  [[ "${WORLD_SIZE}" -le 8 ]] || die "WORLD_SIZE is unexpectedly large: ${WORLD_SIZE}"
-  DEVICE_LIST="$(seq -s, 0 "$((WORLD_SIZE - 1))")"
+  validate_integer CONFIG_WORLD_SIZE "${CONFIG_WORLD_SIZE}"
+  [[ "${CONFIG_WORLD_SIZE}" -le 8 ]] || die "WORLD_SIZE is unexpectedly large: ${CONFIG_WORLD_SIZE}"
+  DEVICE_LIST="$(seq -s, 0 "$((CONFIG_WORLD_SIZE - 1))")"
   export CUDA_VISIBLE_DEVICES="${DEVICE_LIST}"
   export HIP_VISIBLE_DEVICES="${DEVICE_LIST}"
   export ROCR_VISIBLE_DEVICES="${DEVICE_LIST}"
@@ -454,7 +454,7 @@ wait_for_training_ranks() {
       die "training launcher exited during startup"
     fi
     rank_count="$(training_rank_count "${launcher_pid}")"
-    if [[ "${rank_count}" -eq "${WORLD_SIZE}" ]]; then
+    if [[ "${rank_count}" -eq "${CONFIG_WORLD_SIZE}" ]]; then
       log "training ranks ready: launcher ${launcher_pid}, ranks ${rank_count}"
       return 0
     fi
@@ -466,7 +466,7 @@ wait_for_training_ranks() {
     sleep 1
     elapsed=$((elapsed + 1))
     if (( elapsed % 10 == 0 )); then
-      log "waiting for ${WORLD_SIZE} training ranks: ${elapsed}s, current ${rank_count}"
+      log "waiting for ${CONFIG_WORLD_SIZE} training ranks: ${elapsed}s, current ${rank_count}"
     fi
   done
   tail_component_log train 240
@@ -494,7 +494,7 @@ start_train() {
   start_detached train "${TRAIN_LOG}" \
     "${PYTHON_BIN}" "${ACCELERATE_BIN}" launch \
     --multi_gpu \
-    --num_processes "${WORLD_SIZE}" \
+    --num_processes "${CONFIG_WORLD_SIZE}" \
     --num_machines 1 \
     --mixed_precision no \
     --dynamo_backend no \
@@ -590,7 +590,7 @@ component_status() {
     if [[ "${component}" == train ]]; then
       ranks="$(training_rank_count "${pid}")"
       printf '%-10s running pid=%s ranks=%s/%s log=%s\n' \
-        "${component}" "${pid}" "${ranks}" "${WORLD_SIZE:-?}" "${log_file}"
+        "${component}" "${pid}" "${ranks}" "${CONFIG_WORLD_SIZE:-?}" "${log_file}"
     else
       printf '%-10s running pid=%s log=%s\n' "${component}" "${pid}" "${log_file}"
     fi
@@ -636,7 +636,7 @@ validate_stack() {
   log "host: $(hostname)"
   log "project: ${PROJECT_ROOT}"
   log "config: ${CONFIG_ROOT}/${CONFIG_NAME}"
-  log "world size: ${WORLD_SIZE}, devices: ${DEVICE_LIST}"
+  log "world size: ${CONFIG_WORLD_SIZE}, devices: ${DEVICE_LIST}"
   log "checkpoint: ${checkpoint}"
   log "logs: ${LOG_ROOT}"
   log "environment snapshot: ${WORKLOAD_ENV_FILE}"
