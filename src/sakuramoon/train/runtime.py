@@ -14,10 +14,12 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 from torch import nn
+from torch._dynamo import config as dynamo_config
+from torch.nn.parallel import DistributedDataParallel
 
 from sakuramoon.checkpoint.policy import (
     CheckpointCadence,
@@ -36,11 +38,12 @@ from sakuramoon.data.serialize import SerializedCaption
 from sakuramoon.encoders.mage_vae import FrozenMageVAE
 from sakuramoon.encoders.qwen import FrozenQwenEncoder
 from sakuramoon.model.attention import (
-    AcceptedCuSeqlens,
     DenseGQAAttention,
     FA4VarlenGQAAttention,
+    fa4_varlen_attention,
 )
-from sakuramoon.model.dit import DenseDiT
+from sakuramoon.model.block import DiTBlock, PackedDiTBlock
+from sakuramoon.model.dit import DenseDiT, PackedDiT
 from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.objective.flow import (
     flow_matching_loss,
@@ -82,6 +85,83 @@ class _Encoder(Protocol):
 
 class _Vae(Protocol):
     def encode(self, image: torch.Tensor) -> torch.Tensor: ...
+
+
+def require_distributed_forward_module(
+    composite: TrainableComposite,
+    forward_module: nn.Module,
+) -> DistributedDataParallel:
+    """Require an eager DDP wrapper around the original trainable composite."""
+
+    if forward_module is composite:
+        raise ValueError("distributed forward must wrap the trainable composite")
+    if not isinstance(forward_module, DistributedDataParallel):
+        raise TypeError(
+            "distributed forward must remain an uncompiled DistributedDataParallel"
+        )
+    if forward_module.module is not composite:
+        raise ValueError(
+            "DistributedDataParallel must wrap the original trainable composite"
+        )
+    return forward_module
+
+
+def compile_packed_dit_blocks(
+    composite: TrainableComposite,
+    *,
+    backend: str,
+    mode: str,
+    dynamic: bool,
+) -> tuple[PackedDiTBlock, ...]:
+    """Install fail-closed regional compilation after DDP construction."""
+
+    if (
+        backend != "inductor"
+        or mode not in {"default", "reduce-overhead", "max-autotune-no-cudagraphs"}
+        or type(dynamic) is not bool
+    ):
+        raise ValueError("regional torch.compile configuration is invalid")
+    if not dynamic:
+        raise ValueError("packed regional torch.compile requires dynamic=true")
+    if dynamo_config.suppress_errors:
+        raise RuntimeError("torch.compile error suppression must remain disabled")
+    dynamo_config.fail_on_recompile_limit_hit = True
+    if not getattr(fa4_varlen_attention, "_torchdynamo_disable", False):
+        raise RuntimeError("DAS FA2 must remain an explicit eager compiler boundary")
+
+    dit = composite.dit
+    if not isinstance(dit, PackedDiT):
+        raise TypeError("regional torch.compile requires the production PackedDiT")
+    blocks = tuple(dit.blocks.values())
+    if len(blocks) != len(dit.active_slot_ids) or any(
+        not isinstance(block, PackedDiTBlock) for block in blocks
+    ):
+        raise TypeError("PackedDiT block registry is inconsistent")
+    if any(
+        child._forward_pre_hooks or child._forward_hooks
+        for block in blocks
+        for child in block.modules()
+    ):
+        raise RuntimeError("regional compile blocks must not carry Python forward hooks")
+    if any(getattr(block, "_compiled_call_impl", None) is not None for block in blocks):
+        raise RuntimeError("PackedDiT blocks are already compiled")
+
+    parameter_ids = tuple(id(parameter) for parameter in composite.parameters())
+    state_keys = tuple(composite.state_dict())
+    for block in blocks:
+        block.compile(
+            backend=backend,
+            mode=mode,
+            fullgraph=False,
+            dynamic=dynamic,
+        )
+    if any(getattr(block, "_compiled_call_impl", None) is None for block in blocks):
+        raise RuntimeError("regional torch.compile was not installed on every block")
+    if parameter_ids != tuple(id(parameter) for parameter in composite.parameters()):
+        raise RuntimeError("regional torch.compile changed parameter identity")
+    if state_keys != tuple(composite.state_dict()):
+        raise RuntimeError("regional torch.compile changed state_dict keys")
+    return cast(tuple[PackedDiTBlock, ...], blocks)
 
 
 def read_raw_checkpoint_state(
@@ -138,107 +218,136 @@ class DenseDiTAdapter(nn.Module):
         return self.model.artifact_config()
 
 
-ResultT = TypeVar("ResultT")
-
 class ActualDitFlopCounter:
-    """Count executed DiT matmul FLOPs from live tensor and sequence shapes.
+    """Compute exact DiT matmul FLOPs outside eager and compiled graphs.
 
-    The convention matches T053: one multiply-add is two FLOPs. Linear hooks
-    observe their actual invocation shapes, while attention hooks add the QK and
-    AV matrix products omitted by fused SDPA/FA4 operators. Pointwise operations
-    are outside that benchmark convention.
+    One multiply-add is two FLOPs. The locked DiT linear topology is checked
+    once at construction; QK and AV products are added from sequence lengths.
     """
 
     def __init__(self, module: object) -> None:
-        if not isinstance(module, nn.Module):
-            raise TypeError("DiT FLOP counting requires a torch module")
-        self._active_flops: int | None = None
-        self._handles = tuple(
-            child.register_forward_pre_hook(
-                self._linear_hook
-                if isinstance(child, nn.Linear)
-                else self._attention_hook
-            )
-            for child in module.modules()
-            if isinstance(
-                child,
-                (nn.Linear, DenseGQAAttention, FA4VarlenGQAAttention),
-            )
+        model = module.model if isinstance(module, DenseDiTAdapter) else module
+        if not isinstance(model, (DenseDiT, PackedDiT)):
+            raise TypeError("DiT FLOP counting requires DenseDiT or PackedDiT")
+        self._model = model
+        self._packed = isinstance(model, PackedDiT)
+        block_type = PackedDiTBlock if self._packed else DiTBlock
+        attention_type = (
+            FA4VarlenGQAAttention if self._packed else DenseGQAAttention
         )
-        if not self._handles:
-            raise ValueError("DiT module exposes no countable operations")
-
-    def _add(self, value: int) -> None:
-        if self._active_flops is None:
-            return
-        if type(value) is not int or value <= 0:
-            raise RuntimeError("observed DiT FLOP contribution is invalid")
-        self._active_flops += value
-
-    def _linear_hook(
-        self,
-        module: nn.Module,
-        inputs: tuple[object, ...],
-    ) -> None:
-        if not isinstance(module, nn.Linear) or not inputs:
-            raise RuntimeError("DiT linear FLOP hook received an invalid module call")
-        value = inputs[0]
-        if (
-            not isinstance(value, torch.Tensor)
-            or value.ndim == 0
-            or value.shape[-1] != module.in_features
-            or value.numel() % module.in_features
+        blocks = tuple(model.blocks.values())
+        if len(blocks) != len(model.active_slot_ids) or any(
+            not isinstance(block, block_type) for block in blocks
         ):
-            raise RuntimeError("DiT linear input shape cannot be counted")
-        vectors = value.numel() // module.in_features
-        self._add(2 * vectors * module.in_features * module.out_features)
+            raise TypeError("DiT block registry is inconsistent")
+        attentions = tuple(block.attention for block in blocks)
+        if any(not isinstance(item, attention_type) for item in attentions):
+            raise TypeError("DiT attention registry is inconsistent")
 
-    def _attention_hook(
-        self,
-        module: nn.Module,
-        inputs: tuple[object, ...],
-    ) -> None:
-        if not inputs or not isinstance(inputs[0], torch.Tensor):
-            raise RuntimeError("DiT attention FLOP hook received invalid tokens")
-        tokens = inputs[0]
-        if isinstance(module, DenseGQAAttention):
-            if tokens.ndim != 3:
-                raise RuntimeError("dense DiT attention tokens cannot be counted")
-            batch, length, _hidden = tokens.shape
-            sequence_squares = batch * length * length
-        elif isinstance(module, FA4VarlenGQAAttention):
+        conditioner_linears = tuple(
+            child
+            for child in model.conditioner.modules()
+            if isinstance(child, nn.Linear)
+        )
+        block_linears = tuple(
+            child
+            for block in blocks
+            for child in block.modules()
+            if isinstance(child, nn.Linear)
+        )
+        boundary_linears = (model.input_projection, model.output_head.projection)
+        accounted = (*boundary_linears, *conditioner_linears, *block_linears)
+        observed = tuple(
+            child for child in model.modules() if isinstance(child, nn.Linear)
+        )
+        if len({id(item) for item in accounted}) != len(accounted):
+            raise RuntimeError("DiT FLOP registry contains duplicate linears")
+        if {id(item) for item in accounted} != {id(item) for item in observed}:
+            raise RuntimeError("DiT topology contains an unaccounted linear")
+
+        self._image_linear_flops = sum(
+            self._linear_flops(item) for item in boundary_linears
+        )
+        self._conditioner_linear_flops = sum(
+            self._linear_flops(item) for item in conditioner_linears
+        )
+        self._block_linear_flops = sum(
+            self._linear_flops(item) for item in block_linears
+        )
+        self._attention_flops = sum(
+            4 * item.q_heads * item.head_dim for item in attentions
+        )
+        if min(
+            self._image_linear_flops,
+            self._conditioner_linear_flops,
+            self._block_linear_flops,
+            self._attention_flops,
+        ) <= 0:
+            raise RuntimeError("DiT FLOP coefficients must be positive")
+
+    @staticmethod
+    def _linear_flops(module: nn.Linear) -> int:
+        return 2 * module.in_features * module.out_features
+
+    def count(self, inputs: TrainableCompositeInputs) -> int:
+        """Return exact forward matmul FLOPs for accepted composite inputs."""
+
+        if not isinstance(inputs, TrainableCompositeInputs):
+            raise TypeError("DiT FLOP counting requires TrainableCompositeInputs")
+        batch = len(inputs.latents)
+        if (
+            batch <= 0
+            or inputs.main_token_indices.ndim != 2
+            or inputs.main_token_indices.shape[0] != batch
+        ):
+            raise ValueError("DiT FLOP inputs contain an invalid batch")
+        image_lengths: list[int] = []
+        for latent in inputs.latents:
             if (
-                tokens.ndim != 2
-                or len(inputs) < 2
-                or not isinstance(inputs[1], AcceptedCuSeqlens)
+                latent.ndim != 3
+                or latent.shape[0] != self._model.input_projection.in_features
+                or latent.shape[-2] <= 0
+                or latent.shape[-1] <= 0
             ):
-                raise RuntimeError("packed DiT attention boundaries cannot be counted")
-            boundaries = inputs[1]
-            if sum(boundaries.sequence_lengths) != tokens.shape[0]:
-                raise RuntimeError("packed DiT attention token identity changed")
-            sequence_squares = sum(
-                length * length for length in boundaries.sequence_lengths
+                raise ValueError("DiT FLOP latent shapes are invalid")
+            image_lengths.append(latent.shape[-2] * latent.shape[-1])
+        image_tokens = sum(image_lengths)
+
+        if self._packed:
+            text_lengths = inputs.main_token_lengths
+            if (
+                type(text_lengths) is not tuple
+                or len(text_lengths) != batch
+                or any(type(item) is not int or item <= 0 for item in text_lengths)
+            ):
+                raise ValueError("packed DiT FLOP text lengths are invalid")
+            sequence_lengths = tuple(
+                text_length + 4 + image_length
+                for text_length, image_length in zip(
+                    text_lengths, image_lengths, strict=True
+                )
             )
+            block_vectors = sum(sequence_lengths)
+            attention_squares = sum(item * item for item in sequence_lengths)
         else:
-            raise TypeError("unsupported DiT attention module reached FLOP hook")
-        self._add(4 * module.q_heads * module.head_dim * sequence_squares)
+            if len(set(image_lengths)) != 1:
+                raise ValueError("dense DiT FLOP latents must share one image shape")
+            dense_text_length = inputs.main_token_indices.shape[1]
+            if dense_text_length <= 0:
+                raise ValueError("dense DiT FLOP text width must be positive")
+            sequence_length = dense_text_length + 4 + image_lengths[0]
+            block_vectors = batch * sequence_length
+            attention_squares = batch * sequence_length * sequence_length
 
-    def measure(self, operation: Callable[[], ResultT]) -> tuple[ResultT, int]:
-        """Run one DiT forward and return its observed matmul FLOP count."""
-
-        if not callable(operation):
-            raise TypeError("DiT FLOP observation requires a callable")
-        if self._active_flops is not None:
-            raise RuntimeError("DiT FLOP observation cannot be nested")
-        self._active_flops = 0
-        try:
-            result = operation()
-            observed = self._active_flops
-        finally:
-            self._active_flops = None
-        if observed <= 0:
-            raise RuntimeError("DiT forward produced no observable FLOPs")
-        return result, observed
+        flops = (
+            image_tokens * self._image_linear_flops
+            + batch * self._conditioner_linear_flops
+            + block_vectors * self._block_linear_flops
+            + attention_squares * self._attention_flops
+        )
+        if type(flops) is not int or flops <= 0:
+            raise RuntimeError("DiT FLOP result is invalid")
+        return flops
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,6 +586,29 @@ class SingleGpuBatchRuntime:
         self.vae = vae
         self.composite = composite
         self.forward_module = composite if forward_module is None else forward_module
+        if self.forward_module is not composite:
+            require_distributed_forward_module(composite, self.forward_module)
+        blocks = (
+            tuple(composite.dit.blocks.values())
+            if isinstance(composite.dit, PackedDiT)
+            else ()
+        )
+        compiled_blocks = tuple(
+            block
+            for block in blocks
+            if getattr(block, "_compiled_call_impl", None) is not None
+        )
+        if torch_compile_enabled:
+            if not isinstance(composite.dit, PackedDiT):
+                raise TypeError("regional torch.compile requires PackedDiT")
+            if not torch_compile_dynamic:
+                raise ValueError("packed regional torch.compile requires dynamic=true")
+            if len(compiled_blocks) != len(blocks) or not blocks:
+                raise RuntimeError(
+                    "regional torch.compile must be installed before runtime creation"
+                )
+        elif compiled_blocks:
+            raise RuntimeError("compiled DiT blocks are present while compile is disabled")
         self.device = device
         self.generator = generator
         self.p_mean = p_mean
@@ -486,34 +618,6 @@ class SingleGpuBatchRuntime:
         self.noise_observation_boundary = noise_observation_boundary
         self.growth_alpha = growth_alpha
         self.dit_flop_counter = ActualDitFlopCounter(composite.dit)
-        self._compiled_dit_forward = (
-            torch.compile(
-                composite.forward_dit,
-                backend=torch_compile_backend,
-                mode=torch_compile_mode,
-                dynamic=torch_compile_dynamic,
-                fullgraph=False,
-            )
-            if torch_compile_enabled
-            else None
-        )
-        if self.forward_module is not composite and self._compiled_dit_forward is not None:
-            raise ValueError("distributed forward cannot use the single-rank compile path")
-
-    def _forward_dit(
-        self,
-        inputs: TrainableCompositeInputs,
-        conditioning: tuple[object, object],
-    ) -> tuple[torch.Tensor, ...]:
-        operation = self._compiled_dit_forward
-        if operation is None:
-            return self.composite.forward_dit(inputs, conditioning)  # pyright: ignore[reportArgumentType]
-        result = operation(inputs, conditioning)
-        if not isinstance(result, tuple) or not all(
-            isinstance(item, torch.Tensor) for item in result
-        ):
-            raise TypeError("compiled DiT returned an invalid prediction tuple")
-        return result
 
     def _encode_qwen(
         self,
@@ -672,30 +776,11 @@ class SingleGpuBatchRuntime:
         self, batch: TrainingBatch, *, phase_timer: PhaseTimer | None = None
     ) -> RuntimeMeasurement:
         prepared = self.prepare(batch, phase_timer=phase_timer)
-        if self.forward_module is not self.composite:
-            predictions, dit_flops = self.dit_flop_counter.measure(
-                lambda: self.forward_module(
-                    prepared.inputs,
-                    phase_timer=phase_timer,
-                )
-            )
-        elif phase_timer is None and self._compiled_dit_forward is None:
-            predictions, dit_flops = self.dit_flop_counter.measure(
-                lambda: self.composite(prepared.inputs)
-            )
-        else:
-            if phase_timer is None:
-                conditioning = self.composite.forward_conditioning(prepared.inputs)
-                predictions, dit_flops = self.dit_flop_counter.measure(
-                    lambda: self._forward_dit(prepared.inputs, conditioning)
-                )
-            else:
-                with phase_timer.record("conditioning"):
-                    conditioning = self.composite.forward_conditioning(prepared.inputs)
-                with phase_timer.record("dit_forward"):
-                    predictions, dit_flops = self.dit_flop_counter.measure(
-                        lambda: self._forward_dit(prepared.inputs, conditioning)
-                    )
+        dit_flops = self.dit_flop_counter.count(prepared.inputs)
+        predictions = self.forward_module(
+            prepared.inputs,
+            phase_timer=phase_timer,
+        )
         if len(predictions) != len(prepared.clean_latents):
             raise ValueError("DiT prediction count differs from latent batch")
         if phase_timer is None:
@@ -1171,7 +1256,9 @@ __all__ = [
     "RuntimeMeasurement",
     "SingleGpuBatchRuntime",
     "SuccessfulTrainingObservation",
+    "compile_packed_dit_blocks",
     "require_checkpoint_cadence_binding",
+    "require_distributed_forward_module",
     "require_single_gpu_checkpoint_binding",
     "require_single_gpu_checkpoint_compatibility",
     "require_single_gpu_config",

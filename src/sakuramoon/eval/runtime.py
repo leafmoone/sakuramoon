@@ -26,6 +26,7 @@ from sakuramoon.data.serialize import (
     TokenEncoder,
     serialize_caption,
 )
+from sakuramoon.distributed import DistributedProgress
 from sakuramoon.encoders.mage_vae import FrozenMageVAE
 from sakuramoon.encoders.qwen import QwenRuntime
 from sakuramoon.eval.features import (
@@ -37,8 +38,8 @@ from sakuramoon.eval.features import (
     REAL_PREPROCESSING_ID,
     EvaluationFeatureModels,
     ImageFeatureBatch,
+    iter_validation_image_batches,
     validation_dataset_fingerprint,
-    validation_image_batches,
 )
 from sakuramoon.eval.metrics import (
     FeatureStats,
@@ -410,6 +411,11 @@ class TrainingEvaluator:
         self.is_main_process = (
             True if accelerator is None else accelerator.is_main_process
         )
+        self.progress = DistributedProgress.from_default_store(
+            namespace=f"evaluation/{config.run.run_id}",
+            rank=self.rank,
+            world_size=self.world_size,
+        )
         self.output = repository_directory(repository_root, self.evaluation.output_dir)
         self._feature_models: EvaluationFeatureModels | None = None
         self._real_features: ImageFeatureBatch | None = None
@@ -613,14 +619,22 @@ class TrainingEvaluator:
             return self._real_features
 
         print("[eval] computing one-time real Inception/CLIP/logit cache", flush=True)
-        batches = validation_image_batches(
+        feature_batches: list[ImageFeatureBatch] = []
+        completed = 0
+        for batch in iter_validation_image_batches(
             shard_root,
             real_sample_count,
             self.evaluation.batch_size,
             output_size=self.config.stage.resolution,
-        )
-        computed = ImageFeatureBatch.concatenate(
-            tuple(self._models().extract(batch.images) for batch in batches)
+        ):
+            feature_batches.append(self._models().extract(batch.images).cpu())
+            completed += len(batch.sample_ids)
+            print(
+                f"[eval] real features {completed}/{real_sample_count}",
+                flush=True,
+            )
+        computed = ImageFeatureBatch.concatenate(tuple(feature_batches)).to(
+            self.device
         )
         if computed.count != real_sample_count:
             raise EvaluationError("computed real feature count differs")
@@ -646,184 +660,38 @@ class TrainingEvaluator:
         print(f"[eval] saved real feature cache: {cache}", flush=True)
         return self._real_features
 
-    def evaluate(self, update: int) -> EvaluationResult | None:
-        if not self.due(update):
-            raise ValueError("evaluation update is not due")
-        print(
-            f"[eval] update={update} rank={self.rank}/{self.world_size} "
-            "开始计算 FID/IS/KID/CMMD",
-            flush=True,
-        )
-        prompt_path = self.root / self.evaluation.prompt_path
-        prompt_sha256 = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
-        cases = _stage_cases(
-            prompt_path,
-            self.evaluation.sample_count,
-            resolution=self.config.stage.resolution,
-        )
-        fingerprint = self._checkpoint_fingerprint(update)
-        cached = (
-            self._load_generated_cache(
+    def _finalize(
+        self,
+        update: int,
+        features: ImageFeatureBatch,
+        *,
+        fingerprint: str | None,
+        prompt_sha256: str,
+        save_generated_cache: bool,
+    ) -> EvaluationResult:
+        if features.count != self.evaluation.sample_count:
+            raise EvaluationError("generated feature count differs before metrics")
+        if save_generated_cache:
+            if fingerprint is None:
+                raise EvaluationError(
+                    "generated cache publication requires a checkpoint fingerprint"
+                )
+            self._save_generated_cache(
                 update,
                 fingerprint=fingerprint,
                 prompt_sha256=prompt_sha256,
+                features=features,
             )
-            if self.is_main_process and fingerprint is not None
-            else None
-        )
-        cache_flags = self._gather(
-            torch.tensor(
-                [int(cached is not None)],
-                dtype=torch.int64,
-                device=self.device,
-            )
-        )
-        if bool(cache_flags[0].item()):
-            if not self.is_main_process:
-                return None
-            if cached is None:
-                raise EvaluationError("rank zero generated cache state is inconsistent")
-            feature_values = cached
-        else:
-            local_start, local_end = _rank_case_bounds(
-                len(cases),
-                self.evaluation.batch_size,
-                rank=self.rank,
-                world_size=self.world_size,
-            )
-            local_cases = cases[local_start:local_end]
-            groups: dict[tuple[int, int], list[PromptCase]] = {}
-            for case in local_cases:
-                groups.setdefault((case.height, case.width), []).append(case)
-            generated_features: list[ImageFeatureBatch] = []
-            local_feature_values: ImageFeatureBatch | None = None
-            local_error: Exception | None = None
-            was_training = self.composite.training
-            self.composite.eval()
-            try:
-                completed = 0
-                for group in groups.values():
-                    for start in range(0, len(group), self.evaluation.batch_size):
-                        batch_cases = tuple(
-                            group[start : start + self.evaluation.batch_size]
-                        )
-                        images = _generate(
-                            batch_cases,
-                            config=self.config,
-                            evaluation=self.evaluation,
-                            composite=self.composite,
-                            qwen=self.qwen,
-                            vae=self.vae,
-                            device=self.device,
-                            growth_alpha=self.growth_alpha,
-                        )
-                        generated_features.append(self._models().extract(images))
-                        completed += len(batch_cases)
-                        print(
-                            f"[eval] rank={self.rank} 已处理 "
-                            f"{completed}/{len(local_cases)}",
-                            flush=True,
-                        )
-                local_feature_values = ImageFeatureBatch.concatenate(
-                    tuple(generated_features)
-                )
-                if local_feature_values.count != len(local_cases):
-                    raise EvaluationError("generated feature count is invalid")
-            except Exception as error:  # noqa: BLE001 - synchronize rank failures
-                local_error = error
-            finally:
-                self.composite.train(was_training)
-
-            failure_flags = self._gather(
-                torch.tensor(
-                    [int(local_error is not None)],
-                    dtype=torch.int64,
-                    device=self.device,
-                )
-            )
-            if bool(failure_flags.any().item()):
-                if local_error is not None:
-                    raise local_error
-                raise EvaluationError("evaluation generation failed on another rank")
-            if local_feature_values is None:
-                raise RuntimeError("local generated features are unavailable")
-
-            rank_bounds = tuple(
-                _rank_case_bounds(
-                    len(cases),
-                    self.evaluation.batch_size,
-                    rank=process_index,
-                    world_size=self.world_size,
-                )
-                for process_index in range(self.world_size)
-            )
-            rank_counts = tuple(end - start for start, end in rank_bounds)
-            max_rank_count = max(rank_counts)
-            padded_inception = functional.pad(
-                local_feature_values.inception_features,
-                (0, 0, 0, max_rank_count - len(local_cases)),
-            )
-            padded_clip = functional.pad(
-                local_feature_values.clip_features,
-                (0, 0, 0, max_rank_count - len(local_cases)),
-            )
-            padded_logits = functional.pad(
-                local_feature_values.inception_logits,
-                (0, 0, 0, max_rank_count - len(local_cases)),
-            )
-            gathered_inception = self._gather(padded_inception)
-            gathered_clip = self._gather(padded_clip)
-            gathered_logits = self._gather(padded_logits)
-            if not self.is_main_process:
-                return None
-            inception_chunks = gathered_inception.reshape(
-                self.world_size, max_rank_count, INCEPTION_FEATURE_DIM
-            )
-            clip_chunks = gathered_clip.reshape(
-                self.world_size, max_rank_count, CLIP_EMBEDDING_DIM
-            )
-            logit_chunks = gathered_logits.reshape(
-                self.world_size, max_rank_count, INCEPTION_LOGIT_DIM
-            )
-            feature_values = ImageFeatureBatch(
-                torch.cat(
-                    tuple(
-                        inception_chunks[index, :count]
-                        for index, count in enumerate(rank_counts)
-                    )
-                ),
-                torch.cat(
-                    tuple(
-                        clip_chunks[index, :count]
-                        for index, count in enumerate(rank_counts)
-                    )
-                ),
-                torch.cat(
-                    tuple(
-                        logit_chunks[index, :count]
-                        for index, count in enumerate(rank_counts)
-                    )
-                ),
-            )
-            if feature_values.count != self.evaluation.sample_count:
-                raise EvaluationError("gathered generated feature count differs")
-            if fingerprint is not None:
-                self._save_generated_cache(
-                    update,
-                    fingerprint=fingerprint,
-                    prompt_sha256=prompt_sha256,
-                    features=feature_values,
-                )
         real = self._real()
         generated = FeatureStats.from_features(
-            feature_values.inception_features,
+            features.inception_features,
             device=self.device,
         )
         real_stats = FeatureStats.from_features(
             real.inception_features,
             device=self.device,
         )
-        probability_values = feature_values.inception_logits.softmax(dim=1)
+        probability_values = features.inception_logits.softmax(dim=1)
         score = inception_score(
             probability_values,
             splits=self.evaluation.is_splits,
@@ -842,7 +710,7 @@ class TrainingEvaluator:
         fid = frechet_inception_distance(generated, real_stats, device=self.device)
         kid_seed = ((self.config.run.seed << 32) ^ update) % (2**63)
         kid = kernel_inception_distance(
-            feature_values.inception_features,
+            features.inception_features,
             real.inception_features,
             subsets=self.evaluation.kid_subsets,
             subset_size=self.evaluation.kid_subset_size,
@@ -850,7 +718,7 @@ class TrainingEvaluator:
             device=self.device,
         )
         cmmd = clip_maximum_mean_discrepancy(
-            feature_values.clip_features,
+            features.clip_features,
             real.clip_features,
             device=self.device,
         )
@@ -893,6 +761,215 @@ class TrainingEvaluator:
             real.count,
             result_path,
         )
+
+    def evaluate(self, update: int) -> EvaluationResult | None:
+        if not self.due(update):
+            raise ValueError("evaluation update is not due")
+        print(
+            f"[eval] update={update} rank={self.rank}/{self.world_size} "
+            "开始计算 FID/IS/KID/CMMD",
+            flush=True,
+        )
+        self.progress.run_all(
+            f"evaluation/update-{update}/initialize-feature-models",
+            self._models,
+        )
+        prompt_path = self.root / self.evaluation.prompt_path
+        prompt_sha256 = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
+        cases = _stage_cases(
+            prompt_path,
+            self.evaluation.sample_count,
+            resolution=self.config.stage.resolution,
+        )
+        fingerprint = self._checkpoint_fingerprint(update)
+        cached = self.progress.run_on_rank(
+            f"evaluation/update-{update}/load-generated-cache",
+            0,
+            lambda: (
+                self._load_generated_cache(
+                    update,
+                    fingerprint=fingerprint,
+                    prompt_sha256=prompt_sha256,
+                )
+                if fingerprint is not None
+                else None
+            ),
+        )
+        cache_flags = self._gather(
+            torch.tensor(
+                [int(cached is not None)],
+                dtype=torch.int64,
+                device=self.device,
+            )
+        )
+        if cache_flags.shape != (self.world_size,):
+            raise EvaluationError("generated cache flags have an invalid shape")
+        if self.world_size > 1 and bool(cache_flags[1:].any().item()):
+            raise EvaluationError("only rank zero may own generated cache state")
+        cache_hit = bool(cache_flags[0].item())
+        feature_values: ImageFeatureBatch | None = None
+        if cache_hit:
+            if self.is_main_process:
+                if cached is None:
+                    raise EvaluationError(
+                        "rank zero generated cache state is inconsistent"
+                    )
+                feature_values = cached
+        else:
+            local_start, local_end = _rank_case_bounds(
+                len(cases),
+                self.evaluation.batch_size,
+                rank=self.rank,
+                world_size=self.world_size,
+            )
+            local_cases = cases[local_start:local_end]
+
+            def generate_local_features() -> ImageFeatureBatch:
+                groups: dict[tuple[int, int], list[PromptCase]] = {}
+                for case in local_cases:
+                    groups.setdefault((case.height, case.width), []).append(case)
+                generated_features: list[ImageFeatureBatch] = []
+                was_training = self.composite.training
+                self.composite.eval()
+                try:
+                    completed = 0
+                    for group in groups.values():
+                        for start in range(
+                            0,
+                            len(group),
+                            self.evaluation.batch_size,
+                        ):
+                            batch_cases = tuple(
+                                group[start : start + self.evaluation.batch_size]
+                            )
+                            images = _generate(
+                                batch_cases,
+                                config=self.config,
+                                evaluation=self.evaluation,
+                                composite=self.composite,
+                                qwen=self.qwen,
+                                vae=self.vae,
+                                device=self.device,
+                                growth_alpha=self.growth_alpha,
+                            )
+                            generated_features.append(
+                                self._models().extract(images)
+                            )
+                            completed += len(batch_cases)
+                            print(
+                                f"[eval] rank={self.rank} 已处理 "
+                                f"{completed}/{len(local_cases)}",
+                                flush=True,
+                            )
+                finally:
+                    self.composite.train(was_training)
+                result = ImageFeatureBatch.concatenate(
+                    tuple(generated_features)
+                )
+                if result.count != len(local_cases):
+                    raise EvaluationError(
+                        "local generated feature count is invalid"
+                    )
+                return result
+
+            local_feature_values = self.progress.run_all(
+                f"evaluation/update-{update}/generate-local-features",
+                generate_local_features,
+            )
+            rank_bounds = tuple(
+                _rank_case_bounds(
+                    len(cases),
+                    self.evaluation.batch_size,
+                    rank=process_index,
+                    world_size=self.world_size,
+                )
+                for process_index in range(self.world_size)
+            )
+            rank_counts = tuple(end - start for start, end in rank_bounds)
+            max_rank_count = max(rank_counts)
+            padded_inception = functional.pad(
+                local_feature_values.inception_features,
+                (0, 0, 0, max_rank_count - len(local_cases)),
+            )
+            padded_clip = functional.pad(
+                local_feature_values.clip_features,
+                (0, 0, 0, max_rank_count - len(local_cases)),
+            )
+            padded_logits = functional.pad(
+                local_feature_values.inception_logits,
+                (0, 0, 0, max_rank_count - len(local_cases)),
+            )
+            gathered_inception = self._gather(padded_inception)
+            gathered_clip = self._gather(padded_clip)
+            gathered_logits = self._gather(padded_logits)
+            if self.is_main_process:
+                inception_chunks = gathered_inception.reshape(
+                    self.world_size,
+                    max_rank_count,
+                    INCEPTION_FEATURE_DIM,
+                )
+                clip_chunks = gathered_clip.reshape(
+                    self.world_size,
+                    max_rank_count,
+                    CLIP_EMBEDDING_DIM,
+                )
+                logit_chunks = gathered_logits.reshape(
+                    self.world_size,
+                    max_rank_count,
+                    INCEPTION_LOGIT_DIM,
+                )
+                feature_values = ImageFeatureBatch(
+                    torch.cat(
+                        tuple(
+                            inception_chunks[index, :count]
+                            for index, count in enumerate(rank_counts)
+                        )
+                    ),
+                    torch.cat(
+                        tuple(
+                            clip_chunks[index, :count]
+                            for index, count in enumerate(rank_counts)
+                        )
+                    ),
+                    torch.cat(
+                        tuple(
+                            logit_chunks[index, :count]
+                            for index, count in enumerate(rank_counts)
+                        )
+                    ),
+                )
+                if feature_values.count != self.evaluation.sample_count:
+                    raise EvaluationError(
+                        "gathered generated feature count differs"
+                    )
+
+        def finalize_on_main() -> EvaluationResult:
+            if feature_values is None:
+                raise EvaluationError(
+                    "rank zero generated features are unavailable"
+                )
+            return self._finalize(
+                update,
+                feature_values,
+                fingerprint=fingerprint,
+                prompt_sha256=prompt_sha256,
+                save_generated_cache=not cache_hit and fingerprint is not None,
+            )
+
+        result = self.progress.run_on_rank(
+            f"evaluation/update-{update}/finalize-metrics",
+            0,
+            finalize_on_main,
+        )
+        if self.is_main_process:
+            if not isinstance(result, EvaluationResult):
+                raise EvaluationError(
+                    "rank zero evaluation result is unavailable"
+                )
+            return result
+        if result is not None:
+            raise EvaluationError("nonzero rank received an evaluation result")
+        return None
 
 
 __all__ = ["EvaluationError", "EvaluationResult", "TrainingEvaluator"]

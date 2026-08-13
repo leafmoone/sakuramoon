@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import tarfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -34,6 +35,18 @@ INCEPTION_LOGIT_DIM = 1000
 _IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 _CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+_INCEPTION_WEIGHT_FILES = (
+    (
+        "pt_inception-2015-12-05-6726825d.pth",
+        95_628_359,
+        "6726825d0af5f729cebd5821db510b11b1cfad8faad88a03f1befd49fb9129b2",
+    ),
+    (
+        "inception_v3_google-0cc3c7bd.pth",
+        108_949_747,
+        "0cc3c7bd75056d25e46cba549dc184522069b81e9787eff6df84f397bd52a5ef",
+    ),
+)
 
 
 class EvaluationFeatureError(RuntimeError):
@@ -138,10 +151,46 @@ class ValidationImageBatch:
             raise EvaluationFeatureError("validation image batch is invalid")
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise EvaluationFeatureError(
+            f"evaluation weight cannot be read: {path}"
+        ) from error
+    return digest.hexdigest()
+
+
+def require_local_inception_weights() -> tuple[Path, Path]:
+    """Return fully verified local FID/IS weights without permitting downloads."""
+
+    root = Path(torch.hub.get_dir()) / "checkpoints"
+    resolved: list[Path] = []
+    for name, expected_size, expected_sha256 in _INCEPTION_WEIGHT_FILES:
+        path = root / name
+        if not path.is_file() or path.is_symlink():
+            raise EvaluationFeatureError(
+                f"required local evaluation weight is missing: {path}"
+            )
+        if (
+            path.stat().st_size != expected_size
+            or _file_sha256(path) != expected_sha256
+        ):
+            raise EvaluationFeatureError(
+                f"local evaluation weight failed integrity verification: {path}"
+            )
+        resolved.append(path)
+    return resolved[0], resolved[1]
+
+
 class InceptionFeatureModels:
     def __init__(self, device: torch.device) -> None:
         if device.type != "cuda":
             raise ValueError("Inception evaluation requires a CUDA device")
+        require_local_inception_weights()
         self.device = device
         print(f"[eval] Inception inference device: {device}", flush=True)
         from pytorch_fid.inception import (  # pyright: ignore[reportMissingTypeStubs]
@@ -283,13 +332,13 @@ def validation_dataset_fingerprint(
     return digest.hexdigest()
 
 
-def validation_image_batches(
+def iter_validation_image_batches(
     root: Path,
     count: int,
     batch_size: int,
     *,
     output_size: int,
-) -> tuple[ValidationImageBatch, ...]:
+) -> Iterator[ValidationImageBatch]:
     if type(count) is not int or count <= 0:
         raise ValueError("validation image count must be positive")
     if type(batch_size) is not int or batch_size <= 0:
@@ -300,9 +349,9 @@ def validation_image_batches(
     if not archives:
         raise EvaluationFeatureError(f"validation tar files are absent: {root}")
 
-    batches: list[ValidationImageBatch] = []
     current_images: list[torch.Tensor] = []
     current_ids: list[str] = []
+    observed_ids: set[str] = set()
     observed = 0
     for archive in archives:
         with tarfile.open(archive, "r:*") as handle:
@@ -338,37 +387,52 @@ def validation_image_batches(
                     .clamp(0.0, 255.0)
                     .to(torch.uint8)
                 )
-                current_images.append(tensor)
-                current_ids.append(
+                sample_id = (
                     f"{archive.relative_to(root).as_posix()}::{member.name}"
                 )
+                if sample_id in observed_ids:
+                    raise EvaluationFeatureError(
+                        f"validation image selection is duplicated: {sample_id}"
+                    )
+                observed_ids.add(sample_id)
+                current_images.append(tensor)
+                current_ids.append(sample_id)
                 observed += 1
                 if len(current_images) == batch_size:
-                    batches.append(
-                        ValidationImageBatch(
-                            tuple(current_ids), torch.stack(current_images)
-                        )
+                    yield ValidationImageBatch(
+                        tuple(current_ids), torch.stack(current_images)
                     )
                     current_images = []
                     current_ids = []
             if observed >= count:
                 break
     if current_images:
-        batches.append(
-            ValidationImageBatch(tuple(current_ids), torch.stack(current_images))
-        )
+        yield ValidationImageBatch(tuple(current_ids), torch.stack(current_images))
     if observed != count:
         raise EvaluationFeatureError(
             f"validation images are incomplete: {observed}/{count}"
         )
-    flattened_ids = tuple(
-        sample_id for batch in batches for sample_id in batch.sample_ids
-    )
-    if len(flattened_ids) != count or len(set(flattened_ids)) != count:
+    if len(observed_ids) != count:
         raise EvaluationFeatureError(
             "validation image selection is incomplete or duplicated"
         )
-    return tuple(batches)
+
+
+def validation_image_batches(
+    root: Path,
+    count: int,
+    batch_size: int,
+    *,
+    output_size: int,
+) -> tuple[ValidationImageBatch, ...]:
+    return tuple(
+        iter_validation_image_batches(
+            root,
+            count,
+            batch_size,
+            output_size=output_size,
+        )
+    )
 
 
 __all__ = [
@@ -384,6 +448,8 @@ __all__ = [
     "ImageFeatureBatch",
     "InceptionFeatureModels",
     "ValidationImageBatch",
+    "iter_validation_image_batches",
+    "require_local_inception_weights",
     "validation_dataset_fingerprint",
     "validation_image_batches",
 ]

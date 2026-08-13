@@ -28,6 +28,7 @@ from sakuramoon.data.production import (
     AcceptedProductionBatchStream,
     require_accepted_production_batch_stream,
 )
+from sakuramoon.eval.features import require_local_inception_weights
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
 from sakuramoon.storage import repository_directory, repository_file_parent
 from sakuramoon.train.runtime import (
@@ -88,6 +89,7 @@ def require_static_single_gpu_preflight(
     require_local_vae(repository_root)
     if config.evaluation.enabled is True:
         require_local_clip(repository_root)
+        require_local_inception_weights()
 
 
 class _SingleGpuCheckpointPublisher(Protocol):
@@ -381,6 +383,9 @@ def build_single_gpu_preflight_checks(
     def local_assets() -> None:
         require_local_qwen(repository_root)
         require_local_vae(repository_root)
+        if loaded.config.evaluation.enabled is True:
+            require_local_clip(repository_root)
+            require_local_inception_weights()
 
     def data_service() -> None:
         if data_client.health():

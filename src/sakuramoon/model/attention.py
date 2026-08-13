@@ -161,6 +161,9 @@ def accepted_sample_indices(boundaries: AcceptedCuSeqlens) -> torch.Tensor:
     )
 
 
+@torch.compiler.disable(
+    reason="DAS flash_attn_varlen_func is an explicit PyBind eager boundary"
+)
 def fa4_varlen_attention(
     query: torch.Tensor,
     key: torch.Tensor,

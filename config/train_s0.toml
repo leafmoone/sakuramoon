@@ -3,7 +3,7 @@ extends = ["base.toml"]
 [sampling.training]
 enabled = true
 every_updates = 1000
-image_count = 5
+image_count = 12
 output_subdir = "sample"
 
 [run]
@@ -61,8 +61,8 @@ predecessor = ""
 world_size = 2
 depth = 16
 resolution = 256
-local_batch = 128
-accumulation = 2
+local_batch = 64
+accumulation = 4
 # base_lr=0.00005 at reference_batch=256 -> actual_lr=0.0001 for global_batch=512.
 global_batch = 512
 activation_checkpoint_mode = "all"
@@ -87,8 +87,11 @@ queue_capacity = 64
 enabled = true
 every_updates = 1000
 sample_count = 1000
+real_sample_count = 34849
 batch_size = 64
 is_splits = 10
+kid_subsets = 100
+kid_subset_size = 1000
 prompt_path = "data/validation-cohorts/s0-validation-50k-v1/validation-prompts.json"
 validation_shard_root = "data/validation-cohorts/s0-validation-50k-v1/shards"
 output_dir = "output_model/evaluation/s0"

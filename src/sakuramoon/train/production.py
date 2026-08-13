@@ -14,6 +14,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel
 
 from sakuramoon.checkpoint.load import (
     load_inference_artifact,
@@ -41,6 +42,7 @@ from sakuramoon.data.serialize import (
     EXPECTED_SUFFIX_TOKENS,
     FramingContract,
 )
+from sakuramoon.distributed import DistributedProgress
 from sakuramoon.encoders.mage_vae import FrozenMageVAE, load_local_mage_vae
 from sakuramoon.encoders.qwen import QwenRuntime, load_local_qwen
 from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
@@ -50,6 +52,7 @@ from sakuramoon.optim.dtk import configure_tunableop
 from sakuramoon.storage import repository_directory
 from sakuramoon.telemetry.observer import UpdateMetricContext
 from sakuramoon.telemetry.timers import PhaseTimer
+from sakuramoon.train.benchmark import BenchmarkTrace
 from sakuramoon.train.preflight import (
     ProductionSingleGpuCheckpointPublisher,
     RestoredSingleGpuCheckpoint,
@@ -61,7 +64,9 @@ from sakuramoon.train.preflight import (
 from sakuramoon.train.runtime import (
     SingleGpuBatchRuntime,
     SuccessfulTrainingObservation,
+    compile_packed_dit_blocks,
     require_checkpoint_cadence_binding,
+    require_distributed_forward_module,
     require_single_gpu_checkpoint_binding,
     require_single_gpu_checkpoint_compatibility,
     require_single_gpu_config,
@@ -604,9 +609,11 @@ class _AccelerateCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
         self,
         delegate: ProductionSingleGpuCheckpointPublisher,
         accelerator: Accelerator,
+        progress: DistributedProgress,
     ) -> None:
         self._delegate = delegate
         self._accelerator = accelerator
+        self._progress = progress
 
     def publish_update(
         self,
@@ -614,10 +621,17 @@ class _AccelerateCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
         reason: CheckpointReason,
         cadence: CheckpointCadence,
     ) -> Path:
+        stage = (
+            f"checkpoint/update-{state.successful_updates}/"
+            f"publish-{reason.value}"
+        )
+        published = self._progress.run_on_rank(
+            stage,
+            0,
+            lambda: self._delegate.publish_update(state, reason, cadence),
+        )
         value = [
-            str(self._delegate.publish_update(state, reason, cadence))
-            if self._accelerator.is_main_process
-            else ""
+            str(published) if self._accelerator.is_main_process else ""
         ]
         torch.distributed.broadcast_object_list(value, src=0)
         if not value[0]:
@@ -630,9 +644,15 @@ class _AccelerateCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
         manifest: object,
         state: RawCheckpointState,
     ) -> None:
-        if self._accelerator.is_main_process:
-            self._delegate.apply_verified_retention(checkpoint, manifest, state)  # type: ignore[arg-type]
-        self._accelerator.wait_for_everyone()
+        self._progress.run_on_rank(
+            f"checkpoint/{checkpoint.name}/retention",
+            0,
+            lambda: self._delegate.apply_verified_retention(
+                checkpoint,
+                manifest,  # type: ignore[arg-type]
+                state,
+            ),
+        )
 
 
 def _reject_sample(_reason: str) -> None:
@@ -653,8 +673,14 @@ def _run_accepted_lifecycle(
         Accelerator(
             mixed_precision="no",
             kwargs_handlers=[
-                DistributedDataParallelKwargs(find_unused_parameters=False),
-                InitProcessGroupKwargs(timeout=timedelta(minutes=30)),
+                # Artist conditioning is data-dependent: a rank whose final
+                # accumulation microbatch contains only null-style samples does
+                # not traverse the trainable StyleResampler projection path.
+                # DDP must discover those dynamic unused parameters or that rank
+                # can enter the post-update barrier while a peer still reduces
+                # the style gradient buckets.
+                DistributedDataParallelKwargs(find_unused_parameters=True),
+                InitProcessGroupKwargs(timeout=timedelta(minutes=5)),
             ],
         )
         if config.distributed.backend == "accelerate"
@@ -662,6 +688,13 @@ def _run_accepted_lifecycle(
     )
     rank = 0 if accelerator is None else accelerator.process_index
     is_main_process = accelerator is None or accelerator.is_main_process
+    world_size = 1 if accelerator is None else accelerator.num_processes
+    progress = DistributedProgress.from_default_store(
+        namespace=f"training/{config.run.run_id}",
+        rank=rank,
+        world_size=world_size,
+    )
+    benchmark_trace = BenchmarkTrace.from_environment(rank)
     if accelerator is not None and (
         accelerator.num_processes != config.distributed.world_size
         or accelerator.device.type != "cuda"
@@ -677,8 +710,7 @@ def _run_accepted_lifecycle(
             repository_directory(repository_root, config.paths.run_dir)
             / "resolved.toml"
         )
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
+    progress.synchronize("startup/resolved-config-published")
     resolved_config_path = resolved_config_path.resolve(strict=True)
     artifact_root = repository_directory(repository_root, config.paths.artifact_dir)
     device = torch.device("cuda", 0) if accelerator is None else accelerator.device
@@ -776,17 +808,35 @@ def _run_accepted_lifecycle(
         )
         torch.manual_seed(resumed_seed)  # pyright: ignore[reportUnknownMemberType]
         torch.cuda.default_generators[int(device.index or 0)].manual_seed(resumed_seed)
+    distributed_sync_module: DistributedDataParallel | None
     if accelerator is None:
         forward_module: nn.Module = module
+        distributed_sync_module = None
     else:
         prepared_module, prepared_optimizer = accelerator.prepare(
             module,
             optimizer.optimizer,
         )
         forward_module = cast(nn.Module, prepared_module)
+        distributed_sync_module = require_distributed_forward_module(
+            module,
+            forward_module,
+        )
         optimizer.optimizer = prepared_optimizer  # type: ignore[assignment]
-    # No service connection may occur before exact RAW restore and full binding.
+    if config.kernels.torch_compile_enabled:
+        compiled_blocks = compile_packed_dit_blocks(
+            module,
+            backend=config.kernels.torch_compile_backend,
+            mode=config.kernels.torch_compile_mode,
+            dynamic=config.kernels.torch_compile_dynamic,
+        )
+        if is_main_process:
+            _log(
+                "regional torch.compile 已启用: DDP 保持 eager，"
+                f"编译 {len(compiled_blocks)} 个 PackedDiTBlock，FA2 为显式 eager 边界"
+            )
     _log(f"连接数据服务: {config.data.service.socket_path}")
+    # No service connection may occur before exact RAW restore and full binding.
     service_client = DataServiceClient(
         Path(config.data.service.socket_path),
         worker_count=(
@@ -848,7 +898,11 @@ def _run_accepted_lifecycle(
         publisher = (
             base_publisher
             if accelerator is None
-            else _AccelerateCheckpointPublisher(base_publisher, accelerator)
+            else _AccelerateCheckpointPublisher(
+                base_publisher,
+                accelerator,
+                progress,
+            )
         )
         plan = build_single_gpu_preflight_checks(
             loaded,
@@ -935,7 +989,19 @@ def _run_accepted_lifecycle(
                     observation: SuccessfulTrainingObservation,
                 ) -> None:
                     update = observation.loop.update.state.successful_updates
-                    if training_sampler is not None and training_sampler.due(update):
+                    if benchmark_trace is not None:
+                        benchmark_trace.append(observation)
+                    sampling_due = (
+                        config.sampling.training.enabled
+                        and update > 0
+                        and update % config.sampling.training.every_updates == 0
+                    )
+
+                    def sample_and_publish() -> None:
+                        if training_sampler is None:
+                            raise RuntimeError(
+                                "rank zero training sampler is unavailable"
+                            )
                         with observation.phase_timer.record("sample"):
                             samples = training_sampler.sample(
                                 update, observation.microbatches
@@ -949,7 +1015,18 @@ def _run_accepted_lifecycle(
                             {"training_samples/count": len(samples.paths)},
                             successful_update=update,
                         )
-                    telemetry.observer(observation)
+
+                    if sampling_due:
+                        progress.run_on_rank(
+                            f"observer/update-{update}/training-samples",
+                            0,
+                            sample_and_publish,
+                        )
+                    progress.run_on_rank(
+                        f"observer/update-{update}/telemetry",
+                        0,
+                        lambda: telemetry.observer(observation),
+                    )
                     if evaluator is not None and evaluator.due(update):
                         if evaluation_is_splits is None:
                             raise RuntimeError("evaluation config is unavailable")
@@ -979,8 +1056,9 @@ def _run_accepted_lifecycle(
                                 },
                                 successful_update=update,
                             )
-                    if accelerator is not None:
-                        accelerator.wait_for_everyone()
+                    progress.synchronize(
+                        f"observer/update-{update}/complete"
+                    )
 
                 with telemetry:
                     _log(
@@ -1017,8 +1095,8 @@ def _run_accepted_lifecycle(
                         ),
                         no_sync=(
                             None
-                            if accelerator is None
-                            else lambda: accelerator.no_sync(forward_module)
+                            if distributed_sync_module is None
+                            else distributed_sync_module.no_sync
                         ),
                         log_updates=is_main_process,
                     )
@@ -1144,7 +1222,7 @@ def run_production_evaluation(
     accelerator = (
         Accelerator(
             mixed_precision="no",
-            kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(minutes=30))],
+            kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(minutes=5))],
         )
         if config.distributed.backend == "accelerate"
         else None
