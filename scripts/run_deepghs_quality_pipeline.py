@@ -11,8 +11,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
@@ -304,6 +305,7 @@ def _run_with_watchdog(
     *,
     heartbeat: Heartbeat,
     timeout_seconds: float,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     process = subprocess.Popen(
         tuple(command),
@@ -325,6 +327,14 @@ def _run_with_watchdog(
                     sys.stdout.buffer.write(chunk)
                     sys.stdout.buffer.flush()
                     heartbeat.ping("child_output")
+            if cancel_event is not None and cancel_event.is_set():
+                process.terminate()
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                raise OrchestrationError("child process cancelled after peer failure")
             if heartbeat.age > timeout_seconds:
                 process.terminate()
                 try:
@@ -592,24 +602,63 @@ class Pipeline:
         self.token = _load_process_environment()
         self.manifest = _load_manifest(args.manifest)
         self.transport = _transport(self.token)
-        self.classify_worker: ClassifyWorker | None = None
+        self.classify_workers: list[ClassifyWorker] = []
+        self.classify_executors: list[ThreadPoolExecutor] = []
+        self.stop_event = threading.Event()
 
-    def _worker(self) -> ClassifyWorker:
-        if self.classify_worker is None:
-            self.classify_worker = ClassifyWorker(
-                model_root=self.args.model_root,
-                batch_size=self.args.batch_size,
-                device=self.args.device,
-                timeout_seconds=self.args.no_progress_timeout,
-            )
-        return self.classify_worker
+    def _start_workers(self) -> None:
+        if self.classify_workers or self.classify_executors:
+            raise OrchestrationError("classify workers were already started")
+        try:
+            for index, device in enumerate(self.args.devices):
+                worker = ClassifyWorker(
+                    model_root=self.args.model_root,
+                    batch_size=self.args.batch_size,
+                    device=device,
+                    timeout_seconds=self.args.no_progress_timeout,
+                )
+                self.classify_workers.append(worker)
+                self.classify_executors.append(
+                    ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix=f"deepghs-classify-{index}",
+                    )
+                )
+                print(
+                    f"GPU_WORKER_READY worker={index} device={device}", flush=True
+                )
+        except BaseException:
+            self.abort()
+            raise
+
+    def _close_workers(self) -> None:
+        errors: list[BaseException] = []
+        for worker in self.classify_workers:
+            try:
+                worker.close()
+            except OrchestrationError as error:
+                errors.append(error)
+        for executor in self.classify_executors:
+            executor.shutdown(wait=True, cancel_futures=False)
+        self.classify_workers.clear()
+        self.classify_executors.clear()
+        if errors:
+            raise OrchestrationError(
+                f"{len(errors)} classify worker(s) failed during close"
+            ) from errors[0]
 
     def abort(self) -> None:
-        if self.classify_worker is not None:
-            self.classify_worker.abort()
-            self.classify_worker = None
+        self.stop_event.set()
+        for worker in self.classify_workers:
+            worker.abort()
+        for executor in self.classify_executors:
+            executor.shutdown(wait=False, cancel_futures=True)
+        self.classify_workers.clear()
+        self.classify_executors.clear()
 
-    def process(self, shard: Any, input_path: Path) -> None:
+    def _classify(
+        self, worker_index: int, shard: Any, input_path: Path
+    ) -> None:
         paths = _paths(self.args.work_root, shard.path)
         state = _read_state(paths.state, shard.path)
         stage = str(state["stage"])
@@ -624,7 +673,7 @@ class Pipeline:
         if STAGES.index(stage) < STAGES.index("classified"):
             paths.output.parent.mkdir(parents=True, exist_ok=True)
             paths.results.parent.mkdir(parents=True, exist_ok=True)
-            worker_count = self._worker().classify(
+            worker_count = self.classify_workers[worker_index].classify(
                 input_path,
                 paths.output,
                 paths.results,
@@ -645,6 +694,21 @@ class Pipeline:
             )
             stage = "classified"
 
+        if stage != "classified":
+            raise OrchestrationError(
+                f"classification task entered an invalid stage: {stage}"
+            )
+
+    def _finalize(self, shard: Any, input_path: Path) -> None:
+        paths = _paths(self.args.work_root, shard.path)
+        state = _read_state(paths.state, shard.path)
+        stage = str(state["stage"])
+        heartbeat = Heartbeat(shard.path)
+        if STAGES.index(stage) < STAGES.index("classified"):
+            raise OrchestrationError(
+                f"cannot finalize unclassified shard {shard.path}: {stage}"
+            )
+
         _require_file(paths.output, size=int(state["output_bytes"]))
         _require_file(paths.results)
         if STAGES.index(stage) < STAGES.index("verified"):
@@ -662,6 +726,7 @@ class Pipeline:
                 ),
                 heartbeat=heartbeat,
                 timeout_seconds=self.args.no_progress_timeout,
+                cancel_event=self.stop_event,
             )
             count = _count_result_records(paths.results)
             if count != state.get("samples"):
@@ -688,6 +753,7 @@ class Pipeline:
                 ),
                 heartbeat=heartbeat,
                 timeout_seconds=self.args.no_progress_timeout,
+                cancel_event=self.stop_event,
             )
             state = _transition(paths.state, state, "db_updated")
             stage = "db_updated"
@@ -707,6 +773,7 @@ class Pipeline:
                 ),
                 heartbeat=heartbeat,
                 timeout_seconds=self.args.no_progress_timeout,
+                cancel_event=self.stop_event,
             )
             state = _transition(paths.state, state, "uploaded")
             stage = "uploaded"
@@ -768,58 +835,183 @@ class Pipeline:
                 timeout_seconds=self.args.no_progress_timeout,
             )
 
-        futures: dict[int, Future[Path]] = {}
+        download_futures: dict[Future[Path], tuple[int, Any]] = {}
+        ready_downloads: dict[int, tuple[Any, Path]] = {}
+        classify_futures: dict[Future[None], tuple[int, int, Any, Path]] = {}
+        finalize_ready: dict[int, tuple[Any, Path]] = {}
+        finalize_future: Future[None] | None = None
+        finalize_index: int | None = None
+        free_workers: deque[int] = deque()
         next_index = 0
+        completed = 0
         input_root = self.args.work_root / "input"
-        with ThreadPoolExecutor(
+        download_executor = ThreadPoolExecutor(
             max_workers=self.args.download_concurrency,
             thread_name_prefix="deepghs-download",
-        ) as executor:
+        )
+        finalize_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="deepghs-finalize",
+        )
+        succeeded = False
+        try:
+            def outstanding() -> int:
+                return (
+                    len(download_futures)
+                    + len(ready_downloads)
+                    + len(classify_futures)
+                    + len(finalize_ready)
+                    + (finalize_future is not None)
+                )
 
-            def fill() -> None:
-                nonlocal next_index
+            def fill_downloads() -> None:
+                nonlocal next_index, completed
                 while (
                     next_index < len(selected)
-                    and len(futures) < self.args.download_concurrency
+                    and outstanding() < self.args.download_concurrency
                 ):
-                    shard = selected[next_index]
-                    paths = _paths(self.args.work_root, shard.path)
-                    state = _read_state(paths.state, shard.path)
-                    if state["stage"] != "complete":
-                        futures[next_index] = executor.submit(
-                            _download_one,
-                            self.transport,
-                            self.manifest,
-                            shard,
-                            paths,
-                            self.args.cache_root,
-                            input_root,
-                            Heartbeat(shard.path),
-                        )
+                    index = next_index
+                    shard = selected[index]
                     next_index += 1
-
-            fill()
-            for index, shard in enumerate(selected):
-                state = _read_state(
-                    _paths(self.args.work_root, shard.path).state,
-                    shard.path,
-                )
-                if state["stage"] == "complete":
-                    print(f"SKIP_COMPLETE shard={shard.path}", flush=True)
-                    fill()
-                    continue
-                future = futures.pop(index, None)
-                if future is None:
-                    raise OrchestrationError(
-                        f"download future is missing for {shard.path}"
+                    state = _read_state(
+                        _paths(self.args.work_root, shard.path).state,
+                        shard.path,
                     )
-                input_path = future.result()
-                fill()
-                self.process(shard, input_path)
+                    if state["stage"] == "complete":
+                        print(f"SKIP_COMPLETE shard={shard.path}", flush=True)
+                        completed += 1
+                        continue
+                    future = download_executor.submit(
+                        _download_one,
+                        self.transport,
+                        self.manifest,
+                        shard,
+                        _paths(self.args.work_root, shard.path),
+                        self.args.cache_root,
+                        input_root,
+                        Heartbeat(shard.path),
+                    )
+                    download_futures[future] = (index, shard)
 
-        if self.classify_worker is not None:
-            self.classify_worker.close()
-            self.classify_worker = None
+            fill_downloads()
+            while completed < len(selected):
+                made_progress = False
+
+                for future in tuple(download_futures):
+                    if not future.done():
+                        continue
+                    index, shard = download_futures.pop(future)
+                    ready_downloads[index] = (shard, future.result())
+                    made_progress = True
+
+                for future in tuple(classify_futures):
+                    if not future.done():
+                        continue
+                    worker_index, _index, shard, input_path = (
+                        classify_futures.pop(future)
+                    )
+                    future.result()
+                    free_workers.append(worker_index)
+                    finalize_ready[_index] = (shard, input_path)
+                    made_progress = True
+
+                if finalize_future is not None and finalize_future.done():
+                    finalize_future.result()
+                    if finalize_index is None:
+                        raise OrchestrationError(
+                            "finalize future lost its shard index"
+                        )
+                    completed += 1
+                    finalize_future = None
+                    finalize_index = None
+                    made_progress = True
+
+                for index in sorted(ready_downloads):
+                    shard, input_path = ready_downloads[index]
+                    state = _read_state(
+                        _paths(self.args.work_root, shard.path).state,
+                        shard.path,
+                    )
+                    if STAGES.index(str(state["stage"])) >= STAGES.index(
+                        "classified"
+                    ):
+                        del ready_downloads[index]
+                        finalize_ready[index] = (shard, input_path)
+                        made_progress = True
+                        continue
+                    if not self.classify_workers:
+                        self._start_workers()
+                        free_workers.extend(range(len(self.classify_workers)))
+                    if not free_workers:
+                        break
+                    worker_index = free_workers.popleft()
+                    del ready_downloads[index]
+                    future = self.classify_executors[worker_index].submit(
+                        self._classify, worker_index, shard, input_path
+                    )
+                    classify_futures[future] = (
+                        worker_index,
+                        index,
+                        shard,
+                        input_path,
+                    )
+                    print(
+                        f"CLASSIFY_DISPATCH shard={shard.path} "
+                        f"worker={worker_index} "
+                        f"device={self.args.devices[worker_index]}",
+                        flush=True,
+                    )
+                    made_progress = True
+
+                if finalize_future is None and finalize_ready:
+                    finalize_index = min(finalize_ready)
+                    shard, input_path = finalize_ready.pop(finalize_index)
+                    finalize_future = finalize_executor.submit(
+                        self._finalize, shard, input_path
+                    )
+                    print(
+                        f"FINALIZE_DISPATCH shard={shard.path}", flush=True
+                    )
+                    made_progress = True
+
+                fill_downloads()
+                if completed >= len(selected):
+                    break
+                if made_progress:
+                    continue
+                pending = [*download_futures, *classify_futures]
+                if finalize_future is not None:
+                    pending.append(finalize_future)
+                if not pending:
+                    raise OrchestrationError(
+                        "pipeline stalled without pending work"
+                    )
+                wait(pending, return_when=FIRST_COMPLETED)
+
+            if (
+                download_futures
+                or ready_downloads
+                or classify_futures
+                or finalize_ready
+                or finalize_future is not None
+            ):
+                raise OrchestrationError("pipeline finished with orphaned work")
+            if self.classify_workers:
+                self._close_workers()
+            succeeded = True
+        finally:
+            if not succeeded:
+                self.stop_event.set()
+                for future in download_futures:
+                    future.cancel()
+                for future in classify_futures:
+                    future.cancel()
+            download_executor.shutdown(
+                wait=succeeded, cancel_futures=not succeeded
+            )
+            finalize_executor.shutdown(
+                wait=True, cancel_futures=not succeeded
+            )
 
         if (
             not self.args.verify_only
@@ -863,9 +1055,11 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("/sakuramoon-runtime/cache/data"),
     )
-    run.add_argument("--device", default="cuda:0")
-    run.add_argument("--batch-size", type=int, default=16)
-    run.add_argument("--download-concurrency", type=int, default=4)
+    run.add_argument(
+        "--devices", nargs="+", default=("cuda:0", "cuda:1")
+    )
+    run.add_argument("--batch-size", type=int, default=64)
+    run.add_argument("--download-concurrency", type=int, default=8)
     run.add_argument("--no-progress-timeout", type=float, default=300.0)
     run.add_argument("--start-index", type=int, default=0)
     run.add_argument("--limit", type=int)
@@ -883,8 +1077,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "upload-one":
         return _upload_child(args.path, args.remote_path, args.expected_size)
     if (
-        args.batch_size <= 0
-        or args.download_concurrency != 4
+        args.batch_size != 64
+        or tuple(args.devices) != ("cuda:0", "cuda:1")
+        or args.download_concurrency != 8
         or args.no_progress_timeout != 300.0
         or args.start_index < 0
         or (args.limit is not None and args.limit <= 0)
