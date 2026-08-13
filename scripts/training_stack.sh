@@ -13,6 +13,7 @@ CONFIG_ROOT="${CONFIG_ROOT:-${PROJECT_ROOT}/config}"
 VENV_ROOT="${VENV_ROOT:-${PROJECT_ROOT}/.venv}"
 PYTHON_BIN="${PYTHON_BIN:-${VENV_ROOT}/bin/python}"
 ACCELERATE_BIN="${ACCELERATE_BIN:-${VENV_ROOT}/bin/accelerate}"
+MANAGEMENT_PYTHON="${MANAGEMENT_PYTHON:-/usr/bin/python3}"
 WORKLOAD_ENV_FILE="${WORKLOAD_ENV_FILE:-${PROJECT_ROOT}/.env.training-stack.nul}"
 PUBLISH_STATE_ROOT="${PUBLISH_STATE_ROOT:-${RUNTIME_ROOT}/.sm-train-state-publisher}"
 PUBLISH_LAST_PUBLISHED="${PUBLISH_LAST_PUBLISHED:-/root/private_data/.sm-train-state-publisher/last-published-s0.txt}"
@@ -87,6 +88,8 @@ prepare_paths() {
     || die "training config is missing: ${CONFIG_ROOT}/${CONFIG_NAME}"
   [[ -x "${PYTHON_BIN}" ]] || die "Python is not executable: ${PYTHON_BIN}"
   [[ -x "${ACCELERATE_BIN}" ]] || die "Accelerate is not executable: ${ACCELERATE_BIN}"
+  [[ -x "${MANAGEMENT_PYTHON}" ]] \
+    || die "management Python is not executable: ${MANAGEMENT_PYTHON}"
   [[ -r "${PROJECT_ROOT}/scripts/publish_train_state.sh" ]] \
     || die "checkpoint publisher is not readable"
   mkdir -p -- "${LOG_ROOT}" "${RUN_ROOT}" "${PUBLISH_STATE_ROOT}"
@@ -138,20 +141,64 @@ load_config_contract() {
   local config_output
   local -a values
   config_output="$(
-    "${PYTHON_BIN}" - "${CONFIG_NAME}" "${CONFIG_ROOT}" "${RUNTIME_ROOT}" <<'PY'
+    "${MANAGEMENT_PYTHON}" - "${CONFIG_NAME}" "${CONFIG_ROOT}" "${RUNTIME_ROOT}" <<'PY'
 from pathlib import Path
+from collections.abc import Mapping
+import copy
 import sys
+import tomllib
 
-from sakuramoon.config import load_config
+
+def merge(base: Mapping[str, object], overlay: Mapping[str, object]) -> dict[str, object]:
+    result = copy.deepcopy(dict(base))
+    for key, value in overlay.items():
+        existing = result.get(key)
+        if isinstance(existing, Mapping) and isinstance(value, Mapping):
+            result[key] = merge(existing, value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def load(path: Path, root: Path, active: set[Path]) -> dict[str, object]:
+    resolved = path.resolve(strict=True)
+    resolved.relative_to(root)
+    if resolved in active:
+        raise RuntimeError(f"config extends cycle: {resolved}")
+    active.add(resolved)
+    try:
+        with resolved.open("rb") as stream:
+            payload = tomllib.load(stream)
+        includes = payload.pop("extends", [])
+        if not isinstance(includes, list) or not all(isinstance(item, str) for item in includes):
+            raise TypeError("extends must be a string array")
+        merged: dict[str, object] = {}
+        for include in includes:
+            include_path = Path(include)
+            if include_path.is_absolute() or ".." in include_path.parts:
+                raise ValueError(f"invalid extends path: {include}")
+            merged = merge(merged, load(resolved.parent / include_path, root, active))
+        return merge(merged, payload)
+    finally:
+        active.remove(resolved)
 
 config_name, config_root, runtime_root = sys.argv[1:]
-config = load_config(Path(config_name), config_root=Path(config_root)).config
-checkpoint = Path(config.paths.checkpoint_dir)
+root = Path(config_root).resolve(strict=True)
+config = load(root / config_name, root, set())
+paths = config["paths"]
+data = config["data"]
+distributed = config["distributed"]
+if not isinstance(paths, Mapping) or not isinstance(data, Mapping) or not isinstance(distributed, Mapping):
+    raise TypeError("required config tables are missing")
+service = data["service"]
+if not isinstance(service, Mapping):
+    raise TypeError("data.service table is missing")
+checkpoint = Path(str(paths["checkpoint_dir"]))
 if not checkpoint.is_absolute():
     checkpoint = Path(runtime_root) / checkpoint
 print(checkpoint)
-print(config.data.service.socket_path)
-print(config.distributed.world_size)
+print(service["socket_path"])
+print(distributed["world_size"])
 PY
   )" || die "failed to load the training config contract"
   mapfile -t values <<<"${config_output}"
@@ -622,7 +669,6 @@ main() {
 
   case "${action}" in
     status)
-      load_workload_environment
       load_config_contract
       show_status
       return 0
@@ -637,10 +683,15 @@ main() {
       ;;
   esac
 
-  load_workload_environment
   load_config_contract
   validate_integer START_TIMEOUT_SECONDS "${START_TIMEOUT_SECONDS}"
   validate_integer STOP_TIMEOUT_SECONDS "${STOP_TIMEOUT_SECONDS}"
+
+  case "${action}" in
+    start|restart|restart-train|validate)
+      load_workload_environment
+      ;;
+  esac
 
   case "${action}" in
     start)
