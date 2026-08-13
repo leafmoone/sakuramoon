@@ -331,7 +331,7 @@ start_detached() {
   fi
 
   : >"${log_file}"
-  nohup "$@" >>"${log_file}" 2>&1 </dev/null &
+  nohup "$@" >>"${log_file}" 2>&1 </dev/null 9>&- &
   RESOLVED_PID=$!
   write_pid_file "$(pid_file_for "${component}")" "${RESOLVED_PID}"
   sleep 2
@@ -427,7 +427,7 @@ start_publisher() {
       LAST_PUBLISHED="${PUBLISH_LAST_PUBLISHED}" \
     MS_HUB_BIN="${VENV_ROOT}/bin/ms-hub" \
     /usr/bin/bash "${PROJECT_ROOT}/scripts/publish_train_state.sh" loop \
-    >/dev/null 2>&1 </dev/null &
+    >/dev/null 2>&1 </dev/null 9>&- &
   RESOLVED_PID=$!
   write_pid_file "${PUBLISH_PID_FILE}" "${RESOLVED_PID}"
   sleep 2
@@ -673,7 +673,13 @@ main() {
       show_status
       return 0
       ;;
-    start|restart|restart-train|stop|adopt|validate)
+    validate)
+      load_config_contract
+      load_workload_environment
+      validate_stack
+      return 0
+      ;;
+    start|restart|restart-train|stop|adopt)
       exec 9>"${STACK_LOCK_FILE}"
       flock -n 9 || die "another training-stack operation holds ${STACK_LOCK_FILE}"
       ;;
@@ -688,7 +694,7 @@ main() {
   validate_integer STOP_TIMEOUT_SECONDS "${STOP_TIMEOUT_SECONDS}"
 
   case "${action}" in
-    start|restart|restart-train|validate)
+    start|restart|restart-train)
       load_workload_environment
       ;;
   esac
@@ -718,9 +724,6 @@ main() {
     adopt)
       adopt_stack
       show_status
-      ;;
-    validate)
-      validate_stack
       ;;
   esac
 }
