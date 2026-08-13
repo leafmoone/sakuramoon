@@ -54,6 +54,10 @@ max_updates = 5000
 random_new_slots = true
 copy_old_slots = false
 
+[kernels]
+torch_compile_enabled = true
+torch_compile_dynamic = true
+
 [stage]
 name = "S0"
 enabled = true
@@ -61,11 +65,11 @@ predecessor = ""
 world_size = 2
 depth = 16
 resolution = 256
-local_batch = 64
-accumulation = 4
-# base_lr=0.00005 at reference_batch=256 -> actual_lr=0.0001 for global_batch=512.
-global_batch = 512
-activation_checkpoint_mode = "all"
+local_batch = 42
+accumulation = 10
+# base_lr=0.00005 at reference_batch=256 -> actual_lr=0.0001640625 for global_batch=840.
+global_batch = 840
+activation_checkpoint_mode = "none"
 planned_updates = 100000
 manual_finalize = true
 automatic_transition = false
