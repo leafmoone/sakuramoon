@@ -7,7 +7,7 @@ image_count = 12
 output_subdir = "sample"
 
 [run]
-run_id = "s0-production-compile-none-bs42-acc10-20260813"
+run_id = "s0-production-compile-none-bs40-acc10-20260813"
 stage = "S0"
 seed = 44
 
@@ -65,10 +65,10 @@ predecessor = ""
 world_size = 2
 depth = 16
 resolution = 256
-local_batch = 42
+local_batch = 40
 accumulation = 10
-# base_lr=0.00005 at reference_batch=256 -> actual_lr=0.0001640625 for global_batch=840.
-global_batch = 840
+# base_lr=0.00005 at reference_batch=256 -> actual_lr=0.00015625 for global_batch=800.
+global_batch = 800
 activation_checkpoint_mode = "none"
 planned_updates = 100000
 manual_finalize = true
