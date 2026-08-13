@@ -1,0 +1,20 @@
+extends = ["train_s0_perf_compile_all_bs64_acc4_20260813.toml"]
+
+[run]
+run_id = "s0-perf-compile-none-bs47-acc6-20260813"
+
+[paths]
+run_dir = "runs/perf-compile-none-bs47-acc6-20260813"
+artifact_dir = "artifacts/perf-compile-none-bs47-acc6-20260813"
+
+[stage]
+local_batch = 47
+accumulation = 6
+global_batch = 564
+activation_checkpoint_mode = "none"
+
+[logging]
+local_jsonl_path = "artifacts/perf-compile-none-bs47-acc6-20260813/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/perf-compile-none-bs47-acc6-20260813/wandb-retry.jsonl"
