@@ -103,8 +103,8 @@ def test_jlt_learning_rate_scales_with_effective_global_batch(
 
     assert loaded.config.optimizer.base_lr == 5e-5
     assert loaded.config.optimizer.reference_batch == 256
-    assert loaded.config.stage.global_batch == 512
-    assert loaded.config.scaled_learning_rate() == 1e-4
+    assert loaded.config.stage.global_batch == 840
+    assert loaded.config.scaled_learning_rate() == 0.0001640625
 
 
 @pytest.mark.parametrize(

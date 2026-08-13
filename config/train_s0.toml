@@ -7,7 +7,7 @@ image_count = 12
 output_subdir = "sample"
 
 [run]
-run_id = "s0-production-bs64-acc4-20260804-r3"
+run_id = "s0-production-compile-none-bs42-acc10-20260813"
 stage = "S0"
 seed = 44
 
