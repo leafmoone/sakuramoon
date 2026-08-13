@@ -1,0 +1,17 @@
+extends = ["train_s0_perf_compile_alternating_bs48_acc6_20260813.toml"]
+
+[run]
+run_id = "s0-perf-compile-none-bs48-acc6-20260813"
+
+[paths]
+run_dir = "runs/perf-compile-none-bs48-acc6-20260813"
+artifact_dir = "artifacts/perf-compile-none-bs48-acc6-20260813"
+
+[stage]
+activation_checkpoint_mode = "none"
+
+[logging]
+local_jsonl_path = "artifacts/perf-compile-none-bs48-acc6-20260813/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/perf-compile-none-bs48-acc6-20260813/wandb-retry.jsonl"
