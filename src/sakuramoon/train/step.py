@@ -10,9 +10,9 @@ from typing import Protocol
 import torch
 from torch import nn
 
-from sakuramoon.conditioning.style_resampler import (
-    StyleConditionEncoder,
-    StyleConditioningOutput,
+from sakuramoon.conditioning.condition_tokens import (
+    ConditionTokenEncoder,
+    ConditionTokenOutput,
 )
 from sakuramoon.conditioning.text_mixer import TextConditioner, TextConditioningOutput
 from sakuramoon.model.dit import DenseDiT, PackedDiT
@@ -60,42 +60,42 @@ class TrainableComposite(nn.Module):
         *,
         dit: DenseDiT | PackedDiT,
         text: TextConditioner,
-        style: StyleConditionEncoder,
+        condition_tokens: ConditionTokenEncoder,
     ) -> None:
         super().__init__()
         self.dit = dit
         self.text = text
-        self.style = style
+        self.condition_tokens = condition_tokens
 
     def forward_conditioning(
         self, inputs: TrainableCompositeInputs
-    ) -> tuple[TextConditioningOutput, StyleConditioningOutput]:
+    ) -> tuple[TextConditioningOutput, ConditionTokenOutput]:
         text = self.text(
             inputs.qwen_states,
             inputs.main_token_indices,
             inputs.main_mask,
         )
-        style = self.style(
+        condition = self.condition_tokens(
             inputs.qwen_states,
             inputs.condition_token_indices,
             inputs.condition_mask,
             inputs.use_null_condition,
             inputs.active_condition_sample_indices,
         )
-        return text, style
+        return text, condition
 
     def forward_dit(
         self,
         inputs: TrainableCompositeInputs,
-        conditioning: tuple[TextConditioningOutput, StyleConditioningOutput],
+        conditioning: tuple[TextConditioningOutput, ConditionTokenOutput],
     ) -> tuple[torch.Tensor, ...]:
-        text, style = conditioning
+        text, condition = conditioning
         if type(self.dit) is DenseDiT:
             dense_predictions = self.dit(
                 torch.stack(inputs.latents),
                 text.tokens,
                 text.mask,
-                style.tokens,
+                condition.tokens,
                 inputs.timestep,
                 inputs.size_scale,
                 inputs.aspect,
@@ -108,7 +108,7 @@ class TrainableComposite(nn.Module):
             text.tokens,
             text.mask,
             inputs.main_token_lengths,
-            style.tokens,
+            condition.tokens,
             inputs.timestep,
             inputs.size_scale,
             inputs.aspect,

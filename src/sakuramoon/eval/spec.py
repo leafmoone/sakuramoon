@@ -11,8 +11,9 @@ from sakuramoon.data.caption import (
     TAG_SOURCE_ORDER,
     CaptionPlan,
     CaptionTag,
-    StyleCondition,
-    StyleConditionKind,
+    ConditionRequest,
+    ConditionRole,
+    ConditionSource,
     Tag,
     TagSource,
     empty_caption_dropout_hits,
@@ -49,14 +50,15 @@ def _caption_plan_mapping(plan: CaptionPlan) -> dict[str, object]:
             }
             for item in plan.tags
         ],
-        "style_condition": (
+        "condition": (
             None
-            if plan.style_condition is None
+            if plan.condition is None
             else {
-                "kind": plan.style_condition.kind,
+                "role": plan.condition.role,
+                "source": plan.condition.source,
                 "tags": [
                     {"canonical": tag.canonical, "text": tag.text}
-                    for tag in plan.style_condition.tags
+                    for tag in plan.condition.tags
                 ],
             }
         ),
@@ -101,20 +103,24 @@ def _parse_ordered_tags(value: object) -> tuple[CaptionTag, ...]:
     return tuple(result)
 
 
-def _parse_style_condition(value: object) -> StyleCondition | None:
+def _parse_condition(value: object) -> ConditionRequest | None:
     if value is None:
         return None
     if type(value) is not dict:
-        raise ValueError("prompt style condition must be an object or null")
+        raise ValueError("prompt condition must be an object or null")
     document = cast(dict[str, object], value)
-    if set(document) != {"kind", "tags"}:
-        raise ValueError("prompt style condition fields are invalid")
-    kind = document["kind"]
-    if kind not in {"artist", "character"}:
-        raise ValueError("prompt style condition kind is invalid")
-    return StyleCondition(
-        kind=cast(StyleConditionKind, kind),
-        tags=_parse_caption_tags(document["tags"], "style_condition.tags"),
+    if set(document) != {"source", "role", "tags"}:
+        raise ValueError("prompt condition fields are invalid")
+    source = document["source"]
+    role = document["role"]
+    if source not in {"artist_text", "character_text"}:
+        raise ValueError("prompt condition source is invalid")
+    if role not in {"style", "identity"}:
+        raise ValueError("prompt condition role is invalid")
+    return ConditionRequest(
+        source=cast(ConditionSource, source),
+        role=cast(ConditionRole, role),
+        tags=_parse_caption_tags(document["tags"], "condition.tags"),
     )
 
 
@@ -124,7 +130,7 @@ def _parse_caption_plan(value: object) -> CaptionPlan | None:
     if type(value) is not dict:
         raise ValueError("prompt caption plan must be an object or null")
     document = cast(dict[str, object], value)
-    if set(document) != {"tags", "style_condition", "nl_text", "selected_nl"}:
+    if set(document) != {"tags", "condition", "nl_text", "selected_nl"}:
         raise ValueError("prompt caption plan fields are invalid")
     nl_text = document["nl_text"]
     selected_nl = document["selected_nl"]
@@ -140,7 +146,7 @@ def _parse_caption_plan(value: object) -> CaptionPlan | None:
         raise ValueError("prompt caption NL branch is invalid")
     return CaptionPlan(
         tags=_parse_ordered_tags(document["tags"]),
-        style_condition=_parse_style_condition(document["style_condition"]),
+        condition=_parse_condition(document["condition"]),
         nl_text=nl_text,
         selected_nl=selected_nl,
         all_condition_dropped=False,
@@ -196,13 +202,13 @@ class PromptCase:
                 type(plan.tags) is tuple
                 and all(type(tag) is CaptionTag for tag in plan.tags)
                 and (
-                    plan.style_condition is None
-                    or type(plan.style_condition) is StyleCondition
+                    plan.condition is None
+                    or type(plan.condition) is ConditionRequest
                 )
             )
             has_content = bool(
                 plan.tags
-                or plan.style_condition is not None
+                or plan.condition is not None
                 or plan.nl_text is not None
             )
             if (
@@ -253,7 +259,7 @@ class PromptManifest:
             json.dumps(
                 {
                     "cases": [case.as_mapping() for case in self.cases],
-                    "schema_version": 3,
+                    "schema_version": 4,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -274,7 +280,7 @@ class PromptManifest:
         document = cast(dict[str, object], parsed)
         if set(document) != {"cases", "schema_version"}:
             raise ValueError("prompt manifest root fields are invalid")
-        if document["schema_version"] != 3:
+        if document["schema_version"] != 4:
             raise ValueError("prompt manifest schema version is invalid")
         raw_cases = document["cases"]
         if type(raw_cases) is not list:

@@ -1,4 +1,4 @@
-"""Fixed Qwen framing with structured main and style-condition indices."""
+"""Fixed Qwen framing with structured main and condition-token indices."""
 
 from __future__ import annotations
 
@@ -10,8 +10,9 @@ from sakuramoon.data.caption import (
     CaptionDropoutHits,
     CaptionPlan,
     CaptionTag,
-    StyleCondition,
-    StyleConditionKind,
+    ConditionRequest,
+    ConditionRole,
+    ConditionSource,
     Tag,
 )
 
@@ -26,6 +27,10 @@ CONDITION_BUCKETS = (64, 128, 192, 256, 320, 384, 448, 512)
 TEXT_CONDITION_MAX = 512
 EXPECTED_PREFIX_TOKENS = 34
 EXPECTED_SUFFIX_TOKENS = 5
+CONDITION_ROLE_PREFIXES: dict[ConditionRole, str] = {
+    "style": "style reference: ",
+    "identity": "character identity: ",
+}
 
 
 class CaptionSerializationError(ValueError):
@@ -67,7 +72,8 @@ class SerializedCaption:
     condition_token_indices: tuple[int, ...]
     condition_mask: tuple[bool, ...]
     use_null_condition: bool
-    condition_kind: StyleConditionKind | None
+    condition_source: ConditionSource | None
+    condition_role: ConditionRole | None
     all_condition_dropped: bool
     dropout_hits: CaptionDropoutHits
     selected_nl: str | None
@@ -99,17 +105,17 @@ def _body(tags: list[CaptionTag], nl_text: str | None) -> str:
     return tag_text or (nl_text or "")
 
 
-def _condition_text(tags: list[Tag]) -> str:
-    return ", ".join(_display_text(tag) for tag in tags)
+def _condition_text(condition: ConditionRequest | None) -> str:
+    if condition is None:
+        return ""
+    prefix = CONDITION_ROLE_PREFIXES[condition.role]
+    return prefix + ", ".join(_display_text(tag) for tag in condition.tags)
 
 
 def render_caption_segments(plan: CaptionPlan) -> tuple[str, str]:
-    """Render the governed main and style-condition segments."""
+    """Render the governed main and role-explicit condition segments."""
 
-    condition_tags = (
-        [] if plan.style_condition is None else list(plan.style_condition.tags)
-    )
-    return _body(list(plan.tags), plan.nl_text), _condition_text(condition_tags)
+    return _body(list(plan.tags), plan.nl_text), _condition_text(plan.condition)
 
 
 def _bucket_for(tokens: int) -> int:
@@ -135,12 +141,9 @@ def serialize_caption(
         raise CaptionSerializationError("tokenizer framing token counts changed")
 
     tags = list(plan.tags)
-    condition_kind = (
-        None if plan.style_condition is None else plan.style_condition.kind
-    )
-    condition_tags = (
-        [] if plan.style_condition is None else list(plan.style_condition.tags)
-    )
+    condition_source = None if plan.condition is None else plan.condition.source
+    condition_role = None if plan.condition is None else plan.condition.role
+    condition_tags = [] if plan.condition is None else list(plan.condition.tags)
     nl_text = plan.nl_text
     truncated = False
 
@@ -148,9 +151,15 @@ def serialize_caption(
         return dataclasses.replace(
             plan,
             tags=tuple(tags),
-            style_condition=(
-                StyleCondition(kind=condition_kind, tags=tuple(condition_tags))
-                if condition_kind is not None and condition_tags
+            condition=(
+                ConditionRequest(
+                    source=condition_source,
+                    role=condition_role,
+                    tags=tuple(condition_tags),
+                )
+                if condition_source is not None
+                and condition_role is not None
+                and condition_tags
                 else None
             ),
             nl_text=nl_text,
@@ -158,14 +167,19 @@ def serialize_caption(
         )
 
     if condition_tags:
-        if condition_kind is None:
-            raise CaptionSerializationError("style condition kind is missing")
+        if condition_source is None or condition_role is None:
+            raise CaptionSerializationError("condition source or role is missing")
         fitting_tags: list[Tag] = []
         for tag in condition_tags:
-            individual_ids = _encode(tokenizer, _display_text(tag))
+            individual = ConditionRequest(
+                source=condition_source,
+                role=condition_role,
+                tags=(tag,),
+            )
+            individual_ids = _encode(tokenizer, _condition_text(individual))
             if not individual_ids:
                 raise CaptionSerializationError(
-                    "tokenizer produced no style-condition tokens"
+                    "tokenizer produced no condition tokens"
                 )
             if len(suffix_ids) + len(individual_ids) <= TEXT_CONDITION_MAX:
                 fitting_tags.append(tag)
@@ -173,7 +187,7 @@ def serialize_caption(
                 truncated = True
         if not fitting_tags:
             raise CaptionSerializationError(
-                "style-condition segment cannot fit without splitting a tag"
+                "condition segment cannot fit without splitting a tag"
             )
         condition_tags = fitting_tags
 
@@ -189,7 +203,7 @@ def serialize_caption(
         condition_ids = _encode(tokenizer, condition_text)
     if len(suffix_ids) + len(condition_ids) > TEXT_CONDITION_MAX:
         raise CaptionSerializationError(
-            "style-condition segment cannot fit without splitting a tag"
+            "condition segment cannot fit without splitting a tag"
         )
 
     while True:
@@ -229,10 +243,11 @@ def serialize_caption(
         condition_token_indices=condition_indices,
         condition_mask=(True,) * len(condition_indices),
         use_null_condition=not bool(condition_indices),
-        condition_kind=(
-            None
-            if resolved_plan.style_condition is None
-            else resolved_plan.style_condition.kind
+        condition_source=(
+            None if resolved_plan.condition is None else resolved_plan.condition.source
+        ),
+        condition_role=(
+            None if resolved_plan.condition is None else resolved_plan.condition.role
         ),
         all_condition_dropped=resolved_plan.all_condition_dropped,
         dropout_hits=resolved_plan.dropout_hits,

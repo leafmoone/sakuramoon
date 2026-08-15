@@ -13,9 +13,9 @@ from sakuramoon.data.caption import (
     CaptionFields,
     CaptionPlan,
     CaptionTag,
+    ConditionRequest,
     NlCandidates,
     NlDropoutProbabilities,
-    StyleCondition,
     Tag,
     empty_caption_dropout_hits,
 )
@@ -41,12 +41,12 @@ def build_caption_plan(
     probabilities: CaptionDropoutProbabilities,
     *,
     seed: int,
-    style_condition_mode: str = "artist",
+    condition_mode: str = "artist",
 ) -> CaptionPlan:
     return _build_caption_plan(
         fields,
         probabilities,
-        style_condition_mode=style_condition_mode,  # pyright: ignore[reportArgumentType]
+        condition_mode=condition_mode,  # pyright: ignore[reportArgumentType]
         seed=seed,
     )
 
@@ -111,7 +111,7 @@ def test_all_condition_probability_is_fixed_and_produces_only_global_hit() -> No
 
     assert plan.all_condition_dropped is True
     assert plan.tags == ()
-    assert plan.style_condition is None
+    assert plan.condition is None
     assert plan.nl_text is None
     assert tuple(plan.dropout_hits.as_mapping()) == CAPTION_DROPOUT_KEYS
     assert plan.dropout_hits.as_mapping() == {
@@ -163,7 +163,7 @@ def test_unified_tag_probability_applies_to_every_non_nl_field() -> None:
     )
 
     assert plan.tags == ()
-    assert plan.style_condition is None
+    assert plan.condition is None
     assert plan.nl_text in {"A detailed scene.", "soft light"}
     hits = plan.dropout_hits.as_mapping()
     assert all(hits[source] for source in (*BODY_TAG_SOURCE_ORDER, "artist"))
@@ -181,9 +181,10 @@ def test_candidate_source_uses_canonical_ids_and_never_deletes_artist() -> None:
     assert ("character", "candidate_character") not in retained
     assert ("general", "candidate_general") not in retained
     assert ("general", "blue_dress") in retained
-    assert plan.style_condition is not None
-    assert plan.style_condition.kind == "artist"
-    assert tuple(tag.canonical for tag in plan.style_condition.tags) == (
+    assert plan.condition is not None
+    assert plan.condition.source == "artist_text"
+    assert plan.condition.role == "style"
+    assert tuple(tag.canonical for tag in plan.condition.tags) == (
         "sample_artist",
         "candidate_general",
     )
@@ -196,8 +197,10 @@ def test_artist_order_is_fixed_after_independent_dropout() -> None:
         fields, _probabilities(), seed=_seed_for_global_dropout(False)
     )
 
-    assert plan.style_condition == StyleCondition(
-        kind="artist", tags=fields.artists
+    assert plan.condition == ConditionRequest(
+        source="artist_text",
+        role="style",
+        tags=fields.artists,
     )
 
 
@@ -208,69 +211,77 @@ def test_artist_or_character_routing_is_deterministic_and_complementary() -> Non
         for source in BODY_TAG_SOURCE_ORDER
         for tag in getattr(fields, source)
     } | {("artist", tag.canonical) for tag in fields.artists}
-    selected_kinds: set[str] = set()
+    selected_sources: set[str] = set()
 
     for seed in range(10_000):
         plan = build_caption_plan(
             fields,
             _probabilities(),
-            style_condition_mode="artist_or_character",
+            condition_mode="artist_or_character",
             seed=seed,
         )
         if plan.all_condition_dropped:
             continue
-        assert plan.style_condition is not None
+        assert plan.condition is not None
         assert plan == build_caption_plan(
             fields,
             _probabilities(),
-            style_condition_mode="artist_or_character",
+            condition_mode="artist_or_character",
             seed=seed,
         )
-        condition = plan.style_condition
-        selected_kinds.add(condition.kind)
+        condition = plan.condition
+        selected_sources.add(condition.source)
         routed = {(item.source, item.tag.canonical) for item in plan.tags}
-        routed.update((condition.kind, tag.canonical) for tag in condition.tags)
+        condition_tag_source = (
+            "artist" if condition.source == "artist_text" else "character"
+        )
+        routed.update((condition_tag_source, tag.canonical) for tag in condition.tags)
         assert routed == expected
         assert len(plan.tags) + len(condition.tags) == len(expected)
-        if condition.kind == "artist":
+        if condition.source == "artist_text":
+            assert condition.role == "style"
             assert not any(item.source == "artist" for item in plan.tags)
             assert {
                 item.tag.canonical for item in plan.tags if item.source == "character"
             } == {tag.canonical for tag in fields.character}
         else:
+            assert condition.role == "identity"
             assert not any(item.source == "character" for item in plan.tags)
             assert {
                 item.tag.canonical for item in plan.tags if item.source == "artist"
             } == {tag.canonical for tag in fields.artists}
-        if selected_kinds == {"artist", "character"}:
+        if selected_sources == {"artist_text", "character_text"}:
             break
 
-    assert selected_kinds == {"artist", "character"}
+    assert selected_sources == {"artist_text", "character_text"}
 
 
 @pytest.mark.parametrize(
-    ("fields", "expected_kind"),
+    ("fields", "expected_source"),
     [
-        (replace(_fields(), character=()), "artist"),
-        (replace(_fields(), artists=()), "character"),
+        (replace(_fields(), character=()), "artist_text"),
+        (replace(_fields(), artists=()), "character_text"),
         (replace(_fields(), character=(), artists=()), None),
     ],
 )
-def test_artist_or_character_routes_only_available_kind(
-    fields: CaptionFields, expected_kind: str | None
+def test_artist_or_character_routes_only_available_source(
+    fields: CaptionFields, expected_source: str | None
 ) -> None:
     plan = build_caption_plan(
         fields,
         _probabilities(),
-        style_condition_mode="artist_or_character",
+        condition_mode="artist_or_character",
         seed=_seed_for_global_dropout(False),
     )
 
     assert (
-        None if plan.style_condition is None else plan.style_condition.kind
-    ) == expected_kind
-    if expected_kind is not None:
-        assert not any(item.source == expected_kind for item in plan.tags)
+        None if plan.condition is None else plan.condition.source
+    ) == expected_source
+    if expected_source is not None:
+        selected_tag_source = (
+            "artist" if expected_source == "artist_text" else "character"
+        )
+        assert not any(item.source == selected_tag_source for item in plan.tags)
 
 
 def test_nl_selects_at_most_one_available_complete_branch() -> None:
@@ -392,12 +403,12 @@ def test_caption_seed_requires_a_non_negative_integer(seed: object) -> None:
 
 
 @pytest.mark.parametrize("mode", ["", "artist_or_character ", "character", True, 1])
-def test_style_condition_mode_is_strict(mode: object) -> None:
-    with pytest.raises(CaptionError, match="style condition mode"):
+def test_condition_mode_is_strict(mode: object) -> None:
+    with pytest.raises(CaptionError, match="condition mode"):
         _build_caption_plan(
             _fields(),
             _probabilities(),
-            style_condition_mode=mode,  # pyright: ignore[reportArgumentType]
+            condition_mode=mode,  # pyright: ignore[reportArgumentType]
             seed=_seed_for_global_dropout(False),
         )
 
@@ -430,7 +441,7 @@ def test_all_condition_plan_cannot_carry_content() -> None:
     with pytest.raises(CaptionError, match="must be empty"):
         CaptionPlan(
             tags=(CaptionTag("rating", Tag("safe", "safe")),),
-            style_condition=None,
+            condition=None,
             nl_text=None,
             selected_nl=None,
             all_condition_dropped=True,

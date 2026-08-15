@@ -15,7 +15,7 @@ from typing import Protocol, Self
 
 from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
-    STYLE_CONDITION_ROUTE_KEYS,
+    CONDITION_ROUTE_KEYS,
 )
 
 CORE_TIMING_PHASES = (
@@ -102,7 +102,7 @@ class TrainingMetric:
     ready_queue_wait_seconds: float
     nonfinite_count: int
     dropout_hits: Mapping[str, int]
-    style_condition_routes: Mapping[str, int]
+    condition_routes: Mapping[str, int]
     phase_seconds: Mapping[str, float]
 
     def __post_init__(self) -> None:
@@ -181,14 +181,14 @@ class TrainingMetric:
             _nonnegative_int(f"dropout_hits.{key}", value)
             if value > self.effective_batch:
                 raise ValueError("dropout hit count exceeds effective batch")
-        if set(self.style_condition_routes) != set(STYLE_CONDITION_ROUTE_KEYS):
+        if set(self.condition_routes) != set(CONDITION_ROUTE_KEYS):
             raise ValueError(
-                "style_condition_routes must contain every fixed route key"
+                "condition_routes must contain every fixed route key"
             )
-        for key, value in self.style_condition_routes.items():
-            _nonnegative_int(f"style_condition_routes.{key}", value)
-        if sum(self.style_condition_routes.values()) != self.effective_batch:
-            raise ValueError("style condition route counts must equal effective batch")
+        for key, value in self.condition_routes.items():
+            _nonnegative_int(f"condition_routes.{key}", value)
+        if sum(self.condition_routes.values()) != self.effective_batch:
+            raise ValueError("condition route counts must equal effective batch")
         required_phases: set[str] = set(TIMING_PHASES)
         actual_phases = set(self.phase_seconds)
         if actual_phases != required_phases:
@@ -205,8 +205,8 @@ class TrainingMetric:
         )
         object.__setattr__(
             self,
-            "style_condition_routes",
-            MappingProxyType(dict(self.style_condition_routes)),
+            "condition_routes",
+            MappingProxyType(dict(self.condition_routes)),
         )
         object.__setattr__(
             self, "phase_seconds", MappingProxyType(dict(self.phase_seconds))
@@ -247,7 +247,7 @@ class TrainingMetric:
             "ready_queue_wait_seconds": self.ready_queue_wait_seconds,
             "nonfinite_count": self.nonfinite_count,
             "dropout_hits": dict(self.dropout_hits),
-            "style_condition_routes": dict(self.style_condition_routes),
+            "condition_routes": dict(self.condition_routes),
             "phase_seconds": dict(self.phase_seconds),
         }
 
@@ -261,8 +261,8 @@ class TrainingMetric:
         )
         payload.update(
             {
-                f"style_condition_routes/{key}": value
-                for key, value in self.style_condition_routes.items()
+                f"condition_routes/{key}": value
+                for key, value in self.condition_routes.items()
             }
         )
         payload.update(

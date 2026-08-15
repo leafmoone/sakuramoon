@@ -67,7 +67,7 @@ def test_training_metric_flattens_t_bin_metrics_for_wandb() -> None:
         ready_queue_wait_seconds=0.0,
         nonfinite_count=0,
         dropout_hits={key: 0 for key in DROPOUT_KEYS},
-        style_condition_routes={"artist": 7, "character": 6, "null": 7},
+        condition_routes={"artist_text": 7, "character_text": 6, "null": 7},
         phase_seconds={phase: 0.0 for phase in TIMING_PHASES},
     )
 
@@ -75,9 +75,9 @@ def test_training_metric_flattens_t_bin_metrics_for_wandb() -> None:
 
     assert payload["train_loss_by_t/bin_18_t090_095"] == 1.0
     assert payload["train_count_by_t/bin_19_t095_100"] == 1
-    assert payload["style_condition_routes/artist"] == 7
-    assert payload["style_condition_routes/character"] == 6
-    assert payload["style_condition_routes/null"] == 7
+    assert payload["condition_routes/artist_text"] == 7
+    assert payload["condition_routes/character_text"] == 6
+    assert payload["condition_routes/null"] == 7
     assert len(NOISE_T_BIN_LABELS) == NOISE_T_BIN_COUNT
 
 
@@ -111,14 +111,14 @@ def test_training_metric_omits_empty_t_bin_loss_from_wandb() -> None:
         ready_queue_wait_seconds=0.0,
         nonfinite_count=0,
         dropout_hits={key: 0 for key in DROPOUT_KEYS},
-        style_condition_routes={"artist": 7, "character": 6, "null": 7},
+        condition_routes={"artist_text": 7, "character_text": 6, "null": 7},
         phase_seconds={phase: 0.0 for phase in TIMING_PHASES},
     )
     sparse = replace(
         metric,
         effective_batch=19,
         high_noise_sample_count=19,
-        style_condition_routes={"artist": 7, "character": 6, "null": 6},
+        condition_routes={"artist_text": 7, "character_text": 6, "null": 6},
         t_bin_losses=tuple(
             0.0 if index == 18 else 1.0 for index in range(NOISE_T_BIN_COUNT)
         ),

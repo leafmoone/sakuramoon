@@ -171,28 +171,28 @@ def _dropout_counts(
     return totals
 
 
-def _style_condition_route_counts(
+def _condition_route_counts(
     observation: SuccessfulTrainingObservation,
 ) -> dict[str, int]:
-    totals = {"artist": 0, "character": 0, "null": 0}
+    totals = {"artist_text": 0, "character_text": 0, "null": 0}
     for index, measurement in enumerate(observation.microbatches):
-        values = measurement.style_condition_routes.as_mapping()
+        values = measurement.condition_routes.as_mapping()
         if set(values) != set(totals):
             raise ValueError(
-                f"microbatches[{index}].style_condition_routes has an invalid key set"
+                f"microbatches[{index}].condition_routes has an invalid key set"
             )
         for key, value in values.items():
             if type(value) is not int or value < 0:
                 raise TypeError(
-                    f"style condition route {key} must be a nonnegative integer"
+                    f"condition route {key} must be a nonnegative integer"
                 )
             totals[key] += value
         if sum(values.values()) != measurement.per_sample_loss.numel():
             raise ValueError(
-                f"microbatches[{index}].style condition routes differ from samples"
+                f"microbatches[{index}].condition routes differ from samples"
             )
     if sum(totals.values()) != observation.loop.update.effective_samples:
-        raise ValueError("style condition route counts differ from effective batch")
+        raise ValueError("condition route counts differ from effective batch")
     return totals
 
 
@@ -303,7 +303,7 @@ def build_training_metric(
         ready_queue_wait_seconds=observation.loop.data_wait_seconds,
         nonfinite_count=0,
         dropout_hits=_dropout_counts(observation),
-        style_condition_routes=_style_condition_route_counts(observation),
+        condition_routes=_condition_route_counts(observation),
         phase_seconds=_phase_seconds(observation, context),
     )
 

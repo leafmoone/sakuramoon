@@ -402,13 +402,14 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
     condition = model.condition
     head = model.head
     text = model.text
-    style = model.style
+    condition_tokens = model.condition_tokens
     backend = (
         "das_fa2_varlen"
         if config.kernels.attention_backend == "das_fa2_varlen"
         else "dense_sdpa"
     )
     document: dict[str, object] = {
+        "schema_version": 2,
         "class": "TrainableComposite",
         "dit": {
             "active_slot_ids": list(active_slot_ids(config.stage.depth)),
@@ -416,6 +417,7 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
             "attention_backend": backend,
             "attention_dropout": dit.attention_dropout,
             "condition_hidden_size": condition.hidden_dim,
+            "condition_token_count": condition_tokens.token_count,
             "depth": config.stage.depth,
             "final_modulation_size": head.final_modulation_size,
             "head_dim": dit.head_dim,
@@ -456,18 +458,18 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
             "projection_bias": text.projection_bias,
             "sensitive_dtype": text.sensitive_dtype,
         },
-        "style": {
-            "attention_heads": style.attention_heads,
-            "hidden_size": style.hidden_size,
-            "init_std": style.init_std,
-            "input_size": style.input_size,
-            "intermediate_size": style.mlp_intermediate_size,
-            "linear_dtype": style.linear_dtype,
-            "norm_eps": style.norm_eps,
-            "output_size": style.output_size,
-            "projection_bias": style.projection_bias,
-            "query_count": style.query_count,
-            "sensitive_dtype": style.sensitive_dtype,
+        "condition_tokens": {
+            "attention_heads": condition_tokens.attention_heads,
+            "hidden_size": condition_tokens.hidden_size,
+            "init_std": condition_tokens.init_std,
+            "input_size": condition_tokens.input_size,
+            "intermediate_size": condition_tokens.mlp_intermediate_size,
+            "linear_dtype": condition_tokens.linear_dtype,
+            "norm_eps": condition_tokens.norm_eps,
+            "output_size": condition_tokens.output_size,
+            "projection_bias": condition_tokens.projection_bias,
+            "sensitive_dtype": condition_tokens.sensitive_dtype,
+            "token_count": condition_tokens.token_count,
         },
     }
     return document

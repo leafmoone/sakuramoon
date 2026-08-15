@@ -31,7 +31,7 @@ from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.caption import (
     CaptionDropoutCounts,
     CaptionPlan,
-    StyleConditionRouteCounts,
+    ConditionRouteCounts,
 )
 from sakuramoon.data.collate import TrainingBatch
 from sakuramoon.data.production import (
@@ -191,7 +191,7 @@ class DenseDiTAdapter(nn.Module):
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
         text_lengths: tuple[int, ...],
-        style_tokens: torch.Tensor,
+        condition_tokens: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -205,7 +205,7 @@ class DenseDiTAdapter(nn.Module):
             latent_batch,
             text_tokens,
             text_mask,
-            style_tokens,
+            condition_tokens,
             timestep,
             size_scale,
             aspect,
@@ -379,7 +379,7 @@ class RuntimeMeasurement:
     low_noise_sample_count: torch.Tensor
     timesteps: torch.Tensor
     dropout_hits: CaptionDropoutCounts
-    style_condition_routes: StyleConditionRouteCounts
+    condition_routes: ConditionRouteCounts
     captions: tuple[SerializedCaption, ...]
     caption_plans: tuple[CaptionPlan, ...]
 
@@ -399,7 +399,7 @@ class RuntimeMeasurement:
             low_noise_sample_count=self.low_noise_sample_count.detach(),
             timesteps=self.timesteps.detach(),
             dropout_hits=self.dropout_hits,
-            style_condition_routes=self.style_condition_routes,
+            condition_routes=self.condition_routes,
             captions=self.captions,
             caption_plans=self.caption_plans,
         )
@@ -820,7 +820,7 @@ class SingleGpuBatchRuntime:
             low_noise_sample_count=loss.low_noise_sample_count,
             timesteps=prepared.inputs.timestep,
             dropout_hits=batch.dropout_hits,
-            style_condition_routes=batch.style_condition_routes,
+            condition_routes=batch.condition_routes,
             captions=batch.captions,
             caption_plans=tuple(caption.plan for caption in batch.captions),
         )

@@ -100,8 +100,8 @@ shape_count = 17
 transpose_closed = true
 
 [caption]
-category_order = ["tags", "nl", "style_condition"]
-style_condition_mode = "artist_or_character"
+category_order = ["tags", "nl", "condition"]
+condition_mode = "artist_or_character"
 tag_separator = ", "
 tag_nl_separator = "\n\n"
 text_condition_max = 512
@@ -136,8 +136,8 @@ projection_bias = false
 linear_dtype = "bfloat16"
 sensitive_dtype = "float32"
 
-[model.style]
-query_count = 4
+[model.condition_tokens]
+token_count = 8
 input_size = 2048
 hidden_size = 1024
 mlp_intermediate_size = 2048
@@ -151,8 +151,7 @@ linear_dtype = "bfloat16"
 sensitive_dtype = "float32"
 
 [model.packing]
-order = ["text", "style", "image"]
-style_tokens = 4
+order = ["text", "condition", "image"]
 remove_text_padding = true
 cross_sample_attention = false
 modality_init_std = 0.02

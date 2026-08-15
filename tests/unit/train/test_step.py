@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 import sakuramoon.train.step as step_module
-from sakuramoon.conditioning.style_resampler import StyleConditionEncoder
+from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import PackedDiT
 from sakuramoon.optim.clip import clip_grad_norm_fp32
@@ -56,6 +56,7 @@ def _production_composite() -> TrainableComposite:
             modulation_chunks=6,
             final_modulation_size=5120,
             out_channels=128,
+            condition_token_count=8,
             modality_init_std=0.02,
             linear_dtype=torch.bfloat16,
             sensitive_dtype=torch.float32,
@@ -78,12 +79,12 @@ def _production_composite() -> TrainableComposite:
             linear_dtype=torch.bfloat16,
             sensitive_dtype=torch.float32,
         ),
-        style=StyleConditionEncoder(
+        condition_tokens=ConditionTokenEncoder(
             input_size=2048,
             hidden_size=1024,
             intermediate_size=2048,
             output_size=2560,
-            query_count=4,
+            token_count=8,
             attention_heads=16,
             norm_eps=1e-6,
             init_std=0.02,
@@ -106,7 +107,7 @@ def test_production_composite_locks_trainable_fqn_boundary() -> None:
     assert {name for name, _module in composite.named_children()} == {
         "dit",
         "text",
-        "style",
+        "condition_tokens",
     }
     assert all(
         "qwen" not in type(module).__name__.lower()

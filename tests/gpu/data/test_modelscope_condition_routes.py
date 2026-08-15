@@ -13,9 +13,10 @@ from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
     CaptionPlan,
+    ConditionSource,
     NlDropoutProbabilities,
     build_caption_plan,
-    count_style_condition_routes,
+    count_condition_routes,
 )
 from sakuramoon.data.pipeline import PipelineSampleRejected, rng_identity
 from sakuramoon.data.production import parse_modelscope_caption_fields
@@ -64,10 +65,13 @@ def _routed_tags(plan: CaptionPlan) -> Counter[tuple[str, str]]:
     routed: Counter[tuple[str, str]] = Counter(
         (item.source, item.tag.canonical) for item in plan.tags
     )
-    if plan.style_condition is not None:
+    if plan.condition is not None:
+        tag_source = (
+            "artist" if plan.condition.source == "artist_text" else "character"
+        )
         routed.update(
-            (plan.style_condition.kind, tag.canonical)
-            for tag in plan.style_condition.tags
+            (tag_source, tag.canonical)
+            for tag in plan.condition.tags
         )
     return routed
 
@@ -85,7 +89,7 @@ def test_real_modelscope_artist_or_character_routes_are_lossless() -> None:
         candidate_source=0.3,
         nl=NlDropoutProbabilities(0.3, 0.3, 0.3, 0.3, 0.3),
     )
-    routes: list[str | None] = []
+    routes: list[ConditionSource | None] = []
     both_available = 0
     selected_when_both: set[str] = set()
 
@@ -104,19 +108,19 @@ def test_real_modelscope_artist_or_character_routes_are_lossless() -> None:
             artist_plan = build_caption_plan(
                 fields,
                 probabilities,
-                style_condition_mode="artist",
+                condition_mode="artist",
                 seed=seed,
             )
             mixed_plan = build_caption_plan(
                 fields,
                 probabilities,
-                style_condition_mode="artist_or_character",
+                condition_mode="artist_or_character",
                 seed=seed,
             )
             repeated = build_caption_plan(
                 fields,
                 probabilities,
-                style_condition_mode="artist_or_character",
+                condition_mode="artist_or_character",
                 seed=seed,
             )
 
@@ -127,26 +131,31 @@ def test_real_modelscope_artist_or_character_routes_are_lossless() -> None:
             assert mixed_plan.selected_nl == artist_plan.selected_nl
             assert _routed_tags(mixed_plan) == _routed_tags(artist_plan)
 
-            condition = mixed_plan.style_condition
-            kind = None if condition is None else condition.kind
-            routes.append(kind)
+            condition = mixed_plan.condition
+            source = None if condition is None else condition.source
+            routes.append(source)
             if condition is not None:
-                assert not any(item.source == condition.kind for item in mixed_plan.tags)
+                tag_source = (
+                    "artist"
+                    if condition.source == "artist_text"
+                    else "character"
+                )
+                assert not any(item.source == tag_source for item in mixed_plan.tags)
 
-            artist_available = artist_plan.style_condition is not None
+            artist_available = artist_plan.condition is not None
             character_available = any(
                 item.source == "character" for item in artist_plan.tags
             )
             if artist_available and character_available:
                 both_available += 1
                 assert condition is not None
-                selected_when_both.add(condition.kind)
+                selected_when_both.add(condition.source)
 
-    counts = count_style_condition_routes(tuple(routes))
+    counts = count_condition_routes(tuple(routes))
     assert sum(counts.as_mapping().values()) == _REAL_SAMPLE_COUNT * _CYCLE_COUNT
-    assert counts.artist > 0
-    assert counts.character > 0
+    assert counts.artist_text > 0
+    assert counts.character_text > 0
     assert counts.null > 0
     assert corrupted > 0
     assert both_available > 0
-    assert selected_when_both == {"artist", "character"}
+    assert selected_when_both == {"artist_text", "character_text"}

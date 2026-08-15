@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader, get_worker_info
 from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
     CaptionPlan,
-    StyleCondition,
+    ConditionRequest,
     Tag,
     empty_caption_dropout_hits,
 )
@@ -40,7 +40,7 @@ def _sample(
     caption = SerializedCaption(
         plan=CaptionPlan(
             tags=(),
-            style_condition=None,
+            condition=None,
             nl_text=None,
             selected_nl=None,
             all_condition_dropped=False,
@@ -54,7 +54,8 @@ def _sample(
         condition_token_indices=(),
         condition_mask=(),
         use_null_condition=True,
-        condition_kind=None,
+        condition_source=None,
+        condition_role=None,
         all_condition_dropped=False,
         dropout_hits=dropout_hits,
         selected_nl=None,
@@ -92,10 +93,11 @@ def test_collate_pads_eot_and_preserves_structured_metadata() -> None:
     assert batch.main_token_lengths == (3, 2)
     assert batch.condition_token_indices.shape == (2, 0)
     assert batch.active_condition_sample_indices.numel() == 0
-    assert batch.condition_kinds == (None, None)
-    assert batch.style_condition_routes.as_mapping() == {
-        "artist": 0,
-        "character": 0,
+    assert batch.condition_sources == (None, None)
+    assert batch.condition_roles == (None, None)
+    assert batch.condition_routes.as_mapping() == {
+        "artist_text": 0,
+        "character_text": 0,
         "null": 2,
     }
     assert torch.equal(batch.sample_ids, torch.tensor([1, 2]))
@@ -227,8 +229,10 @@ def test_collate_builds_active_condition_sample_plan_on_cpu() -> None:
             sample.caption,
             plan=replace(
                 sample.caption.plan,
-                style_condition=StyleCondition(
-                    kind="artist", tags=(Tag("artist", "artist"),)
+                condition=ConditionRequest(
+                    source="artist_text",
+                    role="style",
+                    tags=(Tag("artist", "artist"),),
                 ),
             ),
             main_token_indices=(0, 1),
@@ -236,7 +240,8 @@ def test_collate_builds_active_condition_sample_plan_on_cpu() -> None:
             condition_token_indices=(2,),
             condition_mask=(True,),
             use_null_condition=False,
-            condition_kind="artist",
+            condition_source="artist_text",
+            condition_role="style",
         ),
     )
 
@@ -244,10 +249,11 @@ def test_collate_builds_active_condition_sample_plan_on_cpu() -> None:
 
     assert batch.active_condition_sample_indices.device.type == "cpu"
     assert torch.equal(batch.active_condition_sample_indices, torch.tensor([0]))
-    assert batch.condition_kinds == ("artist", None)
-    assert batch.style_condition_routes.as_mapping() == {
-        "artist": 1,
-        "character": 0,
+    assert batch.condition_sources == ("artist_text", None)
+    assert batch.condition_roles == ("style", None)
+    assert batch.condition_routes.as_mapping() == {
+        "artist_text": 1,
+        "character_text": 0,
         "null": 1,
     }
 
@@ -274,7 +280,8 @@ def test_collate_rejects_invalid_condition_routing_metadata(
             condition_token_indices=indices,
             condition_mask=mask,
             use_null_condition=use_null,
-            condition_kind="artist" if not use_null else None,
+            condition_source="artist_text" if not use_null else None,
+            condition_role="style" if not use_null else None,
         ),
     )
 
@@ -282,7 +289,7 @@ def test_collate_rejects_invalid_condition_routing_metadata(
         collate_samples((invalid,))
 
 
-def test_collate_rejects_missing_condition_kind() -> None:
+def test_collate_rejects_missing_condition_source_or_role() -> None:
     sample = _sample(1)
     invalid = replace(
         sample,
@@ -291,11 +298,12 @@ def test_collate_rejects_missing_condition_kind() -> None:
             condition_token_indices=(2,),
             condition_mask=(True,),
             use_null_condition=False,
-            condition_kind=None,
+            condition_source=None,
+            condition_role="style",
         ),
     )
 
-    with pytest.raises(CollateError, match="condition kind"):
+    with pytest.raises(CollateError, match="condition source and role"):
         collate_samples((invalid,))
 
 

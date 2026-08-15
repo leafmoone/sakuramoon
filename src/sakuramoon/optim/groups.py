@@ -14,11 +14,11 @@ ParameterGroupName = Literal["matrix_decay", "sensitive_no_decay"]
 _SENSITIVE_ANCESTORS = {"FinalOutputHead", "GlobalConditioner"}
 _SENSITIVE_RANKED_PARAMETERS = {
     ("ModalityEmbedding", "image"),
-    ("ModalityEmbedding", "style"),
+    ("ModalityEmbedding", "condition"),
     ("ModalityEmbedding", "text"),
-    ("StyleConditionEncoder", "layer_embedding"),
-    ("StyleConditionEncoder", "null_tokens"),
-    ("StyleConditionEncoder", "queries"),
+    ("ConditionTokenEncoder", "layer_embedding"),
+    ("ConditionTokenEncoder", "null_tokens"),
+    ("ConditionTokenEncoder", "queries"),
     ("TextConditioner", "gate_bias"),
     ("TextConditioner", "gate_weight"),
 }

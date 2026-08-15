@@ -342,7 +342,7 @@ class CaptionDropoutConfig(StrictModel):
 
 class CaptionConfig(StrictModel):
     category_order: StringTuple
-    style_condition_mode: Literal["artist", "artist_or_character"]
+    condition_mode: Literal["artist", "artist_or_character"]
     tag_separator: Literal[", "]
     tag_nl_separator: Literal["\n\n"]
     text_condition_max: Literal[512]
@@ -355,7 +355,7 @@ class CaptionConfig(StrictModel):
         if self.category_order != (
             "tags",
             "nl",
-            "style_condition",
+            "condition",
         ):
             raise ValueError(
                 "caption category order differs from the approved protocol"
@@ -392,8 +392,8 @@ class TextModelConfig(StrictModel):
         return self
 
 
-class StyleModelConfig(StrictModel):
-    query_count: Literal[4]
+class ConditionTokensModelConfig(StrictModel):
+    token_count: Literal[8]
     input_size: Literal[2048]
     hidden_size: Literal[1024]
     mlp_intermediate_size: Literal[2048]
@@ -409,15 +409,14 @@ class StyleModelConfig(StrictModel):
 
 class PackingModelConfig(StrictModel):
     order: StringTuple
-    style_tokens: Literal[4]
     remove_text_padding: Literal[True]
     cross_sample_attention: Literal[False]
     modality_init_std: FixedPointZeroTwo
 
     @model_validator(mode="after")
     def validate_order(self) -> PackingModelConfig:
-        if self.order != ("text", "style", "image"):
-            raise ValueError("packing order must be text, style, image")
+        if self.order != ("text", "condition", "image"):
+            raise ValueError("packing order must be text, condition, image")
         return self
 
 
@@ -470,7 +469,7 @@ class HeadModelConfig(StrictModel):
 
 class ModelConfig(StrictModel):
     text: TextModelConfig
-    style: StyleModelConfig
+    condition_tokens: ConditionTokensModelConfig
     packing: PackingModelConfig
     rope: RopeModelConfig
     dit: DitModelConfig

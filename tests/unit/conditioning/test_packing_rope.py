@@ -24,13 +24,14 @@ from sakuramoon.conditioning.rope import (
 def _packed():
     text = torch.arange(2 * 3 * 8, dtype=torch.float32).reshape(2, 3, 8)
     text_mask = torch.tensor([[True, True, False], [True, False, False]])
-    style = torch.full((2, 4, 8), -2.0)
+    condition = torch.full((2, 8, 8), -2.0)
     images = (torch.full((4, 8), 3.0), torch.full((2, 8), 4.0))
     return pack_sequences(
         text,
         text_mask,
         (2, 1),
-        style,
+        condition,
+        8,
         images,
         ((2, 2), (1, 2)),
     )
@@ -41,26 +42,26 @@ def test_modality_embeddings_are_separate() -> None:
     tokens = torch.zeros(2, 8)
 
     text = module(tokens, "text")
-    style = module(tokens, "style")
+    condition = module(tokens, "condition")
     image = module(tokens, "image")
 
-    assert not torch.equal(text, style)
-    assert not torch.equal(style, image)
+    assert not torch.equal(text, condition)
+    assert not torch.equal(condition, image)
 
 
 def test_pack_order_cu_seqlens_and_sample_isolation() -> None:
     packed = _packed()
 
-    assert torch.equal(packed.cu_seqlens, torch.tensor([0, 10, 17], dtype=torch.int32))
-    assert packed.max_seqlen == 10
+    assert torch.equal(packed.cu_seqlens, torch.tensor([0, 14, 25], dtype=torch.int32))
+    assert packed.max_seqlen == 14
     assert packed.spans[0].text.start == 0
-    assert packed.spans[0].style.start == 2
-    assert packed.spans[0].image.start == 6
+    assert packed.spans[0].condition.start == 2
+    assert packed.spans[0].image.start == 10
     mask = dense_reference_mask(packed)
-    assert mask[:10, :10].all()
-    assert mask[10:, 10:].all()
-    assert not mask[:10, 10:].any()
-    assert not mask[10:, :10].any()
+    assert mask[:14, :14].all()
+    assert mask[14:, 14:].all()
+    assert not mask[:14, 14:].any()
+    assert not mask[14:, :14].any()
 
 
 @pytest.mark.parametrize("lengths", [(), (0,), (-1,), (True,), (2, 1.5)])
@@ -74,13 +75,13 @@ def test_boundary_factory_rejects_invalid_host_lengths(
         )
 
 
-@pytest.mark.parametrize("field", ["style_dtype", "mask_device"])
+@pytest.mark.parametrize("field", ["condition_dtype", "mask_device"])
 def test_pack_rejects_cross_input_dtype_or_device(field: str) -> None:
     text = torch.zeros(1, 2, 8)
     mask = torch.ones(1, 2, dtype=torch.bool)
-    style = torch.zeros(1, 4, 8)
-    if field == "style_dtype":
-        style = style.to(torch.float64)
+    condition = torch.zeros(1, 8, 8)
+    if field == "condition_dtype":
+        condition = condition.to(torch.float64)
     else:
         mask = torch.ones(1, 2, dtype=torch.bool, device="meta")
 
@@ -89,7 +90,8 @@ def test_pack_rejects_cross_input_dtype_or_device(field: str) -> None:
             text,
             mask,
             (2,),
-            style,
+            condition,
+            8,
             (torch.zeros(1, 8),),
             ((1, 1),),
         )
@@ -101,7 +103,8 @@ def test_pack_rejects_mask_that_disagrees_with_host_lengths() -> None:
             torch.zeros(1, 3, 8),
             torch.tensor([[True, False, True]]),
             (2,),
-            torch.zeros(1, 4, 8),
+            torch.zeros(1, 8, 8),
+            8,
             (torch.zeros(1, 8),),
             ((1, 1),),
         )
@@ -114,13 +117,14 @@ def test_pack_rejects_invalid_text_lengths(lengths: tuple[int, ...]) -> None:
             torch.zeros(1, 3, 8),
             torch.tensor([[True, True, False]]),
             lengths,
-            torch.zeros(1, 4, 8),
+            torch.zeros(1, 8, 8),
+            8,
             (torch.zeros(1, 8),),
             ((1, 1),),
         )
 
 
-def test_area_normalized_coordinates_and_text_style_zero_coordinates() -> None:
+def test_area_normalized_coordinates_and_text_condition_zero_coordinates() -> None:
     square = image_coordinates(2, 2, device=torch.device("cpu"))
     expected = torch.tensor(
         [[-0.5, -0.5], [-0.5, 0.5], [0.5, -0.5], [0.5, 0.5]]
@@ -134,7 +138,14 @@ def test_area_normalized_coordinates_and_text_style_zero_coordinates() -> None:
     )
     packed = _packed()
     coordinates = packed_coordinates(packed, (square, wide))
-    assert torch.count_nonzero(coordinates[packed.spans[0].text.start : packed.spans[0].style.end]) == 0
+    assert (
+        torch.count_nonzero(
+            coordinates[
+                packed.spans[0].text.start : packed.spans[0].condition.end
+            ]
+        )
+        == 0
+    )
     torch.testing.assert_close(coordinates[packed.spans[0].image.start : packed.spans[0].image.end], square)
 
 

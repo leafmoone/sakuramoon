@@ -1,4 +1,4 @@
-"""Four-query style-condition encoder with learned null tokens."""
+"""Fixed-count condition-token encoder with learned null tokens."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from sakuramoon.conditioning.norm import FP32RMSNorm
 
 
 @dataclass(frozen=True)
-class StyleConditioningOutput:
+class ConditionTokenOutput:
     tokens: torch.Tensor
     mask: torch.Tensor
 
@@ -43,7 +43,7 @@ class _ResidualSwiGLU(nn.Module):
         return tensor + self.down(F.silu(self.gate(normalized)) * self.up(normalized))
 
 
-class StyleConditionEncoder(nn.Module):
+class ConditionTokenEncoder(nn.Module):
     def __init__(
         self,
         *,
@@ -51,7 +51,7 @@ class StyleConditionEncoder(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         output_size: int,
-        query_count: int,
+        token_count: int,
         attention_heads: int,
         norm_eps: float,
         init_std: float,
@@ -60,14 +60,14 @@ class StyleConditionEncoder(nn.Module):
         sensitive_dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        if query_count <= 0 or init_std <= 0.0:
-            raise ValueError("query_count and init_std must be positive")
+        if token_count <= 0 or init_std <= 0.0:
+            raise ValueError("token_count and init_std must be positive")
         if linear_dtype not in (torch.float32, torch.bfloat16):
             raise ValueError("linear_dtype must be float32 or bfloat16")
         if sensitive_dtype != torch.float32:
-            raise ValueError("sensitive style parameters must use float32")
+            raise ValueError("sensitive condition parameters must use float32")
         self.input_size = input_size
-        self.query_count = query_count
+        self.token_count = token_count
         self._artifact_config: dict[str, object] = {
             "attention_heads": attention_heads,
             "hidden_size": hidden_size,
@@ -78,7 +78,7 @@ class StyleConditionEncoder(nn.Module):
             "norm_eps": norm_eps,
             "output_size": output_size,
             "projection_bias": projection_bias,
-            "query_count": query_count,
+            "token_count": token_count,
             "sensitive_dtype": str(sensitive_dtype).removeprefix("torch."),
         }
         self.shared_norm = FP32RMSNorm(input_size, norm_eps)
@@ -92,7 +92,7 @@ class StyleConditionEncoder(nn.Module):
             dtype=linear_dtype,
         )
         self.queries = nn.Parameter(
-            torch.empty(query_count, hidden_size, dtype=sensitive_dtype)
+            torch.empty(token_count, hidden_size, dtype=sensitive_dtype)
         )
         self.cross_attention = nn.MultiheadAttention(
             hidden_size,
@@ -102,7 +102,7 @@ class StyleConditionEncoder(nn.Module):
             batch_first=True,
             dtype=linear_dtype,
         )
-        self.style_mlp = _ResidualSwiGLU(
+        self.condition_mlp = _ResidualSwiGLU(
             hidden_size,
             intermediate_size,
             norm_eps,
@@ -116,7 +116,7 @@ class StyleConditionEncoder(nn.Module):
             dtype=linear_dtype,
         )
         self.null_tokens = nn.Parameter(
-            torch.empty(query_count, output_size, dtype=sensitive_dtype)
+            torch.empty(token_count, output_size, dtype=sensitive_dtype)
         )
         nn.init.normal_(self.layer_embedding, std=init_std)
         nn.init.normal_(self.queries, std=init_std)
@@ -129,7 +129,7 @@ class StyleConditionEncoder(nn.Module):
         condition_mask: torch.Tensor,
         use_null_condition: torch.Tensor,
         active_condition_sample_indices: torch.Tensor,
-    ) -> StyleConditioningOutput:
+    ) -> ConditionTokenOutput:
         if qwen_states.ndim != 4 or qwen_states.shape[2:] != (7, self.input_size):
             raise ValueError("qwen_states must have shape [B,L,7,input_size]")
         if (
@@ -200,7 +200,7 @@ class StyleConditionEncoder(nn.Module):
                 valid_plan
             )
         elif not bool(valid_plan):
-            raise ValueError("active style-condition sample/index plan is invalid")
+            raise ValueError("active condition sample/index plan is invalid")
 
         if active_condition_sample_indices.numel():
             safe_indices = active_condition_indices.masked_fill(
@@ -233,27 +233,22 @@ class StyleConditionEncoder(nn.Module):
                 key_padding_mask=~memory_mask,
                 need_weights=False,
             )
-            style = self.style_mlp(queries + attended)
+            condition = self.condition_mlp(queries + attended)
             tokens.index_copy_(
                 0,
                 safe_active_samples,
-                self.output_projection(style),
+                self.output_projection(condition),
             )
 
         mask = torch.ones(
             batch,
-            self.query_count,
+            self.token_count,
             dtype=torch.bool,
             device=qwen_states.device,
         )
-        return StyleConditioningOutput(tokens=tokens, mask=mask)
+        return ConditionTokenOutput(tokens=tokens, mask=mask)
 
     def artifact_config(self) -> dict[str, object]:
         return dict(self._artifact_config)
 
-
-# Import compatibility only. New code must name the generic interface.
-StyleResampler = StyleConditionEncoder
-
-
-__all__ = ["StyleConditionEncoder", "StyleConditioningOutput", "StyleResampler"]
+__all__ = ["ConditionTokenEncoder", "ConditionTokenOutput"]

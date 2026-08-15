@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch import nn
 
-from sakuramoon.conditioning.style_resampler import StyleConditionEncoder
+from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import PackedDiT
 from sakuramoon.optim.clip import clip_grad_norm_fp32
@@ -35,12 +35,12 @@ class _TrainableComposite(nn.Module):
             linear_dtype=torch.bfloat16,
             sensitive_dtype=torch.float32,
         )
-        self.style = StyleConditionEncoder(
+        self.condition_tokens = ConditionTokenEncoder(
             input_size=2048,
             hidden_size=1024,
             intermediate_size=2048,
             output_size=2560,
-            query_count=4,
+            token_count=8,
             attention_heads=16,
             norm_eps=1e-6,
             init_std=0.02,
@@ -73,6 +73,7 @@ def _production_model() -> PackedDiT:
         modulation_chunks=6,
         final_modulation_size=5120,
         out_channels=128,
+        condition_token_count=8,
         modality_init_std=0.02,
         linear_dtype=torch.bfloat16,
         sensitive_dtype=torch.float32,
@@ -150,10 +151,13 @@ def test_full_trainable_composite_uses_role_based_precision_groups() -> None:
 
     assert specs["text.shared_projection.weight"].group == "matrix_decay"
     assert specs["text.gate_weight"].group == "sensitive_no_decay"
-    assert specs["style.cross_attention.in_proj_weight"].group == "matrix_decay"
-    assert specs["style.queries"].group == "sensitive_no_decay"
-    assert specs["style.layer_embedding"].group == "sensitive_no_decay"
-    assert specs["style.null_tokens"].group == "sensitive_no_decay"
+    assert (
+        specs["condition_tokens.cross_attention.in_proj_weight"].group
+        == "matrix_decay"
+    )
+    assert specs["condition_tokens.queries"].group == "sensitive_no_decay"
+    assert specs["condition_tokens.layer_embedding"].group == "sensitive_no_decay"
+    assert specs["condition_tokens.null_tokens"].group == "sensitive_no_decay"
     assert specs["dit.conditioner.condition_mlp.0.weight"].group == (
         "sensitive_no_decay"
     )
@@ -164,7 +168,7 @@ def test_full_trainable_composite_uses_role_based_precision_groups() -> None:
     assert len(audit.decay) == 126
     assert len(audit.sensitive) == 113
     assert sum(spec.parameter.numel() for spec in audit.decay) == 1_240_793_088
-    assert sum(spec.parameter.numel() for spec in audit.sensitive) == 23_145_786
+    assert sum(spec.parameter.numel() for spec in audit.sensitive) == 23_160_122
 
 
 def test_parameter_audit_rejects_fp32_matrix_projection() -> None:

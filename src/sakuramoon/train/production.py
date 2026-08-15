@@ -685,12 +685,12 @@ def _run_accepted_lifecycle(
         Accelerator(
             mixed_precision="no",
             kwargs_handlers=[
-                # Style conditioning is data-dependent: a rank whose final
-                # accumulation microbatch contains only null-style samples does
-                # not traverse the trainable StyleConditionEncoder projection path.
+                # Condition-token encoding is data-dependent: a rank whose final
+                # accumulation microbatch contains only null-condition samples does
+                # not traverse the trainable ConditionTokenEncoder projection path.
                 # DDP must discover those dynamic unused parameters or that rank
                 # can enter the post-update barrier while a peer still reduces
-                # the style gradient buckets.
+                # the condition gradient buckets.
                 DistributedDataParallelKwargs(find_unused_parameters=True),
                 InitProcessGroupKwargs(timeout=timedelta(minutes=5)),
             ],

@@ -5,7 +5,7 @@ import pytest
 from sakuramoon.data.caption import (
     CaptionPlan,
     CaptionTag,
-    StyleCondition,
+    ConditionRequest,
     Tag,
     empty_caption_dropout_hits,
 )
@@ -27,15 +27,19 @@ class _Tokenizer:
         return [1000 + index for index, _character in enumerate(text)]
 
 
-def _plan(kind: str = "artist") -> CaptionPlan:
+def _plan(source: str = "artist_text") -> CaptionPlan:
+    is_artist = source == "artist_text"
+    role = "style" if is_artist else "identity"
+    tag_name = "artist_name" if is_artist else "character_name"
     return CaptionPlan(
         tags=(
             CaptionTag("general", Tag("long_hair", "long_hair")),
             CaptionTag("year", Tag("year 2026", "year 2026")),
         ),
-        style_condition=StyleCondition(
-            kind=kind,  # pyright: ignore[reportArgumentType]
-            tags=(Tag(f"{kind}_name", f"{kind}_name"),),
+        condition=ConditionRequest(
+            source=source,  # pyright: ignore[reportArgumentType]
+            role=role,  # pyright: ignore[reportArgumentType]
+            tags=(Tag(tag_name, tag_name),),
         ),
         nl_text="soft lighting",
         selected_nl="short_vibes",
@@ -44,27 +48,44 @@ def _plan(kind: str = "artist") -> CaptionPlan:
     )
 
 
-@pytest.mark.parametrize("kind", ["artist", "character"])
-def test_serialization_normalizes_only_tokenizer_facing_underscores(kind: str) -> None:
-    plan = _plan(kind)
+@pytest.mark.parametrize(
+    ("source", "role", "tag_name", "expected_condition"),
+    [
+        ("artist_text", "style", "artist_name", "style reference: artist name"),
+        (
+            "character_text",
+            "identity",
+            "character_name",
+            "character identity: character name",
+        ),
+    ],
+)
+def test_serialization_normalizes_tags_and_encodes_explicit_role(
+    source: str,
+    role: str,
+    tag_name: str,
+    expected_condition: str,
+) -> None:
+    plan = _plan(source)
 
     caption = serialize_caption(plan, _Tokenizer(), FramingContract(34, 5, 248044))
 
     assert caption.body == "long hair, year 2026\n\nsoft lighting"
-    assert caption.condition_text == f"{kind} name"
+    assert caption.condition_text == expected_condition
     assert caption.text == (
         SYSTEM_PREFIX
         + "long hair, year 2026\n\nsoft lighting"
         + MAIN_SUFFIX
-        + f"{kind} name"
+        + expected_condition
     )
     assert caption.plan.tags[0].tag.text == "long_hair"
     assert caption.plan.tags[0].tag.canonical == "long_hair"
-    assert caption.plan.style_condition is not None
-    assert caption.plan.style_condition.tags[0].text == f"{kind}_name"
+    assert caption.plan.condition is not None
+    assert caption.plan.condition.tags[0].text == tag_name
     assert caption.condition_token_indices
     assert caption.use_null_condition is False
-    assert caption.condition_kind == kind
+    assert caption.condition_source == source
+    assert caption.condition_role == role
 
 
 def test_serialization_truncates_only_complete_globally_ordered_tags() -> None:
@@ -74,7 +95,7 @@ def test_serialization_truncates_only_complete_globally_ordered_tags() -> None:
     )
     requested = CaptionPlan(
         tags=tags,
-        style_condition=None,
+        condition=None,
         nl_text=None,
         selected_nl=None,
         all_condition_dropped=False,
@@ -91,4 +112,5 @@ def test_serialization_truncates_only_complete_globally_ordered_tags() -> None:
     )
     assert caption.condition_token_indices == ()
     assert caption.use_null_condition is True
-    assert caption.condition_kind is None
+    assert caption.condition_source is None
+    assert caption.condition_role is None

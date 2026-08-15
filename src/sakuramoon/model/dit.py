@@ -198,6 +198,7 @@ class DenseDiT(nn.Module):
         modulation_chunks: int,
         final_modulation_size: int,
         out_channels: int,
+        condition_token_count: int,
         modality_init_std: float,
         linear_dtype: torch.dtype,
         sensitive_dtype: torch.dtype,
@@ -211,12 +212,15 @@ class DenseDiT(nn.Module):
         slots = active_slot_ids(depth)
         if input_channels != out_channels or stable_slot_count != 24:
             raise ValueError("DiT requires 128-channel latent I/O and 24 stable slots")
+        if type(condition_token_count) is not int or condition_token_count <= 0:
+            raise ValueError("condition_token_count must be a positive integer")
         if linear_dtype not in (torch.float32, torch.bfloat16):
             raise ValueError("linear_dtype must be float32 or bfloat16")
         if sensitive_dtype != torch.float32:
             raise ValueError("sensitive DiT parameters must use float32")
         self.depth = depth
         self.hidden_size = hidden_size
+        self.condition_token_count = condition_token_count
         self.active_slot_ids = slots
         self._activation_checkpoint_mode: ActivationCheckpointMode = "none"
         self._artifact_config: dict[str, object] = {
@@ -225,6 +229,7 @@ class DenseDiT(nn.Module):
             "attention_backend": "dense_sdpa",
             "attention_dropout": attention_dropout,
             "condition_hidden_size": condition_hidden_size,
+            "condition_token_count": condition_token_count,
             "depth": depth,
             "final_modulation_size": final_modulation_size,
             "head_dim": head_dim,
@@ -315,7 +320,7 @@ class DenseDiT(nn.Module):
         latent: torch.Tensor,
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
-        style_tokens: torch.Tensor,
+        condition_tokens: torch.Tensor,
         image_coordinate_maps: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, tuple[int, int]]:
         if latent.ndim != 4 or latent.shape[1] != self.input_projection.in_features:
@@ -327,15 +332,22 @@ class DenseDiT(nn.Module):
             raise ValueError("text token width differs from the DiT hidden size")
         if text_mask.shape != text_tokens.shape[:2] or text_mask.dtype != torch.bool:
             raise ValueError("text_mask must be boolean with shape [B,L]")
-        if style_tokens.shape != (batch, 4, self.hidden_size):
-            raise ValueError("style_tokens must have shape [B,4,hidden_size]")
+        if condition_tokens.shape != (
+            batch,
+            self.condition_token_count,
+            self.hidden_size,
+        ):
+            raise ValueError(
+                "condition_tokens must have shape "
+                "[B,condition_token_count,hidden_size]"
+            )
         if (
             latent.dtype != self.input_projection.weight.dtype
             or text_tokens.dtype != latent.dtype
-            or style_tokens.dtype != latent.dtype
+            or condition_tokens.dtype != latent.dtype
         ):
             raise ValueError(
-                "latent, text, style, and DiT linear weights must share dtype"
+                "latent, text, condition, and DiT linear weights must share dtype"
             )
         if image_coordinate_maps.shape != (batch, height * width, 2):
             raise ValueError(
@@ -348,17 +360,22 @@ class DenseDiT(nn.Module):
         )
         image_tokens = self.input_projection(image_tokens)
         text_tokens = self.modality(text_tokens, "text")
-        style_tokens = self.modality(style_tokens, "style")
+        condition_tokens = self.modality(condition_tokens, "condition")
         image_tokens = self.modality(image_tokens, "image")
-        joint = torch.cat((text_tokens, style_tokens, image_tokens), dim=1)
-        style_mask = torch.ones(batch, 4, device=latent.device, dtype=torch.bool)
+        joint = torch.cat((text_tokens, condition_tokens, image_tokens), dim=1)
+        condition_mask = torch.ones(
+            batch,
+            self.condition_token_count,
+            device=latent.device,
+            dtype=torch.bool,
+        )
         image_mask = torch.ones(
             batch,
             height * width,
             device=latent.device,
             dtype=torch.bool,
         )
-        token_mask = torch.cat((text_mask, style_mask, image_mask), dim=1)
+        token_mask = torch.cat((text_mask, condition_mask, image_mask), dim=1)
         coordinates = torch.zeros(
             batch,
             joint.shape[1],
@@ -366,7 +383,7 @@ class DenseDiT(nn.Module):
             device=latent.device,
             dtype=torch.float32,
         )
-        image_start = text_tokens.shape[1] + 4
+        image_start = text_tokens.shape[1] + self.condition_token_count
         coordinates[:, image_start:] = image_coordinate_maps
         return joint, token_mask, coordinates, image_start, (height, width)
 
@@ -375,7 +392,7 @@ class DenseDiT(nn.Module):
         latent: torch.Tensor,
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
-        style_tokens: torch.Tensor,
+        condition_tokens: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -387,7 +404,7 @@ class DenseDiT(nn.Module):
             latent,
             text_tokens,
             text_mask,
-            style_tokens,
+            condition_tokens,
             image_coordinates,
         )
         condition = self.conditioner(
@@ -448,7 +465,7 @@ class DenseDiT(nn.Module):
         latent: torch.Tensor,
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
-        style_tokens: torch.Tensor,
+        condition_tokens: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -460,7 +477,7 @@ class DenseDiT(nn.Module):
             latent,
             text_tokens,
             text_mask,
-            style_tokens,
+            condition_tokens,
             timestep,
             size_scale,
             aspect,
@@ -519,6 +536,7 @@ class PackedDiT(nn.Module):
         modulation_chunks: int,
         final_modulation_size: int,
         out_channels: int,
+        condition_token_count: int,
         modality_init_std: float,
         linear_dtype: torch.dtype,
         sensitive_dtype: torch.dtype,
@@ -532,12 +550,15 @@ class PackedDiT(nn.Module):
         slots = active_slot_ids(depth)
         if input_channels != out_channels or stable_slot_count != 24:
             raise ValueError("DiT requires 128-channel latent I/O and 24 stable slots")
+        if type(condition_token_count) is not int or condition_token_count <= 0:
+            raise ValueError("condition_token_count must be a positive integer")
         if linear_dtype != torch.bfloat16:
             raise ValueError("packed FA4 DiT requires BF16 linear parameters")
         if sensitive_dtype != torch.float32:
             raise ValueError("sensitive DiT parameters must use float32")
         self.depth = depth
         self.hidden_size = hidden_size
+        self.condition_token_count = condition_token_count
         self.active_slot_ids = slots
         self._activation_checkpoint_mode: ActivationCheckpointMode = "none"
         self._artifact_config: dict[str, object] = {
@@ -546,6 +567,7 @@ class PackedDiT(nn.Module):
             "attention_backend": "das_fa2_varlen",
             "attention_dropout": attention_dropout,
             "condition_hidden_size": condition_hidden_size,
+            "condition_token_count": condition_token_count,
             "depth": depth,
             "final_modulation_size": final_modulation_size,
             "head_dim": head_dim,
@@ -637,7 +659,7 @@ class PackedDiT(nn.Module):
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
         text_lengths: tuple[int, ...],
-        style_tokens: torch.Tensor,
+        condition_tokens: torch.Tensor,
     ) -> PackedSequences:
         batch = text_tokens.shape[0] if text_tokens.ndim == 3 else -1
         if batch <= 0 or len(latents) != batch:
@@ -648,11 +670,21 @@ class PackedDiT(nn.Module):
             raise ValueError("text token width differs from the DiT hidden size")
         if text_mask.shape != text_tokens.shape[:2] or text_mask.dtype != torch.bool:
             raise ValueError("text_mask must be boolean with shape [B,L]")
-        if style_tokens.shape != (batch, 4, self.hidden_size):
-            raise ValueError("style_tokens must have shape [B,4,hidden_size]")
+        if condition_tokens.shape != (
+            batch,
+            self.condition_token_count,
+            self.hidden_size,
+        ):
+            raise ValueError(
+                "condition_tokens must have shape "
+                "[B,condition_token_count,hidden_size]"
+            )
         expected_dtype = self.input_projection.weight.dtype
-        if text_tokens.dtype != expected_dtype or style_tokens.dtype != expected_dtype:
-            raise ValueError("text, style, and DiT linear weights must share dtype")
+        if (
+            text_tokens.dtype != expected_dtype
+            or condition_tokens.dtype != expected_dtype
+        ):
+            raise ValueError("text, condition, and DiT linear weights must share dtype")
 
         image_shapes: list[tuple[int, int]] = []
         for latent in latents:
@@ -697,7 +729,8 @@ class PackedDiT(nn.Module):
             self.modality(text_tokens, "text"),
             text_mask,
             text_lengths,
-            self.modality(style_tokens, "style"),
+            self.modality(condition_tokens, "condition"),
+            self.condition_token_count,
             image_tokens,
             tuple(image_shapes),
         )
@@ -839,7 +872,7 @@ class PackedDiT(nn.Module):
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
         text_lengths: tuple[int, ...],
-        style_tokens: torch.Tensor,
+        condition_tokens: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -852,7 +885,7 @@ class PackedDiT(nn.Module):
             text_tokens,
             text_mask,
             text_lengths,
-            style_tokens,
+            condition_tokens,
         )
         return self.forward_packed(
             packed,

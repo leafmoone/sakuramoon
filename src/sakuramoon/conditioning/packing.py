@@ -18,7 +18,7 @@ class TokenSpan:
 @dataclass(frozen=True)
 class SampleSpans:
     text: TokenSpan
-    style: TokenSpan
+    condition: TokenSpan
     image: TokenSpan
 
 
@@ -84,7 +84,8 @@ def pack_sequences(
     text_tokens: torch.Tensor,
     text_mask: torch.Tensor,
     text_lengths: tuple[int, ...],
-    style_tokens: torch.Tensor,
+    condition_tokens: torch.Tensor,
+    condition_token_count: int,
     image_tokens: tuple[torch.Tensor, ...],
     image_shapes: tuple[tuple[int, int], ...],
 ) -> PackedSequences:
@@ -93,8 +94,12 @@ def pack_sequences(
     if text_mask.dtype != torch.bool:
         raise TypeError("text_mask must be boolean")
     batch, _, hidden = text_tokens.shape
-    if style_tokens.shape != (batch, 4, hidden):
-        raise ValueError("style tokens must have shape [B,4,D]")
+    if type(condition_token_count) is not int or condition_token_count <= 0:
+        raise ValueError("condition_token_count must be a positive integer")
+    if condition_tokens.shape != (batch, condition_token_count, hidden):
+        raise ValueError(
+            "condition tokens must have shape [B,condition_token_count,D]"
+        )
     if (
         type(text_lengths) is not tuple
         or len(text_lengths) != batch
@@ -108,8 +113,11 @@ def pack_sequences(
         raise ValueError("text_lengths must contain one valid host length per sample")
     if text_mask.device != text_tokens.device:
         raise ValueError("text tokens and mask must share one device")
-    if style_tokens.device != text_tokens.device or style_tokens.dtype != text_tokens.dtype:
-        raise ValueError("text and style tokens must share one device and dtype")
+    if (
+        condition_tokens.device != text_tokens.device
+        or condition_tokens.dtype != text_tokens.dtype
+    ):
+        raise ValueError("text and condition tokens must share one device and dtype")
     if not torch.is_floating_point(text_tokens):
         raise TypeError("packed tokens must use a floating dtype")
     if len(image_tokens) != batch or len(image_shapes) != batch or batch == 0:
@@ -146,17 +154,17 @@ def pack_sequences(
             raise ValueError("all packed tokens must share device and dtype")
 
         text = text_tokens[sample, : text_lengths[sample]]
-        style = style_tokens[sample]
+        condition = condition_tokens[sample]
         start = offsets[-1]
         text_end = start + text.shape[0]
-        style_end = text_end + 4
-        image_end = style_end + image.shape[0]
-        sequences.append(torch.cat((text, style, image), dim=0))
+        condition_end = text_end + condition_token_count
+        image_end = condition_end + image.shape[0]
+        sequences.append(torch.cat((text, condition, image), dim=0))
         spans.append(
             SampleSpans(
                 text=TokenSpan(start, text_end),
-                style=TokenSpan(text_end, style_end),
-                image=TokenSpan(style_end, image_end),
+                condition=TokenSpan(text_end, condition_end),
+                image=TokenSpan(condition_end, image_end),
             )
         )
         offsets.append(image_end)

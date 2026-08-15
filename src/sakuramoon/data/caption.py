@@ -32,7 +32,11 @@ CAPTION_DROPOUT_KEYS: tuple[str, ...] = (
     "nl2",
     "nl3",
 )
-STYLE_CONDITION_ROUTE_KEYS: tuple[str, ...] = ("artist", "character", "null")
+CONDITION_ROUTE_KEYS: tuple[str, ...] = (
+    "artist_text",
+    "character_text",
+    "null",
+)
 TagSource = Literal[
     "rating",
     "year",
@@ -46,8 +50,9 @@ TagSource = Literal[
     "general",
     "artist",
 ]
-StyleConditionKind = Literal["artist", "character"]
-StyleConditionMode = Literal["artist", "artist_or_character"]
+ConditionSource = Literal["artist_text", "character_text"]
+ConditionRole = Literal["style", "identity"]
+ConditionMode = Literal["artist", "artist_or_character"]
 NlBranch = Literal["long_names", "long_no_names", "short_vibes", "nl2", "nl3"]
 NL_BRANCHES: tuple[NlBranch, ...] = (
     "long_names",
@@ -103,25 +108,33 @@ class CaptionTag:
 
 
 @dataclass(frozen=True)
-class StyleCondition:
-    kind: StyleConditionKind
+class ConditionRequest:
+    source: ConditionSource
+    role: ConditionRole
     tags: tuple[Tag, ...]
 
     def __post_init__(self) -> None:
         if (
-            type(self.kind) is not str
-            or self.kind not in {"artist", "character"}
+            type(self.source) is not str
+            or self.source not in {"artist_text", "character_text"}
+            or type(self.role) is not str
+            or self.role not in {"style", "identity"}
+            or (self.source, self.role)
+            not in {
+                ("artist_text", "style"),
+                ("character_text", "identity"),
+            }
             or type(self.tags) is not tuple
             or not self.tags
             or any(type(tag) is not Tag for tag in self.tags)
         ):
-            raise CaptionError("style condition kind or tags are invalid")
+            raise CaptionError("condition source, role, or tags are invalid")
 
 
 @dataclass(frozen=True)
-class StyleConditionRouteCounts:
-    artist: int
-    character: int
+class ConditionRouteCounts:
+    artist_text: int
+    character_text: int
     null: int
 
     def __post_init__(self) -> None:
@@ -129,32 +142,35 @@ class StyleConditionRouteCounts:
             type(value) is not int or value < 0 for value in self.as_mapping().values()
         ):
             raise CaptionError(
-                "style condition route counts must be non-negative integers"
+                "condition route counts must be non-negative integers"
             )
 
     def as_mapping(self) -> dict[str, int]:
         return {
-            "artist": self.artist,
-            "character": self.character,
+            "artist_text": self.artist_text,
+            "character_text": self.character_text,
             "null": self.null,
         }
 
 
-def count_style_condition_routes(
-    kinds: tuple[StyleConditionKind | None, ...],
-) -> StyleConditionRouteCounts:
-    if type(kinds) is not tuple or any(
-        kind is not None
-        and (type(kind) is not str or kind not in {"artist", "character"})
-        for kind in kinds
+def count_condition_routes(
+    sources: tuple[ConditionSource | None, ...],
+) -> ConditionRouteCounts:
+    if type(sources) is not tuple or any(
+        source is not None
+        and (
+            type(source) is not str
+            or source not in {"artist_text", "character_text"}
+        )
+        for source in sources
     ):
-        raise CaptionError("style condition route kinds are invalid")
-    counts = dict.fromkeys(STYLE_CONDITION_ROUTE_KEYS, 0)
-    for kind in kinds:
-        counts["null" if kind is None else kind] += 1
-    return StyleConditionRouteCounts(
-        artist=counts["artist"],
-        character=counts["character"],
+        raise CaptionError("condition route sources are invalid")
+    counts = dict.fromkeys(CONDITION_ROUTE_KEYS, 0)
+    for source in sources:
+        counts["null" if source is None else source] += 1
+    return ConditionRouteCounts(
+        artist_text=counts["artist_text"],
+        character_text=counts["character_text"],
         null=counts["null"],
     )
 
@@ -394,7 +410,7 @@ def empty_caption_dropout_hits(*, all_condition: bool = False) -> CaptionDropout
 @dataclass(frozen=True)
 class CaptionPlan:
     tags: tuple[CaptionTag, ...]
-    style_condition: StyleCondition | None
+    condition: ConditionRequest | None
     nl_text: str | None
     selected_nl: NlBranch | None
     all_condition_dropped: bool
@@ -402,14 +418,14 @@ class CaptionPlan:
 
     def __post_init__(self) -> None:
         has_content = bool(
-            self.tags or self.style_condition is not None or self.nl_text is not None
+            self.tags or self.condition is not None or self.nl_text is not None
         )
         if type(self.tags) is not tuple or any(
             type(tag) is not CaptionTag for tag in self.tags
         ):
             raise CaptionError("caption plan tags must be an exact CaptionTag tuple")
-        if self.style_condition is not None and type(self.style_condition) is not StyleCondition:
-            raise CaptionError("caption plan style condition is invalid")
+        if self.condition is not None and type(self.condition) is not ConditionRequest:
+            raise CaptionError("caption plan condition is invalid")
         if (
             type(self.all_condition_dropped) is not bool
             or type(self.dropout_hits) is not CaptionDropoutHits
@@ -484,27 +500,36 @@ def _caption_tags(source: TagSource, tags: tuple[Tag, ...]) -> tuple[CaptionTag,
     return tuple(CaptionTag(source=source, tag=tag) for tag in tags)
 
 
-def _select_style_condition(
-    mode: StyleConditionMode,
+def _select_condition(
+    mode: ConditionMode,
     *,
     artists: tuple[Tag, ...],
     characters: tuple[Tag, ...],
     seed: int,
-) -> StyleCondition | None:
+) -> ConditionRequest | None:
     if mode == "artist":
-        return StyleCondition(kind="artist", tags=artists) if artists else None
-    if artists and characters:
-        kind: StyleConditionKind = (
-            "artist"
-            if (_seed(seed, "select:style_condition:artist_or_character") & 1) == 0
-            else "character"
+        return (
+            ConditionRequest(source="artist_text", role="style", tags=artists)
+            if artists
+            else None
         )
-        selected = artists if kind == "artist" else characters
-        return StyleCondition(kind=kind, tags=selected)
+    if artists and characters:
+        source: ConditionSource = (
+            "artist_text"
+            if (_seed(seed, "select:condition:artist_or_character") & 1) == 0
+            else "character_text"
+        )
+        selected = artists if source == "artist_text" else characters
+        role: ConditionRole = "style" if source == "artist_text" else "identity"
+        return ConditionRequest(source=source, role=role, tags=selected)
     if artists:
-        return StyleCondition(kind="artist", tags=artists)
+        return ConditionRequest(source="artist_text", role="style", tags=artists)
     if characters:
-        return StyleCondition(kind="character", tags=characters)
+        return ConditionRequest(
+            source="character_text",
+            role="identity",
+            tags=characters,
+        )
     return None
 
 
@@ -512,7 +537,7 @@ def build_caption_plan(
     fields: CaptionFields,
     probabilities: CaptionDropoutProbabilities,
     *,
-    style_condition_mode: StyleConditionMode,
+    condition_mode: ConditionMode,
     seed: int,
 ) -> CaptionPlan:
     """Apply all-condition, candidate, per-tag, global-shuffle, and NL rules."""
@@ -522,16 +547,16 @@ def build_caption_plan(
     if type(probabilities) is not CaptionDropoutProbabilities:
         raise CaptionError("caption probabilities use an invalid type")
     if (
-        type(style_condition_mode) is not str
-        or style_condition_mode not in {"artist", "artist_or_character"}
+        type(condition_mode) is not str
+        or condition_mode not in {"artist", "artist_or_character"}
     ):
-        raise CaptionError("style condition mode is invalid")
+        raise CaptionError("condition mode is invalid")
     if type(seed) is not int or seed < 0:
         raise CaptionError("caption seed must be a non-negative integer")
     if _drop(seed, "all_condition", ALL_CONDITION_DROPOUT):
         return CaptionPlan(
             tags=(),
-            style_condition=None,
+            condition=None,
             nl_text=None,
             selected_nl=None,
             all_condition_dropped=True,
@@ -619,20 +644,20 @@ def build_caption_plan(
         seed=seed,
     )
 
-    style_condition = _select_style_condition(
-        style_condition_mode,
+    condition = _select_condition(
+        condition_mode,
         artists=artists,
         characters=character,
         seed=seed,
     )
     body_characters = (
         ()
-        if style_condition is not None and style_condition.kind == "character"
+        if condition is not None and condition.source == "character_text"
         else character
     )
     body_artists = (
         artists
-        if style_condition is not None and style_condition.kind == "character"
+        if condition is not None and condition.source == "character_text"
         else ()
     )
     tags = _shuffle_tags(
@@ -672,7 +697,7 @@ def build_caption_plan(
 
     return CaptionPlan(
         tags=tags,
-        style_condition=style_condition,
+        condition=condition,
         nl_text=nl_text,
         selected_nl=selected_nl,
         all_condition_dropped=False,

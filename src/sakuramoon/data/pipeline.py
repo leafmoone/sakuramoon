@@ -21,7 +21,7 @@ from sakuramoon.data.buckets import BucketShape
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
-    StyleConditionMode,
+    ConditionMode,
     build_caption_plan,
 )
 from sakuramoon.data.image_ops import ImageRejected, prepare_image
@@ -285,7 +285,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         buckets: tuple[BucketShape, ...],
         min_crop_retention: float,
         probabilities: CaptionDropoutProbabilities,
-        style_condition_mode: StyleConditionMode,
+        condition_mode: ConditionMode,
         tokenizer: TokenEncoder,
         framing: FramingContract,
         caption_fields_parser: CaptionFieldsParser,
@@ -311,8 +311,8 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
                 probabilities, CaptionDropoutProbabilities
             )
-            or type(style_condition_mode) is not str
-            or style_condition_mode not in {"artist", "artist_or_character"}
+            or type(condition_mode) is not str
+            or condition_mode not in {"artist", "artist_or_character"}
             or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
                 framing, FramingContract
             )
@@ -338,7 +338,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.buckets = buckets
         self.min_crop_retention = min_crop_retention
         self.probabilities = probabilities
-        self.style_condition_mode = style_condition_mode
+        self.condition_mode = condition_mode
         self.tokenizer = tokenizer
         self.framing = framing
         self.caption_fields_parser = caption_fields_parser
@@ -397,7 +397,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         plan = build_caption_plan(
             fields,
             self.probabilities,
-            style_condition_mode=self.style_condition_mode,
+            condition_mode=self.condition_mode,
             seed=identity.caption_seed,
         )
         caption = serialize_caption(plan, self.tokenizer, self.framing)
@@ -524,7 +524,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             buckets=self.buckets,
             min_crop_retention=self.min_crop_retention,
             probabilities=self.probabilities,
-            style_condition_mode=self.style_condition_mode,
+            condition_mode=self.condition_mode,
             tokenizer=self.tokenizer,
             framing=self.framing,
             caption_fields_parser=self.caption_fields_parser,

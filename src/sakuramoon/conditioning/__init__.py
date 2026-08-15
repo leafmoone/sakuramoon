@@ -1,1 +1,1 @@
-"""Trainable text, style, packing, and positional conditioning."""
+"""Trainable text, condition-token, packing, and positional conditioning."""

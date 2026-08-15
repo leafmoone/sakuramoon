@@ -18,9 +18,10 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
     CaptionDropoutCounts,
-    StyleConditionKind,
-    StyleConditionRouteCounts,
-    count_style_condition_routes,
+    ConditionRole,
+    ConditionRouteCounts,
+    ConditionSource,
+    count_condition_routes,
 )
 from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.pipeline import (
@@ -54,8 +55,9 @@ class TrainingBatch:
     condition_token_indices: torch.Tensor
     condition_mask: torch.Tensor
     active_condition_sample_indices: torch.Tensor
-    condition_kinds: tuple[StyleConditionKind | None, ...]
-    style_condition_routes: StyleConditionRouteCounts
+    condition_sources: tuple[ConditionSource | None, ...]
+    condition_roles: tuple[ConditionRole | None, ...]
+    condition_routes: ConditionRouteCounts
     sample_ids: torch.Tensor
     target_height: int
     target_width: int
@@ -348,7 +350,8 @@ def _active_condition_sample_indices(
         indices = sample.caption.condition_token_indices
         mask = sample.caption.condition_mask
         use_null = sample.caption.use_null_condition
-        kind = sample.caption.condition_kind
+        source = sample.caption.condition_source
+        role = sample.caption.condition_role
         if (
             type(use_null) is not bool
             or len(indices) != len(mask)
@@ -367,8 +370,10 @@ def _active_condition_sample_indices(
             raise CollateError(
                 "condition token presence and null routing must be complementary"
             )
-        if (kind is None) != use_null:
-            raise CollateError("condition kind and null routing must agree")
+        if (source is None) != (role is None):
+            raise CollateError("condition source and role must be present together")
+        if (source is None) != use_null:
+            raise CollateError("condition source and null routing must agree")
         if indices:
             active_samples.append(row)
     return torch.tensor(active_samples, dtype=torch.long)
@@ -429,7 +434,10 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     for sample in samples:
         for key, hit in sample.caption.dropout_hits.as_mapping().items():
             dropout_hits[key] += int(hit)
-    condition_kinds = tuple(sample.caption.condition_kind for sample in samples)
+    condition_sources = tuple(
+        sample.caption.condition_source for sample in samples
+    )
+    condition_roles = tuple(sample.caption.condition_role for sample in samples)
     return TrainingBatch(
         images=torch.stack(tuple(sample.image for sample in samples)),
         input_ids=input_ids,
@@ -440,8 +448,9 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         condition_token_indices=condition_indices,
         condition_mask=condition_mask,
         active_condition_sample_indices=active_condition_sample_indices,
-        condition_kinds=condition_kinds,
-        style_condition_routes=count_style_condition_routes(condition_kinds),
+        condition_sources=condition_sources,
+        condition_roles=condition_roles,
+        condition_routes=count_condition_routes(condition_sources),
         sample_ids=torch.tensor(
             tuple(sample.sample_id for sample in samples), dtype=torch.long
         ),

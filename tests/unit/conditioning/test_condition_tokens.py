@@ -3,19 +3,16 @@ from __future__ import annotations
 import pytest
 import torch
 
-from sakuramoon.conditioning.style_resampler import (
-    StyleConditionEncoder,
-    StyleResampler,
-)
+from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 
 
-def _encoder() -> StyleConditionEncoder:
-    return StyleConditionEncoder(
+def _encoder() -> ConditionTokenEncoder:
+    return ConditionTokenEncoder(
         input_size=16,
         hidden_size=12,
         intermediate_size=24,
         output_size=20,
-        query_count=4,
+        token_count=8,
         attention_heads=3,
         norm_eps=1e-6,
         init_std=0.02,
@@ -25,7 +22,7 @@ def _encoder() -> StyleConditionEncoder:
     )
 
 
-def test_condition_tokens_produce_four_independent_slots() -> None:
+def test_condition_tokens_produce_eight_independent_slots() -> None:
     module = _encoder()
     states = torch.randn(2, 5, 7, 16)
     output = module(
@@ -36,7 +33,7 @@ def test_condition_tokens_produce_four_independent_slots() -> None:
         torch.tensor([0, 1]),
     )
 
-    assert output.tokens.shape == (2, 4, 20)
+    assert output.tokens.shape == (2, 8, 20)
     assert output.mask.all()
     assert not torch.equal(output.tokens[:, 0], output.tokens[:, 1])
 
@@ -193,23 +190,8 @@ def test_autocast_active_and_null_outputs_share_input_dtype() -> None:
     torch.testing.assert_close(output.tokens[1], module.null_tokens.to(torch.bfloat16))
 
 
-def test_legacy_style_resampler_alias_preserves_exact_class_and_state_keys() -> None:
-    assert StyleResampler is StyleConditionEncoder
+def test_condition_encoder_state_and_artifact_contract_are_generic() -> None:
     current = _encoder()
-    legacy = StyleResampler(
-        input_size=16,
-        hidden_size=12,
-        intermediate_size=24,
-        output_size=20,
-        query_count=4,
-        attention_heads=3,
-        norm_eps=1e-6,
-        init_std=0.02,
-        projection_bias=False,
-        linear_dtype=torch.float32,
-        sensitive_dtype=torch.float32,
-    )
-
     expected_keys = (
         "layer_embedding",
         "queries",
@@ -218,11 +200,11 @@ def test_legacy_style_resampler_alias_preserves_exact_class_and_state_keys() -> 
         "input_projection.weight",
         "cross_attention.in_proj_weight",
         "cross_attention.out_proj.weight",
-        "style_mlp.norm.weight",
-        "style_mlp.gate.weight",
-        "style_mlp.up.weight",
-        "style_mlp.down.weight",
+        "condition_mlp.norm.weight",
+        "condition_mlp.gate.weight",
+        "condition_mlp.up.weight",
+        "condition_mlp.down.weight",
         "output_projection.weight",
     )
     assert tuple(current.state_dict()) == expected_keys
-    assert tuple(legacy.state_dict()) == expected_keys
+    assert current.artifact_config()["token_count"] == 8

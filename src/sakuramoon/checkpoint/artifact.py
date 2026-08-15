@@ -7,13 +7,14 @@ from typing import Any, cast
 import torch
 from torch import nn
 
-from sakuramoon.conditioning.style_resampler import StyleConditionEncoder
+from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import DenseDiT, PackedDiT
 from sakuramoon.train.step import TrainableComposite
 
 _DTYPES = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-_ROOT_KEYS = {"class", "dit", "text", "style"}
+_ARCHITECTURE_SCHEMA_VERSION = 2
+_ROOT_KEYS = {"schema_version", "class", "dit", "text", "condition_tokens"}
 _DIT_META_KEYS = {"active_slot_ids", "attention_backend"}
 _STATE_COMPATIBLE_ATTENTION_BACKENDS = {
     "dense_sdpa",
@@ -45,22 +46,32 @@ def export_trainable_composite(module: nn.Module) -> dict[str, object]:
     if (
         type(composite.dit) not in {DenseDiT, PackedDiT}
         or type(composite.text) is not TextConditioner
-        or type(composite.style) is not StyleConditionEncoder
-        or set(dict(composite.named_children())) != {"dit", "text", "style"}
+        or type(composite.condition_tokens) is not ConditionTokenEncoder
+        or set(dict(composite.named_children()))
+        != {"dit", "text", "condition_tokens"}
     ):
-        raise TypeError("checkpoint composite must contain only a supported DiT, text and style")
+        raise TypeError(
+            "checkpoint composite must contain only a supported DiT, text and "
+            "condition-token encoder"
+        )
+    if composite.dit.condition_token_count != composite.condition_tokens.token_count:
+        raise ValueError("DiT and condition-token encoder counts differ")
     parameters = tuple(composite.named_parameters(remove_duplicate=False))
     if not parameters or any(not parameter.requires_grad for _, parameter in parameters):
         raise ValueError("checkpoint composite parameters must all be trainable")
-    if any(name.split(".", 1)[0] not in {"dit", "text", "style"} for name, _ in parameters):
+    if any(
+        name.split(".", 1)[0] not in {"dit", "text", "condition_tokens"}
+        for name, _ in parameters
+    ):
         raise ValueError("checkpoint parameter is outside the trainable composite")
     metadata = composite.dit.model_metadata()
     if metadata.get("prediction_type") != "x" or metadata.get("out_channels") != 128:
         raise ValueError("checkpoint model must use the locked x-prediction head")
     return {
+        "schema_version": _ARCHITECTURE_SCHEMA_VERSION,
         "class": "TrainableComposite",
         "dit": composite.dit.artifact_config(),
-        "style": composite.style.artifact_config(),
+        "condition_tokens": composite.condition_tokens.artifact_config(),
         "text": composite.text.artifact_config(),
     }
 
@@ -98,7 +109,11 @@ def build_trainable_composite(
     device: torch.device | str,
 ) -> TrainableComposite:
     document = _mapping(value, "model architecture")
-    if set(document) != _ROOT_KEYS or document.get("class") != "TrainableComposite":
+    if (
+        set(document) != _ROOT_KEYS
+        or document.get("schema_version") != _ARCHITECTURE_SCHEMA_VERSION
+        or document.get("class") != "TrainableComposite"
+    ):
         raise ValueError("model architecture has unknown or missing fields")
     dit_config = _mapping(document["dit"], "DiT architecture")
     recorded_slots = dit_config.get("active_slot_ids")
@@ -120,8 +135,9 @@ def build_trainable_composite(
     text_arguments = _decode_dtypes(
         _mapping(document["text"], "text architecture"), "text"
     )
-    style_arguments = _decode_dtypes(
-        _mapping(document["style"], "style architecture"), "style"
+    condition_token_arguments = _decode_dtypes(
+        _mapping(document["condition_tokens"], "condition-token architecture"),
+        "condition_tokens",
     )
     dit_arguments = _decode_dtypes(dit_arguments, "dit")
     try:
@@ -129,7 +145,7 @@ def build_trainable_composite(
             module = TrainableComposite(
                 dit=dit_class(**dit_arguments),  # pyright: ignore[reportArgumentType]
                 text=TextConditioner(**text_arguments),
-                style=StyleConditionEncoder(**style_arguments),
+                condition_tokens=ConditionTokenEncoder(**condition_token_arguments),
             )
     except (TypeError, ValueError):
         raise ValueError("model architecture cannot construct the locked composite") from None

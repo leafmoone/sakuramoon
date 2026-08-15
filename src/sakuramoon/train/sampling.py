@@ -18,7 +18,7 @@ from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.caption import (
     CaptionPlan,
     CaptionTag,
-    StyleCondition,
+    ConditionRequest,
     Tag,
     empty_caption_dropout_hits,
 )
@@ -111,16 +111,19 @@ class _PromptPair:
     def __post_init__(self) -> None:
         if self.a.sample_id == self.b.sample_id:
             raise TrainingSamplingError("A and B must be different training samples")
-        a_condition = self.a.plan.style_condition
-        b_condition = self.b.plan.style_condition
+        a_condition = self.a.plan.condition
+        b_condition = self.b.plan.condition
         if a_condition is None or b_condition is None:
-            raise TrainingSamplingError("A and B must both have style conditions")
-        if a_condition.kind != b_condition.kind:
-            raise TrainingSamplingError("A and B style-condition kinds must match")
+            raise TrainingSamplingError("A and B must both have conditions")
+        if (
+            a_condition.source != b_condition.source
+            or a_condition.role != b_condition.role
+        ):
+            raise TrainingSamplingError("A and B condition protocols must match")
         a_tags = frozenset(tag.canonical for tag in a_condition.tags)
         b_tags = frozenset(tag.canonical for tag in b_condition.tags)
         if a_tags & b_tags:
-            raise TrainingSamplingError("A and B style conditions must not overlap")
+            raise TrainingSamplingError("A and B conditions must not overlap")
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +153,7 @@ class TrainingSampleResult:
 def _unconditional_plan() -> CaptionPlan:
     return CaptionPlan(
         tags=(),
-        style_condition=None,
+        condition=None,
         nl_text=None,
         selected_nl=None,
         all_condition_dropped=True,
@@ -266,26 +269,27 @@ def _select_prompt_pair(
         raise TrainingSamplingError("post-dropout candidate batch is empty")
     valid_pairs: list[_PromptPair] = []
     for first_index, first in enumerate(candidates):
-        first_condition = first.plan.style_condition
+        first_condition = first.plan.condition
         if first_condition is None:
             continue
         first_tags = frozenset(tag.canonical for tag in first_condition.tags)
         for second in candidates[first_index + 1 :]:
-            second_condition = second.plan.style_condition
+            second_condition = second.plan.condition
             if first.sample_id == second.sample_id or second_condition is None:
                 continue
             second_tags = frozenset(tag.canonical for tag in second_condition.tags)
             if (
-                first_condition.kind == second_condition.kind
+                first_condition.source == second_condition.source
+                and first_condition.role == second_condition.role
                 and first_tags.isdisjoint(second_tags)
             ):
                 valid_pairs.append(_PromptPair(first, second))
     if not valid_pairs:
         condition_candidates = sum(
-            candidate.plan.style_condition is not None for candidate in candidates
+            candidate.plan.condition is not None for candidate in candidates
         )
         raise TrainingSamplingError(
-            "no valid non-overlapping style-condition pair exists: "
+            "no valid non-overlapping condition pair exists: "
             f"candidates={len(candidates)} "
             f"condition_candidates={condition_candidates}"
         )
@@ -349,22 +353,25 @@ def _build_variant_items(
     ):
         main = sources[main_label]
         source_conditions = tuple(
-            sources[condition_label].plan.style_condition
+            sources[condition_label].plan.condition
             for condition_label in condition_labels
         )
         if any(condition is None for condition in source_conditions):
-            raise TrainingSamplingError("variant style condition is unavailable")
+            raise TrainingSamplingError("variant condition is unavailable")
         typed_conditions = tuple(
             condition
             for condition in source_conditions
             if condition is not None
         )
-        kinds = {condition.kind for condition in typed_conditions}
-        if len(kinds) > 1:
-            raise TrainingSamplingError("variant style-condition kinds differ")
+        protocols = {
+            (condition.source, condition.role) for condition in typed_conditions
+        }
+        if len(protocols) > 1:
+            raise TrainingSamplingError("variant condition protocols differ")
         condition = (
-            StyleCondition(
-                kind=typed_conditions[0].kind,
+            ConditionRequest(
+                source=typed_conditions[0].source,
+                role=typed_conditions[0].role,
                 tags=tuple(
                     tag for item in typed_conditions for tag in item.tags
                 ),
@@ -372,7 +379,7 @@ def _build_variant_items(
             if typed_conditions
             else None
         )
-        requested_plan = dataclasses.replace(main.plan, style_condition=condition)
+        requested_plan = dataclasses.replace(main.plan, condition=condition)
         caption = serialize_caption(requested_plan, tokenizer, framing)
         if caption.plan != requested_plan:
             raise TrainingSamplingError(
@@ -471,12 +478,13 @@ def _caption_tag_metadata(tag: CaptionTag) -> dict[str, str]:
 def _plan_metadata(plan: CaptionPlan) -> dict[str, object]:
     return {
         "tags": [_caption_tag_metadata(tag) for tag in plan.tags],
-        "style_condition": (
+        "condition": (
             None
-            if plan.style_condition is None
+            if plan.condition is None
             else {
-                "kind": plan.style_condition.kind,
-                "tags": [_tag_metadata(tag) for tag in plan.style_condition.tags],
+                "source": plan.condition.source,
+                "role": plan.condition.role,
+                "tags": [_tag_metadata(tag) for tag in plan.condition.tags],
             }
         ),
         "nl_text": plan.nl_text,
@@ -538,7 +546,7 @@ def _variant_metadata(
             {
                 "label": label,
                 "sample_id": source.sample_id,
-                "style_condition": _plan_metadata(source.plan)["style_condition"],
+                "condition": _plan_metadata(source.plan)["condition"],
             }
             for label, source in zip(
                 item.condition_sources,

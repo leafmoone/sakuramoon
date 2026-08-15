@@ -82,7 +82,7 @@ def _conditional_plan(case: PromptCase) -> CaptionPlan:
         return case.caption_plan
     return CaptionPlan(
         tags=(),
-        style_condition=None,
+        condition=None,
         nl_text=case.prompt,
         selected_nl="long_names",
         all_condition_dropped=False,
@@ -93,7 +93,7 @@ def _conditional_plan(case: PromptCase) -> CaptionPlan:
 def _unconditional_plan() -> CaptionPlan:
     return CaptionPlan(
         tags=(),
-        style_condition=None,
+        condition=None,
         nl_text=None,
         selected_nl=None,
         all_condition_dropped=True,
