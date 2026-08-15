@@ -93,6 +93,11 @@ def test_collate_pads_eot_and_preserves_structured_metadata() -> None:
     assert batch.condition_token_indices.shape == (2, 0)
     assert batch.active_condition_sample_indices.numel() == 0
     assert batch.condition_kinds == (None, None)
+    assert batch.style_condition_routes.as_mapping() == {
+        "artist": 0,
+        "character": 0,
+        "null": 2,
+    }
     assert torch.equal(batch.sample_ids, torch.tensor([1, 2]))
     assert CAPTION_DROPOUT_KEYS == DROPOUT_KEYS
     dropout_hits = batch.dropout_hits.as_mapping()
@@ -240,6 +245,11 @@ def test_collate_builds_active_condition_sample_plan_on_cpu() -> None:
     assert batch.active_condition_sample_indices.device.type == "cpu"
     assert torch.equal(batch.active_condition_sample_indices, torch.tensor([0]))
     assert batch.condition_kinds == ("artist", None)
+    assert batch.style_condition_routes.as_mapping() == {
+        "artist": 1,
+        "character": 0,
+        "null": 1,
+    }
 
 
 @pytest.mark.parametrize(

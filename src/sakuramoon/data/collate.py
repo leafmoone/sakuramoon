@@ -19,6 +19,8 @@ from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
     CaptionDropoutCounts,
     StyleConditionKind,
+    StyleConditionRouteCounts,
+    count_style_condition_routes,
 )
 from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.pipeline import (
@@ -53,6 +55,7 @@ class TrainingBatch:
     condition_mask: torch.Tensor
     active_condition_sample_indices: torch.Tensor
     condition_kinds: tuple[StyleConditionKind | None, ...]
+    style_condition_routes: StyleConditionRouteCounts
     sample_ids: torch.Tensor
     target_height: int
     target_width: int
@@ -426,6 +429,7 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     for sample in samples:
         for key, hit in sample.caption.dropout_hits.as_mapping().items():
             dropout_hits[key] += int(hit)
+    condition_kinds = tuple(sample.caption.condition_kind for sample in samples)
     return TrainingBatch(
         images=torch.stack(tuple(sample.image for sample in samples)),
         input_ids=input_ids,
@@ -436,7 +440,8 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         condition_token_indices=condition_indices,
         condition_mask=condition_mask,
         active_condition_sample_indices=active_condition_sample_indices,
-        condition_kinds=tuple(sample.caption.condition_kind for sample in samples),
+        condition_kinds=condition_kinds,
+        style_condition_routes=count_style_condition_routes(condition_kinds),
         sample_ids=torch.tensor(
             tuple(sample.sample_id for sample in samples), dtype=torch.long
         ),

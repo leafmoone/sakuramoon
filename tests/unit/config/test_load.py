@@ -38,6 +38,7 @@ def test_recursive_merge_is_deterministic(
     )
 
     assert first.config.run.run_id == "merged"
+    assert first.config.caption.style_condition_mode == "artist_or_character"
     assert first.resolved_toml == second.resolved_toml
     assert [item.path for item in first.inputs] == ["base.toml", "overlay.toml"]
 

@@ -49,6 +49,7 @@ def test_pipeline_skips_corrupt_image_and_reports_rejection() -> None:
     pipeline.cycle_index = 0
     pipeline.caption_fields_parser = _fields
     pipeline.probabilities = _probabilities()
+    pipeline.style_condition_mode = "artist_or_character"
     pipeline.tokenizer = _Tokenizer()
     pipeline.framing = FramingContract(34, 5, 248044)
     pipeline.buckets = (BucketShape(512, 512),)
@@ -82,6 +83,7 @@ def test_pipeline_skips_policy_rejected_sample_before_image_decode() -> None:
         PipelineSampleRejected("ai_image_corrupted")
     )
     pipeline.probabilities = _probabilities()
+    pipeline.style_condition_mode = "artist_or_character"
     pipeline.tokenizer = _Tokenizer()
     pipeline.framing = FramingContract(34, 5, 248044)
     pipeline.buckets = (BucketShape(512, 512),)

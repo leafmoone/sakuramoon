@@ -675,6 +675,7 @@ class ProductionPipelineFactory:
             buckets=buckets,
             min_crop_retention=self.config.data.image.min_crop_retention,
             probabilities=probabilities,
+            style_condition_mode=self.config.caption.style_condition_mode,
             tokenizer=self.tokenizer,
             framing=self.framing,
             caption_fields_parser=parse_modelscope_caption_fields,

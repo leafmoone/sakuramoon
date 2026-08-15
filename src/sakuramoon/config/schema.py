@@ -342,6 +342,7 @@ class CaptionDropoutConfig(StrictModel):
 
 class CaptionConfig(StrictModel):
     category_order: StringTuple
+    style_condition_mode: Literal["artist", "artist_or_character"]
     tag_separator: Literal[", "]
     tag_nl_separator: Literal["\n\n"]
     text_condition_max: Literal[512]

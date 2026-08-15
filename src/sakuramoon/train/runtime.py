@@ -28,7 +28,11 @@ from sakuramoon.checkpoint.policy import (
 from sakuramoon.checkpoint.schema import CheckpointManifest, RawCheckpointState
 from sakuramoon.conditioning.rope import full_canvas_crop_coordinates
 from sakuramoon.config.schema import RuntimeConfig
-from sakuramoon.data.caption import CaptionDropoutCounts, CaptionPlan
+from sakuramoon.data.caption import (
+    CaptionDropoutCounts,
+    CaptionPlan,
+    StyleConditionRouteCounts,
+)
 from sakuramoon.data.collate import TrainingBatch
 from sakuramoon.data.production import (
     AcceptedProductionBatchStream,
@@ -375,6 +379,7 @@ class RuntimeMeasurement:
     low_noise_sample_count: torch.Tensor
     timesteps: torch.Tensor
     dropout_hits: CaptionDropoutCounts
+    style_condition_routes: StyleConditionRouteCounts
     captions: tuple[SerializedCaption, ...]
     caption_plans: tuple[CaptionPlan, ...]
 
@@ -394,6 +399,7 @@ class RuntimeMeasurement:
             low_noise_sample_count=self.low_noise_sample_count.detach(),
             timesteps=self.timesteps.detach(),
             dropout_hits=self.dropout_hits,
+            style_condition_routes=self.style_condition_routes,
             captions=self.captions,
             caption_plans=self.caption_plans,
         )
@@ -814,6 +820,7 @@ class SingleGpuBatchRuntime:
             low_noise_sample_count=loss.low_noise_sample_count,
             timesteps=prepared.inputs.timestep,
             dropout_hits=batch.dropout_hits,
+            style_condition_routes=batch.style_condition_routes,
             captions=batch.captions,
             caption_plans=tuple(caption.plan for caption in batch.captions),
         )

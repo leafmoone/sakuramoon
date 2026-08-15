@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from sakuramoon.data.caption import (
@@ -15,9 +17,9 @@ from sakuramoon.data.caption import (
     NlDropoutProbabilities,
     StyleCondition,
     Tag,
-    build_caption_plan,
     empty_caption_dropout_hits,
 )
+from sakuramoon.data.caption import build_caption_plan as _build_caption_plan
 
 
 def _nl_probabilities(value: float = 0.0) -> NlDropoutProbabilities:
@@ -31,6 +33,21 @@ def _probabilities(
         tag=tag,
         candidate_source=candidate_source,
         nl=_nl_probabilities(nl),
+    )
+
+
+def build_caption_plan(
+    fields: CaptionFields,
+    probabilities: CaptionDropoutProbabilities,
+    *,
+    seed: int,
+    style_condition_mode: str = "artist",
+) -> CaptionPlan:
+    return _build_caption_plan(
+        fields,
+        probabilities,
+        style_condition_mode=style_condition_mode,  # pyright: ignore[reportArgumentType]
+        seed=seed,
     )
 
 
@@ -184,6 +201,78 @@ def test_artist_order_is_fixed_after_independent_dropout() -> None:
     )
 
 
+def test_artist_or_character_routing_is_deterministic_and_complementary() -> None:
+    fields = _fields()
+    expected = {
+        (source, tag.canonical)
+        for source in BODY_TAG_SOURCE_ORDER
+        for tag in getattr(fields, source)
+    } | {("artist", tag.canonical) for tag in fields.artists}
+    selected_kinds: set[str] = set()
+
+    for seed in range(10_000):
+        plan = build_caption_plan(
+            fields,
+            _probabilities(),
+            style_condition_mode="artist_or_character",
+            seed=seed,
+        )
+        if plan.all_condition_dropped:
+            continue
+        assert plan.style_condition is not None
+        assert plan == build_caption_plan(
+            fields,
+            _probabilities(),
+            style_condition_mode="artist_or_character",
+            seed=seed,
+        )
+        condition = plan.style_condition
+        selected_kinds.add(condition.kind)
+        routed = {(item.source, item.tag.canonical) for item in plan.tags}
+        routed.update((condition.kind, tag.canonical) for tag in condition.tags)
+        assert routed == expected
+        assert len(plan.tags) + len(condition.tags) == len(expected)
+        if condition.kind == "artist":
+            assert not any(item.source == "artist" for item in plan.tags)
+            assert {
+                item.tag.canonical for item in plan.tags if item.source == "character"
+            } == {tag.canonical for tag in fields.character}
+        else:
+            assert not any(item.source == "character" for item in plan.tags)
+            assert {
+                item.tag.canonical for item in plan.tags if item.source == "artist"
+            } == {tag.canonical for tag in fields.artists}
+        if selected_kinds == {"artist", "character"}:
+            break
+
+    assert selected_kinds == {"artist", "character"}
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected_kind"),
+    [
+        (replace(_fields(), character=()), "artist"),
+        (replace(_fields(), artists=()), "character"),
+        (replace(_fields(), character=(), artists=()), None),
+    ],
+)
+def test_artist_or_character_routes_only_available_kind(
+    fields: CaptionFields, expected_kind: str | None
+) -> None:
+    plan = build_caption_plan(
+        fields,
+        _probabilities(),
+        style_condition_mode="artist_or_character",
+        seed=_seed_for_global_dropout(False),
+    )
+
+    assert (
+        None if plan.style_condition is None else plan.style_condition.kind
+    ) == expected_kind
+    if expected_kind is not None:
+        assert not any(item.source == expected_kind for item in plan.tags)
+
+
 def test_nl_selects_at_most_one_available_complete_branch() -> None:
     plan = build_caption_plan(
         _fields(), _probabilities(), seed=_seed_for_global_dropout(False)
@@ -299,6 +388,17 @@ def test_caption_seed_requires_a_non_negative_integer(seed: object) -> None:
             _fields(),
             _probabilities(),
             seed=seed,  # pyright: ignore[reportArgumentType]
+        )
+
+
+@pytest.mark.parametrize("mode", ["", "artist_or_character ", "character", True, 1])
+def test_style_condition_mode_is_strict(mode: object) -> None:
+    with pytest.raises(CaptionError, match="style condition mode"):
+        _build_caption_plan(
+            _fields(),
+            _probabilities(),
+            style_condition_mode=mode,  # pyright: ignore[reportArgumentType]
+            seed=_seed_for_global_dropout(False),
         )
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from sakuramoon.data.caption import (
     CaptionPlan,
     CaptionTag,
@@ -25,14 +27,15 @@ class _Tokenizer:
         return [1000 + index for index, _character in enumerate(text)]
 
 
-def _plan() -> CaptionPlan:
+def _plan(kind: str = "artist") -> CaptionPlan:
     return CaptionPlan(
         tags=(
             CaptionTag("general", Tag("long_hair", "long_hair")),
             CaptionTag("year", Tag("year 2026", "year 2026")),
         ),
         style_condition=StyleCondition(
-            kind="artist", tags=(Tag("artist_name", "artist_name"),)
+            kind=kind,  # pyright: ignore[reportArgumentType]
+            tags=(Tag(f"{kind}_name", f"{kind}_name"),),
         ),
         nl_text="soft lighting",
         selected_nl="short_vibes",
@@ -41,26 +44,27 @@ def _plan() -> CaptionPlan:
     )
 
 
-def test_serialization_normalizes_only_tokenizer_facing_underscores() -> None:
-    plan = _plan()
+@pytest.mark.parametrize("kind", ["artist", "character"])
+def test_serialization_normalizes_only_tokenizer_facing_underscores(kind: str) -> None:
+    plan = _plan(kind)
 
     caption = serialize_caption(plan, _Tokenizer(), FramingContract(34, 5, 248044))
 
     assert caption.body == "long hair, year 2026\n\nsoft lighting"
-    assert caption.condition_text == "artist name"
+    assert caption.condition_text == f"{kind} name"
     assert caption.text == (
         SYSTEM_PREFIX
         + "long hair, year 2026\n\nsoft lighting"
         + MAIN_SUFFIX
-        + "artist name"
+        + f"{kind} name"
     )
     assert caption.plan.tags[0].tag.text == "long_hair"
     assert caption.plan.tags[0].tag.canonical == "long_hair"
     assert caption.plan.style_condition is not None
-    assert caption.plan.style_condition.tags[0].text == "artist_name"
+    assert caption.plan.style_condition.tags[0].text == f"{kind}_name"
     assert caption.condition_token_indices
     assert caption.use_null_condition is False
-    assert caption.condition_kind == "artist"
+    assert caption.condition_kind == kind
 
 
 def test_serialization_truncates_only_complete_globally_ordered_tags() -> None:

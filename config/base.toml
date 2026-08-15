@@ -101,6 +101,7 @@ transpose_closed = true
 
 [caption]
 category_order = ["tags", "nl", "style_condition"]
+style_condition_mode = "artist_or_character"
 tag_separator = ", "
 tag_nl_separator = "\n\n"
 text_condition_max = 512

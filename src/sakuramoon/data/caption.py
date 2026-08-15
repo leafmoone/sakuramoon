@@ -32,6 +32,7 @@ CAPTION_DROPOUT_KEYS: tuple[str, ...] = (
     "nl2",
     "nl3",
 )
+STYLE_CONDITION_ROUTE_KEYS: tuple[str, ...] = ("artist", "character", "null")
 TagSource = Literal[
     "rating",
     "year",
@@ -46,6 +47,7 @@ TagSource = Literal[
     "artist",
 ]
 StyleConditionKind = Literal["artist", "character"]
+StyleConditionMode = Literal["artist", "artist_or_character"]
 NlBranch = Literal["long_names", "long_no_names", "short_vibes", "nl2", "nl3"]
 NL_BRANCHES: tuple[NlBranch, ...] = (
     "long_names",
@@ -114,6 +116,47 @@ class StyleCondition:
             or any(type(tag) is not Tag for tag in self.tags)
         ):
             raise CaptionError("style condition kind or tags are invalid")
+
+
+@dataclass(frozen=True)
+class StyleConditionRouteCounts:
+    artist: int
+    character: int
+    null: int
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not int or value < 0 for value in self.as_mapping().values()
+        ):
+            raise CaptionError(
+                "style condition route counts must be non-negative integers"
+            )
+
+    def as_mapping(self) -> dict[str, int]:
+        return {
+            "artist": self.artist,
+            "character": self.character,
+            "null": self.null,
+        }
+
+
+def count_style_condition_routes(
+    kinds: tuple[StyleConditionKind | None, ...],
+) -> StyleConditionRouteCounts:
+    if type(kinds) is not tuple or any(
+        kind is not None
+        and (type(kind) is not str or kind not in {"artist", "character"})
+        for kind in kinds
+    ):
+        raise CaptionError("style condition route kinds are invalid")
+    counts = dict.fromkeys(STYLE_CONDITION_ROUTE_KEYS, 0)
+    for kind in kinds:
+        counts["null" if kind is None else kind] += 1
+    return StyleConditionRouteCounts(
+        artist=counts["artist"],
+        character=counts["character"],
+        null=counts["null"],
+    )
 
 
 @dataclass(frozen=True)
@@ -441,10 +484,35 @@ def _caption_tags(source: TagSource, tags: tuple[Tag, ...]) -> tuple[CaptionTag,
     return tuple(CaptionTag(source=source, tag=tag) for tag in tags)
 
 
+def _select_style_condition(
+    mode: StyleConditionMode,
+    *,
+    artists: tuple[Tag, ...],
+    characters: tuple[Tag, ...],
+    seed: int,
+) -> StyleCondition | None:
+    if mode == "artist":
+        return StyleCondition(kind="artist", tags=artists) if artists else None
+    if artists and characters:
+        kind: StyleConditionKind = (
+            "artist"
+            if (_seed(seed, "select:style_condition:artist_or_character") & 1) == 0
+            else "character"
+        )
+        selected = artists if kind == "artist" else characters
+        return StyleCondition(kind=kind, tags=selected)
+    if artists:
+        return StyleCondition(kind="artist", tags=artists)
+    if characters:
+        return StyleCondition(kind="character", tags=characters)
+    return None
+
+
 def build_caption_plan(
     fields: CaptionFields,
     probabilities: CaptionDropoutProbabilities,
     *,
+    style_condition_mode: StyleConditionMode,
     seed: int,
 ) -> CaptionPlan:
     """Apply all-condition, candidate, per-tag, global-shuffle, and NL rules."""
@@ -453,6 +521,11 @@ def build_caption_plan(
         raise CaptionError("caption fields must use the strict CaptionFields type")
     if type(probabilities) is not CaptionDropoutProbabilities:
         raise CaptionError("caption probabilities use an invalid type")
+    if (
+        type(style_condition_mode) is not str
+        or style_condition_mode not in {"artist", "artist_or_character"}
+    ):
+        raise CaptionError("style condition mode is invalid")
     if type(seed) is not int or seed < 0:
         raise CaptionError("caption seed must be a non-negative integer")
     if _drop(seed, "all_condition", ALL_CONDITION_DROPOUT):
@@ -546,6 +619,22 @@ def build_caption_plan(
         seed=seed,
     )
 
+    style_condition = _select_style_condition(
+        style_condition_mode,
+        artists=artists,
+        characters=character,
+        seed=seed,
+    )
+    body_characters = (
+        ()
+        if style_condition is not None and style_condition.kind == "character"
+        else character
+    )
+    body_artists = (
+        artists
+        if style_condition is not None and style_condition.kind == "character"
+        else ()
+    )
     tags = _shuffle_tags(
         (
             *_caption_tags("rating", rating),
@@ -555,9 +644,10 @@ def build_caption_plan(
             *_caption_tags("anime_completeness", anime_completeness),
             *_caption_tags("anime_classification", anime_classification),
             *_caption_tags("nsfw", nsfw),
-            *_caption_tags("character", character),
+            *_caption_tags("character", body_characters),
             *_caption_tags("copyright", copyright_tags),
             *_caption_tags("general", general),
+            *_caption_tags("artist", body_artists),
         ),
         seed,
     )
@@ -582,9 +672,7 @@ def build_caption_plan(
 
     return CaptionPlan(
         tags=tags,
-        style_condition=(
-            StyleCondition(kind="artist", tags=artists) if artists else None
-        ),
+        style_condition=style_condition,
         nl_text=nl_text,
         selected_nl=selected_nl,
         all_condition_dropped=False,
