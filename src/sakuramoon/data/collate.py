@@ -434,10 +434,12 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     for sample in samples:
         for key, hit in sample.caption.dropout_hits.as_mapping().items():
             dropout_hits[key] += int(hit)
-    condition_sources = tuple(
+    condition_sources: tuple[ConditionSource | None, ...] = tuple(
         sample.caption.condition_source for sample in samples
     )
-    condition_roles = tuple(sample.caption.condition_role for sample in samples)
+    condition_roles: tuple[ConditionRole | None, ...] = tuple(
+        sample.caption.condition_role for sample in samples
+    )
     return TrainingBatch(
         images=torch.stack(tuple(sample.image for sample in samples)),
         input_ids=input_ids,

@@ -275,6 +275,8 @@ def _uint8_chw(image: Image.Image) -> torch.Tensor:
 class WebDatasetPipeline(IterableDataset[PipelineSample]):
     """Decode and serialize each sample from service-approved training shards."""
 
+    condition_mode: ConditionMode
+
     def __init__(
         self,
         *,

@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-from safetensors.torch import (  # pyright: ignore[reportUnknownVariableType]
-    load_file,
-    save_file,
+from safetensors.torch import (
+    load_file,  # pyright: ignore[reportUnknownVariableType]
+    save_file,  # pyright: ignore[reportUnknownVariableType]
 )
 
 from sakuramoon.checkpoint.load import read_checkpoint_manifest
@@ -141,16 +141,17 @@ def _expand_parameter(
 
 
 def migrate_model_tensors(
-    tensors: dict[str, torch.Tensor],
+    tensors: object,
     *,
     init_std: float,
 ) -> dict[str, torch.Tensor]:
     """Rename one shard and deterministically initialize the four new rows."""
 
-    if not tensors:
+    if not isinstance(tensors, dict) or not tensors:
         raise CheckpointError("legacy model shard is empty")
     migrated: dict[str, torch.Tensor] = {}
-    for name, tensor in sorted(tensors.items()):
+    entries = cast(dict[object, object], tensors)
+    for name, tensor in sorted(entries.items(), key=lambda item: str(item[0])):
         if type(name) is not str or not isinstance(tensor, torch.Tensor):
             raise CheckpointError("legacy model shard entries are invalid")
         target_name = _rename_parameter(name)
@@ -172,15 +173,17 @@ def _optimizer_groups(value: object, name: str) -> list[dict[str, object]]:
         group = _mapping(raw_group, f"{name}[{index}]")
         names = group.get("param_names")
         ids = group.get("params")
+        if not isinstance(names, list) or not isinstance(ids, list):
+            raise CheckpointError(f"{name}[{index}] parameter identity is invalid")
+        name_items = cast(list[object], names)
+        id_items = cast(list[object], ids)
         if (
-            not isinstance(names, list)
-            or not all(isinstance(item, str) for item in cast(list[object], names))
-            or not isinstance(ids, list)
-            or not all(type(item) is int for item in cast(list[object], ids))
-            or len(names) != len(ids)
+            not all(isinstance(item, str) for item in name_items)
+            or not all(type(item) is int for item in id_items)
+            or len(name_items) != len(id_items)
         ):
             raise CheckpointError(f"{name}[{index}] parameter identity is invalid")
-        groups.append(cast(dict[str, object], group))
+        groups.append(group)
     return groups
 
 
@@ -327,7 +330,7 @@ def _migrate_model_directory(
     for shard_name in shard_names:
         shard_path = model_dir / shard_name
         try:
-            shard = cast(dict[str, torch.Tensor], load_file(shard_path, device="cpu"))
+            shard = load_file(shard_path, device="cpu")
         except Exception:  # noqa: BLE001 - backend normalization boundary
             raise CheckpointError(f"legacy model shard is unreadable: {shard_name}") from None
         if any(

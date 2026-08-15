@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 import torch
 
@@ -122,9 +124,11 @@ def test_optimizer_migration_renames_sorts_and_drops_only_expanded_moments() -> 
 
     groups = migrated["param_groups"]
     assert isinstance(groups, list)
-    matrix = groups[0]
-    sensitive = groups[1]
-    assert isinstance(matrix, dict) and isinstance(sensitive, dict)
+    matrix_value = groups[0]
+    sensitive_value = groups[1]
+    assert isinstance(matrix_value, dict) and isinstance(sensitive_value, dict)
+    matrix = cast(dict[str, object], matrix_value)
+    sensitive = cast(dict[str, object], sensitive_value)
     assert matrix["param_names"] == [
         "condition_tokens.input_projection.weight",
         "dit.input_projection.weight",
@@ -135,8 +139,11 @@ def test_optimizer_migration_renames_sorts_and_drops_only_expanded_moments() -> 
     ]
     migrated_state = migrated["state"]
     assert isinstance(migrated_state, dict)
-    assert set(migrated_state) == {0, 1}
+    assert set(cast(dict[object, object], migrated_state)) == {0, 1}
     schema_groups = migrated_schema["groups"]
     assert isinstance(schema_groups, list)
-    assert schema_groups[0]["param_names"] == matrix["param_names"]
-    assert schema_groups[1]["param_names"] == sensitive["param_names"]
+    first_schema = schema_groups[0]
+    second_schema = schema_groups[1]
+    assert isinstance(first_schema, dict) and isinstance(second_schema, dict)
+    assert first_schema["param_names"] == matrix["param_names"]
+    assert second_schema["param_names"] == sensitive["param_names"]
