@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-from safetensors.torch import load_file, save_file  # pyright: ignore[reportUnknownVariableType]
+from safetensors.torch import (  # pyright: ignore[reportUnknownVariableType]
+    load_file,
+    save_file,
+)
 
 from sakuramoon.checkpoint.load import read_checkpoint_manifest
 from sakuramoon.checkpoint.schema import (
