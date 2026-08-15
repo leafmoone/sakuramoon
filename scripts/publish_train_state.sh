@@ -174,7 +174,7 @@ verify_remote_checkpoints() {
 }
 
 publish_if_changed() {
-  local candidate identity previous='' marker_tmp checkpoint_count
+  local candidate identity previous='' marker_tmp checkpoint_count upload_log
   candidate="$(stage_source_tree)" || {
     log "no complete checkpoint tree under ${SOURCE_ROOT}"
     return 0
@@ -199,16 +199,29 @@ publish_if_changed() {
   checkpoint_count="$(find "${candidate}" -mindepth 1 -maxdepth 1 \
     -type d -name 'ckpt_*' | wc -l)"
   log "mirroring ${checkpoint_count} checkpoint directories from ${SOURCE_ROOT} to ${REPO_ID}/${REPO_PATH}"
+  upload_log="$(mktemp "${STATE_ROOT}/.upload.XXXXXX")"
   if ! "${MS_HUB_BIN}" upload "${REPO_ID}" "${candidate}" "${REPO_PATH}" \
     --repo-type "${REPO_TYPE}" --use-cache \
     --max-workers "${UPLOAD_WORKERS}" --disable-tqdm \
     --exclude '.ms_upload_cache/**' \
     --commit-message "training state tree ${identity:0:12}" \
-    >>"${LOG_FILE}" 2>&1; then
+    >"${upload_log}" 2>&1; then
+    cat "${upload_log}" >>"${LOG_FILE}"
+    rm -f -- "${upload_log}"
     remove_workdir "${candidate}"
     log "tree upload failed"
     return 1
   fi
+  cat "${upload_log}" >>"${LOG_FILE}"
+  if grep -Eiq \
+    '(^|[[:space:]|])ERROR([[:space:]|:]|$)|commit failed|permanent failure|commit rejected|Failed[[:space:]]*:[[:space:]]*[1-9][0-9]*' \
+    "${upload_log}"; then
+    rm -f -- "${upload_log}"
+    remove_workdir "${candidate}"
+    log "tree upload reported a failure despite a zero exit status"
+    return 1
+  fi
+  rm -f -- "${upload_log}"
   if ! verify_remote_checkpoints "${candidate}"; then
     remove_workdir "${candidate}"
     log "remote checkpoint verification failed"
