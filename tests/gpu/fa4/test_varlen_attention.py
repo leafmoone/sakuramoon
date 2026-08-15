@@ -217,7 +217,7 @@ def test_all_17_image_shapes_and_text_boundaries_execute() -> None:
     text_lengths = (0, 39, 512)
     for height, width in BUCKETS_512:
         for text_length in text_lengths:
-            length = height // 16 * (width // 16) + 4 + text_length
+            length = height // 16 * (width // 16) + 8 + text_length
             boundaries = _validated_boundaries((0, length))
             query = torch.randn(length, 20, 128, device="cuda", dtype=torch.bfloat16)
             key = torch.randn(length, 5, 128, device="cuda", dtype=torch.bfloat16)

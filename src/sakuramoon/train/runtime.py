@@ -235,6 +235,13 @@ class ActualDitFlopCounter:
             raise TypeError("DiT FLOP counting requires DenseDiT or PackedDiT")
         self._model = model
         self._packed = isinstance(model, PackedDiT)
+        condition_token_count = model.condition_token_count
+        if type(condition_token_count) is not int or condition_token_count <= 0:
+            raise ValueError(
+                "DiT FLOP counting requires a positive integer "
+                "condition_token_count"
+            )
+        self._condition_token_count = condition_token_count
         block_type = PackedDiTBlock if self._packed else DiTBlock
         attention_type = (
             FA4VarlenGQAAttention if self._packed else DenseGQAAttention
@@ -326,7 +333,7 @@ class ActualDitFlopCounter:
             ):
                 raise ValueError("packed DiT FLOP text lengths are invalid")
             sequence_lengths = tuple(
-                text_length + 4 + image_length
+                text_length + self._condition_token_count + image_length
                 for text_length, image_length in zip(
                     text_lengths, image_lengths, strict=True
                 )
@@ -339,7 +346,11 @@ class ActualDitFlopCounter:
             dense_text_length = inputs.main_token_indices.shape[1]
             if dense_text_length <= 0:
                 raise ValueError("dense DiT FLOP text width must be positive")
-            sequence_length = dense_text_length + 4 + image_lengths[0]
+            sequence_length = (
+                dense_text_length
+                + self._condition_token_count
+                + image_lengths[0]
+            )
             block_vectors = batch * sequence_length
             attention_squares = batch * sequence_length * sequence_length
 

@@ -65,9 +65,14 @@ class _FakeOutputHead(nn.Module):
 
 
 class _FakePackedDiT(PackedDiT):
-    def __init__(self, block_count: int = 2) -> None:
+    def __init__(
+        self,
+        block_count: int = 2,
+        condition_token_count: int = 8,
+    ) -> None:
         nn.Module.__init__(self)
         self.active_slot_ids = tuple(range(block_count))
+        self.condition_token_count = condition_token_count
         self.input_projection = nn.Linear(2, 5)
         self.conditioner = nn.Sequential(
             nn.Linear(3, 4),
@@ -88,8 +93,11 @@ class _FakeComposite(TrainableComposite):
         self.dit = dit
 
 
-def _composite(block_count: int = 2) -> _FakeComposite:
-    return _FakeComposite(_FakePackedDiT(block_count))
+def _composite(
+    block_count: int = 2,
+    condition_token_count: int = 8,
+) -> _FakeComposite:
+    return _FakeComposite(_FakePackedDiT(block_count, condition_token_count))
 
 
 def _inputs() -> TrainableCompositeInputs:
@@ -230,13 +238,32 @@ def test_analytic_packed_flops_match_locked_topology_formula() -> None:
 
     # image projections: 10 * (2*2*5 + 2*5*2) = 400
     # conditioner:       2 * (2*3*4 + 2*4*5) = 128
-    # block linears:    26 * 2 blocks * 360 = 18,720
-    # attention QK+AV: (13^2 + 13^2) * 2 blocks * (4*2*3) = 16,224
-    assert counter.count(_inputs()) == 35_472
+    # block linears:    34 * 2 blocks * 360 = 24,480
+    # attention QK+AV: (17^2 + 17^2) * 2 blocks * (4*2*3) = 27,744
+    assert counter.count(_inputs()) == 52_752
     assert all(
         not module._forward_pre_hooks and not module._forward_hooks
         for module in composite.dit.modules()
     )
+
+
+def test_flop_counter_uses_model_condition_token_count() -> None:
+    inputs = _inputs()
+    four_token_flops = ActualDitFlopCounter(
+        _composite(condition_token_count=4).dit
+    ).count(inputs)
+    eight_token_flops = ActualDitFlopCounter(
+        _composite(condition_token_count=8).dit
+    ).count(inputs)
+
+    assert eight_token_flops > four_token_flops
+
+
+def test_flop_counter_rejects_invalid_condition_token_count() -> None:
+    composite = _composite(condition_token_count=0)
+
+    with pytest.raises(ValueError, match="positive integer condition_token_count"):
+        ActualDitFlopCounter(composite.dit)
 
 
 def test_flop_counter_rejects_unaccounted_linear() -> None:
