@@ -13,6 +13,7 @@ from sakuramoon.data.caption import (
     CaptionTag,
     NlCandidates,
     NlDropoutProbabilities,
+    StyleCondition,
     Tag,
     build_caption_plan,
     empty_caption_dropout_hits,
@@ -93,7 +94,7 @@ def test_all_condition_probability_is_fixed_and_produces_only_global_hit() -> No
 
     assert plan.all_condition_dropped is True
     assert plan.tags == ()
-    assert plan.artists == ()
+    assert plan.style_condition is None
     assert plan.nl_text is None
     assert tuple(plan.dropout_hits.as_mapping()) == CAPTION_DROPOUT_KEYS
     assert plan.dropout_hits.as_mapping() == {
@@ -145,7 +146,7 @@ def test_unified_tag_probability_applies_to_every_non_nl_field() -> None:
     )
 
     assert plan.tags == ()
-    assert plan.artists == ()
+    assert plan.style_condition is None
     assert plan.nl_text in {"A detailed scene.", "soft light"}
     hits = plan.dropout_hits.as_mapping()
     assert all(hits[source] for source in (*BODY_TAG_SOURCE_ORDER, "artist"))
@@ -163,7 +164,9 @@ def test_candidate_source_uses_canonical_ids_and_never_deletes_artist() -> None:
     assert ("character", "candidate_character") not in retained
     assert ("general", "candidate_general") not in retained
     assert ("general", "blue_dress") in retained
-    assert tuple(tag.canonical for tag in plan.artists) == (
+    assert plan.style_condition is not None
+    assert plan.style_condition.kind == "artist"
+    assert tuple(tag.canonical for tag in plan.style_condition.tags) == (
         "sample_artist",
         "candidate_general",
     )
@@ -176,7 +179,9 @@ def test_artist_order_is_fixed_after_independent_dropout() -> None:
         fields, _probabilities(), seed=_seed_for_global_dropout(False)
     )
 
-    assert plan.artists == fields.artists
+    assert plan.style_condition == StyleCondition(
+        kind="artist", tags=fields.artists
+    )
 
 
 def test_nl_selects_at_most_one_available_complete_branch() -> None:
@@ -325,7 +330,7 @@ def test_all_condition_plan_cannot_carry_content() -> None:
     with pytest.raises(CaptionError, match="must be empty"):
         CaptionPlan(
             tags=(CaptionTag("rating", Tag("safe", "safe")),),
-            artists=(),
+            style_condition=None,
             nl_text=None,
             selected_nl=None,
             all_condition_dropped=True,

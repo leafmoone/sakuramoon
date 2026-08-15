@@ -18,6 +18,7 @@ from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.caption import (
     CaptionPlan,
     CaptionTag,
+    StyleCondition,
     Tag,
     empty_caption_dropout_hits,
 )
@@ -110,12 +111,16 @@ class _PromptPair:
     def __post_init__(self) -> None:
         if self.a.sample_id == self.b.sample_id:
             raise TrainingSamplingError("A and B must be different training samples")
-        if not self.a.plan.artists or not self.b.plan.artists:
-            raise TrainingSamplingError("A and B must both have Artist conditions")
-        a_artists = frozenset(tag.canonical for tag in self.a.plan.artists)
-        b_artists = frozenset(tag.canonical for tag in self.b.plan.artists)
-        if a_artists & b_artists:
-            raise TrainingSamplingError("A and B Artist conditions must not overlap")
+        a_condition = self.a.plan.style_condition
+        b_condition = self.b.plan.style_condition
+        if a_condition is None or b_condition is None:
+            raise TrainingSamplingError("A and B must both have style conditions")
+        if a_condition.kind != b_condition.kind:
+            raise TrainingSamplingError("A and B style-condition kinds must match")
+        a_tags = frozenset(tag.canonical for tag in a_condition.tags)
+        b_tags = frozenset(tag.canonical for tag in b_condition.tags)
+        if a_tags & b_tags:
+            raise TrainingSamplingError("A and B style conditions must not overlap")
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +128,7 @@ class TrainingSampleItem:
     ordinal: int
     variant: VariantName
     main_source: PromptLabel
-    artist_sources: tuple[PromptLabel, ...]
+    condition_sources: tuple[PromptLabel, ...]
     sample_id: str
     caption: SerializedCaption
     plan: CaptionPlan
@@ -145,7 +150,7 @@ class TrainingSampleResult:
 def _unconditional_plan() -> CaptionPlan:
     return CaptionPlan(
         tags=(),
-        artists=(),
+        style_condition=None,
         nl_text=None,
         selected_nl=None,
         all_condition_dropped=True,
@@ -223,16 +228,20 @@ def _conditioning_inputs(
     main_indices, main_mask = index_tensor(
         tuple(item.main_token_indices for item in captions)
     )
-    artist_indices, artist_mask = index_tensor(
-        tuple(item.artist_token_indices for item in captions)
+    condition_indices, condition_mask = index_tensor(
+        tuple(item.condition_token_indices for item in captions)
     )
     use_null = torch.tensor(
-        tuple(item.use_null_style for item in captions),
+        tuple(item.use_null_condition for item in captions),
         dtype=torch.bool,
         device=device,
     )
-    active_style = torch.tensor(
-        tuple(index for index, item in enumerate(captions) if not item.use_null_style),
+    active_condition = torch.tensor(
+        tuple(
+            index
+            for index, item in enumerate(captions)
+            if not item.use_null_condition
+        ),
         dtype=torch.long,
         device=device,
     )
@@ -242,10 +251,10 @@ def _conditioning_inputs(
         main_indices,
         main_mask,
         tuple(len(item.main_token_indices) for item in captions),
-        artist_indices,
-        artist_mask,
+        condition_indices,
+        condition_mask,
         use_null,
-        active_style,
+        active_condition,
     )
 
 
@@ -257,22 +266,28 @@ def _select_prompt_pair(
         raise TrainingSamplingError("post-dropout candidate batch is empty")
     valid_pairs: list[_PromptPair] = []
     for first_index, first in enumerate(candidates):
-        if not first.plan.artists:
+        first_condition = first.plan.style_condition
+        if first_condition is None:
             continue
-        first_artists = frozenset(tag.canonical for tag in first.plan.artists)
+        first_tags = frozenset(tag.canonical for tag in first_condition.tags)
         for second in candidates[first_index + 1 :]:
-            if first.sample_id == second.sample_id or not second.plan.artists:
+            second_condition = second.plan.style_condition
+            if first.sample_id == second.sample_id or second_condition is None:
                 continue
-            second_artists = frozenset(tag.canonical for tag in second.plan.artists)
-            if first_artists.isdisjoint(second_artists):
+            second_tags = frozenset(tag.canonical for tag in second_condition.tags)
+            if (
+                first_condition.kind == second_condition.kind
+                and first_tags.isdisjoint(second_tags)
+            ):
                 valid_pairs.append(_PromptPair(first, second))
     if not valid_pairs:
-        artist_candidates = sum(
-            bool(candidate.plan.artists) for candidate in candidates
+        condition_candidates = sum(
+            candidate.plan.style_condition is not None for candidate in candidates
         )
         raise TrainingSamplingError(
-            "no valid non-overlapping Artist pair exists: "
-            f"candidates={len(candidates)} artist_candidates={artist_candidates}"
+            "no valid non-overlapping style-condition pair exists: "
+            f"candidates={len(candidates)} "
+            f"condition_candidates={condition_candidates}"
         )
     selected = valid_pairs[selector.randrange(len(valid_pairs))]
     if selector.getrandbits(1):
@@ -329,16 +344,35 @@ def _build_variant_items(
 ) -> tuple[TrainingSampleItem, ...]:
     sources: dict[PromptLabel, _PostDropoutPrompt] = {"A": pair.a, "B": pair.b}
     items: list[TrainingSampleItem] = []
-    for ordinal, (variant, main_label, artist_labels, geometry) in enumerate(
+    for ordinal, (variant, main_label, condition_labels, geometry) in enumerate(
         _VARIANT_DEFINITIONS
     ):
         main = sources[main_label]
-        artists = tuple(
-            artist
-            for artist_label in artist_labels
-            for artist in sources[artist_label].plan.artists
+        source_conditions = tuple(
+            sources[condition_label].plan.style_condition
+            for condition_label in condition_labels
         )
-        requested_plan = dataclasses.replace(main.plan, artists=artists)
+        if any(condition is None for condition in source_conditions):
+            raise TrainingSamplingError("variant style condition is unavailable")
+        typed_conditions = tuple(
+            condition
+            for condition in source_conditions
+            if condition is not None
+        )
+        kinds = {condition.kind for condition in typed_conditions}
+        if len(kinds) > 1:
+            raise TrainingSamplingError("variant style-condition kinds differ")
+        condition = (
+            StyleCondition(
+                kind=typed_conditions[0].kind,
+                tags=tuple(
+                    tag for item in typed_conditions for tag in item.tags
+                ),
+            )
+            if typed_conditions
+            else None
+        )
+        requested_plan = dataclasses.replace(main.plan, style_condition=condition)
         caption = serialize_caption(requested_plan, tokenizer, framing)
         if caption.plan != requested_plan:
             raise TrainingSamplingError(
@@ -352,7 +386,7 @@ def _build_variant_items(
                 ordinal=ordinal,
                 variant=variant,
                 main_source=main_label,
-                artist_sources=artist_labels,
+                condition_sources=condition_labels,
                 sample_id=main.sample_id,
                 caption=caption,
                 plan=requested_plan,
@@ -437,7 +471,14 @@ def _caption_tag_metadata(tag: CaptionTag) -> dict[str, str]:
 def _plan_metadata(plan: CaptionPlan) -> dict[str, object]:
     return {
         "tags": [_caption_tag_metadata(tag) for tag in plan.tags],
-        "artists": [_tag_metadata(tag) for tag in plan.artists],
+        "style_condition": (
+            None
+            if plan.style_condition is None
+            else {
+                "kind": plan.style_condition.kind,
+                "tags": [_tag_metadata(tag) for tag in plan.style_condition.tags],
+            }
+        ),
         "nl_text": plan.nl_text,
         "selected_nl": plan.selected_nl,
         "all_condition_dropped": plan.all_condition_dropped,
@@ -455,7 +496,7 @@ def _prompt_metadata(prompt: _PostDropoutPrompt) -> dict[str, object]:
         "plan": _plan_metadata(prompt.plan),
         "serialized": {
             "body": prompt.caption.body,
-            "artist_text": prompt.caption.artist_text,
+            "condition_text": prompt.caption.condition_text,
             "condition_tokens": prompt.caption.condition_tokens,
             "dense_length": prompt.caption.dense_length,
             "truncated": prompt.caption.truncated,
@@ -477,8 +518,8 @@ def _variant_metadata(
     repository_root: Path,
 ) -> dict[str, object]:
     main = _source_for_label(pair, item.main_source)
-    artist_sources = tuple(
-        _source_for_label(pair, label) for label in item.artist_sources
+    condition_sources = tuple(
+        _source_for_label(pair, label) for label in item.condition_sources
     )
     left, top, right, bottom = item.crop_box
     return {
@@ -492,16 +533,16 @@ def _variant_metadata(
             "label": item.main_source,
             "sample_id": main.sample_id,
         },
-        "artist_sources": [label for label in item.artist_sources],
-        "artist_source_details": [
+        "condition_sources": [label for label in item.condition_sources],
+        "condition_source_details": [
             {
                 "label": label,
                 "sample_id": source.sample_id,
-                "artists": [_tag_metadata(tag) for tag in source.plan.artists],
+                "style_condition": _plan_metadata(source.plan)["style_condition"],
             }
             for label, source in zip(
-                item.artist_sources,
-                artist_sources,
+                item.condition_sources,
+                condition_sources,
                 strict=True,
             )
         ],
@@ -619,10 +660,10 @@ class TrainingSampler:
             main_indices,
             main_mask,
             main_lengths,
-            artist_indices,
-            artist_mask,
+            condition_indices,
+            condition_mask,
             use_null,
-            active_style,
+            active_condition,
         ) = _conditioning_inputs(
             captions, tokenizer=self.qwen.tokenizer, device=self.device
         )
@@ -661,10 +702,10 @@ class TrainingSampler:
             main_token_indices=main_indices,
             main_mask=main_mask,
             main_token_lengths=main_lengths,
-            artist_token_indices=artist_indices,
-            artist_mask=artist_mask,
-            use_null_style=use_null,
-            active_style_sample_indices=active_style,
+            condition_token_indices=condition_indices,
+            condition_mask=condition_mask,
+            use_null_condition=use_null,
+            active_condition_sample_indices=active_condition,
             latents=placeholders,
             image_coordinates=branch_coordinates,
             timestep=torch.zeros(
@@ -744,9 +785,9 @@ class TrainingSampler:
             f"B_sample_id={pair.b.sample_id}\n"
             f"shared_seed={shared_seed}\n"
             f"main_source={item.main_source}\n"
-            f"artist_sources={','.join(item.artist_sources) or '<null>'}\n"
+            f"condition_sources={','.join(item.condition_sources) or '<null>'}\n"
             f"body={item.caption.body}\n"
-            f"artist={item.caption.artist_text or '<null>'}"
+            f"condition={item.caption.condition_text or '<null>'}"
         )
 
     def sample(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from sakuramoon.data.caption import (
     CaptionPlan,
     CaptionTag,
+    StyleCondition,
     Tag,
     empty_caption_dropout_hits,
 )
@@ -30,7 +31,9 @@ def _plan() -> CaptionPlan:
             CaptionTag("general", Tag("long_hair", "long_hair")),
             CaptionTag("year", Tag("year 2026", "year 2026")),
         ),
-        artists=(Tag("artist_name", "artist_name"),),
+        style_condition=StyleCondition(
+            kind="artist", tags=(Tag("artist_name", "artist_name"),)
+        ),
         nl_text="soft lighting",
         selected_nl="short_vibes",
         all_condition_dropped=False,
@@ -44,7 +47,7 @@ def test_serialization_normalizes_only_tokenizer_facing_underscores() -> None:
     caption = serialize_caption(plan, _Tokenizer(), FramingContract(34, 5, 248044))
 
     assert caption.body == "long hair, year 2026\n\nsoft lighting"
-    assert caption.artist_text == "artist name"
+    assert caption.condition_text == "artist name"
     assert caption.text == (
         SYSTEM_PREFIX
         + "long hair, year 2026\n\nsoft lighting"
@@ -53,9 +56,11 @@ def test_serialization_normalizes_only_tokenizer_facing_underscores() -> None:
     )
     assert caption.plan.tags[0].tag.text == "long_hair"
     assert caption.plan.tags[0].tag.canonical == "long_hair"
-    assert caption.plan.artists[0].text == "artist_name"
-    assert caption.artist_token_indices
-    assert caption.use_null_style is False
+    assert caption.plan.style_condition is not None
+    assert caption.plan.style_condition.tags[0].text == "artist_name"
+    assert caption.condition_token_indices
+    assert caption.use_null_condition is False
+    assert caption.condition_kind == "artist"
 
 
 def test_serialization_truncates_only_complete_globally_ordered_tags() -> None:
@@ -65,7 +70,7 @@ def test_serialization_truncates_only_complete_globally_ordered_tags() -> None:
     )
     requested = CaptionPlan(
         tags=tags,
-        artists=(),
+        style_condition=None,
         nl_text=None,
         selected_nl=None,
         all_condition_dropped=False,
@@ -80,5 +85,6 @@ def test_serialization_truncates_only_complete_globally_ordered_tags() -> None:
     assert caption.body == ", ".join(
         item.tag.text.replace("_", " ") for item in caption.plan.tags
     )
-    assert caption.artist_token_indices == ()
-    assert caption.use_null_style is True
+    assert caption.condition_token_indices == ()
+    assert caption.use_null_condition is True
+    assert caption.condition_kind is None

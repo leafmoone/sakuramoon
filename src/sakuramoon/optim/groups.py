@@ -16,9 +16,9 @@ _SENSITIVE_RANKED_PARAMETERS = {
     ("ModalityEmbedding", "image"),
     ("ModalityEmbedding", "style"),
     ("ModalityEmbedding", "text"),
-    ("StyleResampler", "layer_embedding"),
-    ("StyleResampler", "null_tokens"),
-    ("StyleResampler", "queries"),
+    ("StyleConditionEncoder", "layer_embedding"),
+    ("StyleConditionEncoder", "null_tokens"),
+    ("StyleConditionEncoder", "queries"),
     ("TextConditioner", "gate_bias"),
     ("TextConditioner", "gate_weight"),
 }

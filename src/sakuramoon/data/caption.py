@@ -45,6 +45,7 @@ TagSource = Literal[
     "general",
     "artist",
 ]
+StyleConditionKind = Literal["artist", "character"]
 NlBranch = Literal["long_names", "long_no_names", "short_vibes", "nl2", "nl3"]
 NL_BRANCHES: tuple[NlBranch, ...] = (
     "long_names",
@@ -97,6 +98,22 @@ class CaptionTag:
             or type(self.tag) is not Tag
         ):
             raise CaptionError("caption tag source or value is invalid")
+
+
+@dataclass(frozen=True)
+class StyleCondition:
+    kind: StyleConditionKind
+    tags: tuple[Tag, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.kind) is not str
+            or self.kind not in {"artist", "character"}
+            or type(self.tags) is not tuple
+            or not self.tags
+            or any(type(tag) is not Tag for tag in self.tags)
+        ):
+            raise CaptionError("style condition kind or tags are invalid")
 
 
 @dataclass(frozen=True)
@@ -334,22 +351,22 @@ def empty_caption_dropout_hits(*, all_condition: bool = False) -> CaptionDropout
 @dataclass(frozen=True)
 class CaptionPlan:
     tags: tuple[CaptionTag, ...]
-    artists: tuple[Tag, ...]
+    style_condition: StyleCondition | None
     nl_text: str | None
     selected_nl: NlBranch | None
     all_condition_dropped: bool
     dropout_hits: CaptionDropoutHits
 
     def __post_init__(self) -> None:
-        has_content = bool(self.tags or self.artists or self.nl_text is not None)
+        has_content = bool(
+            self.tags or self.style_condition is not None or self.nl_text is not None
+        )
         if type(self.tags) is not tuple or any(
             type(tag) is not CaptionTag for tag in self.tags
         ):
             raise CaptionError("caption plan tags must be an exact CaptionTag tuple")
-        if type(self.artists) is not tuple or any(
-            type(tag) is not Tag for tag in self.artists
-        ):
-            raise CaptionError("caption plan artists must be an exact Tag tuple")
+        if self.style_condition is not None and type(self.style_condition) is not StyleCondition:
+            raise CaptionError("caption plan style condition is invalid")
         if (
             type(self.all_condition_dropped) is not bool
             or type(self.dropout_hits) is not CaptionDropoutHits
@@ -441,7 +458,7 @@ def build_caption_plan(
     if _drop(seed, "all_condition", ALL_CONDITION_DROPOUT):
         return CaptionPlan(
             tags=(),
-            artists=(),
+            style_condition=None,
             nl_text=None,
             selected_nl=None,
             all_condition_dropped=True,
@@ -565,7 +582,9 @@ def build_caption_plan(
 
     return CaptionPlan(
         tags=tags,
-        artists=artists,
+        style_condition=(
+            StyleCondition(kind="artist", tags=artists) if artists else None
+        ),
         nl_text=nl_text,
         selected_nl=selected_nl,
         all_condition_dropped=False,

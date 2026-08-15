@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch import nn
 
-from sakuramoon.conditioning.style_resampler import StyleResampler
+from sakuramoon.conditioning.style_resampler import StyleConditionEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import PackedDiT
 from sakuramoon.optim.clip import clip_grad_norm_fp32
@@ -35,7 +35,7 @@ class _TrainableComposite(nn.Module):
             linear_dtype=torch.bfloat16,
             sensitive_dtype=torch.float32,
         )
-        self.style = StyleResampler(
+        self.style = StyleConditionEncoder(
             input_size=2048,
             hidden_size=1024,
             intermediate_size=2048,

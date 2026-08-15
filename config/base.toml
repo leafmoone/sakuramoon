@@ -100,7 +100,7 @@ shape_count = 17
 transpose_closed = true
 
 [caption]
-category_order = ["tags", "nl", "artist"]
+category_order = ["tags", "nl", "style_condition"]
 tag_separator = ", "
 tag_nl_separator = "\n\n"
 text_condition_max = 512

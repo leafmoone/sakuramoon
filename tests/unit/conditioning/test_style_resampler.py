@@ -3,11 +3,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from sakuramoon.conditioning.style_resampler import StyleResampler
+from sakuramoon.conditioning.style_resampler import (
+    StyleConditionEncoder,
+    StyleResampler,
+)
 
 
-def _resampler() -> StyleResampler:
-    return StyleResampler(
+def _encoder() -> StyleConditionEncoder:
+    return StyleConditionEncoder(
         input_size=16,
         hidden_size=12,
         intermediate_size=24,
@@ -22,8 +25,8 @@ def _resampler() -> StyleResampler:
     )
 
 
-def test_artist_tokens_produce_four_independent_slots() -> None:
-    module = _resampler()
+def test_condition_tokens_produce_four_independent_slots() -> None:
+    module = _encoder()
     states = torch.randn(2, 5, 7, 16)
     output = module(
         states,
@@ -39,7 +42,7 @@ def test_artist_tokens_produce_four_independent_slots() -> None:
 
 
 def test_missing_dropout_and_all_condition_share_learned_null_tokens() -> None:
-    module = _resampler()
+    module = _encoder()
     states = torch.randn(3, 4, 7, 16)
     output = module(
         states,
@@ -55,7 +58,7 @@ def test_missing_dropout_and_all_condition_share_learned_null_tokens() -> None:
 
 
 def test_mixed_batch_projects_only_active_samples() -> None:
-    module = _resampler()
+    module = _encoder()
     states = torch.randn(3, 4, 7, 16)
     projected_batch_sizes: list[int] = []
 
@@ -87,7 +90,7 @@ def test_mixed_batch_projects_only_active_samples() -> None:
 
 
 def test_inactive_large_index_does_not_reach_gather() -> None:
-    module = _resampler()
+    module = _encoder()
     states = torch.randn(1, 4, 7, 16)
     mask = torch.tensor([[True, False]])
 
@@ -114,8 +117,8 @@ def test_inactive_large_index_does_not_reach_gather() -> None:
     )
 
 
-def test_style_gathers_only_artist_span_and_detaches_qwen() -> None:
-    module = _resampler()
+def test_style_gathers_only_condition_span_and_detaches_qwen() -> None:
+    module = _encoder()
     states = torch.randn(1, 4, 7, 16, requires_grad=True)
     indices = torch.tensor([[2]])
     mask = torch.tensor([[True]])
@@ -145,7 +148,7 @@ def test_style_gathers_only_artist_span_and_detaches_qwen() -> None:
     ],
 )
 def test_invalid_active_sample_plan_fails(active_samples: torch.Tensor) -> None:
-    module = _resampler()
+    module = _encoder()
 
     with pytest.raises(ValueError, match="sample/index plan"):
         module(
@@ -158,10 +161,10 @@ def test_invalid_active_sample_plan_fails(active_samples: torch.Tensor) -> None:
 
 
 @pytest.mark.parametrize("invalid_index", [-1, 3])
-def test_active_artist_index_outside_qwen_sequence_fails(
+def test_active_condition_index_outside_qwen_sequence_fails(
     invalid_index: int,
 ) -> None:
-    module = _resampler()
+    module = _encoder()
 
     with pytest.raises(ValueError, match="sample/index plan"):
         module(
@@ -174,7 +177,7 @@ def test_active_artist_index_outside_qwen_sequence_fails(
 
 
 def test_autocast_active_and_null_outputs_share_input_dtype() -> None:
-    module = _resampler()
+    module = _encoder()
     states = torch.randn(2, 3, 7, 16, dtype=torch.bfloat16)
 
     with torch.autocast("cpu", dtype=torch.bfloat16):
@@ -188,3 +191,38 @@ def test_autocast_active_and_null_outputs_share_input_dtype() -> None:
 
     assert output.tokens.dtype == torch.bfloat16
     torch.testing.assert_close(output.tokens[1], module.null_tokens.to(torch.bfloat16))
+
+
+def test_legacy_style_resampler_alias_preserves_exact_class_and_state_keys() -> None:
+    assert StyleResampler is StyleConditionEncoder
+    current = _encoder()
+    legacy = StyleResampler(
+        input_size=16,
+        hidden_size=12,
+        intermediate_size=24,
+        output_size=20,
+        query_count=4,
+        attention_heads=3,
+        norm_eps=1e-6,
+        init_std=0.02,
+        projection_bias=False,
+        linear_dtype=torch.float32,
+        sensitive_dtype=torch.float32,
+    )
+
+    expected_keys = (
+        "layer_embedding",
+        "queries",
+        "null_tokens",
+        "shared_norm.weight",
+        "input_projection.weight",
+        "cross_attention.in_proj_weight",
+        "cross_attention.out_proj.weight",
+        "style_mlp.norm.weight",
+        "style_mlp.gate.weight",
+        "style_mlp.up.weight",
+        "style_mlp.down.weight",
+        "output_projection.weight",
+    )
+    assert tuple(current.state_dict()) == expected_keys
+    assert tuple(legacy.state_dict()) == expected_keys

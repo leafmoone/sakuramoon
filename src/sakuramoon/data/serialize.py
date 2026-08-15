@@ -1,4 +1,4 @@
-"""Fixed Qwen framing with structured main and Artist token indices."""
+"""Fixed Qwen framing with structured main and style-condition indices."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from sakuramoon.data.caption import (
     CaptionDropoutHits,
     CaptionPlan,
     CaptionTag,
+    StyleCondition,
+    StyleConditionKind,
     Tag,
 )
 
@@ -62,14 +64,15 @@ class SerializedCaption:
     attention_mask: tuple[bool, ...]
     main_token_indices: tuple[int, ...]
     main_mask: tuple[bool, ...]
-    artist_token_indices: tuple[int, ...]
-    artist_mask: tuple[bool, ...]
-    use_null_style: bool
+    condition_token_indices: tuple[int, ...]
+    condition_mask: tuple[bool, ...]
+    use_null_condition: bool
+    condition_kind: StyleConditionKind | None
     all_condition_dropped: bool
     dropout_hits: CaptionDropoutHits
     selected_nl: str | None
     body: str
-    artist_text: str
+    condition_text: str
     condition_tokens: int
     condition_bucket: int
     dense_length: int
@@ -96,14 +99,17 @@ def _body(tags: list[CaptionTag], nl_text: str | None) -> str:
     return tag_text or (nl_text or "")
 
 
-def _artist_text(artists: list[Tag]) -> str:
-    return ", ".join(_display_text(tag) for tag in artists)
+def _condition_text(tags: list[Tag]) -> str:
+    return ", ".join(_display_text(tag) for tag in tags)
 
 
 def render_caption_segments(plan: CaptionPlan) -> tuple[str, str]:
-    """Render the governed main and Artist segments without tokenization."""
+    """Render the governed main and style-condition segments."""
 
-    return _body(list(plan.tags), plan.nl_text), _artist_text(list(plan.artists))
+    condition_tags = (
+        [] if plan.style_condition is None else list(plan.style_condition.tags)
+    )
+    return _body(list(plan.tags), plan.nl_text), _condition_text(condition_tags)
 
 
 def _bucket_for(tokens: int) -> int:
@@ -129,7 +135,12 @@ def serialize_caption(
         raise CaptionSerializationError("tokenizer framing token counts changed")
 
     tags = list(plan.tags)
-    artists = list(plan.artists)
+    condition_kind = (
+        None if plan.style_condition is None else plan.style_condition.kind
+    )
+    condition_tags = (
+        [] if plan.style_condition is None else list(plan.style_condition.tags)
+    )
     nl_text = plan.nl_text
     truncated = False
 
@@ -137,43 +148,54 @@ def serialize_caption(
         return dataclasses.replace(
             plan,
             tags=tuple(tags),
-            artists=tuple(artists),
+            style_condition=(
+                StyleCondition(kind=condition_kind, tags=tuple(condition_tags))
+                if condition_kind is not None and condition_tags
+                else None
+            ),
             nl_text=nl_text,
             selected_nl=plan.selected_nl if nl_text is not None else None,
         )
 
-    if artists:
-        fitting_artists: list[Tag] = []
-        for artist in artists:
-            individual_ids = _encode(tokenizer, _display_text(artist))
+    if condition_tags:
+        if condition_kind is None:
+            raise CaptionSerializationError("style condition kind is missing")
+        fitting_tags: list[Tag] = []
+        for tag in condition_tags:
+            individual_ids = _encode(tokenizer, _display_text(tag))
             if not individual_ids:
-                raise CaptionSerializationError("tokenizer produced no Artist tokens")
+                raise CaptionSerializationError(
+                    "tokenizer produced no style-condition tokens"
+                )
             if len(suffix_ids) + len(individual_ids) <= TEXT_CONDITION_MAX:
-                fitting_artists.append(artist)
+                fitting_tags.append(tag)
             else:
                 truncated = True
-        if not fitting_artists:
+        if not fitting_tags:
             raise CaptionSerializationError(
-                "Artist segment cannot fit without splitting a tag"
+                "style-condition segment cannot fit without splitting a tag"
             )
-        artists = fitting_artists
+        condition_tags = fitting_tags
 
-    _body_text, artist_text = render_caption_segments(current_plan())
-    artist_ids = _encode(tokenizer, artist_text)
-    while len(suffix_ids) + len(artist_ids) > TEXT_CONDITION_MAX and len(artists) > 1:
-        artists.pop()
+    _body_text, condition_text = render_caption_segments(current_plan())
+    condition_ids = _encode(tokenizer, condition_text)
+    while (
+        len(suffix_ids) + len(condition_ids) > TEXT_CONDITION_MAX
+        and len(condition_tags) > 1
+    ):
+        condition_tags.pop()
         truncated = True
-        _body_text, artist_text = render_caption_segments(current_plan())
-        artist_ids = _encode(tokenizer, artist_text)
-    if len(suffix_ids) + len(artist_ids) > TEXT_CONDITION_MAX:
+        _body_text, condition_text = render_caption_segments(current_plan())
+        condition_ids = _encode(tokenizer, condition_text)
+    if len(suffix_ids) + len(condition_ids) > TEXT_CONDITION_MAX:
         raise CaptionSerializationError(
-            "Artist segment cannot fit without splitting a tag"
+            "style-condition segment cannot fit without splitting a tag"
         )
 
     while True:
-        body, artist_text = render_caption_segments(current_plan())
+        body, condition_text = render_caption_segments(current_plan())
         body_ids = _encode(tokenizer, body)
-        condition_tokens = len(body_ids) + len(suffix_ids) + len(artist_ids)
+        condition_tokens = len(body_ids) + len(suffix_ids) + len(condition_ids)
         if condition_tokens <= TEXT_CONDITION_MAX:
             break
         if nl_text is not None:
@@ -186,32 +208,37 @@ def serialize_caption(
         truncated = True
 
     resolved_plan = current_plan()
-    if render_caption_segments(resolved_plan) != (body, artist_text):
+    if render_caption_segments(resolved_plan) != (body, condition_text):
         raise RuntimeError("resolved caption plan differs from serialized segments")
-    input_ids = prefix_ids + body_ids + suffix_ids + artist_ids
+    input_ids = prefix_ids + body_ids + suffix_ids + condition_ids
     if framing.padding_token_id in input_ids:
         raise CaptionSerializationError(
             "padding token appears in the valid Qwen sequence"
-        )
+    )
     main_length = len(prefix_ids) + len(body_ids) + len(suffix_ids)
     main_indices = tuple(range(main_length))
-    artist_indices = tuple(range(main_length, len(input_ids)))
+    condition_indices = tuple(range(main_length, len(input_ids)))
     condition_bucket = _bucket_for(condition_tokens)
     return SerializedCaption(
         plan=resolved_plan,
-        text=SYSTEM_PREFIX + body + MAIN_SUFFIX + artist_text,
+        text=SYSTEM_PREFIX + body + MAIN_SUFFIX + condition_text,
         input_ids=input_ids,
         attention_mask=(True,) * len(input_ids),
         main_token_indices=main_indices,
         main_mask=(True,) * len(main_indices),
-        artist_token_indices=artist_indices,
-        artist_mask=(True,) * len(artist_indices),
-        use_null_style=not bool(artist_indices),
+        condition_token_indices=condition_indices,
+        condition_mask=(True,) * len(condition_indices),
+        use_null_condition=not bool(condition_indices),
+        condition_kind=(
+            None
+            if resolved_plan.style_condition is None
+            else resolved_plan.style_condition.kind
+        ),
         all_condition_dropped=resolved_plan.all_condition_dropped,
         dropout_hits=resolved_plan.dropout_hits,
         selected_nl=resolved_plan.selected_nl,
         body=body,
-        artist_text=artist_text,
+        condition_text=condition_text,
         condition_tokens=condition_tokens,
         condition_bucket=condition_bucket,
         dense_length=len(prefix_ids) + condition_bucket,

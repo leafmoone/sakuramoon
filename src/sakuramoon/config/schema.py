@@ -354,7 +354,7 @@ class CaptionConfig(StrictModel):
         if self.category_order != (
             "tags",
             "nl",
-            "artist",
+            "style_condition",
         ):
             raise ValueError(
                 "caption category order differs from the approved protocol"

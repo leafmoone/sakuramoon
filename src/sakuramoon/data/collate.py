@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
     CaptionDropoutCounts,
+    StyleConditionKind,
 )
 from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.pipeline import (
@@ -48,14 +49,15 @@ class TrainingBatch:
     main_token_indices: torch.Tensor
     main_mask: torch.Tensor
     main_token_lengths: tuple[int, ...]
-    artist_token_indices: torch.Tensor
-    artist_mask: torch.Tensor
-    active_style_sample_indices: torch.Tensor
+    condition_token_indices: torch.Tensor
+    condition_mask: torch.Tensor
+    active_condition_sample_indices: torch.Tensor
+    condition_kinds: tuple[StyleConditionKind | None, ...]
     sample_ids: torch.Tensor
     target_height: int
     target_width: int
     dense_length: int
-    use_null_style: torch.Tensor
+    use_null_condition: torch.Tensor
     all_condition_dropped: torch.Tensor
     dropout_hits: CaptionDropoutCounts
     source_shards: tuple[str, ...]
@@ -72,11 +74,13 @@ class TrainingBatch:
             attention_mask=self.attention_mask.pin_memory(),
             main_token_indices=self.main_token_indices.pin_memory(),
             main_mask=self.main_mask.pin_memory(),
-            artist_token_indices=self.artist_token_indices.pin_memory(),
-            artist_mask=self.artist_mask.pin_memory(),
-            active_style_sample_indices=self.active_style_sample_indices.pin_memory(),
+            condition_token_indices=self.condition_token_indices.pin_memory(),
+            condition_mask=self.condition_mask.pin_memory(),
+            active_condition_sample_indices=(
+                self.active_condition_sample_indices.pin_memory()
+            ),
             sample_ids=self.sample_ids.pin_memory(),
-            use_null_style=self.use_null_style.pin_memory(),
+            use_null_condition=self.use_null_condition.pin_memory(),
             all_condition_dropped=self.all_condition_dropped.pin_memory(),
         )
 
@@ -333,12 +337,15 @@ def _validate_main_indices(samples: tuple[PipelineSample, ...]) -> None:
             )
 
 
-def _active_style_sample_indices(samples: tuple[PipelineSample, ...]) -> torch.Tensor:
+def _active_condition_sample_indices(
+    samples: tuple[PipelineSample, ...],
+) -> torch.Tensor:
     active_samples: list[int] = []
     for row, sample in enumerate(samples):
-        indices = sample.caption.artist_token_indices
-        mask = sample.caption.artist_mask
-        use_null = sample.caption.use_null_style
+        indices = sample.caption.condition_token_indices
+        mask = sample.caption.condition_mask
+        use_null = sample.caption.use_null_condition
+        kind = sample.caption.condition_kind
         if (
             type(use_null) is not bool
             or len(indices) != len(mask)
@@ -351,12 +358,14 @@ def _active_style_sample_indices(samples: tuple[PipelineSample, ...]) -> torch.T
             )
         ):
             raise CollateError(
-                "Artist token indices must be active positions in the serialized Qwen input"
+                "condition token indices must be active positions in the serialized Qwen input"
             )
         if bool(indices) == use_null:
             raise CollateError(
-                "Artist token presence and null-style routing must be complementary"
+                "condition token presence and null routing must be complementary"
             )
+        if (kind is None) != use_null:
+            raise CollateError("condition kind and null routing must agree")
         if indices:
             active_samples.append(row)
     return torch.tensor(active_samples, dtype=torch.long)
@@ -386,7 +395,7 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     ):
         raise CollateError("batch images must be RGB uint8 tensors at the target size")
     _validate_main_indices(samples)
-    active_style_sample_indices = _active_style_sample_indices(samples)
+    active_condition_sample_indices = _active_condition_sample_indices(samples)
 
     # Right-pad only to the longest serialized Qwen bucket in this image batch.
     # Valid token positions never move, and downstream attention masks remove the
@@ -410,8 +419,8 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     main_token_lengths = tuple(
         len(sample.caption.main_token_indices) for sample in samples
     )
-    artist_indices, artist_mask = _index_tensor(
-        tuple(sample.caption.artist_token_indices for sample in samples)
+    condition_indices, condition_mask = _index_tensor(
+        tuple(sample.caption.condition_token_indices for sample in samples)
     )
     dropout_hits = dict.fromkeys(CAPTION_DROPOUT_KEYS, 0)
     for sample in samples:
@@ -424,17 +433,19 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         main_token_indices=main_indices,
         main_mask=main_mask,
         main_token_lengths=main_token_lengths,
-        artist_token_indices=artist_indices,
-        artist_mask=artist_mask,
-        active_style_sample_indices=active_style_sample_indices,
+        condition_token_indices=condition_indices,
+        condition_mask=condition_mask,
+        active_condition_sample_indices=active_condition_sample_indices,
+        condition_kinds=tuple(sample.caption.condition_kind for sample in samples),
         sample_ids=torch.tensor(
             tuple(sample.sample_id for sample in samples), dtype=torch.long
         ),
         target_height=first.target_height,
         target_width=first.target_width,
         dense_length=dense_length,
-        use_null_style=torch.tensor(
-            tuple(sample.caption.use_null_style for sample in samples), dtype=torch.bool
+        use_null_condition=torch.tensor(
+            tuple(sample.caption.use_null_condition for sample in samples),
+            dtype=torch.bool,
         ),
         all_condition_dropped=torch.tensor(
             tuple(sample.caption.all_condition_dropped for sample in samples),

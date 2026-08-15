@@ -7,7 +7,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
-from sakuramoon.conditioning.style_resampler import StyleResampler
+from sakuramoon.conditioning.style_resampler import StyleConditionEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import DenseDiT, PackedDiT
 from sakuramoon.train.step import TrainableComposite
@@ -45,7 +45,7 @@ def export_trainable_composite(module: nn.Module) -> dict[str, object]:
     if (
         type(composite.dit) not in {DenseDiT, PackedDiT}
         or type(composite.text) is not TextConditioner
-        or type(composite.style) is not StyleResampler
+        or type(composite.style) is not StyleConditionEncoder
         or set(dict(composite.named_children())) != {"dit", "text", "style"}
     ):
         raise TypeError("checkpoint composite must contain only a supported DiT, text and style")
@@ -129,7 +129,7 @@ def build_trainable_composite(
             module = TrainableComposite(
                 dit=dit_class(**dit_arguments),  # pyright: ignore[reportArgumentType]
                 text=TextConditioner(**text_arguments),
-                style=StyleResampler(**style_arguments),
+                style=StyleConditionEncoder(**style_arguments),
             )
     except (TypeError, ValueError):
         raise ValueError("model architecture cannot construct the locked composite") from None

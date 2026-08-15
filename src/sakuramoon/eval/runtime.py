@@ -82,7 +82,7 @@ def _conditional_plan(case: PromptCase) -> CaptionPlan:
         return case.caption_plan
     return CaptionPlan(
         tags=(),
-        artists=(),
+        style_condition=None,
         nl_text=case.prompt,
         selected_nl="long_names",
         all_condition_dropped=False,
@@ -93,7 +93,7 @@ def _conditional_plan(case: PromptCase) -> CaptionPlan:
 def _unconditional_plan() -> CaptionPlan:
     return CaptionPlan(
         tags=(),
-        artists=(),
+        style_condition=None,
         nl_text=None,
         selected_nl=None,
         all_condition_dropped=True,
@@ -160,16 +160,20 @@ def _conditioning_inputs(
     main_indices, main_mask = _index_tensor(
         tuple(item.main_token_indices for item in captions), device
     )
-    artist_indices, artist_mask = _index_tensor(
-        tuple(item.artist_token_indices for item in captions), device
+    condition_indices, condition_mask = _index_tensor(
+        tuple(item.condition_token_indices for item in captions), device
     )
     use_null = torch.tensor(
-        tuple(item.use_null_style for item in captions),
+        tuple(item.use_null_condition for item in captions),
         dtype=torch.bool,
         device=device,
     )
-    active_style = torch.tensor(
-        tuple(index for index, item in enumerate(captions) if not item.use_null_style),
+    active_condition = torch.tensor(
+        tuple(
+            index
+            for index, item in enumerate(captions)
+            if not item.use_null_condition
+        ),
         dtype=torch.long,
         device=device,
     )
@@ -179,10 +183,10 @@ def _conditioning_inputs(
         main_indices,
         main_mask,
         tuple(len(item.main_token_indices) for item in captions),
-        artist_indices,
-        artist_mask,
+        condition_indices,
+        condition_mask,
         use_null,
-        active_style,
+        active_condition,
     )
 
 
@@ -223,10 +227,10 @@ def _generate(
         main_indices,
         main_mask,
         main_lengths,
-        artist_indices,
-        artist_mask,
+        condition_indices,
+        condition_mask,
         use_null,
-        active_style,
+        active_condition,
     ) = _conditioning_inputs(cases, qwen.tokenizer, device)
     qwen_states = qwen.encoder(input_ids, attention_mask).hidden_states
     branch_count = len(cases) * 2
@@ -262,10 +266,10 @@ def _generate(
         main_token_indices=main_indices,
         main_mask=main_mask,
         main_token_lengths=main_lengths,
-        artist_token_indices=artist_indices,
-        artist_mask=artist_mask,
-        use_null_style=use_null,
-        active_style_sample_indices=active_style,
+        condition_token_indices=condition_indices,
+        condition_mask=condition_mask,
+        use_null_condition=use_null,
+        active_condition_sample_indices=active_condition,
         latents=placeholders,
         image_coordinates=(coordinate_map,) * branch_count,
         timestep=torch.zeros(branch_count, dtype=torch.float32, device=device),

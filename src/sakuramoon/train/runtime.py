@@ -464,8 +464,8 @@ def _require_batch(batch: TrainingBatch) -> None:
         raise ValueError("training image and token batch sizes differ")
     if batch.main_token_indices.shape[0] != batch.images.shape[0]:
         raise ValueError("main token routing batch size differs from images")
-    if batch.artist_token_indices.shape[0] != batch.images.shape[0]:
-        raise ValueError("Artist token routing batch size differs from images")
+    if batch.condition_token_indices.shape[0] != batch.images.shape[0]:
+        raise ValueError("condition token routing batch size differs from images")
     if len(batch.main_token_lengths) != batch.images.shape[0]:
         raise ValueError("main token length count differs from images")
     if len(batch.source_shards) != batch.images.shape[0]:
@@ -660,16 +660,16 @@ class SingleGpuBatchRuntime:
             main_mask = batch.main_mask.to(
                 self.device, dtype=torch.bool, non_blocking=True
             )
-            artist_token_indices = batch.artist_token_indices.to(
+            condition_token_indices = batch.condition_token_indices.to(
                 self.device, dtype=torch.long, non_blocking=True
             )
-            artist_mask = batch.artist_mask.to(
+            condition_mask = batch.condition_mask.to(
                 self.device, dtype=torch.bool, non_blocking=True
             )
-            use_null_style = batch.use_null_style.to(
+            use_null_condition = batch.use_null_condition.to(
                 self.device, dtype=torch.bool, non_blocking=True
             )
-            active_style_sample_indices = batch.active_style_sample_indices.to(
+            active_condition_sample_indices = batch.active_condition_sample_indices.to(
                 self.device, dtype=torch.long, non_blocking=True
             )
         else:
@@ -693,17 +693,19 @@ class SingleGpuBatchRuntime:
                 main_mask = batch.main_mask.to(
                     self.device, dtype=torch.bool, non_blocking=True
                 )
-                artist_token_indices = batch.artist_token_indices.to(
+                condition_token_indices = batch.condition_token_indices.to(
                     self.device, dtype=torch.long, non_blocking=True
                 )
-                artist_mask = batch.artist_mask.to(
+                condition_mask = batch.condition_mask.to(
                     self.device, dtype=torch.bool, non_blocking=True
                 )
-                use_null_style = batch.use_null_style.to(
+                use_null_condition = batch.use_null_condition.to(
                     self.device, dtype=torch.bool, non_blocking=True
                 )
-                active_style_sample_indices = batch.active_style_sample_indices.to(
-                    self.device, dtype=torch.long, non_blocking=True
+                active_condition_sample_indices = (
+                    batch.active_condition_sample_indices.to(
+                        self.device, dtype=torch.long, non_blocking=True
+                    )
                 )
         if phase_timer is None:
             qwen_output = self._encode_qwen(batch, input_ids, attention_mask)
@@ -755,10 +757,10 @@ class SingleGpuBatchRuntime:
             main_token_indices=main_token_indices,
             main_mask=main_mask,
             main_token_lengths=batch.main_token_lengths,
-            artist_token_indices=artist_token_indices,
-            artist_mask=artist_mask,
-            use_null_style=use_null_style,
-            active_style_sample_indices=active_style_sample_indices,
+            condition_token_indices=condition_token_indices,
+            condition_mask=condition_mask,
+            use_null_condition=use_null_condition,
+            active_condition_sample_indices=active_condition_sample_indices,
             latents=tuple(item for item in state.unbind(0)),
             image_coordinates=image_coordinates,
             timestep=timestep,

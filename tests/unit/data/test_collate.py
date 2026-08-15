@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader, get_worker_info
 from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
     CaptionPlan,
+    StyleCondition,
+    Tag,
     empty_caption_dropout_hits,
 )
 from sakuramoon.data.collate import (
@@ -38,7 +40,7 @@ def _sample(
     caption = SerializedCaption(
         plan=CaptionPlan(
             tags=(),
-            artists=(),
+            style_condition=None,
             nl_text=None,
             selected_nl=None,
             all_condition_dropped=False,
@@ -49,14 +51,15 @@ def _sample(
         attention_mask=(True,) * len(input_ids),
         main_token_indices=tuple(range(len(input_ids))),
         main_mask=(True,) * len(input_ids),
-        artist_token_indices=(),
-        artist_mask=(),
-        use_null_style=True,
+        condition_token_indices=(),
+        condition_mask=(),
+        use_null_condition=True,
+        condition_kind=None,
         all_condition_dropped=False,
         dropout_hits=dropout_hits,
         selected_nl=None,
         body="",
-        artist_text="",
+        condition_text="",
         condition_tokens=5,
         condition_bucket=dense_length - 34,
         dense_length=dense_length,
@@ -87,8 +90,9 @@ def test_collate_pads_eot_and_preserves_structured_metadata() -> None:
     assert batch.main_token_indices[1, 2] == -1
     assert not batch.main_mask[1, 2]
     assert batch.main_token_lengths == (3, 2)
-    assert batch.artist_token_indices.shape == (2, 0)
-    assert batch.active_style_sample_indices.numel() == 0
+    assert batch.condition_token_indices.shape == (2, 0)
+    assert batch.active_condition_sample_indices.numel() == 0
+    assert batch.condition_kinds == (None, None)
     assert torch.equal(batch.sample_ids, torch.tensor([1, 2]))
     assert CAPTION_DROPOUT_KEYS == DROPOUT_KEYS
     dropout_hits = batch.dropout_hits.as_mapping()
@@ -210,24 +214,32 @@ def test_collate_rejects_invalid_main_index_metadata(
         collate_samples((invalid,))
 
 
-def test_collate_builds_active_style_sample_plan_on_cpu() -> None:
+def test_collate_builds_active_condition_sample_plan_on_cpu() -> None:
     sample = _sample(1)
     active = replace(
         sample,
         caption=replace(
             sample.caption,
+            plan=replace(
+                sample.caption.plan,
+                style_condition=StyleCondition(
+                    kind="artist", tags=(Tag("artist", "artist"),)
+                ),
+            ),
             main_token_indices=(0, 1),
             main_mask=(True, True),
-            artist_token_indices=(2,),
-            artist_mask=(True,),
-            use_null_style=False,
+            condition_token_indices=(2,),
+            condition_mask=(True,),
+            use_null_condition=False,
+            condition_kind="artist",
         ),
     )
 
     batch = collate_samples((active, _sample(2)))
 
-    assert batch.active_style_sample_indices.device.type == "cpu"
-    assert torch.equal(batch.active_style_sample_indices, torch.tensor([0]))
+    assert batch.active_condition_sample_indices.device.type == "cpu"
+    assert torch.equal(batch.active_condition_sample_indices, torch.tensor([0]))
+    assert batch.condition_kinds == ("artist", None)
 
 
 @pytest.mark.parametrize(
@@ -239,7 +251,7 @@ def test_collate_builds_active_style_sample_plan_on_cpu() -> None:
         ((), (), False),
     ],
 )
-def test_collate_rejects_invalid_artist_routing_metadata(
+def test_collate_rejects_invalid_condition_routing_metadata(
     indices: tuple[int, ...],
     mask: tuple[bool, ...],
     use_null: bool,
@@ -249,13 +261,31 @@ def test_collate_rejects_invalid_artist_routing_metadata(
         sample,
         caption=replace(
             sample.caption,
-            artist_token_indices=indices,
-            artist_mask=mask,
-            use_null_style=use_null,
+            condition_token_indices=indices,
+            condition_mask=mask,
+            use_null_condition=use_null,
+            condition_kind="artist" if not use_null else None,
         ),
     )
 
-    with pytest.raises(CollateError, match="Artist token|Artist token presence"):
+    with pytest.raises(CollateError, match="condition token|condition token presence"):
+        collate_samples((invalid,))
+
+
+def test_collate_rejects_missing_condition_kind() -> None:
+    sample = _sample(1)
+    invalid = replace(
+        sample,
+        caption=replace(
+            sample.caption,
+            condition_token_indices=(2,),
+            condition_mask=(True,),
+            use_null_condition=False,
+            condition_kind=None,
+        ),
+    )
+
+    with pytest.raises(CollateError, match="condition kind"):
         collate_samples((invalid,))
 
 

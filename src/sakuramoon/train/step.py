@@ -11,8 +11,8 @@ import torch
 from torch import nn
 
 from sakuramoon.conditioning.style_resampler import (
+    StyleConditionEncoder,
     StyleConditioningOutput,
-    StyleResampler,
 )
 from sakuramoon.conditioning.text_mixer import TextConditioner, TextConditioningOutput
 from sakuramoon.model.dit import DenseDiT, PackedDiT
@@ -40,10 +40,10 @@ class TrainableCompositeInputs:
     main_token_indices: torch.Tensor
     main_mask: torch.Tensor
     main_token_lengths: tuple[int, ...]
-    artist_token_indices: torch.Tensor
-    artist_mask: torch.Tensor
-    use_null_style: torch.Tensor
-    active_style_sample_indices: torch.Tensor
+    condition_token_indices: torch.Tensor
+    condition_mask: torch.Tensor
+    use_null_condition: torch.Tensor
+    active_condition_sample_indices: torch.Tensor
     latents: tuple[torch.Tensor, ...]
     image_coordinates: tuple[torch.Tensor, ...]
     timestep: torch.Tensor
@@ -60,7 +60,7 @@ class TrainableComposite(nn.Module):
         *,
         dit: DenseDiT | PackedDiT,
         text: TextConditioner,
-        style: StyleResampler,
+        style: StyleConditionEncoder,
     ) -> None:
         super().__init__()
         self.dit = dit
@@ -77,10 +77,10 @@ class TrainableComposite(nn.Module):
         )
         style = self.style(
             inputs.qwen_states,
-            inputs.artist_token_indices,
-            inputs.artist_mask,
-            inputs.use_null_style,
-            inputs.active_style_sample_indices,
+            inputs.condition_token_indices,
+            inputs.condition_mask,
+            inputs.use_null_condition,
+            inputs.active_condition_sample_indices,
         )
         return text, style
 

@@ -1,4 +1,4 @@
-"""Four-query Artist style resampler with learned null tokens."""
+"""Four-query style-condition encoder with learned null tokens."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class _ResidualSwiGLU(nn.Module):
         return tensor + self.down(F.silu(self.gate(normalized)) * self.up(normalized))
 
 
-class StyleResampler(nn.Module):
+class StyleConditionEncoder(nn.Module):
     def __init__(
         self,
         *,
@@ -125,40 +125,47 @@ class StyleResampler(nn.Module):
     def forward(
         self,
         qwen_states: torch.Tensor,
-        artist_token_indices: torch.Tensor,
-        artist_mask: torch.Tensor,
-        use_null: torch.Tensor,
-        active_sample_indices: torch.Tensor,
+        condition_token_indices: torch.Tensor,
+        condition_mask: torch.Tensor,
+        use_null_condition: torch.Tensor,
+        active_condition_sample_indices: torch.Tensor,
     ) -> StyleConditioningOutput:
         if qwen_states.ndim != 4 or qwen_states.shape[2:] != (7, self.input_size):
             raise ValueError("qwen_states must have shape [B,L,7,input_size]")
         if (
-            artist_token_indices.shape != artist_mask.shape
-            or artist_mask.dtype != torch.bool
+            condition_token_indices.shape != condition_mask.shape
+            or condition_mask.dtype != torch.bool
         ):
-            raise ValueError("Artist indices and mask must have matching [B,A] shapes")
-        if artist_token_indices.dtype != torch.long:
-            raise TypeError("artist_token_indices must use torch.long")
+            raise ValueError(
+                "condition indices and mask must have matching [B,C] shapes"
+            )
+        if condition_token_indices.dtype != torch.long:
+            raise TypeError("condition_token_indices must use torch.long")
         batch = qwen_states.shape[0]
         if (
             batch <= 0
-            or artist_token_indices.shape[0] != batch
-            or use_null.shape != (batch,)
+            or condition_token_indices.shape[0] != batch
+            or use_null_condition.shape != (batch,)
         ):
-            raise ValueError("Artist metadata batch shape differs from Qwen states")
-        if use_null.dtype != torch.bool:
-            raise TypeError("use_null must be boolean")
+            raise ValueError("condition metadata batch shape differs from Qwen states")
+        if use_null_condition.dtype != torch.bool:
+            raise TypeError("use_null_condition must be boolean")
         if (
-            artist_token_indices.device != qwen_states.device
-            or artist_mask.device != qwen_states.device
-            or use_null.device != qwen_states.device
-            or active_sample_indices.device != qwen_states.device
+            condition_token_indices.device != qwen_states.device
+            or condition_mask.device != qwen_states.device
+            or use_null_condition.device != qwen_states.device
+            or active_condition_sample_indices.device != qwen_states.device
         ):
             raise ValueError(
-                "Qwen states and Artist routing tensors must share one device"
+                "Qwen states and condition routing tensors must share one device"
             )
-        if active_sample_indices.ndim != 1 or active_sample_indices.dtype != torch.long:
-            raise ValueError("active_sample_indices must be a one-dimensional long tensor")
+        if (
+            active_condition_sample_indices.ndim != 1
+            or active_condition_sample_indices.dtype != torch.long
+        ):
+            raise ValueError(
+                "active_condition_sample_indices must be a one-dimensional long tensor"
+            )
 
         tokens = (
             self.null_tokens.to(dtype=qwen_states.dtype, device=qwen_states.device)
@@ -166,26 +173,26 @@ class StyleResampler(nn.Module):
             .expand(batch, -1, -1)
             .clone()
         )
-        sample_in_range = (active_sample_indices >= 0) & (
-            active_sample_indices < batch
+        sample_in_range = (active_condition_sample_indices >= 0) & (
+            active_condition_sample_indices < batch
         )
-        safe_active_samples = active_sample_indices.clamp(0, batch - 1)
-        expected_active = artist_mask.any(dim=1) & ~use_null
+        safe_active_samples = active_condition_sample_indices.clamp(0, batch - 1)
+        expected_active = condition_mask.any(dim=1) & ~use_null_condition
         planned_active = torch.zeros_like(expected_active).scatter(
             0,
             safe_active_samples,
             True,
         )
         plan_matches = (planned_active == expected_active).all() & (
-            expected_active.sum() == active_sample_indices.numel()
+            expected_active.sum() == active_condition_sample_indices.numel()
         )
-        active_artist_indices = artist_token_indices.index_select(
+        active_condition_indices = condition_token_indices.index_select(
             0, safe_active_samples
         )
-        active_artist_mask = artist_mask.index_select(0, safe_active_samples)
-        indices_in_range = (~active_artist_mask) | (
-            (active_artist_indices >= 0)
-            & (active_artist_indices < qwen_states.shape[1])
+        active_condition_mask = condition_mask.index_select(0, safe_active_samples)
+        indices_in_range = (~active_condition_mask) | (
+            (active_condition_indices >= 0)
+            & (active_condition_indices < qwen_states.shape[1])
         )
         valid_plan = sample_in_range.all() & plan_matches & indices_in_range.all()
         if qwen_states.is_cuda:
@@ -193,10 +200,12 @@ class StyleResampler(nn.Module):
                 valid_plan
             )
         elif not bool(valid_plan):
-            raise ValueError("active Artist sample/index plan is invalid")
+            raise ValueError("active style-condition sample/index plan is invalid")
 
-        if active_sample_indices.numel():
-            safe_indices = active_artist_indices.masked_fill(~active_artist_mask, 0)
+        if active_condition_sample_indices.numel():
+            safe_indices = active_condition_indices.masked_fill(
+                ~active_condition_mask, 0
+            )
             gather_index = safe_indices[:, :, None, None].expand(
                 -1, -1, 7, self.input_size
             )
@@ -210,7 +219,7 @@ class StyleResampler(nn.Module):
             )[None, None]
             memory = self.input_projection(selected).flatten(1, 2)
             memory_mask = (
-                active_artist_mask[:, :, None].expand(-1, -1, 7).flatten(1, 2)
+                active_condition_mask[:, :, None].expand(-1, -1, 7).flatten(1, 2)
             )
             queries = (
                 self.queries.to(memory.dtype)
@@ -243,4 +252,8 @@ class StyleResampler(nn.Module):
         return dict(self._artifact_config)
 
 
-__all__ = ["StyleConditioningOutput", "StyleResampler"]
+# Import compatibility only. New code must name the generic interface.
+StyleResampler = StyleConditionEncoder
+
+
+__all__ = ["StyleConditionEncoder", "StyleConditioningOutput", "StyleResampler"]

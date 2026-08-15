@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 import sakuramoon.train.step as step_module
-from sakuramoon.conditioning.style_resampler import StyleResampler
+from sakuramoon.conditioning.style_resampler import StyleConditionEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import PackedDiT
 from sakuramoon.optim.clip import clip_grad_norm_fp32
@@ -78,7 +78,7 @@ def _production_composite() -> TrainableComposite:
             linear_dtype=torch.bfloat16,
             sensitive_dtype=torch.float32,
         ),
-        style=StyleResampler(
+        style=StyleConditionEncoder(
             input_size=2048,
             hidden_size=1024,
             intermediate_size=2048,

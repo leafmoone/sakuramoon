@@ -685,9 +685,9 @@ def _run_accepted_lifecycle(
         Accelerator(
             mixed_precision="no",
             kwargs_handlers=[
-                # Artist conditioning is data-dependent: a rank whose final
+                # Style conditioning is data-dependent: a rank whose final
                 # accumulation microbatch contains only null-style samples does
-                # not traverse the trainable StyleResampler projection path.
+                # not traverse the trainable StyleConditionEncoder projection path.
                 # DDP must discover those dynamic unused parameters or that rank
                 # can enter the post-update barrier while a peer still reduces
                 # the style gradient buckets.
