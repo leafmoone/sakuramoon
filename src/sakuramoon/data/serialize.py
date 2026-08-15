@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from sakuramoon.data.caption import (
-    CATEGORY_ORDER,
     CaptionDropoutHits,
     CaptionPlan,
+    CaptionTag,
     Tag,
 )
 
@@ -83,25 +83,27 @@ def _encode(tokenizer: TokenEncoder, text: str) -> tuple[int, ...]:
     return tuple(encoded)
 
 
-def _body(categories: dict[str, list[Tag]], nl_text: str | None) -> str:
-    tags = [tag.text for category in CATEGORY_ORDER for tag in categories[category]]
-    tag_text = ", ".join(tags)
+def _display_text(tag: Tag) -> str:
+    """Normalize only the tokenizer-facing surface; canonical IDs stay untouched."""
+
+    return tag.text.replace("_", " ")
+
+
+def _body(tags: list[CaptionTag], nl_text: str | None) -> str:
+    tag_text = ", ".join(_display_text(item.tag) for item in tags)
     if tag_text and nl_text:
         return f"{tag_text}\n\n{nl_text}"
     return tag_text or (nl_text or "")
 
 
 def _artist_text(artists: list[Tag]) -> str:
-    return ", ".join(tag.text for tag in artists)
+    return ", ".join(_display_text(tag) for tag in artists)
 
 
 def render_caption_segments(plan: CaptionPlan) -> tuple[str, str]:
     """Render the governed main and Artist segments without tokenization."""
 
-    categories = {
-        category: list(getattr(plan, category)) for category in CATEGORY_ORDER
-    }
-    return _body(categories, plan.nl_text), _artist_text(list(plan.artists))
+    return _body(list(plan.tags), plan.nl_text), _artist_text(list(plan.artists))
 
 
 def _bucket_for(tokens: int) -> int:
@@ -120,12 +122,13 @@ def serialize_caption(
 
     prefix_ids = _encode(tokenizer, SYSTEM_PREFIX)
     suffix_ids = _encode(tokenizer, MAIN_SUFFIX)
-    if len(prefix_ids) != framing.prefix_tokens or len(suffix_ids) != framing.suffix_tokens:
+    if (
+        len(prefix_ids) != framing.prefix_tokens
+        or len(suffix_ids) != framing.suffix_tokens
+    ):
         raise CaptionSerializationError("tokenizer framing token counts changed")
 
-    categories = {
-        category: list(getattr(plan, category)) for category in CATEGORY_ORDER
-    }
+    tags = list(plan.tags)
     artists = list(plan.artists)
     nl_text = plan.nl_text
     truncated = False
@@ -133,10 +136,7 @@ def serialize_caption(
     def current_plan() -> CaptionPlan:
         return dataclasses.replace(
             plan,
-            nsfw=tuple(categories["nsfw"]),
-            character=tuple(categories["character"]),
-            copyright=tuple(categories["copyright"]),
-            general=tuple(categories["general"]),
+            tags=tuple(tags),
             artists=tuple(artists),
             nl_text=nl_text,
             selected_nl=plan.selected_nl if nl_text is not None else None,
@@ -145,7 +145,7 @@ def serialize_caption(
     if artists:
         fitting_artists: list[Tag] = []
         for artist in artists:
-            individual_ids = _encode(tokenizer, artist.text)
+            individual_ids = _encode(tokenizer, _display_text(artist))
             if not individual_ids:
                 raise CaptionSerializationError("tokenizer produced no Artist tokens")
             if len(suffix_ids) + len(individual_ids) <= TEXT_CONDITION_MAX:
@@ -166,7 +166,9 @@ def serialize_caption(
         _body_text, artist_text = render_caption_segments(current_plan())
         artist_ids = _encode(tokenizer, artist_text)
     if len(suffix_ids) + len(artist_ids) > TEXT_CONDITION_MAX:
-        raise CaptionSerializationError("Artist segment cannot fit without splitting a tag")
+        raise CaptionSerializationError(
+            "Artist segment cannot fit without splitting a tag"
+        )
 
     while True:
         body, artist_text = render_caption_segments(current_plan())
@@ -178,22 +180,19 @@ def serialize_caption(
             nl_text = None
             truncated = True
             continue
-        removed = False
-        for category in reversed(CATEGORY_ORDER):
-            if categories[category]:
-                categories[category].pop()
-                truncated = True
-                removed = True
-                break
-        if not removed:
+        if not tags:
             raise CaptionSerializationError("fixed framing exceeds the condition limit")
+        tags.pop()
+        truncated = True
 
     resolved_plan = current_plan()
     if render_caption_segments(resolved_plan) != (body, artist_text):
         raise RuntimeError("resolved caption plan differs from serialized segments")
     input_ids = prefix_ids + body_ids + suffix_ids + artist_ids
     if framing.padding_token_id in input_ids:
-        raise CaptionSerializationError("padding token appears in the valid Qwen sequence")
+        raise CaptionSerializationError(
+            "padding token appears in the valid Qwen sequence"
+        )
     main_length = len(prefix_ids) + len(body_ids) + len(suffix_ids)
     main_indices = tuple(range(main_length))
     artist_indices = tuple(range(main_length, len(input_ids)))

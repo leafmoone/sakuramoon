@@ -13,6 +13,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol, Self
 
+from sakuramoon.data.caption import CAPTION_DROPOUT_KEYS
+
 CORE_TIMING_PHASES = (
     "data",
     "qwen",
@@ -48,21 +50,8 @@ NOISE_T_BIN_LABELS = tuple(
     f"bin_{index:02d}_t{index * 5:03d}_{(index + 1) * 5:03d}"
     for index in range(NOISE_T_BIN_COUNT)
 )
-TRAINING_METRIC_SCHEMA_VERSION = 3
-DROPOUT_KEYS = (
-    "all_condition",
-    "nsfw",
-    "character",
-    "copyright",
-    "general",
-    "artist",
-    "candidate_source",
-    "long_names",
-    "long_no_names",
-    "short_vibes",
-    "nl2",
-    "nl3",
-)
+TRAINING_METRIC_SCHEMA_VERSION = 4
+DROPOUT_KEYS = CAPTION_DROPOUT_KEYS
 
 
 def _finite_float(name: str, value: float, *, minimum: float | None = None) -> None:

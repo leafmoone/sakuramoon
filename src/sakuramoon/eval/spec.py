@@ -7,7 +7,14 @@ import re
 from dataclasses import dataclass
 from typing import cast
 
-from sakuramoon.data.caption import CaptionDropoutHits, CaptionPlan, Tag
+from sakuramoon.data.caption import (
+    TAG_SOURCE_ORDER,
+    CaptionPlan,
+    CaptionTag,
+    Tag,
+    TagSource,
+    empty_caption_dropout_hits,
+)
 from sakuramoon.data.serialize import (
     MAIN_SUFFIX,
     SYSTEM_PREFIX,
@@ -15,21 +22,7 @@ from sakuramoon.data.serialize import (
 )
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_NO_DROPOUT = CaptionDropoutHits(
-    all_condition=False,
-    nsfw=False,
-    character=False,
-    copyright=False,
-    general=False,
-    artist=False,
-    candidate_source=False,
-    long_names=False,
-    long_no_names=False,
-    short_vibes=False,
-    nl2=False,
-    nl3=False,
-)
-_CAPTION_TAG_FIELDS = ("nsfw", "character", "copyright", "general", "artists")
+_NO_DROPOUT = empty_caption_dropout_hits()
 
 
 def _safe_id(name: str, value: str) -> None:
@@ -46,13 +39,17 @@ def caption_plan_prompt_text(plan: CaptionPlan) -> str:
 
 def _caption_plan_mapping(plan: CaptionPlan) -> dict[str, object]:
     return {
-        **{
-            field: [
-                {"canonical": tag.canonical, "text": tag.text}
-                for tag in getattr(plan, field)
-            ]
-            for field in _CAPTION_TAG_FIELDS
-        },
+        "tags": [
+            {
+                "canonical": item.tag.canonical,
+                "source": item.source,
+                "text": item.tag.text,
+            }
+            for item in plan.tags
+        ],
+        "artists": [
+            {"canonical": tag.canonical, "text": tag.text} for tag in plan.artists
+        ],
         "nl_text": plan.nl_text,
         "selected_nl": plan.selected_nl,
     }
@@ -72,13 +69,35 @@ def _parse_caption_tags(value: object, field: str) -> tuple[Tag, ...]:
     return tuple(result)
 
 
+def _parse_ordered_tags(value: object) -> tuple[CaptionTag, ...]:
+    if type(value) is not list:
+        raise ValueError("prompt caption tags must be an array")
+    result: list[CaptionTag] = []
+    for raw_item in cast(list[object], value):
+        if type(raw_item) is not dict:
+            raise ValueError("prompt caption tag must be an object")
+        item = cast(dict[str, object], raw_item)
+        if set(item) != {"canonical", "source", "text"}:
+            raise ValueError("prompt caption tag fields are invalid")
+        source = item["source"]
+        if source not in TAG_SOURCE_ORDER:
+            raise ValueError("prompt caption tag source is invalid")
+        result.append(
+            CaptionTag(
+                source=cast(TagSource, source),
+                tag=Tag(cast(str, item["text"]), cast(str, item["canonical"])),
+            )
+        )
+    return tuple(result)
+
+
 def _parse_caption_plan(value: object) -> CaptionPlan | None:
     if value is None:
         return None
     if type(value) is not dict:
         raise ValueError("prompt caption plan must be an object or null")
     document = cast(dict[str, object], value)
-    if set(document) != {*_CAPTION_TAG_FIELDS, "nl_text", "selected_nl"}:
+    if set(document) != {"tags", "artists", "nl_text", "selected_nl"}:
         raise ValueError("prompt caption plan fields are invalid")
     nl_text = document["nl_text"]
     selected_nl = document["selected_nl"]
@@ -93,10 +112,7 @@ def _parse_caption_plan(value: object) -> CaptionPlan | None:
     ):
         raise ValueError("prompt caption NL branch is invalid")
     return CaptionPlan(
-        nsfw=_parse_caption_tags(document["nsfw"], "nsfw"),
-        character=_parse_caption_tags(document["character"], "character"),
-        copyright=_parse_caption_tags(document["copyright"], "copyright"),
-        general=_parse_caption_tags(document["general"], "general"),
+        tags=_parse_ordered_tags(document["tags"]),
         artists=_parse_caption_tags(document["artists"], "artists"),
         nl_text=nl_text,
         selected_nl=selected_nl,
@@ -149,15 +165,13 @@ class PromptCase:
             raise ValueError("prompt dimensions must be positive multiples of 16")
         if self.caption_plan is not None:
             plan = self.caption_plan
-            typed_tags = all(
-                type(getattr(plan, field)) is tuple
-                and all(type(tag) is Tag for tag in getattr(plan, field))
-                for field in _CAPTION_TAG_FIELDS
+            typed_tags = (
+                type(plan.tags) is tuple
+                and all(type(tag) is CaptionTag for tag in plan.tags)
+                and type(plan.artists) is tuple
+                and all(type(tag) is Tag for tag in plan.artists)
             )
-            has_content = (
-                any(getattr(plan, field) for field in _CAPTION_TAG_FIELDS)
-                or plan.nl_text is not None
-            )
+            has_content = bool(plan.tags or plan.artists or plan.nl_text is not None)
             if (
                 type(plan) is not CaptionPlan
                 or not typed_tags
@@ -206,7 +220,7 @@ class PromptManifest:
             json.dumps(
                 {
                     "cases": [case.as_mapping() for case in self.cases],
-                    "schema_version": 1,
+                    "schema_version": 2,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -227,7 +241,7 @@ class PromptManifest:
         document = cast(dict[str, object], parsed)
         if set(document) != {"cases", "schema_version"}:
             raise ValueError("prompt manifest root fields are invalid")
-        if document["schema_version"] != 1:
+        if document["schema_version"] != 2:
             raise ValueError("prompt manifest schema version is invalid")
         raw_cases = document["cases"]
         if type(raw_cases) is not list:

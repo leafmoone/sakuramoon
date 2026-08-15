@@ -100,7 +100,7 @@ shape_count = 17
 transpose_closed = true
 
 [caption]
-category_order = ["nsfw", "character", "copyright", "general", "nl"]
+category_order = ["tags", "nl", "artist"]
 tag_separator = ", "
 tag_nl_separator = "\n\n"
 text_condition_max = 512
@@ -109,11 +109,7 @@ qwen_dense_lengths = [98, 162, 226, 290, 354, 418, 482, 546]
 
 [caption.dropout]
 all_condition = 0.10
-general = 0.1
-artist = 0.1
-character = 0.2
-copyright = 0.1
-nsfw = 0.1
+tag = 0.1
 candidate_source = 0.3
 
 [caption.dropout.nl]

@@ -653,11 +653,7 @@ class ProductionPipelineFactory:
         self._require_governed_issuance()
         dropout = self.config.caption.dropout
         probabilities = CaptionDropoutProbabilities(
-            nsfw=dropout.nsfw,
-            character=dropout.character,
-            copyright=dropout.copyright,
-            general=dropout.general,
-            artist=dropout.artist,
+            tag=dropout.tag,
             candidate_source=dropout.candidate_source,
             nl=NlDropoutProbabilities(
                 long_names=dropout.nl.long_names,

@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader, get_worker_info
 
 from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
-    CaptionDropoutHits,
     CaptionPlan,
+    empty_caption_dropout_hits,
 )
 from sakuramoon.data.collate import (
     BucketedBatchDataset,
@@ -26,28 +26,18 @@ from sakuramoon.data.serialize import SerializedCaption
 from sakuramoon.telemetry.metrics import DROPOUT_KEYS
 
 
-def _sample(sample_id: int, *, width: int = 8, dense_length: int = 64) -> PipelineSample:
+def _sample(
+    sample_id: int, *, width: int = 8, dense_length: int = 64
+) -> PipelineSample:
     input_ids = (10, 11, 12) if sample_id % 2 else (20, 21)
-    dropout_hits = CaptionDropoutHits(
-        all_condition=False,
-        nsfw=False,
-        character=False,
-        copyright=False,
+    dropout_hits = replace(
+        empty_caption_dropout_hits(),
         general=bool(sample_id % 2),
         artist=bool(sample_id % 2),
-        candidate_source=False,
-        long_names=False,
-        long_no_names=False,
-        short_vibes=False,
-        nl2=False,
-        nl3=False,
     )
     caption = SerializedCaption(
         plan=CaptionPlan(
-            nsfw=(),
-            character=(),
-            copyright=(),
-            general=(),
+            tags=(),
             artists=(),
             nl_text=None,
             selected_nl=None,

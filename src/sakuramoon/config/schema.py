@@ -335,11 +335,7 @@ class NlDropoutConfig(StrictModel):
 
 class CaptionDropoutConfig(StrictModel):
     all_condition: FixedPointOne
-    general: FixedPointOne
-    artist: FixedPointOne
-    character: FixedPointTwo
-    copyright: FixedPointOne
-    nsfw: FixedPointOne
+    tag: FixedPointOne
     candidate_source: FixedPointThree
     nl: NlDropoutConfig
 
@@ -356,11 +352,9 @@ class CaptionConfig(StrictModel):
     @model_validator(mode="after")
     def validate_protocol_sequences(self) -> CaptionConfig:
         if self.category_order != (
-            "nsfw",
-            "character",
-            "copyright",
-            "general",
+            "tags",
             "nl",
+            "artist",
         ):
             raise ValueError(
                 "caption category order differs from the approved protocol"

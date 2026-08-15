@@ -15,7 +15,12 @@ from PIL import Image
 
 from sakuramoon.conditioning.rope import full_canvas_crop_coordinates
 from sakuramoon.config.schema import RuntimeConfig
-from sakuramoon.data.caption import CaptionDropoutHits, CaptionPlan, Tag
+from sakuramoon.data.caption import (
+    CaptionPlan,
+    CaptionTag,
+    Tag,
+    empty_caption_dropout_hits,
+)
 from sakuramoon.data.serialize import (
     EXPECTED_PREFIX_TOKENS,
     EXPECTED_SUFFIX_TOKENS,
@@ -80,21 +85,8 @@ class TrainingSamplingError(RuntimeError):
     """A periodic training sample could not be generated or persisted."""
 
 
-_NO_DROPOUT = CaptionDropoutHits(
-    all_condition=False,
-    nsfw=False,
-    character=False,
-    copyright=False,
-    general=False,
-    artist=False,
-    candidate_source=False,
-    long_names=False,
-    long_no_names=False,
-    short_vibes=False,
-    nl2=False,
-    nl3=False,
-)
-_ALL_DROPPED = dataclasses.replace(_NO_DROPOUT, all_condition=True)
+_NO_DROPOUT = empty_caption_dropout_hits()
+_ALL_DROPPED = empty_caption_dropout_hits(all_condition=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,10 +144,7 @@ class TrainingSampleResult:
 
 def _unconditional_plan() -> CaptionPlan:
     return CaptionPlan(
-        nsfw=(),
-        character=(),
-        copyright=(),
-        general=(),
+        tags=(),
         artists=(),
         nl_text=None,
         selected_nl=None,
@@ -441,12 +430,13 @@ def _tag_metadata(tag: Tag) -> dict[str, str]:
     return {"text": tag.text, "canonical": tag.canonical}
 
 
+def _caption_tag_metadata(tag: CaptionTag) -> dict[str, str]:
+    return {"source": tag.source, **_tag_metadata(tag.tag)}
+
+
 def _plan_metadata(plan: CaptionPlan) -> dict[str, object]:
     return {
-        "nsfw": [_tag_metadata(tag) for tag in plan.nsfw],
-        "character": [_tag_metadata(tag) for tag in plan.character],
-        "copyright": [_tag_metadata(tag) for tag in plan.copyright],
-        "general": [_tag_metadata(tag) for tag in plan.general],
+        "tags": [_caption_tag_metadata(tag) for tag in plan.tags],
         "artists": [_tag_metadata(tag) for tag in plan.artists],
         "nl_text": plan.nl_text,
         "selected_nl": plan.selected_nl,

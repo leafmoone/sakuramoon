@@ -17,7 +17,7 @@ from torch.nn import functional
 
 from sakuramoon.conditioning.rope import image_coordinates
 from sakuramoon.config.schema import EvaluationEnabledConfig, RuntimeConfig
-from sakuramoon.data.caption import CaptionDropoutHits, CaptionPlan
+from sakuramoon.data.caption import CaptionPlan, empty_caption_dropout_hits
 from sakuramoon.data.serialize import (
     EXPECTED_PREFIX_TOKENS,
     EXPECTED_SUFFIX_TOKENS,
@@ -73,31 +73,15 @@ class EvaluationResult:
     result_path: Path
 
 
-_NO_DROPOUT = CaptionDropoutHits(
-    all_condition=False,
-    nsfw=False,
-    character=False,
-    copyright=False,
-    general=False,
-    artist=False,
-    candidate_source=False,
-    long_names=False,
-    long_no_names=False,
-    short_vibes=False,
-    nl2=False,
-    nl3=False,
-)
-_ALL_DROPPED = dataclasses.replace(_NO_DROPOUT, all_condition=True)
+_NO_DROPOUT = empty_caption_dropout_hits()
+_ALL_DROPPED = empty_caption_dropout_hits(all_condition=True)
 
 
 def _conditional_plan(case: PromptCase) -> CaptionPlan:
     if case.caption_plan is not None:
         return case.caption_plan
     return CaptionPlan(
-        nsfw=(),
-        character=(),
-        copyright=(),
-        general=(),
+        tags=(),
         artists=(),
         nl_text=case.prompt,
         selected_nl="long_names",
@@ -108,10 +92,7 @@ def _conditional_plan(case: PromptCase) -> CaptionPlan:
 
 def _unconditional_plan() -> CaptionPlan:
     return CaptionPlan(
-        nsfw=(),
-        character=(),
-        copyright=(),
-        general=(),
+        tags=(),
         artists=(),
         nl_text=None,
         selected_nl=None,

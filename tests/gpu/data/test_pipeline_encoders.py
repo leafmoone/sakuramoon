@@ -51,7 +51,7 @@ def _empty_fields(_raw: Mapping[str, object]) -> CaptionFields:
 
 def _probabilities() -> CaptionDropoutProbabilities:
     nl = NlDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0)
-    return CaptionDropoutProbabilities(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, nl)
+    return CaptionDropoutProbabilities(tag=0.0, candidate_source=0.0, nl=nl)
 
 
 def _identity_metadata(
@@ -152,7 +152,7 @@ def test_real_modelscope_shard_pipeline_qwen_and_mage() -> None:
     )
     vae = load_local_mage_vae(repository_root, device)
     nl = NlDropoutProbabilities(0.3, 0.3, 0.3, 0.3, 0.3)
-    probabilities = CaptionDropoutProbabilities(0.1, 0.2, 0.1, 0.1, 0.1, 0.3, nl)
+    probabilities = CaptionDropoutProbabilities(tag=0.1, candidate_source=0.3, nl=nl)
     buckets = generate_base_buckets(
         DataBucketsConfig(
             base_area_px=262144,

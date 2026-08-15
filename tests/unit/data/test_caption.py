@@ -4,16 +4,18 @@ import pytest
 
 from sakuramoon.data.caption import (
     ALL_CONDITION_DROPOUT,
+    BODY_TAG_SOURCE_ORDER,
     CAPTION_DROPOUT_KEYS,
-    CaptionDropoutHits,
     CaptionDropoutProbabilities,
     CaptionError,
     CaptionFields,
     CaptionPlan,
+    CaptionTag,
     NlCandidates,
     NlDropoutProbabilities,
     Tag,
     build_caption_plan,
+    empty_caption_dropout_hits,
 )
 
 
@@ -21,35 +23,34 @@ def _nl_probabilities(value: float = 0.0) -> NlDropoutProbabilities:
     return NlDropoutProbabilities(value, value, value, value, value)
 
 
-def _probabilities(**changes: float) -> CaptionDropoutProbabilities:
-    values = {
-        "nsfw": 0.0,
-        "character": 0.0,
-        "copyright": 0.0,
-        "general": 0.0,
-        "artist": 0.0,
-        "candidate_source": 0.0,
-    }
-    values.update(changes)
+def _probabilities(
+    *, tag: float = 0.0, candidate_source: float = 0.0, nl: float = 0.0
+) -> CaptionDropoutProbabilities:
     return CaptionDropoutProbabilities(
-        nsfw=values["nsfw"],
-        character=values["character"],
-        copyright=values["copyright"],
-        general=values["general"],
-        artist=values["artist"],
-        candidate_source=values["candidate_source"],
-        nl=_nl_probabilities(),
+        tag=tag,
+        candidate_source=candidate_source,
+        nl=_nl_probabilities(nl),
     )
 
 
 def _fields() -> CaptionFields:
     return CaptionFields(
-        nsfw=(Tag("safe", "rating:safe"),),
-        character=(Tag("alice", "character:alice"),),
-        copyright=(Tag("wonderland", "copyright:wonderland"),),
-        general=(Tag("blue dress", "general:blue_dress"),),
-        artists=(Tag("sample artist", "artist:sample"),),
-        candidate_tags=frozenset({"character:alice", "general:blue_dress"}),
+        nsfw=(Tag("nsfw", "nsfw"),),
+        character=(
+            Tag("alice", "alice"),
+            Tag("candidate_character", "candidate_character"),
+        ),
+        copyright=(Tag("wonderland", "wonderland"),),
+        general=(
+            Tag("blue_dress", "blue_dress"),
+            Tag("candidate_general", "candidate_general"),
+            Tag("soft_light", "soft_light"),
+        ),
+        artists=(
+            Tag("sample_artist", "sample_artist"),
+            Tag("candidate_general", "candidate_general"),
+        ),
+        candidate_tags=frozenset({"candidate_character", "candidate_general"}),
         nl=NlCandidates(
             long_names="A detailed scene.",
             long_no_names=None,
@@ -57,73 +58,159 @@ def _fields() -> CaptionFields:
             nl2=None,
             nl3=None,
         ),
+        rating=(Tag("safe", "safe"),),
+        year=(Tag("year 2026", "year 2026"), Tag("newest", "newest")),
+        aesthetic=(Tag("masterpiece", "masterpiece"),),
+        quality=(Tag("best", "best"),),
+        anime_completeness=(Tag("polished", "polished"),),
+        anime_classification=(Tag("illustration", "illustration"),),
     )
 
 
 def _seed_for_global_dropout(expected: bool) -> int:
-    for seed in range(1000):
+    for seed in range(10_000):
         plan = build_caption_plan(_fields(), _probabilities(), seed=seed)
         if plan.all_condition_dropped is expected:
             return seed
     raise AssertionError("test could not find deterministic global dropout seed")
 
 
-def test_all_condition_probability_is_fixed_and_produces_empty_plan() -> None:
+def _seed_for_partial_general_dropout() -> int:
+    source_count = len(_fields().general)
+    for seed in range(10_000):
+        plan = build_caption_plan(_fields(), _probabilities(tag=0.5), seed=seed)
+        retained = tuple(item for item in plan.tags if item.source == "general")
+        if not plan.all_condition_dropped and 0 < len(retained) < source_count:
+            return seed
+    raise AssertionError("test could not find a partial per-tag dropout seed")
+
+
+def test_all_condition_probability_is_fixed_and_produces_only_global_hit() -> None:
     assert ALL_CONDITION_DROPOUT == 0.10
     plan = build_caption_plan(
         _fields(), _probabilities(), seed=_seed_for_global_dropout(True)
     )
+
     assert plan.all_condition_dropped is True
-    assert plan.nsfw == plan.character == plan.copyright == plan.general == ()
+    assert plan.tags == ()
     assert plan.artists == ()
     assert plan.nl_text is None
-    assert plan.dropout_hits.all_condition is True
     assert tuple(plan.dropout_hits.as_mapping()) == CAPTION_DROPOUT_KEYS
+    assert plan.dropout_hits.as_mapping() == {
+        key: key == "all_condition" for key in CAPTION_DROPOUT_KEYS
+    }
 
 
-def test_category_order_data_and_internal_shuffle_are_deterministic() -> None:
+def test_all_non_artist_tags_are_globally_shuffled_deterministically() -> None:
     fields = _fields()
-    fields = CaptionFields(
-        nsfw=fields.nsfw,
-        character=fields.character,
-        copyright=fields.copyright,
-        general=(
-            Tag("first", "general:first"),
-            Tag("second", "general:second"),
-            Tag("third", "general:third"),
-        ),
-        artists=fields.artists,
-        candidate_tags=fields.candidate_tags,
-        nl=fields.nl,
+    expected = {
+        (source, tag.canonical)
+        for source in BODY_TAG_SOURCE_ORDER
+        for tag in getattr(fields, source)
+    }
+    selected: tuple[CaptionTag, ...] | None = None
+    grouped_sources = tuple(
+        source for source in BODY_TAG_SOURCE_ORDER for _tag in getattr(fields, source)
     )
-    seed = _seed_for_global_dropout(False)
-    first = build_caption_plan(fields, _probabilities(), seed=seed)
-    repeated = build_caption_plan(fields, _probabilities(), seed=seed)
-    assert first == repeated
-    assert set(first.general) == set(fields.general)
+    for seed in range(10_000):
+        plan = build_caption_plan(fields, _probabilities(), seed=seed)
+        if (
+            not plan.all_condition_dropped
+            and tuple(item.source for item in plan.tags) != grouped_sources
+        ):
+            selected = plan.tags
+            repeated = build_caption_plan(fields, _probabilities(), seed=seed)
+            assert repeated.tags == selected
+            break
+
+    assert selected is not None
+    assert {(item.source, item.tag.canonical) for item in selected} == expected
 
 
-def test_candidate_dropout_deletes_canonical_matches_only_from_tag_categories() -> None:
+def test_each_tag_drops_independently_within_one_source() -> None:
+    fields = _fields()
+    seed = _seed_for_partial_general_dropout()
+    plan = build_caption_plan(fields, _probabilities(tag=0.5), seed=seed)
+    retained = tuple(item.tag for item in plan.tags if item.source == "general")
+
+    assert 0 < len(retained) < len(fields.general)
+    assert plan.dropout_hits.general is True
+
+
+def test_unified_tag_probability_applies_to_every_non_nl_field() -> None:
+    plan = build_caption_plan(
+        _fields(),
+        _probabilities(tag=1.0),
+        seed=_seed_for_global_dropout(False),
+    )
+
+    assert plan.tags == ()
+    assert plan.artists == ()
+    assert plan.nl_text in {"A detailed scene.", "soft light"}
+    hits = plan.dropout_hits.as_mapping()
+    assert all(hits[source] for source in (*BODY_TAG_SOURCE_ORDER, "artist"))
+    assert hits["candidate_source"] is False
+
+
+def test_candidate_source_uses_canonical_ids_and_never_deletes_artist() -> None:
     plan = build_caption_plan(
         _fields(),
         _probabilities(candidate_source=1.0),
         seed=_seed_for_global_dropout(False),
     )
-    assert plan.character == ()
-    assert plan.general == ()
-    assert plan.nsfw and plan.copyright
-    assert plan.artists
-    assert plan.nl_text is not None
+    retained = {(item.source, item.tag.canonical) for item in plan.tags}
+
+    assert ("character", "candidate_character") not in retained
+    assert ("general", "candidate_general") not in retained
+    assert ("general", "blue_dress") in retained
+    assert tuple(tag.canonical for tag in plan.artists) == (
+        "sample_artist",
+        "candidate_general",
+    )
+    assert plan.dropout_hits.candidate_source is True
+
+
+def test_artist_order_is_fixed_after_independent_dropout() -> None:
+    fields = _fields()
+    plan = build_caption_plan(
+        fields, _probabilities(), seed=_seed_for_global_dropout(False)
+    )
+
+    assert plan.artists == fields.artists
+
+
+def test_nl_selects_at_most_one_available_complete_branch() -> None:
+    plan = build_caption_plan(
+        _fields(), _probabilities(), seed=_seed_for_global_dropout(False)
+    )
+
+    assert plan.selected_nl in {"long_names", "short_vibes"}
+    assert plan.nl_text in {"A detailed scene.", "soft light"}
+
+
+def test_explicit_nl_dropout_removes_all_available_branches() -> None:
+    plan = build_caption_plan(
+        _fields(),
+        _probabilities(nl=1.0),
+        seed=_seed_for_global_dropout(False),
+    )
+
+    assert plan.selected_nl is None
+    assert plan.nl_text is None
+    assert all(
+        getattr(plan.dropout_hits, branch)
+        for branch in ("long_names", "long_no_names", "short_vibes", "nl2", "nl3")
+    )
 
 
 @pytest.mark.parametrize(
     "candidate_tags",
     [
         frozenset({""}),
-        frozenset({" character:alice"}),
-        frozenset({"character:alice "}),
+        frozenset({" candidate"}),
+        frozenset({"candidate "}),
         frozenset({1}),
-        {"character:alice"},
+        {"candidate"},
     ],
 )
 def test_candidate_deletion_ids_require_exact_canonical_boundaries(
@@ -142,130 +229,62 @@ def test_candidate_deletion_ids_require_exact_canonical_boundaries(
         )
 
 
-def test_explicit_category_and_artist_dropout() -> None:
-    plan = build_caption_plan(
-        _fields(),
-        _probabilities(nsfw=1.0, general=1.0, artist=1.0),
-        seed=_seed_for_global_dropout(False),
-    )
-    assert plan.nsfw == ()
-    assert plan.general == ()
-    assert plan.character and plan.copyright
-    assert plan.artists == ()
-
-
-def test_nl_selects_at_most_one_currently_available_branch() -> None:
-    plan = build_caption_plan(
-        _fields(), _probabilities(), seed=_seed_for_global_dropout(False)
-    )
-    assert plan.selected_nl in {"long_names", "short_vibes"}
-    assert plan.nl_text in {"A detailed scene.", "soft light"}
-
-
-def test_explicit_nl_dropout_removes_all_available_branches() -> None:
-    probabilities = CaptionDropoutProbabilities(
-        nsfw=0.0,
-        character=0.0,
-        copyright=0.0,
-        general=0.0,
-        artist=0.0,
-        candidate_source=0.0,
-        nl=NlDropoutProbabilities(1.0, 1.0, 1.0, 1.0, 1.0),
-    )
-    plan = build_caption_plan(
-        _fields(), probabilities, seed=_seed_for_global_dropout(False)
-    )
-    assert plan.selected_nl is None
-    assert plan.nl_text is None
-    assert all(
-        getattr(plan.dropout_hits, branch)
-        for branch in ("long_names", "long_no_names", "short_vibes", "nl2", "nl3")
-    )
-
-
-def test_component_hits_are_retained_when_sources_are_empty() -> None:
-    fields = CaptionFields(
-        nsfw=(),
-        character=(),
-        copyright=(),
-        general=(),
-        artists=(),
-        candidate_tags=frozenset(),
-        nl=NlCandidates(None, None, None, None, None),
-    )
-    plan = build_caption_plan(
-        fields,
-        CaptionDropoutProbabilities(
-            nsfw=1.0,
-            character=1.0,
-            copyright=1.0,
-            general=1.0,
-            artist=1.0,
-            candidate_source=1.0,
-            nl=NlDropoutProbabilities(1.0, 1.0, 1.0, 1.0, 1.0),
-        ),
-        seed=_seed_for_global_dropout(False),
-    )
-
-    assert plan.all_condition_dropped is False
-    assert plan.nsfw == plan.character == plan.copyright == plan.general == ()
-    assert plan.artists == ()
-    assert plan.nl_text is None
-    assert plan.dropout_hits.as_mapping() == {
-        "all_condition": False,
-        "nsfw": True,
-        "character": True,
-        "copyright": True,
-        "general": True,
-        "artist": True,
-        "candidate_source": True,
-        "long_names": True,
-        "long_no_names": True,
-        "short_vibes": True,
-        "nl2": True,
-        "nl3": True,
-    }
-
-
 def test_five_nl_probabilities_must_remain_equal() -> None:
     with pytest.raises(CaptionError, match="must be equal"):
         CaptionDropoutProbabilities(
-            nsfw=0.0,
-            character=0.0,
-            copyright=0.0,
-            general=0.0,
-            artist=0.0,
-            candidate_source=0.0,
+            tag=0.1,
+            candidate_source=0.3,
             nl=NlDropoutProbabilities(0.1, 0.2, 0.1, 0.1, 0.1),
         )
 
 
 @pytest.mark.parametrize("value", [-0.1, 1.1, 0, True])
-def test_unresolved_probabilities_require_explicit_valid_floats(value: object) -> None:
+def test_probabilities_require_explicit_valid_floats(value: object) -> None:
     with pytest.raises(CaptionError, match="explicit floats"):
         CaptionDropoutProbabilities(
-            nsfw=value,  # type: ignore[arg-type]
-            character=0.0,
-            copyright=0.0,
-            general=0.0,
-            artist=0.0,
-            candidate_source=0.0,
+            tag=value,  # pyright: ignore[reportArgumentType]
+            candidate_source=0.3,
             nl=_nl_probabilities(),
         )
 
 
 @pytest.mark.parametrize(
-    "text", ["", " bad", "bad, boundary", "line\nbreak", "<think>bad</think>"]
+    "text",
+    [
+        "",
+        " bad",
+        "bad, boundary",
+        "line\nbreak",
+        "line\rbreak",
+        "nul\0tag",
+        "<think>bad</think>",
+    ],
 )
 def test_tag_boundaries_and_thinking_markers_are_rejected(text: str) -> None:
     with pytest.raises(CaptionError):
         Tag(text, "canonical")
 
 
-@pytest.mark.parametrize("canonical", ["", " bad", "bad "])
+@pytest.mark.parametrize(
+    "canonical", ["", " bad", "bad ", "line\nbreak", "line\rbreak", "nul\0id"]
+)
 def test_tag_canonical_ids_must_be_trim_stable(canonical: str) -> None:
     with pytest.raises(CaptionError, match="boundaries"):
         Tag("valid", canonical)
+
+
+def test_nl_candidates_reject_non_text_values_immediately() -> None:
+    with pytest.raises(CaptionError, match="text or null"):
+        NlCandidates(1, None, None, None, None)  # pyright: ignore[reportArgumentType]
+
+
+def test_caption_probabilities_reject_invalid_nl_container_immediately() -> None:
+    with pytest.raises(CaptionError, match="invalid type"):
+        CaptionDropoutProbabilities(
+            tag=0.1,
+            candidate_source=0.3,
+            nl=object(),  # pyright: ignore[reportArgumentType]
+        )
 
 
 @pytest.mark.parametrize("seed", [-1, True, "1"])
@@ -280,7 +299,7 @@ def test_caption_seed_requires_a_non_negative_integer(seed: object) -> None:
 
 def test_nl_thinking_markers_are_rejected_when_consumed() -> None:
     fields = _fields()
-    fields = CaptionFields(
+    invalid = CaptionFields(
         nsfw=fields.nsfw,
         character=fields.character,
         copyright=fields.copyright,
@@ -288,34 +307,27 @@ def test_nl_thinking_markers_are_rejected_when_consumed() -> None:
         artists=fields.artists,
         candidate_tags=fields.candidate_tags,
         nl=NlCandidates("<think>hidden</think>", None, None, None, None),
+        rating=fields.rating,
+        year=fields.year,
+        aesthetic=fields.aesthetic,
+        quality=fields.quality,
+        anime_completeness=fields.anime_completeness,
+        anime_classification=fields.anime_classification,
     )
+
     with pytest.raises(CaptionError, match="thinking"):
-        build_caption_plan(fields, _probabilities(), seed=_seed_for_global_dropout(False))
+        build_caption_plan(
+            invalid, _probabilities(), seed=_seed_for_global_dropout(False)
+        )
 
 
 def test_all_condition_plan_cannot_carry_content() -> None:
     with pytest.raises(CaptionError, match="must be empty"):
         CaptionPlan(
-            nsfw=(Tag("safe", "rating:safe"),),
-            character=(),
-            copyright=(),
-            general=(),
+            tags=(CaptionTag("rating", Tag("safe", "safe")),),
             artists=(),
             nl_text=None,
             selected_nl=None,
             all_condition_dropped=True,
-            dropout_hits=CaptionDropoutHits(
-                all_condition=True,
-                nsfw=False,
-                character=False,
-                copyright=False,
-                general=False,
-                artist=False,
-                candidate_source=False,
-                long_names=False,
-                long_no_names=False,
-                short_vibes=False,
-                nl2=False,
-                nl3=False,
-            ),
+            dropout_hits=empty_caption_dropout_hits(all_condition=True),
         )
