@@ -85,6 +85,12 @@ class CaptionFields:
     artists: tuple[Tag, ...]
     candidate_tags: frozenset[str]
     nl: NlCandidates
+    rating: tuple[Tag, ...] = ()
+    year: tuple[Tag, ...] = ()
+    aesthetic: tuple[Tag, ...] = ()
+    quality: tuple[Tag, ...] = ()
+    anime_completeness: tuple[Tag, ...] = ()
+    anime_classification: tuple[Tag, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.candidate_tags) is not frozenset or any(

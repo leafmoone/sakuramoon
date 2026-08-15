@@ -9,7 +9,7 @@ from sakuramoon.data.caption import (
 )
 from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.metadata import MetadataFieldMapping
-from sakuramoon.data.pipeline import WebDatasetPipeline
+from sakuramoon.data.pipeline import PipelineSampleRejected, WebDatasetPipeline
 from sakuramoon.data.serialize import MAIN_SUFFIX, SYSTEM_PREFIX, FramingContract
 
 
@@ -69,3 +69,35 @@ def test_pipeline_skips_corrupt_image_and_reports_rejection() -> None:
 
     assert result is None
     assert rejections == ["decode_error"]
+
+
+def test_pipeline_skips_policy_rejected_sample_before_image_decode() -> None:
+    pipeline = object.__new__(WebDatasetPipeline)
+    pipeline.metadata_adapter = lambda raw: raw
+    pipeline.metadata_fields = MetadataFieldMapping(id_field="id")
+    pipeline.base_seed = 7
+    pipeline.stage = "S0"
+    pipeline.cycle_index = 0
+    pipeline.caption_fields_parser = lambda _raw: (_ for _ in ()).throw(
+        PipelineSampleRejected("ai_image_corrupted")
+    )
+    pipeline.probabilities = _probabilities()
+    pipeline.tokenizer = _Tokenizer()
+    pipeline.framing = FramingContract(34, 5, 248044)
+    pipeline.buckets = (BucketShape(512, 512),)
+    pipeline.min_crop_retention = 0.8
+    rejections: list[str] = []
+    pipeline.rejection_observer = rejections.append
+
+    shard = "data/synthetic/shard-000000.tar"
+    sample = {
+        "__url__": shard,
+        "json": b'{"id": 1}',
+    }
+    result = pipeline._process(
+        sample,
+        {shard: ShardRecord(path=shard, bytes=1)},
+    )
+
+    assert result is None
+    assert rejections == ["ai_image_corrupted"]

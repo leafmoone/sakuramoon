@@ -41,11 +41,11 @@ downsample_factor = 16
 sample_posterior = false
 
 [data.source]
-repo_id = "leafmoone/webdataset_danbooru"
+repo_id = "leafmoone/webdataset_danbooru_v2"
 revision = "master"
 
 [data.manifest]
-path = "data/dataset-manifest.json"
+path = "data/dataset-manifest-danbooru-v2.json"
 initialize_if_missing = true
 refresh_existing = false
 

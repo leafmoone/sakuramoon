@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing.reduction
 import os
+import re
 import secrets
 import weakref
 from collections.abc import Callable, Iterator, Mapping
@@ -27,7 +28,11 @@ from sakuramoon.data.collate import (
     iter_service_batches,
 )
 from sakuramoon.data.metadata import MetadataFieldMapping
-from sakuramoon.data.pipeline import RejectionObserver, WebDatasetPipeline
+from sakuramoon.data.pipeline import (
+    PipelineSampleRejected,
+    RejectionObserver,
+    WebDatasetPipeline,
+)
 from sakuramoon.data.serialize import FramingContract, TokenEncoder
 from sakuramoon.data.service_protocol import ShardLeaseDescriptor
 
@@ -39,6 +44,39 @@ class ProductionDataError(ValueError):
 PRODUCTION_METADATA_FIELDS = MetadataFieldMapping(
     id_field="id",
 )
+
+_V2_REQUIRED_TOP_LEVEL = frozenset(
+    {
+        "aesthetic",
+        "anime_classification",
+        "anime_completeness",
+        "captions",
+        "dropout",
+        "id",
+        "image",
+        "join",
+        "multicaptions",
+        "nsfw",
+        "quality",
+        "rating",
+        "schema_version",
+        "source",
+        "tags",
+        "year",
+    }
+)
+_V2_OPTIONAL_TOP_LEVEL = frozenset({"ai_image_corrupted"})
+_RATINGS = frozenset({"safe", "general", "questionable", "explicit"})
+_NSFW_VALUES = frozenset({"sfw", "questionable", "nsfw"})
+_QUALITY_VALUES = frozenset(
+    {"masterpiece", "best", "great", "good", "normal", "low", "worst"}
+)
+_COMPLETENESS_VALUES = frozenset({"polished", "rough", "monochrome"})
+_CLASSIFICATION_VALUES = frozenset(
+    {"3d", "bangumi", "comic", "illustration", "not_painting"}
+)
+_YEAR_PATTERN = re.compile(r"^year [0-9]{4}(?:, (?:newest|oldest))?$")
+_MULTICAPTION_KEYS = frozenset({"long_names", "long_no_names", "short", "vibes"})
 
 
 def _require_spawn_serializable(value: object, name: str) -> None:
@@ -60,6 +98,135 @@ def _nested_mapping(raw: Mapping[str, object], key: str) -> Mapping[str, object]
     if not all(type(item) is str for item in mapping):
         raise ProductionDataError(f"ModelScope metadata {key} keys must be strings")
     return cast(Mapping[str, object], mapping)
+
+
+def _require_exact_keys(
+    mapping: Mapping[str, object], expected: frozenset[str], *, group: str
+) -> None:
+    observed = frozenset(mapping)
+    if observed != expected:
+        missing = sorted(expected - observed)
+        extra = sorted(observed - expected)
+        raise ProductionDataError(
+            f"ModelScope metadata {group} fields differ: missing={missing!r} extra={extra!r}"
+        )
+
+
+def _required_text(raw: Mapping[str, object], key: str) -> str:
+    if key not in raw:
+        raise ProductionDataError(f"ModelScope metadata {key} is required")
+    value = raw[key]
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or "\n" in value
+        or "<think>" in value
+        or "</think>" in value
+    ):
+        raise ProductionDataError(
+            f"ModelScope metadata {key} must be non-empty boundary text"
+        )
+    return value
+
+
+def _tag_from_value(
+    raw: Mapping[str, object], key: str, *, allowed: frozenset[str] | None = None
+) -> tuple[Tag, ...]:
+    value = _required_text(raw, key)
+    if allowed is not None and value not in allowed:
+        raise ProductionDataError(f"ModelScope metadata {key} has an invalid value")
+    return (Tag(text=value, canonical=value),)
+
+
+def _validate_v2_contract(raw: Mapping[str, object]) -> None:
+    observed = frozenset(raw)
+    if not _V2_REQUIRED_TOP_LEVEL.issubset(observed) or not observed.issubset(
+        _V2_REQUIRED_TOP_LEVEL | _V2_OPTIONAL_TOP_LEVEL
+    ):
+        missing = sorted(_V2_REQUIRED_TOP_LEVEL - observed)
+        extra = sorted(observed - _V2_REQUIRED_TOP_LEVEL - _V2_OPTIONAL_TOP_LEVEL)
+        raise ProductionDataError(
+            "ModelScope metadata v2 top-level fields differ: "
+            f"missing={missing!r} extra={extra!r}"
+        )
+    if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
+        raise ProductionDataError("ModelScope metadata schema_version must be 1")
+    if type(raw["id"]) is not int or cast(int, raw["id"]) <= 0:
+        raise ProductionDataError("ModelScope metadata id must be a positive integer")
+
+    source = _nested_mapping(raw, "source")
+    _require_exact_keys(
+        source,
+        frozenset({"dataset", "dataset_version", "release", "original_path"}),
+        group="source",
+    )
+    if (
+        source["dataset"] != "danbooru"
+        or source["dataset_version"] != "5.9"
+        or any(
+            type(source[key]) is not str
+            or not cast(str, source[key])
+            or cast(str, source[key]) != cast(str, source[key]).strip()
+            for key in ("release", "original_path")
+        )
+    ):
+        raise ProductionDataError("ModelScope metadata source contract is invalid")
+
+    image = _nested_mapping(raw, "image")
+    _require_exact_keys(
+        image, frozenset({"format", "width", "height"}), group="image"
+    )
+    if (
+        image["format"] != "webp"
+        or type(image["width"]) is not int
+        or cast(int, image["width"]) <= 0
+        or type(image["height"]) is not int
+        or cast(int, image["height"]) <= 0
+    ):
+        raise ProductionDataError("ModelScope metadata image contract is invalid")
+
+    tags = _nested_mapping(raw, "tags")
+    _require_exact_keys(
+        tags,
+        frozenset({"general", "character", "artist", "copyright"}),
+        group="tags",
+    )
+    captions = _nested_mapping(raw, "captions")
+    _require_exact_keys(captions, frozenset({"nl2", "nl3"}), group="captions")
+    multicaptions = _nested_mapping(raw, "multicaptions")
+    unknown_multicaptions = frozenset(multicaptions) - _MULTICAPTION_KEYS
+    if unknown_multicaptions:
+        raise ProductionDataError(
+            "ModelScope metadata multicaptions fields differ: "
+            f"extra={sorted(unknown_multicaptions)!r}"
+        )
+    join = _nested_mapping(raw, "join")
+    _require_exact_keys(
+        join,
+        frozenset({"multicaptions", "character_records"}),
+        group="join",
+    )
+    if any(value not in {"matched", "missing"} for value in join.values()):
+        raise ProductionDataError("ModelScope metadata join values are invalid")
+    dropout = _nested_mapping(raw, "dropout")
+    _require_exact_keys(
+        dropout,
+        frozenset({"candidate_tags", "candidate_source", "policy_version"}),
+        group="dropout",
+    )
+    if (
+        dropout["candidate_source"] != "popular_tags_intersection"
+        or dropout["policy_version"] != "dropout_v1"
+    ):
+        raise ProductionDataError("ModelScope metadata dropout policy is invalid")
+
+    if "ai_image_corrupted" in raw:
+        if raw["ai_image_corrupted"] != "corrupted":
+            raise ProductionDataError(
+                "ModelScope metadata ai_image_corrupted must be absent or corrupted"
+            )
+        raise PipelineSampleRejected("ai_image_corrupted")
 
 
 def adapt_modelscope_metadata(
@@ -107,15 +274,9 @@ def _short_vibes(multicaptions: Mapping[str, object]) -> str | None:
 def parse_modelscope_caption_fields(
     raw: Mapping[str, object],
 ) -> CaptionFields:
-    """Parse the governed real-dataset caption projection used by D014."""
+    """Parse the strict v2 metadata contract used for production conditioning."""
 
-    nsfw = raw.get("nsfw")
-    if nsfw is None or (type(nsfw) is str and not nsfw.strip()):
-        nsfw_tags: tuple[Tag, ...] = ()
-    elif type(nsfw) is str:
-        nsfw_tags = (Tag(nsfw, nsfw),)
-    else:
-        raise ProductionDataError("ModelScope metadata nsfw must be text or null")
+    _validate_v2_contract(raw)
     captions = _nested_mapping(raw, "captions")
     multicaptions = _nested_mapping(raw, "multicaptions")
     dropout = _nested_mapping(raw, "dropout")
@@ -129,8 +290,14 @@ def parse_modelscope_caption_fields(
         raise ProductionDataError(
             "ModelScope metadata dropout.candidate_tags must contain only strings"
         )
+    year = _required_text(raw, "year")
+    if _YEAR_PATTERN.fullmatch(year) is None:
+        raise ProductionDataError("ModelScope metadata year has an invalid value")
+    year_tags = tuple(
+        Tag(text=component, canonical=component) for component in year.split(", ")
+    )
     return CaptionFields(
-        nsfw=nsfw_tags,
+        nsfw=_tag_from_value(raw, "nsfw", allowed=_NSFW_VALUES),
         character=_modelscope_tags(raw, "character"),
         copyright=_modelscope_tags(raw, "copyright"),
         general=_modelscope_tags(raw, "general"),
@@ -142,6 +309,20 @@ def parse_modelscope_caption_fields(
             _short_vibes(multicaptions),
             _optional_text(captions, "nl2", group="captions"),
             _optional_text(captions, "nl3", group="captions"),
+        ),
+        rating=_tag_from_value(raw, "rating", allowed=_RATINGS),
+        year=year_tags,
+        aesthetic=(
+            ()
+            if raw["aesthetic"] == " "
+            else _tag_from_value(raw, "aesthetic")
+        ),
+        quality=_tag_from_value(raw, "quality", allowed=_QUALITY_VALUES),
+        anime_completeness=_tag_from_value(
+            raw, "anime_completeness", allowed=_COMPLETENESS_VALUES
+        ),
+        anime_classification=_tag_from_value(
+            raw, "anime_classification", allowed=_CLASSIFICATION_VALUES
         ),
     )
 

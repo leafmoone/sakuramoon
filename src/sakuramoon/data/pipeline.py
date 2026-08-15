@@ -110,6 +110,21 @@ class PipelineSampleError(ValueError):
     """A WebDataset sample cannot satisfy the training input contract."""
 
 
+class PipelineSampleRejected(Exception):
+    """A valid metadata policy explicitly excludes one sample from training."""
+
+    def __init__(self, reason: str) -> None:
+        if (
+            type(reason) is not str
+            or not reason
+            or reason != reason.strip()
+            or any(character.isspace() for character in reason)
+        ):
+            raise PipelineSampleError("sample rejection reason is invalid")
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class RngIdentity:
     base_seed: int
@@ -357,7 +372,21 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             cycle_index=self.cycle_index,
             sample_id=metadata.id,
         )
-        fields = cast(object, self.caption_fields_parser(raw_metadata))
+        try:
+            fields = cast(object, self.caption_fields_parser(raw_metadata))
+        except PipelineSampleRejected as rejected:
+            print(
+                f"[data] skip sample shard={shard_record.path} "
+                f"id={metadata.id} reason={rejected.reason}",
+                flush=True,
+            )
+            _trace_sample(
+                shard_record.path,
+                metadata.id,
+                f"reject:{rejected.reason}",
+            )
+            self.rejection_observer(rejected.reason)
+            return None
         if not isinstance(fields, CaptionFields):
             raise PipelineSampleError("caption field parser returned an invalid value")
         plan = build_caption_plan(
@@ -512,6 +541,7 @@ __all__ = [
     "MetadataAdapter",
     "PipelineSample",
     "PipelineSampleError",
+    "PipelineSampleRejected",
     "RejectionObserver",
     "RngIdentity",
     "WebDatasetPipeline",

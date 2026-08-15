@@ -30,15 +30,28 @@ class _DepthIterator(Iterator[TrainingBatch]):
 def _stream_identity() -> ProductionBatchStreamIdentity:
     return ProductionBatchStreamIdentity(
         loader=ConfiguredDataLoader(1, 1, 1, False, True),
-        dataset_id="leafmoone/webdataset_danbooru@master",
+        dataset_id="leafmoone/webdataset_danbooru_v2@master",
         session_id="test-session",
     )
 
 
 def _real_row() -> dict[str, object]:
     return {
+        "schema_version": 1,
         "id": 71,
-        "image": {"width": 832, "height": 1216},
+        "source": {
+            "dataset": "danbooru",
+            "dataset_version": "5.9",
+            "release": "2026.7",
+            "original_path": "danbooru/posts/71.jpg",
+        },
+        "image": {"format": "webp", "width": 832, "height": 1216},
+        "rating": "safe",
+        "year": "year 2026, newest",
+        "aesthetic": " ",
+        "quality": "best",
+        "anime_completeness": "polished",
+        "anime_classification": "illustration",
         "captions": {"nl2": "A blue-haired character.", "nl3": ""},
         "multicaptions": {
             "long_names": "Alice in a blue dress.",
@@ -52,8 +65,13 @@ def _real_row() -> dict[str, object]:
             "general": ["blue_hair", "dress"],
             "artist": ["artist_name"],
         },
-        "dropout": {"candidate_tags": ["blue_hair"]},
-        "nsfw": "safe",
+        "dropout": {
+            "candidate_tags": ["blue_hair"],
+            "candidate_source": "popular_tags_intersection",
+            "policy_version": "dropout_v1",
+        },
+        "join": {"multicaptions": "matched", "character_records": "matched"},
+        "nsfw": "sfw",
     }
 
 
@@ -66,7 +84,7 @@ def test_governed_modelscope_adapter_and_caption_parser() -> None:
     assert adapted == {
         "id": 71,
     }
-    assert tuple(tag.text for tag in fields.nsfw) == ("safe",)
+    assert tuple(tag.text for tag in fields.nsfw) == ("sfw",)
     assert tuple(tag.text for tag in fields.character) == ("alice",)
     assert tuple(tag.text for tag in fields.general) == ("blue_hair", "dress")
     assert tuple(tag.text for tag in fields.artists) == ("artist_name",)
@@ -76,6 +94,14 @@ def test_governed_modelscope_adapter_and_caption_parser() -> None:
     assert fields.nl.short_vibes == "A blue-haired character.\n\nsoft light"
     assert fields.nl.nl2 == "A blue-haired character."
     assert fields.nl.nl3 is None
+    assert tuple(tag.text for tag in fields.rating) == ("safe",)
+    assert tuple(tag.text for tag in fields.year) == ("year 2026", "newest")
+    assert fields.aesthetic == ()
+    assert tuple(tag.text for tag in fields.quality) == ("best",)
+    assert tuple(tag.text for tag in fields.anime_completeness) == ("polished",)
+    assert tuple(tag.text for tag in fields.anime_classification) == (
+        "illustration",
+    )
 
 
 def test_modelscope_adapter_ignores_missing_declared_image_dimensions() -> None:
@@ -85,14 +111,44 @@ def test_modelscope_adapter_ignores_missing_declared_image_dimensions() -> None:
     assert adapt_modelscope_metadata(raw) == {"id": 71}
 
 
-@pytest.mark.parametrize("value", [None, ""])
-def test_governed_modelscope_parser_accepts_empty_nsfw(value: object) -> None:
+@pytest.mark.parametrize("value", [None, "", "safe", 2])
+def test_governed_modelscope_parser_rejects_invalid_nsfw(value: object) -> None:
     raw = _real_row()
     raw["nsfw"] = value
 
+    with pytest.raises(ProductionDataError, match="nsfw"):
+        parse_modelscope_caption_fields(raw)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("year 2021", ("year 2021",)),
+        ("year 2024, newest", ("year 2024", "newest")),
+        ("year 2017, oldest", ("year 2017", "oldest")),
+    ],
+)
+def test_governed_modelscope_parser_splits_year_tags(
+    value: str, expected: tuple[str, ...]
+) -> None:
+    raw = _real_row()
+    raw["year"] = value
+
     fields = parse_modelscope_caption_fields(raw)
 
-    assert fields.nsfw == ()
+    assert tuple(tag.text for tag in fields.year) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "2026", "year 26", "year 2026,newest", "year 2026, middle"],
+)
+def test_governed_modelscope_parser_rejects_invalid_year(value: object) -> None:
+    raw = _real_row()
+    raw["year"] = value
+
+    with pytest.raises(ProductionDataError, match="year"):
+        parse_modelscope_caption_fields(raw)
 
 
 def test_governed_modelscope_parser_rejects_schema_drift() -> None:
@@ -109,11 +165,6 @@ def test_governed_modelscope_parser_rejects_schema_drift() -> None:
     dropout["candidate_tags"] = ["valid", 2]
     with pytest.raises(ProductionDataError, match="only strings"):
         parse_modelscope_caption_fields(bad_candidate)
-
-    bad_nsfw = _real_row()
-    bad_nsfw["nsfw"] = 2
-    with pytest.raises(ProductionDataError, match="nsfw must be text or null"):
-        parse_modelscope_caption_fields(bad_nsfw)
 
     bad_nl = _real_row()
     multicaptions = bad_nl["multicaptions"]
@@ -151,6 +202,25 @@ def test_governed_modelscope_parser_combines_short_and_vibes(
     fields = parse_modelscope_caption_fields(raw)
 
     assert fields.nl.short_vibes == expected
+
+
+def test_governed_modelscope_parser_rejects_corrupted_sample() -> None:
+    raw = _real_row()
+    raw["ai_image_corrupted"] = "corrupted"
+
+    with pytest.raises(
+        production_module.PipelineSampleRejected,
+        match="ai_image_corrupted",
+    ):
+        parse_modelscope_caption_fields(raw)
+
+
+def test_governed_modelscope_parser_rejects_invalid_corruption_value() -> None:
+    raw = _real_row()
+    raw["ai_image_corrupted"] = "normal"
+
+    with pytest.raises(ProductionDataError, match="absent or corrupted"):
+        parse_modelscope_caption_fields(raw)
 
 
 def test_accepted_stream_exposes_only_live_iterator_ready_batch_depth() -> None:

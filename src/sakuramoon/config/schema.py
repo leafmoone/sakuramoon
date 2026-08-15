@@ -174,7 +174,7 @@ class AssetsConfig(StrictModel):
 
 
 class DataSourceConfig(StrictModel):
-    repo_id: Literal["leafmoone/webdataset_danbooru"]
+    repo_id: Literal["leafmoone/webdataset_danbooru_v2"]
     revision: Literal["master"]
 
 

@@ -28,7 +28,7 @@ def _queue_store(tmp_path: Path) -> tuple[_QueueStore, ShardRecord]:
     training = ShardRecord(path="data/training.tar", bytes=1)
     manifest = DatasetManifest.from_shards(
         DatasetSourceIdentity(
-            repo_id="leafmoone/webdataset_danbooru",
+            repo_id="leafmoone/webdataset_danbooru_v2",
             revision="master",
         ),
         (validation, training),
