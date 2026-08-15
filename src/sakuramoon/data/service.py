@@ -30,6 +30,8 @@ from sakuramoon.data.service_protocol import (
 )
 from sakuramoon.data.validation import ValidationSelection, validate_selection_manifest
 
+_QUEUE_SCHEMA_VERSION = 2
+
 
 class DataServiceError(RuntimeError):
     pass
@@ -81,6 +83,14 @@ class _QueueState:
     cycle: int
     rows: tuple[_Row, ...]
 
+    @property
+    def completed_epochs(self) -> int:
+        return self.cycle
+
+    @property
+    def current_epoch(self) -> int:
+        return self.completed_epochs + 1
+
 
 class _QueueStore:
     def __init__(
@@ -124,36 +134,70 @@ class _QueueStore:
             if not isinstance(document, dict):
                 raise TypeError
             raw = cast(dict[str, Any], document)
-            cycle = raw.get("cycle", raw.get("cycle_index"))
+            schema_version = raw.get("schema_version")
+            if schema_version == 1:
+                if set(raw) != {"cycle", "rows", "schema_version"}:
+                    raise ValueError
+            elif schema_version == _QUEUE_SCHEMA_VERSION:
+                if set(raw) != {
+                    "completed_epochs",
+                    "current_epoch",
+                    "cycle",
+                    "rows",
+                    "schema_version",
+                }:
+                    raise ValueError
+            else:
+                raise ValueError
+            cycle = raw["cycle"]
+            if type(cycle) is not int:
+                raise TypeError
+            if schema_version == _QUEUE_SCHEMA_VERSION and (
+                type(raw["completed_epochs"]) is not int
+                or type(raw["current_epoch"]) is not int
+                or raw["completed_epochs"] != cycle
+                or raw["current_epoch"] != cycle + 1
+            ):
+                raise ValueError
             raw_rows = raw["rows"]
             if not isinstance(raw_rows, list):
                 raise TypeError
-            rows = tuple(
-                _Row(
-                    path=cast(str, item["path"]),
-                    status=(
-                        "pending"
-                        if item.get("status") == "active"
-                        else cast(Literal["pending", "active", "completed"], item["status"])
-                    ),
+            rows: list[_Row] = []
+            for item in cast(list[object], raw_rows):
+                if not isinstance(item, dict):
+                    raise TypeError
+                item_mapping = cast(dict[object, object], item)
+                if set(item_mapping) != {"path", "status"}:
+                    raise TypeError
+                row = cast(dict[str, object], item_mapping)
+                status = row["status"]
+                rows.append(
+                    _Row(
+                        path=cast(str, row["path"]),
+                        status=(
+                            "pending"
+                            if status == "active"
+                            else cast(Literal["pending", "active", "completed"], status)
+                        ),
+                    )
                 )
-                for item in cast(list[dict[str, object]], raw_rows)
-            )
-            state = _QueueState(cast(int, cycle), rows)
+            state = _QueueState(cycle, tuple(rows))
             self._validate(state)
             return state
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
             raise DataServiceError("data queue state could not be loaded") from None
 
     def save(self, state: _QueueState) -> None:
         self._validate(state)
         payload = canonical_json_bytes(
             {
+                "completed_epochs": state.completed_epochs,
+                "current_epoch": state.current_epoch,
                 "cycle": state.cycle,
                 "rows": [
                     {"path": row.path, "status": row.status} for row in state.rows
                 ],
-                "schema_version": 1,
+                "schema_version": _QUEUE_SCHEMA_VERSION,
             }
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,7 +301,9 @@ class DataSupplyService:
             self._state = state
             self._started = True
             _log(
-                f"训练分片队列: cycle={state.cycle}, shards={len(state.rows)}, "
+                f"训练分片队列: epoch={state.current_epoch}, "
+                f"completed_epochs={state.completed_epochs}, cycle={state.cycle}, "
+                f"shards={len(state.rows)}, "
                 f"workers={self.identity.worker_count}"
             )
             _log(
@@ -393,21 +439,29 @@ class DataSupplyService:
             except _ServiceStopping:
                 return False
 
-    def _replace_status(
+    def _state_with_status(
         self, path: str, status: Literal["pending", "active", "completed"]
-    ) -> None:
+    ) -> _QueueState:
         matches = [row for row in self.state.rows if row.path == path]
         if len(matches) != 1:
             raise DataServiceError("leased shard is absent from queue")
-        self._state = replace(
+        return replace(
             self.state,
             rows=tuple(
                 replace(row, status=status) if row.path == path else row
                 for row in self.state.rows
             ),
         )
-        self.store.save(self.state)
+
+    def _commit_state(self, state: _QueueState) -> None:
+        self.store.save(state)
+        self._state = state
         self._revision += 1
+
+    def _replace_status(
+        self, path: str, status: Literal["pending", "active", "completed"]
+    ) -> None:
+        self._commit_state(self._state_with_status(path, status))
 
     def lease(self, worker_id: int) -> ShardLeaseDescriptor | None:
         with self._lock:
@@ -458,13 +512,28 @@ class DataSupplyService:
                 or self._worker_leases.get(worker_id) != lease_id
             ):
                 raise DataServiceError("ACK does not match an active lease")
-            self._replace_status(descriptor.record.path, "completed")
-            _log(f"worker={worker_id} 完成分片: {descriptor.record.path}")
+            completed_state = self._state_with_status(
+                descriptor.record.path, "completed"
+            )
+            completed_epoch: int | None = None
+            if all(row.status == "completed" for row in completed_state.rows):
+                completed_epoch = completed_state.current_epoch
+                next_state = self.store.new(completed_state.cycle + 1)
+                if next_state.completed_epochs != completed_epoch:
+                    raise DataServiceError("data epoch rollover identity is invalid")
+                self._commit_state(next_state)
+            else:
+                self._commit_state(completed_state)
             del self._outstanding[lease_id]
             del self._worker_leases[worker_id]
-            if all(row.status == "completed" for row in self.state.rows):
-                self._state = self.store.new(self.state.cycle + 1)
-                self.store.save(self.state)
+            _log(f"worker={worker_id} 完成分片: {descriptor.record.path}")
+            if completed_epoch is not None:
+                _log(
+                    f"数据 epoch 完成: epoch={completed_epoch}, "
+                    f"completed_epochs={self.state.completed_epochs}, "
+                    f"shards={len(self.state.rows)}; "
+                    f"已重建 epoch={self.state.current_epoch} 队列"
+                )
             self._schedule_lookahead()
 
     @property
