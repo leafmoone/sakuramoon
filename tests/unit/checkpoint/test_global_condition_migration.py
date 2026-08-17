@@ -155,4 +155,3 @@ def test_optimizer_migration_rejects_any_unexpected_parameter_delta(
             source_schema,
             migration.migrate_architecture(_source_architecture()),
         )
-
