@@ -14,15 +14,20 @@ from pathlib import Path
 def _configure_cuda_allocator() -> str:
     """Enable expandable CUDA segments before importing Torch."""
 
-    current = os.environ.get("PYTORCH_ALLOC_CONF", "")
+    current = os.environ.get("PYTORCH_ALLOC_CONF") or os.environ.get(
+        "PYTORCH_CUDA_ALLOC_CONF", ""
+    )
     options = [
         option.strip()
         for option in current.split(",")
         if option.strip() and not option.strip().startswith("expandable_segments:")
     ]
+    if not any(option.startswith("max_split_size_mb:") for option in options):
+        options.append("max_split_size_mb:512")
     options.append("expandable_segments:True")
     configured = ",".join(options)
     os.environ["PYTORCH_ALLOC_CONF"] = configured
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = configured
     return configured
 
 
@@ -35,8 +40,21 @@ def _configure_torchinductor_cache(project_root: object) -> Path:
     if not resolved_root.is_dir():
         raise NotADirectoryError(f"project root is not a directory: {resolved_root}")
 
-    cache_parent = resolved_root / "cache"
-    cache_path = cache_parent / "torchinductor"
+    override = os.environ.get("SAKURAMOON_TORCHINDUCTOR_CACHE_DIR")
+    if override is not None and not override.strip():
+        raise RuntimeError(
+            "SAKURAMOON_TORCHINDUCTOR_CACHE_DIR may not be empty"
+        )
+    cache_path = (
+        Path(override).expanduser()
+        if override is not None
+        else resolved_root / "cache" / "torchinductor"
+    )
+    if not cache_path.is_absolute():
+        raise RuntimeError(
+            "SAKURAMOON_TORCHINDUCTOR_CACHE_DIR must be absolute"
+        )
+    cache_parent = cache_path.parent
     if cache_parent.is_symlink() or cache_path.is_symlink():
         raise RuntimeError("TorchInductor cache path may not contain a symlink")
     if cache_parent.exists() and not cache_parent.is_dir():

@@ -27,9 +27,16 @@ def _nl_probabilities(value: float = 0.0) -> NlDropoutProbabilities:
 
 
 def _probabilities(
-    *, tag: float = 0.0, candidate_source: float = 0.0, nl: float = 0.0
+    *,
+    condition_route: float = 0.0,
+    condition_only: float = 0.0,
+    tag: float = 0.0,
+    candidate_source: float = 0.0,
+    nl: float = 0.0,
 ) -> CaptionDropoutProbabilities:
     return CaptionDropoutProbabilities(
+        condition_route=condition_route,
+        condition_only=condition_only,
         tag=tag,
         candidate_source=candidate_source,
         nl=_nl_probabilities(nl),
@@ -256,6 +263,97 @@ def test_artist_or_character_routing_is_deterministic_and_complementary() -> Non
     assert selected_sources == {"artist_text", "character_text"}
 
 
+def test_condition_route_and_condition_only_dropout_have_distinct_body_semantics() -> None:
+    fields = _fields()
+    seed = _seed_for_global_dropout(False)
+    normal = build_caption_plan(
+        fields,
+        _probabilities(),
+        condition_mode="artist_or_character",
+        seed=seed,
+    )
+    route = build_caption_plan(
+        fields,
+        _probabilities(condition_route=1.0),
+        condition_mode="artist_or_character",
+        seed=seed,
+    )
+    condition_only = build_caption_plan(
+        fields,
+        _probabilities(condition_only=1.0),
+        condition_mode="artist_or_character",
+        seed=seed,
+    )
+
+    assert normal.condition is not None
+    selected_source = (
+        "artist" if normal.condition.source == "artist_text" else "character"
+    )
+    normal_tags = {(item.source, item.tag.canonical) for item in normal.tags}
+    route_tags = {(item.source, item.tag.canonical) for item in route.tags}
+    selected_tags = {
+        (selected_source, tag.canonical) for tag in normal.condition.tags
+    }
+
+    assert route.condition is None
+    assert route.dropout_hits.condition_route is True
+    assert route.dropout_hits.condition_only is False
+    assert route_tags == normal_tags | selected_tags
+
+    assert condition_only.condition is None
+    assert condition_only.dropout_hits.condition_route is False
+    assert condition_only.dropout_hits.condition_only is True
+    assert condition_only.tags == normal.tags
+    assert condition_only.nl_text == normal.nl_text
+    assert condition_only.selected_nl == normal.selected_nl
+
+
+def test_condition_dropout_outcomes_are_mutually_exclusive() -> None:
+    probabilities = _probabilities(
+        condition_route=0.10,
+        condition_only=0.05,
+    )
+    observed: set[tuple[bool, bool]] = set()
+    active = 0
+    route_hits = 0
+    condition_only_hits = 0
+    for seed in range(20_000):
+        plan = build_caption_plan(
+            _fields(),
+            probabilities,
+            condition_mode="artist",
+            seed=seed,
+        )
+        if plan.all_condition_dropped:
+            continue
+        active += 1
+        hits = (
+            plan.dropout_hits.condition_route,
+            plan.dropout_hits.condition_only,
+        )
+        observed.add(hits)
+        route_hits += int(hits[0])
+        condition_only_hits += int(hits[1])
+
+    assert observed == {(False, False), (True, False), (False, True)}
+    assert 0.09 < route_hits / active < 0.11
+    assert 0.04 < condition_only_hits / active < 0.06
+
+
+def test_natural_null_does_not_report_condition_dropout() -> None:
+    fields = replace(_fields(), character=(), artists=())
+    plan = build_caption_plan(
+        fields,
+        _probabilities(condition_route=1.0),
+        condition_mode="artist_or_character",
+        seed=_seed_for_global_dropout(False),
+    )
+
+    assert plan.condition is None
+    assert plan.dropout_hits.condition_route is False
+    assert plan.dropout_hits.condition_only is False
+
+
 @pytest.mark.parametrize(
     ("fields", "expected_source"),
     [
@@ -337,9 +435,22 @@ def test_candidate_deletion_ids_require_exact_canonical_boundaries(
 def test_five_nl_probabilities_must_remain_equal() -> None:
     with pytest.raises(CaptionError, match="must be equal"):
         CaptionDropoutProbabilities(
+            condition_route=0.0,
+            condition_only=0.0,
             tag=0.1,
             candidate_source=0.3,
             nl=NlDropoutProbabilities(0.1, 0.2, 0.1, 0.1, 0.1),
+        )
+
+
+def test_condition_dropout_probabilities_must_be_mutually_bounded() -> None:
+    with pytest.raises(CaptionError, match="sum to at most one"):
+        CaptionDropoutProbabilities(
+            condition_route=0.75,
+            condition_only=0.5,
+            tag=0.1,
+            candidate_source=0.3,
+            nl=_nl_probabilities(),
         )
 
 
@@ -347,6 +458,8 @@ def test_five_nl_probabilities_must_remain_equal() -> None:
 def test_probabilities_require_explicit_valid_floats(value: object) -> None:
     with pytest.raises(CaptionError, match="explicit floats"):
         CaptionDropoutProbabilities(
+            condition_route=0.0,
+            condition_only=0.0,
             tag=value,  # pyright: ignore[reportArgumentType]
             candidate_source=0.3,
             nl=_nl_probabilities(),
@@ -386,6 +499,8 @@ def test_nl_candidates_reject_non_text_values_immediately() -> None:
 def test_caption_probabilities_reject_invalid_nl_container_immediately() -> None:
     with pytest.raises(CaptionError, match="invalid type"):
         CaptionDropoutProbabilities(
+            condition_route=0.0,
+            condition_only=0.0,
             tag=0.1,
             candidate_source=0.3,
             nl=object(),  # pyright: ignore[reportArgumentType]

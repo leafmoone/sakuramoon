@@ -1,14 +1,48 @@
 from __future__ import annotations
 
 # pyright: reportPrivateUsage=false
+import errno
+import socket
 import threading
 from concurrent.futures import Future
+from typing import cast
 
 import pytest
 
 from sakuramoon.data.cache import CachedShard
 from sakuramoon.data.modelscope import DatasetTransientError, DatasetTransportError
-from sakuramoon.data.service import DataServiceError, DataSupplyService
+from sakuramoon.data.service import (
+    DataServiceError,
+    DataServiceServer,
+    DataSupplyService,
+)
+
+
+class _ResponseServer(DataServiceServer):
+    def __init__(self) -> None:
+        self.request_timeout_seconds = 1.0
+
+    def _dispatch(self, request: dict[str, object]) -> dict[str, object]:
+        return {"ok": True, "request": request}
+
+
+class _FakeConnection:
+    def __init__(self, send_error: OSError | None = None) -> None:
+        self.send_error = send_error
+        self.timeout: float | None = None
+        self.sent = b""
+
+    def settimeout(self, value: float) -> None:
+        self.timeout = value
+
+    def recv(self, size: int) -> bytes:
+        del size
+        return b'{"op":"health"}\n'
+
+    def sendall(self, payload: bytes) -> None:
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent += payload
 
 
 def _service_with_failed_future(error: Exception) -> DataSupplyService:
@@ -39,3 +73,32 @@ def test_permanent_download_failure_keeps_exact_reason() -> None:
         match=r"data/shard\.tar: shard is unavailable",
     ):
         service._collect_completed()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BrokenPipeError(errno.EPIPE, "client closed"),
+        ConnectionResetError(errno.ECONNRESET, "client reset"),
+        TimeoutError(errno.ETIMEDOUT, "client timed out"),
+    ],
+)
+def test_client_disconnect_does_not_prevent_next_request(error: OSError) -> None:
+    server = _ResponseServer()
+    disconnected = _FakeConnection(error)
+    healthy = _FakeConnection()
+
+    server._handle_connection(cast(socket.socket, disconnected))
+    server._handle_connection(cast(socket.socket, healthy))
+
+    assert disconnected.timeout == 1.0
+    assert healthy.timeout == 1.0
+    assert b'"ok":true' in healthy.sent
+
+
+def test_unexpected_socket_error_is_not_hidden() -> None:
+    server = _ResponseServer()
+    connection = _FakeConnection(OSError(errno.EIO, "unexpected I/O error"))
+
+    with pytest.raises(OSError, match="unexpected I/O error"):
+        server._handle_connection(cast(socket.socket, connection))

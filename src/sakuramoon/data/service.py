@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -31,6 +32,16 @@ from sakuramoon.data.service_protocol import (
 from sakuramoon.data.validation import ValidationSelection, validate_selection_manifest
 
 _QUEUE_SCHEMA_VERSION = 2
+
+_CLIENT_DISCONNECTED_ERRNOS = frozenset(
+    {
+        errno.ECONNABORTED,
+        errno.ECONNRESET,
+        errno.ENOTCONN,
+        errno.EPIPE,
+        errno.ETIMEDOUT,
+    }
+)
 
 
 class DataServiceError(RuntimeError):
@@ -433,8 +444,17 @@ class DataSupplyService:
     def wait_until_ready(self) -> bool:
         with self._lock:
             self._require_running()
+            pending_count = len(self._pending_paths())
+            if pending_count <= 0:
+                raise DataServiceError("data service has no remaining training shard")
+            ready_count = min(self.identity.worker_count, pending_count)
+            if ready_count < self.identity.worker_count:
+                _log(
+                    f"epoch 尾部仅剩 {ready_count} 个分片; "
+                    f"允许少于 {self.identity.worker_count} 个 worker 的启动屏障"
+                )
             try:
-                self._wait_for_ready_count(self.identity.worker_count)
+                self._wait_for_ready_count(ready_count)
                 return True
             except _ServiceStopping:
                 return False
@@ -585,6 +605,21 @@ def _response(payload: dict[str, object]) -> bytes:
     return framed
 
 
+def _client_disconnected(error: OSError) -> bool:
+    return (
+        isinstance(
+            error,
+            (
+                BrokenPipeError,
+                ConnectionAbortedError,
+                ConnectionResetError,
+                TimeoutError,
+            ),
+        )
+        or error.errno in _CLIENT_DISCONNECTED_ERRNOS
+    )
+
+
 class DataServiceServer:
     def __init__(
         self,
@@ -647,6 +682,39 @@ class DataServiceServer:
             return {"ok": True}
         raise DataServiceError("service operation is invalid")
 
+    def _handle_connection(self, connection: socket.socket) -> None:
+        try:
+            connection.settimeout(self.request_timeout_seconds)
+            request = _recv_frame(connection)
+        except OSError as error:
+            if not _client_disconnected(error):
+                raise
+            _log(f"客户端连接在读取请求时断开，忽略当前连接: {error}")
+            return
+
+        response: dict[str, object]
+        try:
+            response = self._dispatch(request)
+        except (
+            DataServiceError,
+            DataServiceProtocolError,
+            TypeError,
+            ValueError,
+        ) as error:
+            _log(f"请求失败: {error}")
+            response = {
+                "error": str(error),
+                "error_type": type(error).__name__,
+                "ok": False,
+            }
+
+        try:
+            connection.sendall(_response(response))
+        except OSError as error:
+            if not _client_disconnected(error):
+                raise
+            _log(f"客户端连接在发送响应时断开，忽略当前连接: {error}")
+
     def serve(
         self,
         stop_event: threading.Event,
@@ -689,23 +757,7 @@ class DataServiceServer:
                 except TimeoutError:
                     continue
                 with connection:
-                    connection.settimeout(self.request_timeout_seconds)
-                    response: dict[str, object]
-                    try:
-                        response = self._dispatch(_recv_frame(connection))
-                    except (
-                        DataServiceError,
-                        DataServiceProtocolError,
-                        TypeError,
-                        ValueError,
-                    ) as error:
-                        _log(f"请求失败: {error}")
-                        response = {
-                            "error": str(error),
-                            "error_type": type(error).__name__,
-                            "ok": False,
-                        }
-                    connection.sendall(_response(response))
+                    self._handle_connection(connection)
         finally:
             if listener is not None:
                 listener.close()

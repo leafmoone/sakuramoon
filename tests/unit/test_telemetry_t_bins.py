@@ -50,6 +50,7 @@ def test_training_metric_flattens_t_bin_metrics_for_wandb() -> None:
         t_bin_sample_counts=(1,) * NOISE_T_BIN_COUNT,
         pre_clip_grad_norm=1.0,
         post_clip_grad_norm=1.0,
+        condition_encoder_grad_norm=0.25,
         clip_fraction=0.0,
         learning_rate=0.0001,
         timestep_min=0.0,
@@ -78,6 +79,7 @@ def test_training_metric_flattens_t_bin_metrics_for_wandb() -> None:
     assert payload["condition_routes/artist_text"] == 7
     assert payload["condition_routes/character_text"] == 6
     assert payload["condition_routes/null"] == 7
+    assert payload["condition_encoder_grad_norm"] == 0.25
     assert len(NOISE_T_BIN_LABELS) == NOISE_T_BIN_COUNT
 
 
@@ -94,6 +96,7 @@ def test_training_metric_omits_empty_t_bin_loss_from_wandb() -> None:
         t_bin_sample_counts=(1,) * NOISE_T_BIN_COUNT,
         pre_clip_grad_norm=1.0,
         post_clip_grad_norm=1.0,
+        condition_encoder_grad_norm=0.25,
         clip_fraction=0.0,
         learning_rate=0.0001,
         timestep_min=0.0,

@@ -700,11 +700,7 @@ class PackedDiT(nn.Module):
             _, height, width = latent.shape
             image_shapes.append((height, width))
 
-        if (
-            not self.training
-            and not torch.is_grad_enabled()
-            and len(set(image_shapes)) == 1
-        ):
+        if len(set(image_shapes)) == 1:
             height, width = image_shapes[0]
             latent_batch = torch.stack(latents)
             projected = self.input_projection(

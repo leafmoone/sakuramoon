@@ -85,6 +85,8 @@ def test_real_modelscope_artist_or_character_routes_are_lossless() -> None:
         raise FileNotFoundError(shard)
 
     probabilities = CaptionDropoutProbabilities(
+        condition_route=0.0,
+        condition_only=0.0,
         tag=0.1,
         candidate_source=0.3,
         nl=NlDropoutProbabilities(0.3, 0.3, 0.3, 0.3, 0.3),

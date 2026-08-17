@@ -13,7 +13,9 @@ from typing import Literal
 import torch
 from PIL import Image
 
+from sakuramoon.conditioning.condition_tokens import ConditionTokenOutput
 from sakuramoon.conditioning.rope import full_canvas_crop_coordinates
+from sakuramoon.conditioning.text_mixer import TextConditioningOutput
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.caption import (
     CaptionPlan,
@@ -80,6 +82,8 @@ _VARIANT_NAMES = tuple(definition[0] for definition in _VARIANT_DEFINITIONS)
 _VARIANT_COUNT = 12
 _CFG_BRANCH_COUNT = 24
 _ZOOM = 1.5
+_DIAGNOSTIC_ITEM_INDICES = (0, 2, 4)
+_DIAGNOSTIC_TIMESTEPS = (0.2, 0.5, 0.8)
 
 
 class TrainingSamplingError(RuntimeError):
@@ -148,6 +152,7 @@ class TrainingSampleResult:
     update: int
     paths: tuple[Path, ...]
     captions: tuple[str, ...]
+    diagnostics: dict[str, float]
 
 
 def _unconditional_plan() -> CaptionPlan:
@@ -467,6 +472,55 @@ def _shared_initial_noise(
     return base_noise.repeat(_VARIANT_COUNT, 1, 1, 1)
 
 
+def _tensor_rms(tensor: torch.Tensor) -> torch.Tensor:
+    if not tensor.is_floating_point() or tensor.numel() == 0:
+        raise TrainingSamplingError(
+            "diagnostic tensor must be nonempty floating point"
+        )
+    return tensor.float().square().mean().sqrt()
+
+
+def _tensor_cosine(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+    if first.shape != second.shape or first.numel() == 0:
+        raise TrainingSamplingError("diagnostic cosine tensors must match")
+    left = first.float().flatten()
+    right = second.float().flatten()
+    return torch.dot(left, right) / (left.norm() * right.norm()).clamp_min(1e-12)
+
+
+def _metric_float(name: str, value: torch.Tensor) -> float:
+    result = float(value.detach().cpu().item())
+    if not math.isfinite(result):
+        raise TrainingSamplingError(f"condition diagnostic is nonfinite: {name}")
+    return result
+
+
+def _condition_representation_diagnostics(
+    tokens: torch.Tensor,
+) -> dict[str, float]:
+    if tokens.ndim != 3 or tokens.shape[0] != _CFG_BRANCH_COUNT:
+        raise TrainingSamplingError(
+            "condition diagnostic tokens must match the 24 CFG branches"
+        )
+    condition_a = tokens[0]
+    condition_b = tokens[1]
+    condition_null = tokens[4]
+    rms_a = _tensor_rms(condition_a)
+    rms_b = _tensor_rms(condition_b)
+    values = {
+        "condition_A_rms": rms_a,
+        "condition_B_rms": rms_b,
+        "condition_active_rms": 0.5 * (rms_a + rms_b),
+        "condition_null_rms": _tensor_rms(condition_null),
+        "condition_A_B_cosine": _tensor_cosine(condition_a, condition_b),
+        "condition_A_null_cosine": _tensor_cosine(condition_a, condition_null),
+        "condition_B_null_cosine": _tensor_cosine(condition_b, condition_null),
+        "condition_A_B_delta_rms": _tensor_rms(condition_a - condition_b),
+        "condition_A_null_delta_rms": _tensor_rms(condition_a - condition_null),
+    }
+    return {name: _metric_float(name, value) for name, value in values.items()}
+
+
 def _tag_metadata(tag: Tag) -> dict[str, str]:
     return {"text": tag.text, "canonical": tag.canonical}
 
@@ -649,13 +703,129 @@ class TrainingSampler:
             )
         return tuple(result)
 
+    def _condition_diagnostics(
+        self,
+        inputs: TrainableCompositeInputs,
+        conditioning: tuple[TextConditioningOutput, ConditionTokenOutput],
+        noise: torch.Tensor,
+    ) -> dict[str, float]:
+        text, condition = conditioning
+        diagnostics = _condition_representation_diagnostics(condition.tokens)
+        active_text = text.tokens[:_VARIANT_COUNT][text.mask[:_VARIANT_COUNT]]
+        diagnostics["text_token_rms"] = _metric_float(
+            "text_token_rms", _tensor_rms(active_text)
+        )
+
+        dit = self.composite.dit
+        conditional_text = text.tokens[:_VARIANT_COUNT]
+        conditional_condition = condition.tokens[:_VARIANT_COUNT]
+        text_after = dit.modality(conditional_text, "text")
+        condition_after = dit.modality(conditional_condition, "condition")
+        diagnostics["text_token_after_modality_rms"] = _metric_float(
+            "text_token_after_modality_rms",
+            _tensor_rms(text_after[text.mask[:_VARIANT_COUNT]]),
+        )
+        diagnostics["condition_token_after_modality_rms"] = _metric_float(
+            "condition_token_after_modality_rms",
+            0.5 * (
+                _tensor_rms(condition_after[0])
+                + _tensor_rms(condition_after[1])
+            ),
+        )
+        diagnostics["null_condition_after_modality_rms"] = _metric_float(
+            "null_condition_after_modality_rms",
+            _tensor_rms(condition_after[4]),
+        )
+
+        latent_batch = noise.to(dit.input_projection.weight.dtype)
+        batch, channels, height, width = latent_batch.shape
+        projected_image = dit.input_projection(
+            latent_batch.permute(0, 2, 3, 1).reshape(
+                batch * height * width, channels
+            )
+        ).reshape(batch, height * width, dit.hidden_size)
+        diagnostics["image_token_rms"] = _metric_float(
+            "image_token_rms", _tensor_rms(projected_image)
+        )
+        diagnostics["image_token_after_modality_rms"] = _metric_float(
+            "image_token_after_modality_rms",
+            _tensor_rms(dit.modality(projected_image, "image")),
+        )
+
+        indices = torch.tensor(
+            _DIAGNOSTIC_ITEM_INDICES,
+            dtype=torch.long,
+            device=self.device,
+        )
+        diagnostic_text = dataclasses.replace(
+            text,
+            tokens=text.tokens.index_select(0, indices),
+            mask=text.mask.index_select(0, indices),
+            layer_weights=text.layer_weights.index_select(0, indices),
+        )
+        diagnostic_condition = dataclasses.replace(
+            condition,
+            tokens=condition.tokens.index_select(0, indices),
+            mask=condition.mask.index_select(0, indices),
+        )
+        use_null = inputs.use_null_condition.index_select(0, indices)
+        diagnostic_inputs = dataclasses.replace(
+            inputs,
+            qwen_states=inputs.qwen_states.index_select(0, indices),
+            main_token_indices=inputs.main_token_indices.index_select(0, indices),
+            main_mask=inputs.main_mask.index_select(0, indices),
+            main_token_lengths=tuple(
+                inputs.main_token_lengths[index]
+                for index in _DIAGNOSTIC_ITEM_INDICES
+            ),
+            condition_token_indices=inputs.condition_token_indices.index_select(
+                0, indices
+            ),
+            condition_mask=inputs.condition_mask.index_select(0, indices),
+            use_null_condition=use_null,
+            active_condition_sample_indices=torch.nonzero(
+                ~use_null, as_tuple=False
+            ).flatten(),
+            latents=(latent_batch[0],) * 3,
+            image_coordinates=tuple(
+                inputs.image_coordinates[index]
+                for index in _DIAGNOSTIC_ITEM_INDICES
+            ),
+            size_scale=inputs.size_scale.index_select(0, indices),
+            aspect=inputs.aspect.index_select(0, indices),
+        )
+        for timestep_value in _DIAGNOSTIC_TIMESTEPS:
+            timestep = torch.full(
+                (3,),
+                timestep_value,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            predictions = torch.stack(
+                self.composite.forward_dit(
+                    dataclasses.replace(diagnostic_inputs, timestep=timestep),
+                    (diagnostic_text, diagnostic_condition),
+                )
+            )
+            denominator = _tensor_rms(predictions[0]).clamp_min(1e-12)
+            suffix = f"t{round(timestep_value * 10):02d}"
+            diagnostics[f"dit_swap_relative_rms_{suffix}"] = _metric_float(
+                f"dit_swap_relative_rms_{suffix}",
+                _tensor_rms(predictions[0] - predictions[1]) / denominator,
+            )
+            diagnostics[f"dit_null_relative_rms_{suffix}"] = _metric_float(
+                f"dit_null_relative_rms_{suffix}",
+                _tensor_rms(predictions[0] - predictions[2]) / denominator,
+            )
+        return diagnostics
+
     def _generate_batch(
         self,
         items: tuple[TrainingSampleItem, ...],
         *,
         shared_seed: int,
         framing: FramingContract,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, float]]:
         height, width = _require_variant_batch(items)
         conditional = tuple(item.caption for item in items)
         unconditional = serialize_caption(
@@ -730,6 +900,7 @@ class TrainingSampler:
             shared_seed=shared_seed,
             device=self.device,
         )
+        diagnostics = self._condition_diagnostics(inputs, conditioning, noise)
 
         def velocity(state: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
             if state.shape != noise.shape or timestep.shape != (_VARIANT_COUNT,):
@@ -778,7 +949,7 @@ class TrainingSampler:
             .clamp(0.0, 255.0)
             .to(device="cpu", dtype=torch.uint8)
         )
-        return images
+        return images, diagnostics
 
     @staticmethod
     def _wandb_caption(
@@ -836,7 +1007,7 @@ class TrainingSampler:
         self.composite.eval()
         try:
             with torch.inference_mode():
-                images = self._generate_batch(
+                images, diagnostics = self._generate_batch(
                     items,
                     shared_seed=shared_seed,
                     framing=framing,
@@ -870,7 +1041,7 @@ class TrainingSampler:
             for item, path in zip(items, paths, strict=True)
         ]
         metadata = {
-            "schema_version": 2,
+            "schema_version": 3,
             "update": update,
             "profile": self.config.sampling.profile,
             "A_sample_id": pair.a.sample_id,
@@ -878,6 +1049,7 @@ class TrainingSampler:
             "shared_seed": shared_seed,
             "state_count": _VARIANT_COUNT,
             "cfg_branch_count": _CFG_BRANCH_COUNT,
+            "condition_diagnostics": diagnostics,
             "initial_noise": "single_base_noise_repeated_12",
             "cfg_coordinate_sharing": True,
             "output_size": {
@@ -903,7 +1075,7 @@ class TrainingSampler:
             f"[sample] update={update} saved {_VARIANT_COUNT} variants: {step_root}",
             flush=True,
         )
-        return TrainingSampleResult(update, paths, wandb_captions)
+        return TrainingSampleResult(update, paths, wandb_captions, diagnostics)
 
 
 __all__ = [

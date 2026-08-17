@@ -324,7 +324,11 @@ def _forge_boundaries(
     batch_size: int = 1,
 ) -> ValidatedCuSeqlens:
     boundaries = object.__new__(ValidatedCuSeqlens)
-    object.__setattr__(boundaries, "tensor", tensor)
+    object.__setattr__(
+        boundaries,
+        "_ValidatedCuSeqlens__tensor",
+        tensor,
+    )
     object.__setattr__(boundaries, "sequence_lengths", sequence_lengths)
     object.__setattr__(boundaries, "total_tokens", total_tokens)
     object.__setattr__(boundaries, "max_seqlen", max_seqlen)
@@ -361,7 +365,7 @@ def test_forged_boundary_handle_fails_before_native_kernel(case: str) -> None:
             batch_size=2,
         )
 
-    with pytest.raises(ValueError, match="metadata|values"):
+    with pytest.raises(TypeError, match="capability"):
         accept_fa4_boundaries(
             boundaries,
             total_tokens=boundaries.total_tokens,
@@ -370,20 +374,25 @@ def test_forged_boundary_handle_fails_before_native_kernel(case: str) -> None:
         )
 
 
-def test_post_construction_boundary_mutation_fails_at_packed_entry() -> None:
+def test_diagnostic_boundary_mutation_does_not_reach_packed_entry() -> None:
     boundaries = build_validated_cu_seqlens(
         (2, 2),
         device=torch.device("cuda"),
     )
-    boundaries.tensor[1] = 3
+    snapshot = boundaries.tensor
+    snapshot[1] = 3
 
-    with pytest.raises(ValueError, match="differ from validated host lengths"):
-        accept_fa4_boundaries(
-            boundaries,
-            total_tokens=4,
-            batch_size=2,
-            device=torch.device("cuda"),
-        )
+    accepted = accept_fa4_boundaries(
+        boundaries,
+        total_tokens=4,
+        batch_size=2,
+        device=torch.device("cuda"),
+    )
+
+    assert torch.equal(
+        accepted_sample_indices(accepted),
+        torch.tensor([0, 0, 1, 1], device="cuda", dtype=torch.int64),
+    )
 
 
 def test_unaccepted_public_boundaries_cannot_reach_native_kernel(

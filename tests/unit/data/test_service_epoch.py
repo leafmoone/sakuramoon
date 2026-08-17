@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -69,6 +70,47 @@ def test_legacy_queue_state_is_upgraded_without_resetting_epoch(
         "rows": [{"path": training.path, "status": "pending"}],
         "schema_version": 2,
     }
+
+
+def test_wait_until_ready_accepts_partial_final_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = object.__new__(DataSupplyService)
+    service.identity = SimpleNamespace(worker_count=16)
+    service._state = _QueueState(
+        0,
+        (
+            _Row("completed.tar", "completed"),
+            _Row("remaining-1.tar", "pending"),
+            _Row("remaining-2.tar", "pending"),
+            _Row("remaining-3.tar", "pending"),
+        ),
+    )
+    service._started = True
+    service._closed = False
+    service._lock = threading.RLock()
+    service._outstanding = {}
+    requested: list[int] = []
+    monkeypatch.setattr(service, "_wait_for_ready_count", requested.append)
+
+    assert service.wait_until_ready() is True
+    assert requested == [3]
+
+
+def test_wait_until_ready_rejects_queue_without_pending_shards() -> None:
+    service = object.__new__(DataSupplyService)
+    service.identity = SimpleNamespace(worker_count=16)
+    service._state = _QueueState(
+        0,
+        (_Row("completed.tar", "completed"),),
+    )
+    service._started = True
+    service._closed = False
+    service._lock = threading.RLock()
+    service._outstanding = {}
+
+    with pytest.raises(DataServiceError, match="no remaining training shard"):
+        service.wait_until_ready()
 
 
 def test_queue_state_rejects_inconsistent_epoch_metadata(tmp_path: Path) -> None:

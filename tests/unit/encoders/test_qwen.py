@@ -42,10 +42,14 @@ class _FakeQwen(nn.Module):
         for layer in self.layers:
             hidden_states = layer(hidden_states)
             states.append(hidden_states)
-        # Transformers 5.14.1 replaces the final captured block output with
-        # last_hidden_state after final RMSNorm. Make that semantic visible.
-        states[-1] = states[-1] + 1000.0
-        return SimpleNamespace(hidden_states=tuple(states))
+        if kwargs["output_hidden_states"]:
+            # Transformers 5.14.1 replaces the final captured block output with
+            # last_hidden_state after final RMSNorm. Make that semantic visible.
+            states[-1] = states[-1] + 1000.0
+            returned_states: tuple[torch.Tensor, ...] | None = tuple(states)
+        else:
+            returned_states = None
+        return SimpleNamespace(hidden_states=returned_states)
 
 
 def test_selects_seven_states_from_one_frozen_forward() -> None:
@@ -58,7 +62,7 @@ def test_selects_seven_states_from_one_frozen_forward() -> None:
 
     assert backend.calls == 1
     assert backend.kwargs["use_cache"] is False
-    assert backend.kwargs["output_hidden_states"] is True
+    assert backend.kwargs["output_hidden_states"] is False
     assert output.hidden_states.shape == (2, 3, 7, 2048)
     assert output.hidden_states[0, 0, :, 0].tolist() == [4, 11, 37, 79, 137, 211, 301]
     assert backend.layers[-1].calls == 1

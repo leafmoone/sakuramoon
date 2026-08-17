@@ -22,11 +22,15 @@ class SampleSpans:
     image: TokenSpan
 
 
+_VALIDATED_BOUNDARY_CAPABILITY = object()
+
+
 @dataclass(frozen=True, init=False)
 class ValidatedCuSeqlens:
     """Sequence boundaries derived once from validated host-side lengths."""
 
-    tensor: torch.Tensor
+    __tensor: torch.Tensor
+    __capability: object
     sequence_lengths: tuple[int, ...]
     total_tokens: int
     max_seqlen: int
@@ -47,13 +51,32 @@ class ValidatedCuSeqlens:
         offsets = (0, *accumulate(sequence_lengths))
         object.__setattr__(
             self,
-            "tensor",
+            "_ValidatedCuSeqlens__tensor",
             torch.tensor(offsets, dtype=torch.int32, device=device),
+        )
+        object.__setattr__(
+            self,
+            "_ValidatedCuSeqlens__capability",
+            _VALIDATED_BOUNDARY_CAPABILITY,
         )
         object.__setattr__(self, "sequence_lengths", sequence_lengths)
         object.__setattr__(self, "total_tokens", offsets[-1])
         object.__setattr__(self, "max_seqlen", max(sequence_lengths))
         object.__setattr__(self, "batch_size", len(sequence_lengths))
+
+    @property
+    def tensor(self) -> torch.Tensor:
+        """Return a diagnostic snapshot without exposing mutable kernel state."""
+
+        return self.__tensor.detach().clone()
+
+    def _tensor_for_packed_entry(self) -> torch.Tensor:
+        if (
+            getattr(self, "_ValidatedCuSeqlens__capability", None)
+            is not _VALIDATED_BOUNDARY_CAPABILITY
+        ):
+            raise TypeError("invalid validated-boundary capability")
+        return self.__tensor
 
 
 def build_validated_cu_seqlens(
@@ -62,6 +85,48 @@ def build_validated_cu_seqlens(
     device: torch.device,
 ) -> ValidatedCuSeqlens:
     return ValidatedCuSeqlens(sequence_lengths, device=device)
+
+
+def validated_cu_seqlens_for_packed_entry(
+    boundaries: ValidatedCuSeqlens,
+    *,
+    total_tokens: int,
+    batch_size: int,
+    device: torch.device,
+) -> tuple[tuple[int, ...], torch.Tensor]:
+    """Accept only constructor-sealed offsets without synchronizing device values."""
+
+    if type(boundaries) is not ValidatedCuSeqlens:
+        raise TypeError("packed entry requires a ValidatedCuSeqlens input")
+    lengths = boundaries.sequence_lengths
+    if type(lengths) is not tuple or not lengths or any(
+        type(length) is not int or length <= 0 for length in lengths
+    ):
+        raise ValueError("validated boundaries contain invalid host lengths")
+    offsets = (0, *accumulate(lengths))
+    if (
+        boundaries.batch_size != len(lengths)
+        or boundaries.batch_size != batch_size
+        or boundaries.total_tokens != offsets[-1]
+        or boundaries.total_tokens != total_tokens
+        or boundaries.max_seqlen != max(lengths)
+    ):
+        raise ValueError("validated boundaries contain inconsistent host metadata")
+    tensor = boundaries._tensor_for_packed_entry()
+    device_index = getattr(device, "index", None)
+    if (
+        tensor.ndim != 1
+        or tensor.shape != (len(offsets),)
+        or tensor.dtype != torch.int32
+        or not tensor.is_contiguous()
+        or tensor.device.type != device.type
+        or (
+            device_index is not None
+            and tensor.device.index != device_index
+        )
+    ):
+        raise ValueError("validated boundaries contain inconsistent tensor metadata")
+    return lengths, tensor
 
 
 @dataclass(frozen=True)
@@ -207,4 +272,5 @@ __all__ = [
     "canvas_condition",
     "dense_reference_mask",
     "pack_sequences",
+    "validated_cu_seqlens_for_packed_entry",
 ]

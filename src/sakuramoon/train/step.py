@@ -34,6 +34,25 @@ def _complete_device_work(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def _condition_encoder_grad_norm(
+    module: nn.Module,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    squared_norm = torch.zeros((), device=device, dtype=torch.float32)
+    found = False
+    for name, parameter in module.named_parameters():
+        if "condition_tokens" not in name.split(".") or parameter.grad is None:
+            continue
+        if parameter.grad.is_sparse:
+            raise RuntimeError("sparse condition encoder gradients are unsupported")
+        squared_norm.add_(parameter.grad.float().square().sum())
+        found = True
+    if not found:
+        return squared_norm
+    return squared_norm.sqrt()
+
+
 @dataclass(frozen=True, slots=True)
 class TrainableCompositeInputs:
     qwen_states: torch.Tensor
@@ -152,6 +171,7 @@ class SingleGpuUpdateState:
 class SingleGpuUpdateResult:
     mean_loss: torch.Tensor
     clip: ClipResult
+    condition_encoder_grad_norm: torch.Tensor
     microbatches: int
     effective_samples: int
     state: SingleGpuUpdateState
@@ -302,6 +322,10 @@ class SingleGpuStep:
                 for parameter in parameters:
                     if parameter.grad is not None:
                         parameter.grad.mul_(gradient_scale)
+                condition_encoder_grad_norm = _condition_encoder_grad_norm(
+                    self.module,
+                    device=self._device,
+                )
                 clip = clip_grad_norm_fp32(parameters, max_norm=1.0)
         except BaseException as error:
             self._detection_phase = "clip"
@@ -368,6 +392,7 @@ class SingleGpuStep:
         result = SingleGpuUpdateResult(
             mean_loss=self._loss_sum / self._samples,
             clip=clip,
+            condition_encoder_grad_norm=condition_encoder_grad_norm,
             microbatches=self._microbatches,
             effective_samples=self._samples,
             state=successful,

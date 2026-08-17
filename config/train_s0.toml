@@ -23,7 +23,7 @@ frozen_encoders_outside_wrapper = true
 automatic_backend_fallback = false
 
 [checkpoint]
-full_every_updates = 500
+full_every_updates = 100
 slots = 2
 
 [data.cache]
@@ -65,10 +65,10 @@ predecessor = ""
 world_size = 2
 depth = 16
 resolution = 256
-local_batch = 40
+local_batch = 38
 accumulation = 10
 # base_lr=0.00005 at reference_batch=256 -> actual_lr=0.00015625 for global_batch=800.
-global_batch = 800
+global_batch = 760
 activation_checkpoint_mode = "none"
 planned_updates = 100000
 manual_finalize = true

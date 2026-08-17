@@ -53,7 +53,7 @@ NOISE_T_BIN_LABELS = tuple(
     f"bin_{index:02d}_t{index * 5:03d}_{(index + 1) * 5:03d}"
     for index in range(NOISE_T_BIN_COUNT)
 )
-TRAINING_METRIC_SCHEMA_VERSION = 5
+TRAINING_METRIC_SCHEMA_VERSION = 6
 DROPOUT_KEYS = CAPTION_DROPOUT_KEYS
 
 
@@ -85,6 +85,7 @@ class TrainingMetric:
     t_bin_sample_counts: tuple[int, ...]
     pre_clip_grad_norm: float
     post_clip_grad_norm: float
+    condition_encoder_grad_norm: float
     clip_fraction: float
     learning_rate: float
     timestep_min: float
@@ -128,6 +129,7 @@ class TrainingMetric:
         for name in (
             "pre_clip_grad_norm",
             "post_clip_grad_norm",
+            "condition_encoder_grad_norm",
             "learning_rate",
             "timestep_min",
             "timestep_max",
@@ -230,6 +232,7 @@ class TrainingMetric:
             ),
             "pre_clip_grad_norm": self.pre_clip_grad_norm,
             "post_clip_grad_norm": self.post_clip_grad_norm,
+            "condition_encoder_grad_norm": self.condition_encoder_grad_norm,
             "clip_fraction": self.clip_fraction,
             "learning_rate": self.learning_rate,
             "timestep_min": self.timestep_min,

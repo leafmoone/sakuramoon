@@ -15,9 +15,12 @@ PYTHON_BIN="${PYTHON_BIN:-${VENV_ROOT}/bin/python}"
 ACCELERATE_BIN="${ACCELERATE_BIN:-${VENV_ROOT}/bin/accelerate}"
 MANAGEMENT_PYTHON="${MANAGEMENT_PYTHON:-${PYTHON_BIN}}"
 WORKLOAD_ENV_FILE="${WORKLOAD_ENV_FILE:-${PROJECT_ROOT}/.env.training-stack.nul}"
+RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
+SAKURAMOON_TORCHINDUCTOR_CACHE_DIR="${SAKURAMOON_TORCHINDUCTOR_CACHE_DIR:-${RUNTIME_ROOT}/torchinductor-cache}"
+export SAKURAMOON_TORCHINDUCTOR_CACHE_DIR
 PUBLISH_STATE_ROOT="${PUBLISH_STATE_ROOT:-${RUNTIME_ROOT}/.sm-train-state-publisher}"
 PUBLISH_LAST_PUBLISHED="${PUBLISH_LAST_PUBLISHED:-/root/private_data/.sm-train-state-publisher/last-published-s0.txt}"
-REQUIRED_HOST_SUBSTRING="${REQUIRED_HOST_SUBSTRING:-leaf6}"
+REQUIRED_HOST_SUBSTRING="${REQUIRED_HOST_SUBSTRING:-leaf10}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
 START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-180}"
 STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-30}"
@@ -61,6 +64,8 @@ Actions:
 
 Training always resumes from the numerically newest complete checkpoint.
 Use ALLOW_FRESH_START=1 only when a deliberate fresh run is required.
+Set RESUME_CHECKPOINT=/absolute/path to select a complete migrated checkpoint
+that is intentionally stored outside the configured checkpoint root.
 EOF
 }
 
@@ -111,7 +116,7 @@ load_workload_environment() {
     [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
       || die "invalid workload environment variable name: ${key}"
     case "${key}" in
-      HOSTNAME|HOME|USER|LOGNAME|PWD|OLDPWD|SHLVL|_|SSH_*|CRD_*|KUBERNETES_*|SCNET_*|NOTEBOOK_*|JUPYTER_*|RANK|LOCAL_RANK|WORLD_SIZE|LOCAL_WORLD_SIZE|MASTER_ADDR|MASTER_PORT|RESUME)
+      HOSTNAME|HOME|USER|LOGNAME|PWD|OLDPWD|SHLVL|_|SSH_*|CRD_*|KUBERNETES_*|SCNET_*|NOTEBOOK_*|JUPYTER_*|RANK|LOCAL_RANK|WORLD_SIZE|LOCAL_WORLD_SIZE|MASTER_ADDR|MASTER_PORT|RESUME|RESUME_CHECKPOINT)
         continue
         ;;
     esac
@@ -395,6 +400,21 @@ latest_complete_checkpoint() {
   printf '%s\n' "${best}"
 }
 
+selected_resume_checkpoint() {
+  local resolved
+  if [[ -z "${RESUME_CHECKPOINT}" ]]; then
+    latest_complete_checkpoint
+    return
+  fi
+
+  resolved="$(realpath -e -- "${RESUME_CHECKPOINT}")" || die "explicit resume checkpoint does not exist: ${RESUME_CHECKPOINT}"
+  [[ -d "${resolved}" ]] || die "explicit resume checkpoint is not a directory: ${resolved}"
+  [[ -f "${resolved}/COMPLETE" ]] || die "explicit resume checkpoint lacks COMPLETE: ${resolved}"
+  grep -qx 'complete' "${resolved}/COMPLETE" || die "explicit resume checkpoint is incomplete: ${resolved}"
+  [[ -f "${resolved}/manifest.json" ]] || die "explicit resume checkpoint lacks manifest.json: ${resolved}"
+  printf '%s\n' "${resolved}"
+}
+
 start_data() {
   if ! resolve_component_pid data; then
     if [[ -e "${DATA_SOCKET}" ]]; then
@@ -484,7 +504,7 @@ start_train() {
   fi
 
   local -a resume_args=()
-  if checkpoint="$(latest_complete_checkpoint)"; then
+  if checkpoint="$(selected_resume_checkpoint)"; then
     resume_args=(--resume "${checkpoint}")
     log "selected resume checkpoint: ${checkpoint}"
   else
@@ -631,7 +651,7 @@ adopt_stack() {
 
 validate_stack() {
   local checkpoint
-  checkpoint="$(latest_complete_checkpoint)" \
+  checkpoint="$(selected_resume_checkpoint)" \
     || die "validation requires a complete checkpoint"
   log "host: $(hostname)"
   log "project: ${PROJECT_ROOT}"
@@ -665,6 +685,7 @@ main() {
   require_command flock
   require_command seq
   require_command awk
+  require_command realpath
   prepare_paths
 
   case "${action}" in

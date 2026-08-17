@@ -110,6 +110,8 @@ qwen_dense_lengths = [98, 162, 226, 290, 354, 418, 482, 546]
 
 [caption.dropout]
 all_condition = 0.10
+condition_route = 0.0
+condition_only = 0.0
 tag = 0.1
 candidate_source = 0.3
 

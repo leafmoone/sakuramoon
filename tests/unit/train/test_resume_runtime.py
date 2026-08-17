@@ -46,6 +46,18 @@ def test_cuda_allocator_enables_expandable_segments(monkeypatch: Any) -> None:
 
     assert configured == "max_split_size_mb:128,expandable_segments:True"
     assert os.environ["PYTORCH_ALLOC_CONF"] == configured
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == configured
+
+
+def test_cuda_allocator_defaults_to_bounded_splitting(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PYTORCH_ALLOC_CONF", raising=False)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+
+    configured = _configure_cuda_allocator()
+
+    assert configured == "max_split_size_mb:512,expandable_segments:True"
+    assert os.environ["PYTORCH_ALLOC_CONF"] == configured
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == configured
 
 
 def test_torchinductor_cache_is_bound_inside_project(

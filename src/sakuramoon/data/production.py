@@ -77,6 +77,7 @@ _CLASSIFICATION_VALUES = frozenset(
 )
 _YEAR_PATTERN = re.compile(r"^year [0-9]{4}(?:, (?:newest|oldest))?$")
 _MULTICAPTION_KEYS = frozenset({"long_names", "long_no_names", "short", "vibes"})
+_IMAGE_FORMATS = frozenset({"jpg", "jpeg", "png", "webp"})
 
 
 def _require_spawn_serializable(value: object, name: str) -> None:
@@ -139,6 +140,20 @@ def _tag_from_value(
     return (Tag(text=value, canonical=value),)
 
 
+def _modelscope_nsfw_tags(
+    raw: Mapping[str, object],
+) -> tuple[Tag, ...]:
+    value = raw["nsfw"]
+    if value is None:
+        join = _nested_mapping(raw, "join")
+        if join["character_records"] == "missing":
+            return ()
+        raise ProductionDataError(
+            "ModelScope metadata nsfw may be null only when character records are missing"
+        )
+    return _tag_from_value(raw, "nsfw", allowed=_NSFW_VALUES)
+
+
 def _validate_v2_contract(raw: Mapping[str, object]) -> None:
     observed = frozenset(raw)
     if not _V2_REQUIRED_TOP_LEVEL.issubset(observed) or not observed.issubset(
@@ -177,12 +192,18 @@ def _validate_v2_contract(raw: Mapping[str, object]) -> None:
     _require_exact_keys(
         image, frozenset({"format", "width", "height"}), group="image"
     )
+    width = image["width"]
+    height = image["height"]
+    dimensions_valid = (width is None and height is None) or (
+        type(width) is int
+        and cast(int, width) > 0
+        and type(height) is int
+        and cast(int, height) > 0
+    )
     if (
-        image["format"] != "webp"
-        or type(image["width"]) is not int
-        or cast(int, image["width"]) <= 0
-        or type(image["height"]) is not int
-        or cast(int, image["height"]) <= 0
+        type(image["format"]) is not str
+        or cast(str, image["format"]) not in _IMAGE_FORMATS
+        or not dimensions_valid
     ):
         raise ProductionDataError("ModelScope metadata image contract is invalid")
 
@@ -297,7 +318,7 @@ def parse_modelscope_caption_fields(
         Tag(text=component, canonical=component) for component in year.split(", ")
     )
     return CaptionFields(
-        nsfw=_tag_from_value(raw, "nsfw", allowed=_NSFW_VALUES),
+        nsfw=_modelscope_nsfw_tags(raw),
         character=_modelscope_tags(raw, "character"),
         copyright=_modelscope_tags(raw, "copyright"),
         general=_modelscope_tags(raw, "general"),
@@ -653,6 +674,8 @@ class ProductionPipelineFactory:
         self._require_governed_issuance()
         dropout = self.config.caption.dropout
         probabilities = CaptionDropoutProbabilities(
+            condition_route=dropout.condition_route,
+            condition_only=dropout.condition_only,
             tag=dropout.tag,
             candidate_source=dropout.candidate_source,
             nl=NlDropoutProbabilities(

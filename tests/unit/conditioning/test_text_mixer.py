@@ -24,6 +24,31 @@ def _conditioner() -> TextConditioner:
     )
 
 
+def test_shared_projection_batches_all_seven_layers_in_one_call() -> None:
+    module = _conditioner()
+    states = torch.randn(2, 6, 7, 16)
+    indices = torch.tensor([[0, 2, 4], [1, 3, 5]])
+    mask = torch.ones(2, 3, dtype=torch.bool)
+    input_shapes: list[tuple[int, ...]] = []
+
+    def record_projection_input(
+        _module: torch.nn.Module,
+        inputs: tuple[torch.Tensor, ...],
+    ) -> None:
+        input_shapes.append(tuple(inputs[0].shape))
+
+    handle = module.shared_projection.register_forward_pre_hook(
+        record_projection_input
+    )
+    try:
+        output = module(states, indices, mask)
+    finally:
+        handle.remove()
+
+    assert input_shapes == [(2 * 3 * 7, 16)]
+    assert output.tokens.shape == (2, 3, 24)
+
+
 def test_gathers_only_main_tokens_and_zeroes_padding() -> None:
     module = _conditioner()
     states = torch.randn(2, 6, 7, 16)

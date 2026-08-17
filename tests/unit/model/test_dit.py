@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from torch import nn
 
 import sakuramoon.model.dit as dit_module
 from sakuramoon.conditioning.rope import image_coordinates
@@ -90,6 +91,15 @@ def _inputs() -> tuple[torch.Tensor, ...]:
         torch.tensor([0.0], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
     )
+
+
+class _IdentityModality(nn.Module):
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        _modality: str,
+    ) -> torch.Tensor:
+        return tokens
 
 
 def _image_coordinate_maps() -> torch.Tensor:
@@ -341,6 +351,64 @@ def test_activation_checkpoint_mode_is_runtime_only_and_validated() -> None:
     assert model.state_dict().keys() == state_keys
     with pytest.raises(ValueError, match="activation checkpoint mode"):
         model.set_activation_checkpoint_mode("unknown")
+
+
+def test_packed_training_batches_same_shape_image_projection() -> None:
+    model = object.__new__(PackedDiT)
+    nn.Module.__init__(model)
+    model.hidden_size = 5
+    model.condition_token_count = 2
+    model.input_projection = nn.Linear(3, 5, bias=False)
+    model.modality = _IdentityModality()
+    model.train()
+    latents = (
+        torch.randn(3, 2, 2, requires_grad=True),
+        torch.randn(3, 2, 2, requires_grad=True),
+    )
+    text_tokens = torch.randn(2, 3, 5)
+    text_mask = torch.tensor(
+        [[True, True, False], [True, True, True]],
+        dtype=torch.bool,
+    )
+    condition_tokens = torch.randn(2, 2, 5)
+    projection_inputs: list[tuple[int, ...]] = []
+
+    def record_projection_input(
+        _module: nn.Module,
+        inputs: tuple[torch.Tensor, ...],
+    ) -> None:
+        projection_inputs.append(tuple(inputs[0].shape))
+
+    handle = model.input_projection.register_forward_pre_hook(
+        record_projection_input
+    )
+    try:
+        packed = model.prepare_packed_sequences(
+            latents,
+            text_tokens,
+            text_mask,
+            (2, 3),
+            condition_tokens,
+        )
+    finally:
+        handle.remove()
+
+    assert projection_inputs == [(2 * 2 * 2, 3)]
+    with torch.no_grad():
+        expected = tuple(
+            model.input_projection(
+                latent.permute(1, 2, 0).reshape(2 * 2, 3)
+            )
+            for latent in latents
+        )
+    for spans, image_tokens in zip(packed.spans, expected, strict=True):
+        torch.testing.assert_close(
+            packed.tokens[spans.image.start : spans.image.end],
+            image_tokens,
+        )
+    packed.tokens.square().mean().backward()
+    assert all(latent.grad is not None for latent in latents)
+    assert model.input_projection.weight.grad is not None
 
 
 def test_packed_and_dense_production_state_dicts_are_isomorphic() -> None:

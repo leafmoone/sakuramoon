@@ -1024,7 +1024,13 @@ def _run_accepted_lifecycle(
                             successful_update=update,
                         )
                         telemetry.submit_wandb_metrics(
-                            {"training_samples/count": len(samples.paths)},
+                            {
+                                "training_samples/count": len(samples.paths),
+                                **{
+                                    f"condition_diagnostics/{key}": value
+                                    for key, value in samples.diagnostics.items()
+                                },
+                            },
                             successful_update=update,
                         )
 

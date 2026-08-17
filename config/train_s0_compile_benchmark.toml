@@ -1,5 +1,0 @@
-extends = ["train_s0.toml"]
-
-[kernels]
-torch_compile_enabled = true
-torch_compile_dynamic = true

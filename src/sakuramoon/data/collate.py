@@ -6,6 +6,7 @@ import multiprocessing as mp
 import os
 import queue
 import sys
+import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from multiprocessing.queues import Queue as MultiprocessingQueue
@@ -38,6 +39,7 @@ from sakuramoon.data.service_protocol import (
 
 _WORKER_CONTEXT = mp.get_context("spawn")
 _MAX_TORCH_SEED = 2**64 - 1
+_LEASE_RETRY_SECONDS = 0.25
 
 
 class CollateError(ValueError):
@@ -792,7 +794,13 @@ def iter_service_batches(
     def drain() -> Iterator[TrainingBatch]:
         try:
             submit_available()
-            while queued:
+            while True:
+                if not queued:
+                    if client.health():
+                        return
+                    time.sleep(_LEASE_RETRY_SECONDS)
+                    submit_available()
+                    continue
                 item = next(iterator)
                 if isinstance(item, _WorkerBatch):
                     descriptor = queued.get(item.shard_path)

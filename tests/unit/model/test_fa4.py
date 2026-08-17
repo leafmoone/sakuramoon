@@ -110,3 +110,22 @@ def test_packed_entry_derives_routing_from_the_accepted_host_identity() -> None:
     )
 
     assert torch.equal(accepted_sample_indices(accepted), torch.tensor([0, 0, 1, 1, 1]))
+
+
+def test_boundary_snapshot_cannot_mutate_kernel_state() -> None:
+    public = ValidatedCuSeqlens((2, 3), device=torch.device("cpu"))
+    snapshot = public.tensor
+    snapshot[1] = 99
+
+    accepted = accept_fa4_boundaries(
+        public,
+        total_tokens=5,
+        batch_size=2,
+        device=torch.device("cpu"),
+    )
+
+    assert torch.equal(public.tensor, torch.tensor([0, 2, 5], dtype=torch.int32))
+    assert torch.equal(
+        accepted_sample_indices(accepted),
+        torch.tensor([0, 0, 1, 1, 1]),
+    )

@@ -286,6 +286,9 @@ def build_training_metric(
         post_clip_grad_norm=_scalar_float(
             "clip.post_clip_norm", update.clip.post_clip_norm
         ),
+        condition_encoder_grad_norm=_scalar_float(
+            "condition_encoder_grad_norm", update.condition_encoder_grad_norm
+        ),
         clip_fraction=float(coefficient < 1.0),
         learning_rate=observation.learning_rate,
         timestep_min=timestep_min,

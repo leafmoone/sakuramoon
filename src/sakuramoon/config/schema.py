@@ -335,6 +335,8 @@ class NlDropoutConfig(StrictModel):
 
 class CaptionDropoutConfig(StrictModel):
     all_condition: FixedPointOne
+    condition_route: FixedZero
+    condition_only: FixedZero
     tag: FixedPointOne
     candidate_source: FixedPointThree
     nl: NlDropoutConfig

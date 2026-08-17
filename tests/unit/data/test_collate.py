@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -77,6 +79,102 @@ def _sample(
         rng=RngIdentity(1, "S0", 0, sample_id, sample_id + 1, sample_id + 2),
         padding_token_id=248044,
     )
+
+
+def test_service_batches_wait_for_a_transient_epoch_tail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import sakuramoon.data.collate as collate_module
+
+    record = collate_module.ShardRecord(path="data/remaining.tar", bytes=1)
+    local_path = tmp_path / "remaining.tar"
+    local_path.write_bytes(b"x")
+    descriptor = collate_module.ShardLeaseDescriptor(
+        lease_id="lease-1",
+        worker_id=0,
+        cycle_index=1,
+        state_revision=0,
+        record=record,
+        local_path=local_path,
+    )
+    expected_batch = cast(Any, object())
+
+    class FakeClient:
+        identity = SimpleNamespace(worker_count=1)
+
+        def __init__(self) -> None:
+            self.lease_calls = 0
+
+        def health(self) -> bool:
+            return False
+
+        def lease(self, worker_id: int):
+            assert worker_id == 0
+            self.lease_calls += 1
+            return None if self.lease_calls == 1 else descriptor
+
+        def acknowledge(self, _descriptor) -> None:
+            raise AssertionError("batch must be observed before ACK")
+
+    class FakeDataset:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.command = None
+
+        def submit(self, worker_id: int, command) -> None:
+            assert worker_id == 0
+            self.command = command
+
+        def stop(self, _worker_id: int, _record) -> None:
+            pass
+
+    class FakeLoader:
+        def __init__(self, dataset: FakeDataset) -> None:
+            self.dataset = dataset
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            command = self.dataset.command
+            if command is None:
+                raise AssertionError("loader advanced before a lease was available")
+            self.dataset.command = None
+            return collate_module._WorkerBatch(
+                0,
+                123,
+                command.shard_path,
+                expected_batch,
+            )
+
+    monkeypatch.setattr(collate_module, "_PersistentShardDataset", FakeDataset)
+    monkeypatch.setattr(
+        collate_module,
+        "_build_batch_loader",
+        lambda dataset, **_kwargs: FakeLoader(dataset),
+    )
+    monkeypatch.setattr(
+        collate_module,
+        "_shutdown_loader",
+        lambda _loader, **_kwargs: None,
+    )
+    monkeypatch.setattr(collate_module.time, "sleep", lambda _seconds: None)
+
+    client = FakeClient()
+    stream = collate_module.iter_service_batches(
+        cast(Any, SimpleNamespace(base_seed=1)),
+        cast(Any, client),
+        batch_size=1,
+        worker_count=1,
+        ready_batches=1,
+        pin_memory=False,
+        drop_last=True,
+    )
+    try:
+        assert next(stream) is expected_batch
+        assert client.lease_calls == 2
+    finally:
+        stream.close()
 
 
 def test_collate_pads_eot_and_preserves_structured_metadata() -> None:

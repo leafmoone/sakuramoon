@@ -104,11 +104,31 @@ def test_governed_modelscope_adapter_and_caption_parser() -> None:
     )
 
 
-def test_modelscope_adapter_ignores_missing_declared_image_dimensions() -> None:
+@pytest.mark.parametrize("image_format", ["jpg", "jpeg", "png", "webp"])
+@pytest.mark.parametrize(
+    ("width", "height"),
+    [(832, 1216), (None, None)],
+)
+def test_modelscope_parser_accepts_repository_image_contract(
+    image_format: str,
+    width: int | None,
+    height: int | None,
+) -> None:
     raw = _real_row()
-    raw["image"] = {"format": "webp", "width": None, "height": None}
+    raw["image"] = {"format": image_format, "width": width, "height": height}
 
     assert adapt_modelscope_metadata(raw) == {"id": 71}
+    assert parse_modelscope_caption_fields(raw).quality
+
+
+def test_modelscope_parser_accepts_null_nsfw_when_character_records_are_missing() -> None:
+    raw = _real_row()
+    raw["nsfw"] = None
+    join = raw["join"]
+    assert isinstance(join, dict)
+    join["character_records"] = "missing"
+
+    assert parse_modelscope_caption_fields(raw).nsfw == ()
 
 
 @pytest.mark.parametrize("value", [None, "", "safe", 2])
