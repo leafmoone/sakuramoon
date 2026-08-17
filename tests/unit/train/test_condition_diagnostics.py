@@ -11,7 +11,7 @@ from sakuramoon.train.sampling import (
     _condition_representation_diagnostics,  # pyright: ignore[reportPrivateUsage]
 )
 from sakuramoon.train.step import (
-    _condition_encoder_grad_norm,  # pyright: ignore[reportPrivateUsage]
+    _parameter_grad_norm,  # pyright: ignore[reportPrivateUsage]
 )
 
 
@@ -46,11 +46,15 @@ class _Composite(nn.Module):
         self.other = nn.Linear(2, 2, bias=False)
 
 
-def test_condition_encoder_grad_norm_uses_only_condition_parameters() -> None:
+def test_parameter_grad_norm_uses_only_matching_parameters() -> None:
     module = _Composite()
     module.condition_tokens.weight.grad = torch.full((2, 2), 3.0)
     module.other.weight.grad = torch.full((2, 2), 100.0)
 
-    value = _condition_encoder_grad_norm(module, device=torch.device("cpu"))
+    value = _parameter_grad_norm(
+        module,
+        predicate=lambda name, _parameter: "condition_tokens" in name.split("."),
+        device=torch.device("cpu"),
+    )
 
     torch.testing.assert_close(value, torch.tensor(6.0))

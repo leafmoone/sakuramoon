@@ -289,6 +289,10 @@ def build_training_metric(
         condition_encoder_grad_norm=_scalar_float(
             "condition_encoder_grad_norm", update.condition_encoder_grad_norm
         ),
+        condition_global_projection_grad_norm=_scalar_float(
+            "condition_global_projection_grad_norm",
+            update.condition_global_projection_grad_norm,
+        ),
         clip_fraction=float(coefficient < 1.0),
         learning_rate=observation.learning_rate,
         timestep_min=timestep_min,

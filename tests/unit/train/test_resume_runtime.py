@@ -155,7 +155,7 @@ def test_resume_rebinds_only_checkpoint_cadence_policy() -> None:
         checkpoint_cadence=CheckpointCadence(
             last_successful_update=trainer.successful_updates,
             last_wall_clock_unix_seconds=123.5,
-            every_successful_updates=100,
+            every_successful_updates=500,
         ),
     )
 
@@ -167,7 +167,7 @@ def test_resume_rebinds_only_checkpoint_cadence_policy() -> None:
     assert resumed.checkpoint_cadence == CheckpointCadence(
         last_successful_update=28_300,
         last_wall_clock_unix_seconds=123.5,
-        every_successful_updates=500,
+        every_successful_updates=100,
     )
     assert (
         resumed.checkpoint_cadence.due(

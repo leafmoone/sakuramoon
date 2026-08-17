@@ -274,6 +274,7 @@ class DenseDiT(nn.Module):
             active_slot_ids=slots,
             modulation_chunks=modulation_chunks,
             final_modulation_size=final_modulation_size,
+            norm_eps=norm_eps,
         )
         self.blocks = nn.ModuleDict(
             {
@@ -393,6 +394,7 @@ class DenseDiT(nn.Module):
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
         condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -411,6 +413,8 @@ class DenseDiT(nn.Module):
             timestep,
             size_scale,
             aspect,
+            condition_tokens,
+            condition_active_mask,
             self.active_slot_ids,
         )
         attention_mask = dense_attention_mask(token_mask)
@@ -466,6 +470,7 @@ class DenseDiT(nn.Module):
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
         condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -478,6 +483,7 @@ class DenseDiT(nn.Module):
             text_tokens,
             text_mask,
             condition_tokens,
+            condition_active_mask,
             timestep,
             size_scale,
             aspect,
@@ -612,6 +618,7 @@ class PackedDiT(nn.Module):
             active_slot_ids=slots,
             modulation_chunks=modulation_chunks,
             final_modulation_size=final_modulation_size,
+            norm_eps=norm_eps,
         )
         self.blocks = nn.ModuleDict(
             {
@@ -738,6 +745,8 @@ class PackedDiT(nn.Module):
     def forward_packed_features(
         self,
         packed: PackedSequences,
+        condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -761,6 +770,8 @@ class PackedDiT(nn.Module):
             timestep,
             size_scale,
             aspect,
+            condition_tokens,
+            condition_active_mask,
             self.active_slot_ids,
         )
         joint = packed.tokens
@@ -844,6 +855,8 @@ class PackedDiT(nn.Module):
     def forward_packed(
         self,
         packed: PackedSequences,
+        condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -854,6 +867,8 @@ class PackedDiT(nn.Module):
         return self.predict_from_features(
             self.forward_packed_features(
                 packed,
+                condition_tokens,
+                condition_active_mask,
                 timestep,
                 size_scale,
                 aspect,
@@ -869,6 +884,7 @@ class PackedDiT(nn.Module):
         text_mask: torch.Tensor,
         text_lengths: tuple[int, ...],
         condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -885,6 +901,8 @@ class PackedDiT(nn.Module):
         )
         return self.forward_packed(
             packed,
+            condition_tokens,
+            condition_active_mask,
             timestep,
             size_scale,
             aspect,

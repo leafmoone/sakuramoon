@@ -132,11 +132,11 @@ def test_full_16l_production_parameter_schema_is_locked() -> None:
         sensitive_weight_decay=0.0,
     )
 
-    assert len(audit.specs) == 206
+    assert len(audit.specs) == 208
     assert len(audit.decay) == 113
-    assert len(audit.sensitive) == 93
+    assert len(audit.sensitive) == 95
     assert sum(spec.parameter.numel() for spec in audit.decay) == 1_216_675_840
-    assert sum(spec.parameter.numel() for spec in audit.sensitive) == 23_090_304
+    assert sum(spec.parameter.numel() for spec in audit.sensitive) == 25_714_304
 
 
 def test_full_trainable_composite_uses_role_based_precision_groups() -> None:
@@ -161,14 +161,20 @@ def test_full_trainable_composite_uses_role_based_precision_groups() -> None:
     assert specs["dit.conditioner.condition_mlp.0.weight"].group == (
         "sensitive_no_decay"
     )
+    assert specs["dit.conditioner.condition_global_norm.weight"].group == (
+        "sensitive_no_decay"
+    )
+    assert specs[
+        "dit.conditioner.condition_global_projection.weight"
+    ].group == "sensitive_no_decay"
     assert specs["dit.output_head.projection.weight"].group == (
         "sensitive_no_decay"
     )
-    assert len(audit.specs) == 239
+    assert len(audit.specs) == 241
     assert len(audit.decay) == 126
-    assert len(audit.sensitive) == 113
+    assert len(audit.sensitive) == 115
     assert sum(spec.parameter.numel() for spec in audit.decay) == 1_240_793_088
-    assert sum(spec.parameter.numel() for spec in audit.sensitive) == 23_160_122
+    assert sum(spec.parameter.numel() for spec in audit.sensitive) == 25_784_122
 
 
 def test_parameter_audit_rejects_fp32_matrix_projection() -> None:

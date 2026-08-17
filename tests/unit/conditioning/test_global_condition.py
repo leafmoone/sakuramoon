@@ -21,7 +21,20 @@ def _module() -> GlobalConditioner:
         active_slot_ids=tuple(range(24)),
         modulation_chunks=6,
         final_modulation_size=64,
+        norm_eps=1e-6,
     )
+
+
+def _condition_inputs(
+    batch: int,
+    *,
+    active: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    tokens = torch.randn(batch, 8, 32, dtype=torch.float32)
+    active_mask = (
+        torch.ones(batch, dtype=torch.bool) if active is None else active
+    )
+    return tokens, active_mask
 
 
 def test_fixed_embedding_zero_and_shape() -> None:
@@ -78,8 +91,16 @@ def test_target_canvas_condition_integrates_with_cfg_shared_inputs() -> None:
         captured_inputs.append(inputs[0].detach().clone())
 
     hook = module.condition_mlp.register_forward_pre_hook(capture_condition_input)
+    condition_tokens, condition_active = _condition_inputs(2)
     try:
-        output = module(timestep, cfg_size_scale, cfg_aspect, (0, 3))
+        output = module(
+            timestep,
+            cfg_size_scale,
+            cfg_aspect,
+            condition_tokens,
+            condition_active,
+            (0, 3),
+        )
     finally:
         hook.remove()
 
@@ -115,11 +136,13 @@ def test_target_canvas_condition_integrates_with_cfg_shared_inputs() -> None:
         rtol=1e-6,
     )
     torch.testing.assert_close(
-        output.condition_hidden[0],
-        output.condition_hidden[1],
+        output.base_hidden[0],
+        output.base_hidden[1],
         atol=0,
         rtol=0,
     )
+    torch.testing.assert_close(output.condition_residual, torch.zeros_like(output.condition_residual))
+    torch.testing.assert_close(output.total_hidden, output.base_hidden, atol=0, rtol=0)
 
 
 def test_modulation_paths_start_zero_and_are_independent() -> None:
@@ -128,10 +151,13 @@ def test_modulation_paths_start_zero_and_are_independent() -> None:
         torch.tensor([0.0, 1.0], dtype=torch.float32),
         torch.tensor([0.0, 0.5], dtype=torch.float32),
         torch.tensor([0.0, -1.0], dtype=torch.float32),
+        *_condition_inputs(2),
         (0, 3, 7),
     )
 
-    assert output.condition_hidden.shape == (2, 1024)
+    assert output.base_hidden.shape == (2, 1024)
+    assert output.condition_residual.shape == (2, 1024)
+    assert output.total_hidden.shape == (2, 1024)
     for tensor in (
         output.block.attention_scale,
         output.block.attention_shift,
@@ -159,6 +185,7 @@ def test_block_bias_chunks_follow_locked_modulation_order() -> None:
         torch.tensor([0.5], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
+        *_condition_inputs(1),
         (3,),
     )
 
@@ -184,11 +211,14 @@ def test_condition_parameters_and_outputs_remain_fp32_under_autocast() -> None:
             torch.tensor([0.5], dtype=torch.float32),
             torch.tensor([0.25], dtype=torch.float32),
             torch.tensor([-0.5], dtype=torch.float32),
+            *_condition_inputs(1),
             (0, 3),
         )
 
     assert {parameter.dtype for parameter in module.parameters()} == {torch.float32}
-    assert output.condition_hidden.dtype == torch.float32
+    assert output.base_hidden.dtype == torch.float32
+    assert output.condition_residual.dtype == torch.float32
+    assert output.total_hidden.dtype == torch.float32
     assert output.block.attention_scale.dtype == torch.float32
     assert output.final_scale.dtype == torch.float32
 
@@ -203,9 +233,10 @@ def test_final_path_applies_silu_and_does_not_reuse_block_projection() -> None:
         torch.tensor([0.5], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
+        *_condition_inputs(1),
         (0,),
     )
-    expected = torch.nn.functional.silu(output.condition_hidden).sum(dim=-1)
+    expected = torch.nn.functional.silu(output.total_hidden).sum(dim=-1)
 
     torch.testing.assert_close(output.final_scale[:, 0], expected)
     torch.testing.assert_close(output.final_shift[:, 0], expected)
@@ -217,6 +248,7 @@ def test_zero_initialized_outputs_receive_gradients() -> None:
         torch.tensor([0.25], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
+        *_condition_inputs(1),
         (2, 5),
     )
     loss = (
@@ -239,6 +271,7 @@ def test_active_slot_selection_removes_only_the_slot_axis() -> None:
         torch.tensor([0.25], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
+        *_condition_inputs(1),
         (2, 5),
     )
 
@@ -260,6 +293,7 @@ def test_rejects_invalid_timestep_metadata_and_slot() -> None:
             torch.tensor([0.5], dtype=torch.float64),
             torch.tensor([0.0], dtype=torch.float32),
             torch.tensor([0.0], dtype=torch.float32),
+            *_condition_inputs(1),
             (0,),
         )
     with pytest.raises(ValueError, match="slot"):
@@ -267,5 +301,59 @@ def test_rejects_invalid_timestep_metadata_and_slot() -> None:
             torch.tensor([0.5], dtype=torch.float32),
             torch.tensor([0.0], dtype=torch.float32),
             torch.tensor([0.0], dtype=torch.float32),
+            *_condition_inputs(1),
             (24,),
         )
+
+
+def test_global_condition_residual_masks_null_samples_exactly() -> None:
+    module = _module()
+    with torch.no_grad():
+        module.condition_global_projection.weight.fill_(0.25)
+    tokens, active = _condition_inputs(
+        2,
+        active=torch.tensor([True, False], dtype=torch.bool),
+    )
+
+    output = module(
+        torch.tensor([0.5, 0.5], dtype=torch.float32),
+        torch.zeros(2, dtype=torch.float32),
+        torch.zeros(2, dtype=torch.float32),
+        tokens,
+        active,
+        (0,),
+    )
+
+    assert torch.count_nonzero(output.condition_residual[0]) > 0
+    assert torch.count_nonzero(output.condition_residual[1]) == 0
+    torch.testing.assert_close(
+        output.total_hidden[1], output.base_hidden[1], atol=0, rtol=0
+    )
+
+
+def test_zero_initialized_global_projection_receives_gradient() -> None:
+    module = _module()
+    tokens, active = _condition_inputs(1)
+    output = module(
+        torch.tensor([0.25], dtype=torch.float32),
+        torch.tensor([0.0], dtype=torch.float32),
+        torch.tensor([0.0], dtype=torch.float32),
+        tokens,
+        active,
+        (2,),
+    )
+    with torch.no_grad():
+        module.shared_block_projection.weight.fill_(0.01)
+    output = module(
+        torch.tensor([0.25], dtype=torch.float32),
+        torch.tensor([0.0], dtype=torch.float32),
+        torch.tensor([0.0], dtype=torch.float32),
+        tokens,
+        active,
+        (2,),
+    )
+    output.block.attention_scale.sum().backward()
+
+    gradient = module.condition_global_projection.weight.grad
+    assert gradient is not None
+    assert torch.count_nonzero(gradient) > 0

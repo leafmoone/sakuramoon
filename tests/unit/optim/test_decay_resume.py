@@ -72,3 +72,20 @@ def test_checkpoint_restore_keeps_non_hyperparameter_fields_strict() -> None:
 
     with pytest.raises(CheckpointError, match="betas"):
         _validate_optimizer_state(saved, wrapper, successful_updates=0)
+
+
+def test_checkpoint_restore_allows_lazy_state_for_new_parameters() -> None:
+    wrapper = _optimizer_wrapper()
+    saved = copy.deepcopy(wrapper.optimizer.state_dict())
+    saved["state"][1] = {
+        "step": torch.tensor(10.0, dtype=torch.float32),
+        "exp_avg": torch.zeros(64, dtype=torch.float32),
+        "exp_avg_sq": torch.zeros(64, dtype=torch.float32),
+    }
+
+    _validate_optimizer_state(saved, wrapper, successful_updates=10)
+    wrapper.optimizer.load_state_dict(saved)
+
+    specs = {spec.name: spec for spec in wrapper.audit.specs}
+    assert specs["norm"].parameter in wrapper.optimizer.state
+    assert specs["matrix.weight"].parameter not in wrapper.optimizer.state

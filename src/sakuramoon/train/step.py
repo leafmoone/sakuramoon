@@ -34,18 +34,19 @@ def _complete_device_work(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
-def _condition_encoder_grad_norm(
+def _parameter_grad_norm(
     module: nn.Module,
     *,
+    predicate: Callable[[str, nn.Parameter], bool],
     device: torch.device,
 ) -> torch.Tensor:
     squared_norm = torch.zeros((), device=device, dtype=torch.float32)
     found = False
     for name, parameter in module.named_parameters():
-        if "condition_tokens" not in name.split(".") or parameter.grad is None:
+        if not predicate(name, parameter) or parameter.grad is None:
             continue
         if parameter.grad.is_sparse:
-            raise RuntimeError("sparse condition encoder gradients are unsupported")
+            raise RuntimeError("sparse diagnostic gradients are unsupported")
         squared_norm.add_(parameter.grad.float().square().sum())
         found = True
     if not found:
@@ -115,6 +116,7 @@ class TrainableComposite(nn.Module):
                 text.tokens,
                 text.mask,
                 condition.tokens,
+                condition.active_mask,
                 inputs.timestep,
                 inputs.size_scale,
                 inputs.aspect,
@@ -128,6 +130,7 @@ class TrainableComposite(nn.Module):
             text.mask,
             inputs.main_token_lengths,
             condition.tokens,
+            condition.active_mask,
             inputs.timestep,
             inputs.size_scale,
             inputs.aspect,
@@ -172,6 +175,7 @@ class SingleGpuUpdateResult:
     mean_loss: torch.Tensor
     clip: ClipResult
     condition_encoder_grad_norm: torch.Tensor
+    condition_global_projection_grad_norm: torch.Tensor
     microbatches: int
     effective_samples: int
     state: SingleGpuUpdateState
@@ -322,8 +326,18 @@ class SingleGpuStep:
                 for parameter in parameters:
                     if parameter.grad is not None:
                         parameter.grad.mul_(gradient_scale)
-                condition_encoder_grad_norm = _condition_encoder_grad_norm(
+                condition_encoder_grad_norm = _parameter_grad_norm(
                     self.module,
+                    predicate=lambda name, _parameter: (
+                        "condition_tokens" in name.split(".")
+                    ),
+                    device=self._device,
+                )
+                condition_global_projection_grad_norm = _parameter_grad_norm(
+                    self.module,
+                    predicate=lambda name, _parameter: name.endswith(
+                        "dit.conditioner.condition_global_projection.weight"
+                    ),
                     device=self._device,
                 )
                 clip = clip_grad_norm_fp32(parameters, max_norm=1.0)
@@ -393,6 +407,9 @@ class SingleGpuStep:
             mean_loss=self._loss_sum / self._samples,
             clip=clip,
             condition_encoder_grad_norm=condition_encoder_grad_norm,
+            condition_global_projection_grad_norm=(
+                condition_global_projection_grad_norm
+            ),
             microbatches=self._microbatches,
             effective_samples=self._samples,
             state=successful,

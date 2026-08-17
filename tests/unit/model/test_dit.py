@@ -87,6 +87,7 @@ def _inputs() -> tuple[torch.Tensor, ...]:
         torch.randn(1, 3, 8),
         torch.tensor([[True, True, False]]),
         torch.randn(1, 8, 8),
+        torch.tensor([True]),
         torch.tensor([0.5], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),
         torch.tensor([0.0], dtype=torch.float32),

@@ -409,7 +409,7 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
         else "dense_sdpa"
     )
     document: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "class": "TrainableComposite",
         "dit": {
             "active_slot_ids": list(active_slot_ids(config.stage.depth)),

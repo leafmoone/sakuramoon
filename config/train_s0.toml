@@ -2,7 +2,7 @@ extends = ["base.toml"]
 
 [sampling.training]
 enabled = true
-every_updates = 1000
+every_updates = 200
 image_count = 12
 output_subdir = "sample"
 

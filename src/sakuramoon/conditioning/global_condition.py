@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from sakuramoon.conditioning.norm import FP32RMSNorm
+
 FREQUENCY_BASE = 10000.0
 
 
@@ -35,7 +37,9 @@ class BlockModulation:
 
 @dataclass(frozen=True)
 class GlobalConditionOutput:
-    condition_hidden: torch.Tensor
+    base_hidden: torch.Tensor
+    condition_residual: torch.Tensor
+    total_hidden: torch.Tensor
     block: BlockModulation
     final_scale: torch.Tensor
     final_shift: torch.Tensor
@@ -69,6 +73,7 @@ class GlobalConditioner(nn.Module):
         active_slot_ids: tuple[int, ...],
         modulation_chunks: int,
         final_modulation_size: int,
+        norm_eps: float,
     ) -> None:
         super().__init__()
         if (
@@ -83,6 +88,7 @@ class GlobalConditioner(nn.Module):
             or any(slot_id < 0 or slot_id >= slot_count for slot_id in active_slot_ids)
             or modulation_chunks != 6
             or final_modulation_size != 2 * model_dim
+            or norm_eps <= 0.0
         ):
             raise ValueError("global condition dimensions violate the locked contract")
         self.timestep_dim = timestep_dim
@@ -99,6 +105,13 @@ class GlobalConditioner(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
+        self.condition_global_norm = FP32RMSNorm(model_dim, norm_eps)
+        self.condition_global_projection = nn.Linear(
+            model_dim,
+            hidden_dim,
+            bias=False,
+            dtype=torch.float32,
+        )
         modulation_size = modulation_chunks * model_dim
         self.shared_block_projection = nn.Linear(
             hidden_dim, modulation_size, bias=False
@@ -112,6 +125,7 @@ class GlobalConditioner(nn.Module):
         self.final_activation = nn.SiLU()
         self.final_projection = nn.Linear(hidden_dim, final_modulation_size, bias=True)
         nn.init.zeros_(self.shared_block_projection.weight)
+        nn.init.zeros_(self.condition_global_projection.weight)
         for bias in self.block_biases.values():
             nn.init.zeros_(bias)
         nn.init.zeros_(self.final_projection.weight)
@@ -122,6 +136,8 @@ class GlobalConditioner(nn.Module):
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
+        condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         slot_ids: tuple[int, ...],
     ) -> GlobalConditionOutput:
         if (
@@ -139,6 +155,26 @@ class GlobalConditioner(nn.Module):
             slot_id not in self.active_slot_ids for slot_id in slot_ids
         ):
             raise ValueError("slot_ids are empty or not present in this topology")
+        batch = timestep.shape[0]
+        if (
+            condition_tokens.ndim != 3
+            or condition_tokens.shape[0] != batch
+            or condition_tokens.shape[1] <= 0
+            or condition_tokens.shape[2] != self.model_dim
+            or not condition_tokens.is_floating_point()
+        ):
+            raise ValueError(
+                "condition_tokens must have shape [B,C,model_dim] and floating dtype"
+            )
+        if (
+            condition_active_mask.shape != (batch,)
+            or condition_active_mask.dtype != torch.bool
+            or condition_active_mask.device != condition_tokens.device
+            or condition_tokens.device != timestep.device
+        ):
+            raise ValueError(
+                "condition tokens, active mask, and global inputs must share one batch/device"
+            )
 
         device_type = timestep.device.type
         with torch.autocast(device_type=device_type, enabled=False):
@@ -150,8 +186,16 @@ class GlobalConditioner(nn.Module):
                 ),
                 dim=-1,
             )
-            condition_hidden = self.condition_mlp(embedded)
-            shared = self.shared_block_projection(condition_hidden)
+            base_hidden = self.condition_mlp(embedded)
+            normalized = self.condition_global_norm(condition_tokens.float())
+            pooled = normalized.mean(dim=1)
+            condition_residual = self.condition_global_projection(pooled)
+            condition_residual = condition_residual.masked_fill(
+                ~condition_active_mask[:, None],
+                0.0,
+            )
+            total_hidden = base_hidden + condition_residual
+            shared = self.shared_block_projection(total_hidden)
             selected_biases = torch.stack(
                 tuple(self.block_biases[f"slot_{slot_id:02d}"] for slot_id in slot_ids)
             )
@@ -163,11 +207,13 @@ class GlobalConditioner(nn.Module):
                 self.model_dim,
             ).unbind(dim=2)
             final_modulation = self.final_projection(
-                self.final_activation(condition_hidden)
+                self.final_activation(total_hidden)
             )
             final_scale, final_shift = final_modulation.chunk(2, dim=-1)
         return GlobalConditionOutput(
-            condition_hidden=condition_hidden,
+            base_hidden=base_hidden,
+            condition_residual=condition_residual,
+            total_hidden=total_hidden,
             block=BlockModulation(*chunks),
             final_scale=final_scale,
             final_shift=final_shift,

@@ -114,9 +114,9 @@ def test_production_composite_locks_trainable_fqn_boundary() -> None:
         and "vae" not in type(module).__name__.lower()
         for module in composite.modules()
     )
-    assert len(audit.specs) == 239
+    assert len(audit.specs) == 241
     assert len(audit.decay) == 126
-    assert len(audit.sensitive) == 113
+    assert len(audit.sensitive) == 115
 
 
 def test_unequal_microbatches_match_merged_sample_mean_update() -> None:

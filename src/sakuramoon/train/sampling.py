@@ -37,6 +37,19 @@ from sakuramoon.encoders.qwen import QwenRuntime
 from sakuramoon.objective.flow import guided_velocity
 from sakuramoon.sampling.sampler import sample_profile
 from sakuramoon.storage import repository_directory
+from sakuramoon.train.condition_diagnostics import (
+    FixedConditionPair,
+    TrainingSamplingError,
+    condition_representation_diagnostics,
+    global_path_diagnostics,
+    load_fixed_condition_pairs,
+)
+from sakuramoon.train.condition_diagnostics import (
+    metric_float as _metric_float,
+)
+from sakuramoon.train.condition_diagnostics import (
+    tensor_rms as _tensor_rms,
+)
 from sakuramoon.train.runtime import RuntimeMeasurement
 from sakuramoon.train.step import TrainableComposite, TrainableCompositeInputs
 
@@ -86,8 +99,16 @@ _DIAGNOSTIC_ITEM_INDICES = (0, 2, 4)
 _DIAGNOSTIC_TIMESTEPS = (0.2, 0.5, 0.8)
 
 
-class TrainingSamplingError(RuntimeError):
-    """A periodic training sample could not be generated or persisted."""
+def _condition_representation_diagnostics(
+    tokens: torch.Tensor,
+) -> dict[str, float]:
+    return condition_representation_diagnostics(
+        tokens,
+        expected_batch=_CFG_BRANCH_COUNT,
+        a_index=0,
+        b_index=1,
+        null_index=4,
+    )
 
 
 _NO_DROPOUT = empty_caption_dropout_hits()
@@ -472,55 +493,6 @@ def _shared_initial_noise(
     return base_noise.repeat(_VARIANT_COUNT, 1, 1, 1)
 
 
-def _tensor_rms(tensor: torch.Tensor) -> torch.Tensor:
-    if not tensor.is_floating_point() or tensor.numel() == 0:
-        raise TrainingSamplingError(
-            "diagnostic tensor must be nonempty floating point"
-        )
-    return tensor.float().square().mean().sqrt()
-
-
-def _tensor_cosine(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
-    if first.shape != second.shape or first.numel() == 0:
-        raise TrainingSamplingError("diagnostic cosine tensors must match")
-    left = first.float().flatten()
-    right = second.float().flatten()
-    return torch.dot(left, right) / (left.norm() * right.norm()).clamp_min(1e-12)
-
-
-def _metric_float(name: str, value: torch.Tensor) -> float:
-    result = float(value.detach().cpu().item())
-    if not math.isfinite(result):
-        raise TrainingSamplingError(f"condition diagnostic is nonfinite: {name}")
-    return result
-
-
-def _condition_representation_diagnostics(
-    tokens: torch.Tensor,
-) -> dict[str, float]:
-    if tokens.ndim != 3 or tokens.shape[0] != _CFG_BRANCH_COUNT:
-        raise TrainingSamplingError(
-            "condition diagnostic tokens must match the 24 CFG branches"
-        )
-    condition_a = tokens[0]
-    condition_b = tokens[1]
-    condition_null = tokens[4]
-    rms_a = _tensor_rms(condition_a)
-    rms_b = _tensor_rms(condition_b)
-    values = {
-        "condition_A_rms": rms_a,
-        "condition_B_rms": rms_b,
-        "condition_active_rms": 0.5 * (rms_a + rms_b),
-        "condition_null_rms": _tensor_rms(condition_null),
-        "condition_A_B_cosine": _tensor_cosine(condition_a, condition_b),
-        "condition_A_null_cosine": _tensor_cosine(condition_a, condition_null),
-        "condition_B_null_cosine": _tensor_cosine(condition_b, condition_null),
-        "condition_A_B_delta_rms": _tensor_rms(condition_a - condition_b),
-        "condition_A_null_delta_rms": _tensor_rms(condition_a - condition_null),
-    }
-    return {name: _metric_float(name, value) for name, value in values.items()}
-
-
 def _tag_metadata(tag: Tag) -> dict[str, str]:
     return {"text": tag.text, "canonical": tag.canonical}
 
@@ -652,6 +624,13 @@ class TrainingSampler:
         self.vae = vae
         self.device = device
         self.growth_alpha = growth_alpha
+        self.fixed_condition_pairs = (
+            load_fixed_condition_pairs(
+                repository_root / config.evaluation.prompt_path
+            )
+            if config.evaluation.enabled
+            else ()
+        )
         self.output_root = (
             repository_directory(repository_root, config.paths.checkpoint_dir)
             / config.sampling.training.output_subdir
@@ -737,6 +716,29 @@ class TrainingSampler:
             _tensor_rms(condition_after[4]),
         )
 
+        global_output = dit.conditioner(
+            torch.full(
+                (_VARIANT_COUNT,),
+                0.5,
+                dtype=torch.float32,
+                device=self.device,
+            ),
+            inputs.size_scale[:_VARIANT_COUNT],
+            inputs.aspect[:_VARIANT_COUNT],
+            conditional_condition,
+            condition.active_mask[:_VARIANT_COUNT],
+            dit.active_slot_ids,
+        )
+        diagnostics.update(
+            global_path_diagnostics(
+                global_output,
+                dit.conditioner.condition_global_projection.weight,
+                a_index=0,
+                b_index=1,
+                null_index=4,
+            )
+        )
+
         latent_batch = noise.to(dit.input_projection.weight.dtype)
         batch, channels, height, width = latent_batch.shape
         projected_image = dit.input_projection(
@@ -767,6 +769,7 @@ class TrainingSampler:
             condition,
             tokens=condition.tokens.index_select(0, indices),
             mask=condition.mask.index_select(0, indices),
+            active_mask=condition.active_mask.index_select(0, indices),
         )
         use_null = inputs.use_null_condition.index_select(0, indices)
         diagnostic_inputs = dataclasses.replace(
@@ -817,6 +820,227 @@ class TrainingSampler:
                 f"dit_null_relative_rms_{suffix}",
                 _tensor_rms(predictions[0] - predictions[2]) / denominator,
             )
+        return diagnostics
+
+    def _fixed_prompt_pair(
+        self,
+        pair: FixedConditionPair,
+        *,
+        framing: FramingContract,
+    ) -> _PromptPair:
+        prompts: list[_PostDropoutPrompt] = []
+        for case in (pair.a, pair.b):
+            plan = case.caption_plan
+            if plan is None:
+                raise TrainingSamplingError(
+                    f"fixed condition pair {pair.label} lacks a caption plan"
+                )
+            caption = serialize_caption(plan, self.qwen.tokenizer, framing)
+            if caption.plan != plan:
+                raise TrainingSamplingError(
+                    f"fixed condition pair {pair.label} cannot preserve its plan"
+                )
+            prompts.append(
+                _PostDropoutPrompt(
+                    sample_id=case.prompt_id,
+                    caption=caption,
+                    plan=plan,
+                    observed_height=case.height,
+                    observed_width=case.width,
+                )
+            )
+        return _PromptPair(prompts[0], prompts[1])
+
+    def _fixed_condition_diagnostics(
+        self,
+        *,
+        framing: FramingContract,
+    ) -> dict[str, float]:
+        if len(self.fixed_condition_pairs) != 4:
+            raise TrainingSamplingError(
+                "fixed condition diagnostics require exactly four pairs"
+            )
+        resolution = self.config.stage.resolution
+        items: list[TrainingSampleItem] = []
+        noise_rows: list[torch.Tensor] = []
+        for fixed_pair in self.fixed_condition_pairs:
+            pair = self._fixed_prompt_pair(fixed_pair, framing=framing)
+            variants = _build_variant_items(
+                pair,
+                tokenizer=self.qwen.tokenizer,
+                framing=framing,
+                resolution=resolution,
+            )
+            items.extend((variants[0], variants[2], variants[4]))
+            generator = torch.Generator(device=self.device)
+            generator.manual_seed(fixed_pair.a.seed % (2**63))
+            base_noise = torch.randn(
+                (128, resolution // 16, resolution // 16),
+                generator=generator,
+                device=self.device,
+                dtype=torch.float32,
+            )
+            noise_rows.extend((base_noise, base_noise, base_noise))
+
+        captions = tuple(item.caption for item in items)
+        (
+            input_ids,
+            attention_mask,
+            main_indices,
+            main_mask,
+            main_lengths,
+            condition_indices,
+            condition_mask,
+            use_null,
+            active_condition,
+        ) = _conditioning_inputs(
+            captions, tokenizer=self.qwen.tokenizer, device=self.device
+        )
+        qwen_output = self.qwen.encoder(input_ids, attention_mask)
+        qwen_states = getattr(qwen_output, "hidden_states", None)
+        if not isinstance(qwen_states, torch.Tensor):
+            raise TrainingSamplingError("Qwen output lacks fixed-cohort hidden states")
+        batch = len(items)
+        coordinates = tuple(
+            full_canvas_crop_coordinates(
+                resolution // 16,
+                resolution // 16,
+                full_height=resolution,
+                full_width=resolution,
+                crop_box=(0, 0, resolution, resolution),
+                device=self.device,
+            )
+            for _ in items
+        )
+        inputs = TrainableCompositeInputs(
+            qwen_states=qwen_states,
+            main_token_indices=main_indices,
+            main_mask=main_mask,
+            main_token_lengths=main_lengths,
+            condition_token_indices=condition_indices,
+            condition_mask=condition_mask,
+            use_null_condition=use_null,
+            active_condition_sample_indices=active_condition,
+            latents=tuple(
+                noise.to(torch.bfloat16) for noise in noise_rows
+            ),
+            image_coordinates=coordinates,
+            timestep=torch.zeros(batch, dtype=torch.float32, device=self.device),
+            size_scale=torch.full(
+                (batch,),
+                0.5 * math.log2((resolution * resolution) / float(512 * 512)),
+                dtype=torch.float32,
+                device=self.device,
+            ),
+            aspect=torch.zeros(batch, dtype=torch.float32, device=self.device),
+            growth_alpha=self.growth_alpha,
+        )
+        text, condition = self.composite.forward_conditioning(inputs)
+        diagnostics: dict[str, float] = {}
+        representation: list[dict[str, float]] = []
+        for pair_index in range(4):
+            offset = 3 * pair_index
+            representation.append(
+                condition_representation_diagnostics(
+                    condition.tokens,
+                    expected_batch=batch,
+                    a_index=offset,
+                    b_index=offset + 1,
+                    null_index=offset + 2,
+                )
+            )
+        for key in (
+            "condition_A_B_cosine",
+            "condition_A_B_delta_rms",
+            "condition_A_null_delta_rms",
+        ):
+            diagnostics[f"fixed_{key}"] = sum(item[key] for item in representation) / 4
+
+        dit = self.composite.dit
+        global_output = dit.conditioner(
+            torch.full((batch,), 0.5, dtype=torch.float32, device=self.device),
+            inputs.size_scale,
+            inputs.aspect,
+            condition.tokens,
+            condition.active_mask,
+            dit.active_slot_ids,
+        )
+        global_values = [
+            global_path_diagnostics(
+                global_output,
+                dit.conditioner.condition_global_projection.weight,
+                a_index=3 * pair_index,
+                b_index=3 * pair_index + 1,
+                null_index=3 * pair_index + 2,
+            )
+            for pair_index in range(4)
+        ]
+        for key in (
+            "global_base_rms",
+            "global_condition_active_rms",
+            "global_condition_to_base_ratio",
+            "global_total_rms",
+            "global_A_B_delta_rms",
+        ):
+            diagnostics[f"fixed_{key}"] = sum(item[key] for item in global_values) / 4
+        diagnostics["fixed_condition_global_projection_weight_rms"] = global_values[
+            0
+        ]["condition_global_projection_weight_rms"]
+        if all("global_A_B_cosine" in item for item in global_values):
+            diagnostics["fixed_global_A_B_cosine"] = sum(
+                item["global_A_B_cosine"] for item in global_values
+            ) / 4
+
+        group_indices = {
+            "all": range(4),
+            "style": range(2),
+            "identity": range(2, 4),
+        }
+        for timestep_value in _DIAGNOSTIC_TIMESTEPS:
+            timestep = torch.full(
+                (batch,),
+                timestep_value,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            predictions = torch.stack(
+                self.composite.forward_dit(
+                    dataclasses.replace(inputs, timestep=timestep),
+                    (text, condition),
+                )
+            )
+            swap_values: list[float] = []
+            null_values: list[float] = []
+            for pair_index in range(4):
+                offset = 3 * pair_index
+                denominator = _tensor_rms(predictions[offset]).clamp_min(1e-12)
+                swap_values.append(
+                    _metric_float(
+                        "fixed_dit_swap_relative_rms",
+                        _tensor_rms(
+                            predictions[offset] - predictions[offset + 1]
+                        )
+                        / denominator,
+                    )
+                )
+                null_values.append(
+                    _metric_float(
+                        "fixed_dit_null_relative_rms",
+                        _tensor_rms(
+                            predictions[offset] - predictions[offset + 2]
+                        )
+                        / denominator,
+                    )
+                )
+            suffix = f"t{round(timestep_value * 10):02d}"
+            for group, pair_indices in group_indices.items():
+                selected = tuple(pair_indices)
+                diagnostics[f"fixed_{group}_dit_swap_relative_rms_{suffix}"] = (
+                    sum(swap_values[index] for index in selected) / len(selected)
+                )
+                diagnostics[f"fixed_{group}_dit_null_relative_rms_{suffix}"] = (
+                    sum(null_values[index] for index in selected) / len(selected)
+                )
         return diagnostics
 
     def _generate_batch(
@@ -901,6 +1125,7 @@ class TrainingSampler:
             device=self.device,
         )
         diagnostics = self._condition_diagnostics(inputs, conditioning, noise)
+        diagnostics.update(self._fixed_condition_diagnostics(framing=framing))
 
         def velocity(state: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
             if state.shape != noise.shape or timestep.shape != (_VARIANT_COUNT,):
