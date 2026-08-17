@@ -63,10 +63,10 @@ VariantName = Literal[
     "B-null",
     "A-with-BA",
     "B-with-BA",
-    "A-zoom",
-    "B-zoom",
-    "A-shift-zoom",
-    "B-shift-zoom",
+    "A-zoom-mild",
+    "A-zoom-strong",
+    "A-shift-zoom-mild",
+    "A-shift-zoom-strong",
 ]
 GeometryKind = Literal["canonical", "zoom", "shift_zoom"]
 CoordinateType = Literal[
@@ -76,25 +76,32 @@ CoordinateType = Literal[
 ]
 
 _VARIANT_DEFINITIONS: tuple[
-    tuple[VariantName, PromptLabel, tuple[PromptLabel, ...], GeometryKind], ...
+    tuple[
+        VariantName,
+        PromptLabel,
+        tuple[PromptLabel, ...],
+        GeometryKind,
+        float,
+    ],
+    ...,
 ] = (
-    ("A-base", "A", ("A",), "canonical"),
-    ("B-base", "B", ("B",), "canonical"),
-    ("A-with-B", "A", ("B",), "canonical"),
-    ("B-with-A", "B", ("A",), "canonical"),
-    ("A-null", "A", (), "canonical"),
-    ("B-null", "B", (), "canonical"),
-    ("A-with-BA", "A", ("B", "A"), "canonical"),
-    ("B-with-BA", "B", ("B", "A"), "canonical"),
-    ("A-zoom", "A", ("A",), "zoom"),
-    ("B-zoom", "B", ("B",), "zoom"),
-    ("A-shift-zoom", "A", ("A",), "shift_zoom"),
-    ("B-shift-zoom", "B", ("B",), "shift_zoom"),
+    ("A-base", "A", ("A",), "canonical", 1.0),
+    ("B-base", "B", ("B",), "canonical", 1.0),
+    ("A-with-B", "A", ("B",), "canonical", 1.0),
+    ("B-with-A", "B", ("A",), "canonical", 1.0),
+    ("A-null", "A", (), "canonical", 1.0),
+    ("B-null", "B", (), "canonical", 1.0),
+    ("A-with-BA", "A", ("B", "A"), "canonical", 1.0),
+    ("B-with-BA", "B", ("B", "A"), "canonical", 1.0),
+    ("A-zoom-mild", "A", ("A",), "zoom", 1.10),
+    ("A-zoom-strong", "A", ("A",), "zoom", 1.50),
+    ("A-shift-zoom-mild", "A", ("A",), "shift_zoom", 1.10),
+    ("A-shift-zoom-strong", "A", ("A",), "shift_zoom", 1.50),
 )
 _VARIANT_NAMES = tuple(definition[0] for definition in _VARIANT_DEFINITIONS)
 _VARIANT_COUNT = 12
 _CFG_BRANCH_COUNT = 24
-_ZOOM = 1.5
+_GEOMETRY_PROTOCOL = "tiered-zoom-v1"
 _DIAGNOSTIC_ITEM_INDICES = (0, 2, 4)
 _DIAGNOSTIC_TIMESTEPS = (0.2, 0.5, 0.8)
 
@@ -328,6 +335,7 @@ def _select_prompt_pair(
 def _variant_geometry(
     resolution: int,
     kind: GeometryKind,
+    requested_zoom: float,
 ) -> tuple[float, tuple[int, int], tuple[int, int, int, int], CoordinateType]:
     if type(resolution) is not int or resolution <= 0 or resolution % 16:
         raise TrainingSamplingError(
@@ -338,13 +346,23 @@ def _variant_geometry(
             "stage resolution must support exact shift-zoom quarters"
         )
     if kind == "canonical":
+        if requested_zoom != 1.0:
+            raise TrainingSamplingError("canonical geometry must use unit zoom")
         return (
             1.0,
             (resolution, resolution),
             (0, 0, resolution, resolution),
             "canonical_full_canvas",
         )
-    virtual = 3 * resolution // 2
+    if (
+        type(requested_zoom) is not float
+        or not math.isfinite(requested_zoom)
+        or requested_zoom <= 1.0
+    ):
+        raise TrainingSamplingError(
+            "spatial geometry zoom must be finite and above one"
+        )
+    virtual = math.floor(resolution * requested_zoom + 0.5)
     available = virtual - resolution
     centered = available // 2
     if kind == "zoom":
@@ -358,7 +376,7 @@ def _variant_geometry(
     else:
         raise TrainingSamplingError("unknown training sample geometry")
     return (
-        _ZOOM,
+        virtual / resolution,
         (virtual, virtual),
         (left, top, left + resolution, top + resolution),
         coordinate_type,
@@ -374,9 +392,13 @@ def _build_variant_items(
 ) -> tuple[TrainingSampleItem, ...]:
     sources: dict[PromptLabel, _PostDropoutPrompt] = {"A": pair.a, "B": pair.b}
     items: list[TrainingSampleItem] = []
-    for ordinal, (variant, main_label, condition_labels, geometry) in enumerate(
-        _VARIANT_DEFINITIONS
-    ):
+    for ordinal, (
+        variant,
+        main_label,
+        condition_labels,
+        geometry,
+        requested_zoom,
+    ) in enumerate(_VARIANT_DEFINITIONS):
         main = sources[main_label]
         source_conditions = tuple(
             sources[condition_label].plan.condition
@@ -412,7 +434,7 @@ def _build_variant_items(
                 f"variant {variant} cannot preserve its complete structured plan"
             )
         zoom, virtual_canvas, crop_box, coordinate_type = _variant_geometry(
-            resolution, geometry
+            resolution, geometry, requested_zoom
         )
         items.append(
             TrainingSampleItem(
@@ -1267,6 +1289,7 @@ class TrainingSampler:
         ]
         metadata = {
             "schema_version": 3,
+            "geometry_protocol": _GEOMETRY_PROTOCOL,
             "update": update,
             "profile": self.config.sampling.profile,
             "A_sample_id": pair.a.sample_id,
