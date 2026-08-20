@@ -91,7 +91,27 @@ class IsolatedAdamW8bit:
         if not isinstance(optimizer_state, dict) or not isinstance(sr_state, dict):
             raise TypeError("optimizer and SR RNG state must be mappings")
         self.optimizer.load_state_dict(cast(dict[str, object], optimizer_state))
+        self._move_quantized_state_to_parameter_devices()
         self.sr_rng.load_state_dict(cast(dict[str, object], sr_state))
+
+    def _move_quantized_state_to_parameter_devices(self) -> None:
+        """Keep restored AdamW8bit moments on the parameter HCU."""
+
+        for spec in self.audit.specs:
+            state = self.optimizer.state.get(spec.parameter)
+            if not state:
+                continue
+            target = spec.parameter.device
+            for name, value in tuple(state.items()):
+                if name == "step" or not isinstance(value, torch.Tensor):
+                    continue
+                if value.device != target:
+                    moved = value.to(device=target)
+                    if type(moved) is not type(value) or moved.device != target:
+                        raise RuntimeError(
+                            "restored AdamW8bit moment lost its quantized device binding"
+                        )
+                    state[name] = moved
 
     def audit_state(self) -> tuple[OptimizerStateSpec, ...]:
         """Validate lazy/quantized state and report physical bytes by canonical FQN."""
