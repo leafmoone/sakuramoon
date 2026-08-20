@@ -35,6 +35,7 @@ from sakuramoon.train.runtime import (
     require_single_gpu_checkpoint_binding,
     require_single_gpu_config,
 )
+from sakuramoon.train.stage import canonical_growth_alpha
 
 if TYPE_CHECKING:
     from sakuramoon.config.schema import RuntimeConfig
@@ -236,7 +237,12 @@ class ProductionSingleGpuCheckpointPublisher:
         )
         raw_state = RawCheckpointState(
             trainer=state,
-            growth=restored.growth,
+            growth=replace(
+                restored.growth,
+                alpha=canonical_growth_alpha(
+                    restored.growth, state.successful_updates
+                ),
+            ),
             stage_budget=restored.stage_budget,
             checkpoint_cadence=cadence,
         )

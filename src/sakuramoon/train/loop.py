@@ -87,6 +87,7 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         successful_update_observer: Callable[[SuccessfulLoopObservation], None]
         | None = None,
         effective_sample_multiplier: int = 1,
+        growth_alpha_for_update: Callable[[int], float] | None = None,
         backward: Callable[[torch.Tensor], None] | None = None,
         no_sync: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> None:
@@ -102,6 +103,11 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         self.loss_fn = loss_fn
         self.accumulation_steps = accumulation_steps
         self.effective_sample_multiplier = effective_sample_multiplier
+        if growth_alpha_for_update is not None and not callable(
+            growth_alpha_for_update
+        ):
+            raise TypeError("growth_alpha_for_update must be callable")
+        self.growth_alpha_for_update = growth_alpha_for_update
         self.backward = backward
         self.no_sync = no_sync
         self.target_successful_updates = target_successful_updates
@@ -208,6 +214,13 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                 accumulation_steps=self.accumulation_steps,
                 state=self.state,
                 effective_sample_multiplier=self.effective_sample_multiplier,
+                growth_alpha=(
+                    1.0
+                    if self.growth_alpha_for_update is None
+                    else self.growth_alpha_for_update(
+                        self.state.successful_updates + 1
+                    )
+                ),
                 backward=self.backward,
             )
             active_detection_boundary = "data"

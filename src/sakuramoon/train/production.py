@@ -46,7 +46,7 @@ from sakuramoon.distributed import DistributedProgress
 from sakuramoon.encoders.mage_vae import FrozenMageVAE, load_local_mage_vae
 from sakuramoon.encoders.qwen import QwenRuntime, load_local_qwen
 from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
-from sakuramoon.model.growth import active_slot_ids
+from sakuramoon.model.growth import active_slot_ids, growth_ramp_updates
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
 from sakuramoon.optim.dtk import configure_tunableop
 from sakuramoon.storage import repository_directory
@@ -73,6 +73,11 @@ from sakuramoon.train.runtime import (
 )
 from sakuramoon.train.sampling import TrainingSampler
 from sakuramoon.train.step import SingleGpuUpdateState, TrainableComposite
+from sakuramoon.train.stage import (
+    GrowthProgress,
+    canonical_growth_alpha,
+    checkpoint_reason,
+)
 
 
 class ProductionReadinessError(RuntimeError):
@@ -402,16 +407,19 @@ class _SuccessfulUpdateLrScheduler:
 def _initial_raw_state(
     config: RuntimeConfig, *, wall_clock: float
 ) -> RawCheckpointState:
+    growth_enabled = config.growth.enabled
     return RawCheckpointState(
         trainer=SingleGpuUpdateState.initial(),
         growth=GrowthCheckpointState(
             active_slot_ids(config.stage.depth),
-            1.0,
+            0.0 if growth_enabled else 1.0,
             config.stage.name,
             config.stage.world_size,
             config.stage.resolution,
-            None,
-            None,
+            0 if growth_enabled else None,
+            growth_ramp_updates(config.stage.planned_updates)
+            if growth_enabled
+            else None,
         ),
         stage_budget=StageBudgetCheckpointState(0, config.stage.planned_updates),
         checkpoint_cadence=CheckpointCadence(
@@ -420,6 +428,27 @@ def _initial_raw_state(
             config.checkpoint.full_every_updates,
         ),
     )
+
+
+def _forced_production_checkpoint_reason(
+    state: RawCheckpointState,
+    *,
+    initial_update: int,
+    update: int,
+) -> CheckpointReason | None:
+    """Resolve durable G1 ramp points without duplicating cadence saves."""
+
+    if type(initial_update) is not int or type(update) is not int:
+        raise TypeError("forced checkpoint updates must be integers")
+    if update <= initial_update:
+        return None
+    if state.growth.ramp_start_successful_update is not None:
+        forced = GrowthProgress.from_checkpoint(state).forced_checkpoint(update)
+        if forced is not None and forced.value != "post-transition":
+            return checkpoint_reason(forced)
+    if update == state.stage_budget.terminal_successful_update:
+        return CheckpointReason.STAGE_FINALIZE
+    return None
 
 
 def _bootstrap_checkpoint(
@@ -458,8 +487,10 @@ def _resume_state_for_config(
     """Apply explicit governed resume-policy changes to a validated RAW state."""
 
     terminal = state.stage_budget.terminal_successful_update
-    configured = config.stage.planned_updates
-    if configured < terminal:
+    configured_terminal = (
+        state.stage_budget.start_successful_update + config.stage.planned_updates
+    )
+    if configured_terminal < terminal:
         raise ValueError("configured planned updates cannot shrink checkpoint budget")
     resumed = state
     if state.growth.world_size != config.stage.world_size:
@@ -474,13 +505,13 @@ def _resume_state_for_config(
             resumed,
             growth=replace(state.growth, world_size=config.stage.world_size),
         )
-    if configured != terminal:
-        _log(f"扩展训练总步数: {terminal} -> {configured}")
+    if configured_terminal != terminal:
+        _log(f"扩展训练总步数: {terminal} -> {configured_terminal}")
         resumed = replace(
             resumed,
             stage_budget=StageBudgetCheckpointState(
                 state.stage_budget.start_successful_update,
-                configured,
+                configured_terminal,
             ),
         )
     persisted_interval = state.checkpoint_cadence.every_successful_updates
@@ -1015,6 +1046,9 @@ def _run_accepted_lifecycle(
                                 "rank zero training sampler is unavailable"
                             )
                         with observation.phase_timer.record("sample"):
+                            training_sampler.set_growth_alpha(
+                                canonical_growth_alpha(restored.state.growth, update)
+                            )
                             samples = training_sampler.sample(
                                 update, observation.microbatches
                             )
@@ -1024,7 +1058,13 @@ def _run_accepted_lifecycle(
                             successful_update=update,
                         )
                         telemetry.submit_wandb_metrics(
-                            {"training_samples/count": len(samples.paths)},
+                            {
+                                "training_samples/count": len(samples.paths),
+                                **{
+                                    f"condition_diagnostics/{key}": value
+                                    for key, value in samples.diagnostics.items()
+                                },
+                            },
                             successful_update=update,
                         )
 
@@ -1042,6 +1082,9 @@ def _run_accepted_lifecycle(
                     if evaluator is not None and evaluator.due(update):
                         if evaluation_is_splits is None:
                             raise RuntimeError("evaluation config is unavailable")
+                        evaluator.set_growth_alpha(
+                            canonical_growth_alpha(restored.state.growth, update)
+                        )
                         evaluation = evaluator.evaluate(update)
                         if is_main_process:
                             if evaluation is None:
@@ -1095,11 +1138,12 @@ def _run_accepted_lifecycle(
                         restored_checkpoint=restored,
                         phase_timer=telemetry.phase_timer,
                         successful_update_observer=observe_successful_update,
-                        forced_checkpoint=lambda update: (
-                            CheckpointReason.STAGE_FINALIZE
-                            if update
-                            == restored.state.stage_budget.terminal_successful_update
-                            else None
+                        forced_checkpoint=(
+                            lambda update: _forced_production_checkpoint_reason(
+                                restored.state,
+                                initial_update=initial_update,
+                                update=update,
+                            )
                         ),
                         verified_checkpoint_observer=verified_checkpoints.append,
                         backward=(

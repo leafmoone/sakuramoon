@@ -16,6 +16,7 @@ from sakuramoon.conditioning.condition_tokens import (
 )
 from sakuramoon.conditioning.text_mixer import TextConditioner, TextConditioningOutput
 from sakuramoon.model.dit import DenseDiT, PackedDiT
+from sakuramoon.model.growth import new_slot_fqn_prefixes
 from sakuramoon.optim.clip import ClipResult, clip_grad_norm_fp32
 from sakuramoon.telemetry.timers import PhaseTimer
 
@@ -32,6 +33,26 @@ def _record_phase(timer: PhaseTimer | None, phase: str) -> Generator[None]:
 def _complete_device_work(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+
+
+def _parameter_grad_norm(
+    module: nn.Module,
+    *,
+    predicate: Callable[[str, nn.Parameter], bool],
+    device: torch.device,
+) -> torch.Tensor:
+    squared_norm = torch.zeros((), device=device, dtype=torch.float32)
+    found = False
+    for name, parameter in module.named_parameters():
+        if not predicate(name, parameter) or parameter.grad is None:
+            continue
+        if parameter.grad.is_sparse:
+            raise RuntimeError("sparse diagnostic gradients are unsupported")
+        squared_norm.add_(parameter.grad.float().square().sum())
+        found = True
+    if not found:
+        return squared_norm
+    return squared_norm.sqrt()
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +117,7 @@ class TrainableComposite(nn.Module):
                 text.tokens,
                 text.mask,
                 condition.tokens,
+                condition.active_mask,
                 inputs.timestep,
                 inputs.size_scale,
                 inputs.aspect,
@@ -109,6 +131,7 @@ class TrainableComposite(nn.Module):
             text.mask,
             inputs.main_token_lengths,
             condition.tokens,
+            condition.active_mask,
             inputs.timestep,
             inputs.size_scale,
             inputs.aspect,
@@ -152,9 +175,15 @@ class SingleGpuUpdateState:
 class SingleGpuUpdateResult:
     mean_loss: torch.Tensor
     clip: ClipResult
+    condition_encoder_grad_norm: torch.Tensor
+    condition_global_projection_grad_norm: torch.Tensor
     microbatches: int
     effective_samples: int
     state: SingleGpuUpdateState
+    growth_alpha: float = 1.0
+    growth_new_block_grad_norm: torch.Tensor | None = None
+    growth_new_conditioner_grad_norm: torch.Tensor | None = None
+    growth_new_slot_grad_norm: torch.Tensor | None = None
 
 
 class StepOptimizer(Protocol):
@@ -174,6 +203,7 @@ class SingleGpuStep:
         accumulation_steps: int,
         state: SingleGpuUpdateState,
         effective_sample_multiplier: int = 1,
+        growth_alpha: float = 1.0,
         backward: Callable[[torch.Tensor], None] | None = None,
     ) -> None:
         if type(accumulation_steps) is not int or accumulation_steps <= 0:
@@ -186,10 +216,13 @@ class SingleGpuStep:
             or (backward is not None and not callable(backward))
         ):
             raise ValueError("distributed step controls are invalid")
+        if type(growth_alpha) is not float or not 0.0 <= growth_alpha <= 1.0:
+            raise ValueError("growth_alpha must be a float in [0,1]")
         self.module = module
         self.optimizer = optimizer
         self.accumulation_steps = accumulation_steps
         self.effective_sample_multiplier = effective_sample_multiplier
+        self.growth_alpha = growth_alpha
         self._backward = backward
         self._state: SingleGpuUpdateState = state
         self._microbatches = 0
@@ -302,6 +335,46 @@ class SingleGpuStep:
                 for parameter in parameters:
                     if parameter.grad is not None:
                         parameter.grad.mul_(gradient_scale)
+                condition_encoder_grad_norm = _parameter_grad_norm(
+                    self.module,
+                    predicate=lambda name, _parameter: (
+                        "condition_tokens" in name.split(".")
+                    ),
+                    device=self._device,
+                )
+                condition_global_projection_grad_norm = _parameter_grad_norm(
+                    self.module,
+                    predicate=lambda name, _parameter: name.endswith(
+                        "dit.conditioner.condition_global_projection.weight"
+                    ),
+                    device=self._device,
+                )
+                try:
+                    prefixes = new_slot_fqn_prefixes(self.module.dit.depth)
+                except (AttributeError, ValueError):
+                    prefixes = ()
+                block_prefixes = tuple(
+                    prefix for prefix in prefixes if prefix.startswith("dit.blocks.")
+                )
+                conditioner_names = tuple(
+                    prefix
+                    for prefix in prefixes
+                    if prefix.startswith("dit.conditioner.")
+                )
+                growth_new_block_grad_norm = _parameter_grad_norm(
+                    self.module,
+                    predicate=lambda name, _parameter: name.startswith(block_prefixes),
+                    device=self._device,
+                )
+                growth_new_conditioner_grad_norm = _parameter_grad_norm(
+                    self.module,
+                    predicate=lambda name, _parameter: name in conditioner_names,
+                    device=self._device,
+                )
+                growth_new_slot_grad_norm = torch.sqrt(
+                    growth_new_block_grad_norm.square()
+                    + growth_new_conditioner_grad_norm.square()
+                )
                 clip = clip_grad_norm_fp32(parameters, max_norm=1.0)
         except BaseException as error:
             self._detection_phase = "clip"
@@ -368,9 +441,17 @@ class SingleGpuStep:
         result = SingleGpuUpdateResult(
             mean_loss=self._loss_sum / self._samples,
             clip=clip,
+            condition_encoder_grad_norm=condition_encoder_grad_norm,
+            condition_global_projection_grad_norm=(
+                condition_global_projection_grad_norm
+            ),
             microbatches=self._microbatches,
             effective_samples=self._samples,
             state=successful,
+            growth_alpha=self.growth_alpha,
+            growth_new_block_grad_norm=growth_new_block_grad_norm,
+            growth_new_conditioner_grad_norm=growth_new_conditioner_grad_norm,
+            growth_new_slot_grad_norm=growth_new_slot_grad_norm,
         )
         self._state = result.state
         self._microbatches = 0

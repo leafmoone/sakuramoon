@@ -53,7 +53,7 @@ NOISE_T_BIN_LABELS = tuple(
     f"bin_{index:02d}_t{index * 5:03d}_{(index + 1) * 5:03d}"
     for index in range(NOISE_T_BIN_COUNT)
 )
-TRAINING_METRIC_SCHEMA_VERSION = 5
+TRAINING_METRIC_SCHEMA_VERSION = 8
 DROPOUT_KEYS = CAPTION_DROPOUT_KEYS
 
 
@@ -85,6 +85,8 @@ class TrainingMetric:
     t_bin_sample_counts: tuple[int, ...]
     pre_clip_grad_norm: float
     post_clip_grad_norm: float
+    condition_encoder_grad_norm: float
+    condition_global_projection_grad_norm: float
     clip_fraction: float
     learning_rate: float
     timestep_min: float
@@ -104,6 +106,10 @@ class TrainingMetric:
     dropout_hits: Mapping[str, int]
     condition_routes: Mapping[str, int]
     phase_seconds: Mapping[str, float]
+    growth_alpha: float = 1.0
+    growth_new_slot_grad_norm: float = 0.0
+    growth_new_block_grad_norm: float = 0.0
+    growth_new_conditioner_grad_norm: float = 0.0
 
     def __post_init__(self) -> None:
         _nonnegative_int("successful_update", self.successful_update, positive=True)
@@ -128,6 +134,8 @@ class TrainingMetric:
         for name in (
             "pre_clip_grad_norm",
             "post_clip_grad_norm",
+            "condition_encoder_grad_norm",
+            "condition_global_projection_grad_norm",
             "learning_rate",
             "timestep_min",
             "timestep_max",
@@ -135,11 +143,17 @@ class TrainingMetric:
             "timestep_std",
             "samples_per_second",
             "ready_queue_wait_seconds",
+            "growth_alpha",
+            "growth_new_slot_grad_norm",
+            "growth_new_block_grad_norm",
+            "growth_new_conditioner_grad_norm",
         ):
             _finite_float(name, getattr(self, name), minimum=0.0)
         _finite_float("clip_fraction", self.clip_fraction, minimum=0.0)
         if self.clip_fraction > 1.0:
             raise ValueError("clip_fraction must not exceed one")
+        if not 0.0 <= self.growth_alpha <= 1.0:
+            raise ValueError("growth_alpha must be in [0,1]")
         if self.post_clip_grad_norm > self.pre_clip_grad_norm:
             raise ValueError("post-clip gradient norm must not exceed pre-clip norm")
         if not (
@@ -230,6 +244,10 @@ class TrainingMetric:
             ),
             "pre_clip_grad_norm": self.pre_clip_grad_norm,
             "post_clip_grad_norm": self.post_clip_grad_norm,
+            "condition_encoder_grad_norm": self.condition_encoder_grad_norm,
+            "condition_global_projection_grad_norm": (
+                self.condition_global_projection_grad_norm
+            ),
             "clip_fraction": self.clip_fraction,
             "learning_rate": self.learning_rate,
             "timestep_min": self.timestep_min,
@@ -249,6 +267,10 @@ class TrainingMetric:
             "dropout_hits": dict(self.dropout_hits),
             "condition_routes": dict(self.condition_routes),
             "phase_seconds": dict(self.phase_seconds),
+            "growth_alpha": self.growth_alpha,
+            "growth_new_slot_grad_norm": self.growth_new_slot_grad_norm,
+            "growth_new_block_grad_norm": self.growth_new_block_grad_norm,
+            "growth_new_conditioner_grad_norm": self.growth_new_conditioner_grad_norm,
         }
 
     def as_wandb_mapping(self) -> dict[str, int | float]:

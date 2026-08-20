@@ -405,6 +405,13 @@ class TrainingEvaluator:
         self._feature_models: EvaluationFeatureModels | None = None
         self._real_features: ImageFeatureBatch | None = None
 
+    def set_growth_alpha(self, value: float) -> None:
+        """Select the canonical alpha for the update being evaluated."""
+
+        if type(value) is not float or not 0.0 <= value <= 1.0:
+            raise ValueError("growth_alpha must be a float in [0,1]")
+        self.growth_alpha = value
+
     def due(self, update: int) -> bool:
         return update > 0 and update % self.evaluation.every_updates == 0
 

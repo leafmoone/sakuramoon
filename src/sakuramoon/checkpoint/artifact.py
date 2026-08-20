@@ -13,7 +13,7 @@ from sakuramoon.model.dit import DenseDiT, PackedDiT
 from sakuramoon.train.step import TrainableComposite
 
 _DTYPES = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-_ARCHITECTURE_SCHEMA_VERSION = 2
+_ARCHITECTURE_SCHEMA_VERSION = 3
 _ROOT_KEYS = {"schema_version", "class", "dit", "text", "condition_tokens"}
 _DIT_META_KEYS = {"active_slot_ids", "attention_backend"}
 _STATE_COMPATIBLE_ATTENTION_BACKENDS = {
@@ -56,6 +56,8 @@ def export_trainable_composite(module: nn.Module) -> dict[str, object]:
         )
     if composite.dit.condition_token_count != composite.condition_tokens.token_count:
         raise ValueError("DiT and condition-token encoder counts differ")
+    if composite.dit.hidden_size != composite.condition_tokens.output_size:
+        raise ValueError("DiT and condition-token encoder widths differ")
     parameters = tuple(composite.named_parameters(remove_duplicate=False))
     if not parameters or any(not parameter.requires_grad for _, parameter in parameters):
         raise ValueError("checkpoint composite parameters must all be trainable")

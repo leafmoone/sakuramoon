@@ -25,7 +25,13 @@ from sakuramoon.model.attention import (
     dense_attention_mask,
 )
 from sakuramoon.model.block import DiTBlock, PackedDiTBlock
-from sakuramoon.model.growth import active_slot_ids, slot_growth, slot_name
+from sakuramoon.model.growth import (
+    active_slot_ids,
+    new_slot_ids,
+    packed_growth_alpha,
+    slot_growth,
+    slot_name,
+)
 from sakuramoon.model.output_head import FinalOutputHead
 
 ActivationCheckpointMode = Literal["none", "alternating", "all"]
@@ -274,6 +280,7 @@ class DenseDiT(nn.Module):
             active_slot_ids=slots,
             modulation_chunks=modulation_chunks,
             final_modulation_size=final_modulation_size,
+            norm_eps=norm_eps,
         )
         self.blocks = nn.ModuleDict(
             {
@@ -393,6 +400,7 @@ class DenseDiT(nn.Module):
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
         condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -411,6 +419,8 @@ class DenseDiT(nn.Module):
             timestep,
             size_scale,
             aspect,
+            condition_tokens,
+            condition_active_mask,
             self.active_slot_ids,
         )
         attention_mask = dense_attention_mask(token_mask)
@@ -466,6 +476,7 @@ class DenseDiT(nn.Module):
         text_tokens: torch.Tensor,
         text_mask: torch.Tensor,
         condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -478,6 +489,7 @@ class DenseDiT(nn.Module):
             text_tokens,
             text_mask,
             condition_tokens,
+            condition_active_mask,
             timestep,
             size_scale,
             aspect,
@@ -612,6 +624,7 @@ class PackedDiT(nn.Module):
             active_slot_ids=slots,
             modulation_chunks=modulation_chunks,
             final_modulation_size=final_modulation_size,
+            norm_eps=norm_eps,
         )
         self.blocks = nn.ModuleDict(
             {
@@ -700,11 +713,7 @@ class PackedDiT(nn.Module):
             _, height, width = latent.shape
             image_shapes.append((height, width))
 
-        if (
-            not self.training
-            and not torch.is_grad_enabled()
-            and len(set(image_shapes)) == 1
-        ):
+        if len(set(image_shapes)) == 1:
             height, width = image_shapes[0]
             latent_batch = torch.stack(latents)
             projected = self.input_projection(
@@ -742,6 +751,8 @@ class PackedDiT(nn.Module):
     def forward_packed_features(
         self,
         packed: PackedSequences,
+        condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -765,11 +776,25 @@ class PackedDiT(nn.Module):
             timestep,
             size_scale,
             aspect,
+            condition_tokens,
+            condition_active_mask,
             self.active_slot_ids,
         )
         joint = packed.tokens
+        growth_slots = new_slot_ids(self.depth)
+        dynamic_growth = (
+            packed_growth_alpha(self.depth, growth_alpha, packed.tokens)
+            if growth_slots
+            else None
+        )
         for active_index, slot_id in enumerate(self.active_slot_ids):
-            growth = slot_growth(self.depth, slot_id, growth_alpha)
+            growth = (
+                dynamic_growth
+                if slot_id in growth_slots
+                else slot_growth(self.depth, slot_id, growth_alpha)
+            )
+            if growth is None:
+                raise RuntimeError("new growth slots require a device growth scalar")
             block = self.blocks[slot_name(slot_id)]
             modulation = condition.block.for_active_index(active_index)
             if _checkpoint_block_at(
@@ -848,6 +873,8 @@ class PackedDiT(nn.Module):
     def forward_packed(
         self,
         packed: PackedSequences,
+        condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -858,6 +885,8 @@ class PackedDiT(nn.Module):
         return self.predict_from_features(
             self.forward_packed_features(
                 packed,
+                condition_tokens,
+                condition_active_mask,
                 timestep,
                 size_scale,
                 aspect,
@@ -873,6 +902,7 @@ class PackedDiT(nn.Module):
         text_mask: torch.Tensor,
         text_lengths: tuple[int, ...],
         condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -889,6 +919,8 @@ class PackedDiT(nn.Module):
         )
         return self.forward_packed(
             packed,
+            condition_tokens,
+            condition_active_mask,
             timestep,
             size_scale,
             aspect,

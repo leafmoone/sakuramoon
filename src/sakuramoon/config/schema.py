@@ -335,6 +335,8 @@ class NlDropoutConfig(StrictModel):
 
 class CaptionDropoutConfig(StrictModel):
     all_condition: FixedPointOne
+    condition_route: FixedZero
+    condition_only: FixedZero
     tag: FixedPointOne
     candidate_source: FixedPointThree
     nl: NlDropoutConfig
@@ -666,6 +668,20 @@ class StageConfig(StrictModel):
             raise ValueError(
                 "stage global_batch must equal local_batch * accumulation * world_size"
             )
+        if self.name == "S0" and (
+            self.predecessor != ""
+            or self.world_size != 2
+            or self.depth != 16
+            or self.resolution != 256
+        ):
+            raise ValueError("S0 topology must be world_size=2, depth=16, resolution=256")
+        if self.name == "G1" and (
+            self.predecessor != "S0"
+            or self.world_size != 2
+            or self.depth != 20
+            or self.resolution != 256
+        ):
+            raise ValueError("G1 topology must be S0->G1 at world_size=2, depth=20, resolution=256")
         return self
 
 
@@ -846,18 +862,20 @@ class RuntimeConfig(StrictModel):
         elif not self.stage.enabled:
             raise ValueError("selected stage must be enabled")
         accepted_backends = (
-            {"native", "accelerate"} if self.stage.name == "S0" else {"ddp"}
+            {"native", "accelerate"}
+            if self.stage.name in {"S0", "G1"}
+            else {"ddp"}
         )
         if self.distributed.backend not in accepted_backends:
             raise ValueError("distributed backend does not match the selected stage")
-        if self.stage.name == "S0" and (
+        if self.stage.name in {"S0", "G1"} and (
             (self.distributed.backend == "native" and self.distributed.world_size != 1)
             or (
                 self.distributed.backend == "accelerate"
                 and self.distributed.world_size <= 1
             )
         ):
-            raise ValueError("S0 distributed backend and world size are inconsistent")
+            raise ValueError("S0/G1 distributed backend and world size are inconsistent")
         if self.distributed.world_size != self.stage.world_size:
             raise ValueError("distributed and stage world_size must match")
         if self.growth.enabled != (self.stage.name in {"G1", "G2"}):

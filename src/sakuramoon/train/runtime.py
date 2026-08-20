@@ -67,6 +67,7 @@ from sakuramoon.train.step import (
     TrainableComposite,
     TrainableCompositeInputs,
 )
+from sakuramoon.train.stage import canonical_growth_alpha
 
 if TYPE_CHECKING:
     from sakuramoon.train.preflight import (
@@ -192,6 +193,7 @@ class DenseDiTAdapter(nn.Module):
         text_mask: torch.Tensor,
         text_lengths: tuple[int, ...],
         condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
         timestep: torch.Tensor,
         size_scale: torch.Tensor,
         aspect: torch.Tensor,
@@ -206,6 +208,7 @@ class DenseDiTAdapter(nn.Module):
             text_tokens,
             text_mask,
             condition_tokens,
+            condition_active_mask,
             timestep,
             size_scale,
             aspect,
@@ -636,6 +639,13 @@ class SingleGpuBatchRuntime:
         self.growth_alpha = growth_alpha
         self.dit_flop_counter = ActualDitFlopCounter(composite.dit)
 
+    def set_growth_alpha(self, value: float) -> None:
+        """Select the canonical alpha before starting one successful update."""
+
+        if type(value) is not float or not 0.0 <= value <= 1.0:
+            raise ValueError("growth_alpha must be a float in [0,1]")
+        self.growth_alpha = value
+
     def _encode_qwen(
         self,
         batch: TrainingBatch,
@@ -889,16 +899,16 @@ class SingleGpuBatchRuntime:
 
 
 def require_single_gpu_config(config: RuntimeConfig) -> None:
-    """Accept the governed S0 native or Accelerate topology."""
+    """Accept the governed S0/G1 native or Accelerate topology."""
 
     if (
         config.run.intent != "train"
-        or config.run.stage != "S0"
+        or config.run.stage not in {"S0", "G1"}
         or not config.stage.enabled
         or config.stage.world_size not in {1, 2}
     ):
         raise ValueError(
-            "the production runtime accepts only governed train-intent S0 topology"
+            "the production runtime accepts only governed train-intent S0/G1 topology"
         )
     topology = (config.distributed.backend, config.distributed.world_size)
     if topology not in {("native", 1), ("accelerate", 2)}:
@@ -913,7 +923,7 @@ def require_single_gpu_checkpoint_compatibility(
     *,
     runtime_growth_alpha: float,
 ) -> None:
-    """Bind a RAW checkpoint to the resolved S0 model and stage."""
+    """Bind a RAW checkpoint to the resolved S0/G1 model and stage."""
 
     require_single_gpu_config(config)
     require_checkpoint_cadence_binding(config, state)
@@ -941,8 +951,10 @@ def require_single_gpu_checkpoint_compatibility(
         <= stage_budget.terminal_successful_update
     ):
         raise ValueError("restored stage budget is inconsistent with trainer state")
-    if stage_budget.start_successful_update != 0:
+    if config.stage.name == "S0" and stage_budget.start_successful_update != 0:
         raise ValueError("restored S0 stage budget must start at update zero")
+    if config.stage.name == "G1" and stage_budget.start_successful_update <= 0:
+        raise ValueError("restored G1 stage budget must start at its transition update")
     if (
         stage_budget.terminal_successful_update - stage_budget.start_successful_update
         != config.stage.planned_updates
@@ -1075,11 +1087,18 @@ def _run_single_gpu_training(
         pending_measurements: list[RuntimeMeasurement] = []
         active_phase_timer: PhaseTimer | None = None
         active_learning_rate: float | None = None
+        next_growth_update = state.successful_updates + 1
 
         def update_started(timer: PhaseTimer | None) -> None:
             nonlocal active_learning_rate, active_phase_timer
             active_phase_timer = timer
             active_learning_rate = _optimizer_learning_rate(optimizer)
+            runtime.set_growth_alpha(
+                canonical_growth_alpha(
+                    raw_state.growth,
+                    next_growth_update,
+                )
+            )
 
         def measure_batch(batch: TrainingBatch) -> torch.Tensor:
             if active_phase_timer is None:
@@ -1089,13 +1108,15 @@ def _run_single_gpu_training(
             return measurement.per_sample_loss
 
         def observe_update(observation: SuccessfulLoopObservation) -> None:
-            nonlocal active_learning_rate, active_phase_timer
+            nonlocal active_learning_rate, active_phase_timer, next_growth_update
             microbatches = tuple(pending_measurements)
             update_timer = observation.phase_timer
             if update_timer is None or update_timer is not active_phase_timer:
                 raise RuntimeError("training observation phase timer identity changed")
             if active_learning_rate is None:
                 raise RuntimeError("training update learning rate was not captured")
+            if observation.update.state.successful_updates != next_growth_update:
+                raise RuntimeError("growth alpha update edge changed during the update")
             if runtime.device.type == "cuda":
                 allocated = torch.cuda.memory_allocated(runtime.device)
                 reserved = torch.cuda.memory_reserved(runtime.device)
@@ -1121,6 +1142,7 @@ def _run_single_gpu_training(
             pending_measurements.clear()
             active_learning_rate = None
             active_phase_timer = None
+            next_growth_update += 1
 
         def publish_and_verify(
             update_state: SingleGpuUpdateState,
@@ -1142,7 +1164,12 @@ def _run_single_gpu_training(
                 raise ValueError("published RAW checkpoint identity is inconsistent")
             expected_state = RawCheckpointState(
                 trainer=update_state,
-                growth=raw_state.growth,
+                growth=replace(
+                    raw_state.growth,
+                    alpha=canonical_growth_alpha(
+                        raw_state.growth, update_state.successful_updates
+                    ),
+                ),
                 stage_budget=stage_budget,
                 checkpoint_cadence=replace(
                     proposed_cadence,
@@ -1181,6 +1208,9 @@ def _run_single_gpu_training(
             update_started=update_started,
             successful_update_observer=observe_update,
             effective_sample_multiplier=config.distributed.world_size,
+            growth_alpha_for_update=lambda update: canonical_growth_alpha(
+                raw_state.growth, update
+            ),
             backward=backward,
             no_sync=no_sync,
         )

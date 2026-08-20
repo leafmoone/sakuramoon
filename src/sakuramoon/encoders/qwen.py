@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import cast
 
 import torch
 from torch import nn
@@ -26,18 +27,6 @@ QWEN_DENSE_LENGTHS = tuple(
     for condition_bucket in CONDITION_BUCKETS
 )
 QWEN_DENSE_GROUP_SIZE = 32
-_HIDDEN_STATE_INDEX_BY_BLOCK = {
-    2: 2,
-    4: 4,
-    8: 8,
-    12: 12,
-    16: 16,
-    20: 20,
-}
-
-
-class _ModelOutput(Protocol):
-    hidden_states: tuple[torch.Tensor, ...] | None
 
 
 @dataclass(frozen=True)
@@ -80,48 +69,50 @@ class FrozenQwenEncoder(nn.Module):
         layers = getattr(self.model, "layers", None)
         if not isinstance(layers, nn.ModuleList) or len(layers) != 24:
             raise RuntimeError("Qwen must expose exactly 24 decoder layers")
-        raw_block_24: list[torch.Tensor] = []
+        captured: dict[int, list[torch.Tensor]] = {
+            block: [] for block in HIDDEN_STATE_BLOCKS
+        }
 
-        def capture_raw_block_24(
-            _module: nn.Module,
-            _inputs: tuple[object, ...],
-            block_output: object,
-        ) -> None:
-            if not isinstance(block_output, torch.Tensor):
-                raise TypeError("Qwen block 24 must return one raw tensor")
-            raw_block_24.append(block_output)
+        def capture_block(
+            block: int,
+        ) -> Callable[
+            [nn.Module, tuple[object, ...], object],
+            None,
+        ]:
+            def hook(
+                _module: nn.Module,
+                _inputs: tuple[object, ...],
+                block_output: object,
+            ) -> None:
+                if not isinstance(block_output, torch.Tensor):
+                    raise TypeError(f"Qwen block {block} must return one raw tensor")
+                captured[block].append(block_output)
 
-        handle = layers[-1].register_forward_hook(capture_raw_block_24)
+            return hook
+
+        handles = tuple(
+            layers[block - 1].register_forward_hook(capture_block(block))
+            for block in HIDDEN_STATE_BLOCKS
+        )
         try:
-            output = cast(
-                _ModelOutput,
-                self.model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    use_cache=False,
-                    output_hidden_states=True,
-                    return_dict=True,
-                ),
+            self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+                output_hidden_states=False,
+                return_dict=True,
             )
         finally:
-            handle.remove()
-        states = output.hidden_states
-        if states is None or len(states) != 25:
-            actual = None if states is None else len(states)
-            raise RuntimeError(f"Qwen must return 25 hidden-state entries, got {actual}")
-        if len(raw_block_24) != 1:
-            raise RuntimeError(
-                f"Qwen block 24 must run exactly once, got {len(raw_block_24)}"
-            )
-        if raw_block_24[0].shape != states[24].shape:
-            raise RuntimeError("Qwen raw block 24 shape differs from final hidden state")
+            for handle in handles:
+                handle.remove()
+        for block, values in captured.items():
+            if len(values) != 1:
+                raise RuntimeError(
+                    f"Qwen block {block} must run exactly once, got {len(values)}"
+                )
 
         selected = torch.stack(
-            tuple(
-                states[_HIDDEN_STATE_INDEX_BY_BLOCK[block]]
-                for block in HIDDEN_STATE_BLOCKS[:-1]
-            )
-            + (raw_block_24[0],),
+            tuple(captured[block][0] for block in HIDDEN_STATE_BLOCKS),
             dim=2,
         )
         if selected.shape[-1] != 2048:

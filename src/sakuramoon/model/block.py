@@ -193,6 +193,26 @@ class PackedDiTBlock(nn.Module):
             raise ValueError("selected block modulation tensors must be [B,D]")
         return value.index_select(0, sample_indices)
 
+    @staticmethod
+    def _validate_growth_scale(
+        value: float | torch.Tensor,
+        tokens: torch.Tensor,
+    ) -> None:
+        if type(value) is float:
+            if not 0.0 <= value <= 1.0:
+                raise ValueError("growth switches must be in [0,1]")
+            return
+        if not isinstance(value, torch.Tensor):
+            raise TypeError("growth switches must be floats or scalar tensors")
+        if (
+            value.ndim != 0
+            or value.dtype != tokens.dtype
+            or value.device != tokens.device
+        ):
+            raise ValueError(
+                "tensor growth switches must be scalar and match token dtype/device"
+            )
+
     def forward(
         self,
         tokens: torch.Tensor,
@@ -201,8 +221,8 @@ class PackedDiTBlock(nn.Module):
         sample_indices: torch.Tensor,
         modulation: BlockModulation,
         *,
-        attention_growth: float,
-        mlp_growth: float,
+        attention_growth: float | torch.Tensor,
+        mlp_growth: float | torch.Tensor,
     ) -> torch.Tensor:
         if tokens.ndim != 2 or tokens.shape[-1] != self.hidden_size:
             raise ValueError("tokens must have shape [T,hidden_size]")
@@ -212,8 +232,8 @@ class PackedDiTBlock(nn.Module):
             or sample_indices.device != tokens.device
         ):
             raise ValueError("sample_indices must be int64 [T] on the token device")
-        if not 0.0 <= attention_growth <= 1.0 or not 0.0 <= mlp_growth <= 1.0:
-            raise ValueError("growth switches must be in [0,1]")
+        self._validate_growth_scale(attention_growth, tokens)
+        self._validate_growth_scale(mlp_growth, tokens)
         batch = boundaries.batch_size
         if batch <= 0:
             raise ValueError("cu_seqlens must describe at least one sample")

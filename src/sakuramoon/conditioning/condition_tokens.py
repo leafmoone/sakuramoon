@@ -15,6 +15,7 @@ from sakuramoon.conditioning.norm import FP32RMSNorm
 class ConditionTokenOutput:
     tokens: torch.Tensor
     mask: torch.Tensor
+    active_mask: torch.Tensor
 
 
 class _ResidualSwiGLU(nn.Module):
@@ -67,6 +68,7 @@ class ConditionTokenEncoder(nn.Module):
         if sensitive_dtype != torch.float32:
             raise ValueError("sensitive condition parameters must use float32")
         self.input_size = input_size
+        self.output_size = output_size
         self.token_count = token_count
         self._artifact_config: dict[str, object] = {
             "attention_heads": attention_heads,
@@ -246,7 +248,11 @@ class ConditionTokenEncoder(nn.Module):
             dtype=torch.bool,
             device=qwen_states.device,
         )
-        return ConditionTokenOutput(tokens=tokens, mask=mask)
+        return ConditionTokenOutput(
+            tokens=tokens,
+            mask=mask,
+            active_mask=expected_active,
+        )
 
     def artifact_config(self) -> dict[str, object]:
         return dict(self._artifact_config)

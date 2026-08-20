@@ -151,13 +151,16 @@ class TextConditioner(nn.Module):
         gather_index = safe_indices[:, :, None, None].expand(-1, -1, 7, self.input_size)
         selected = torch.gather(qwen_states.detach(), dim=1, index=gather_index)
         selected = selected * main_mask[:, :, None, None]
-        projected = torch.stack(
+        normalized = torch.stack(
             tuple(
-                self.shared_projection(self.layer_norms[layer](selected[:, :, layer]))
+                self.layer_norms[layer](selected[:, :, layer])
                 for layer in range(7)
             ),
             dim=2,
         )
+        projected = self.shared_projection(
+            normalized.reshape(-1, self.input_size)
+        ).reshape(*normalized.shape[:-1], self.adapter_size)
         grouped = projected.view(*projected.shape[:-1], self.groups, self.group_size)
         scores = (
             torch.einsum("bmlgh,lgh->bmlg", grouped.float(), self.gate_weight)

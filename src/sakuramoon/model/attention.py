@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from itertools import accumulate
 
 import torch
 import torch.nn.functional as F
@@ -19,6 +18,7 @@ except (ImportError, OSError):
 from sakuramoon.conditioning.packing import (
     ValidatedCuSeqlens,
     build_validated_cu_seqlens,
+    validated_cu_seqlens_for_packed_entry,
 )
 from sakuramoon.conditioning.rope import QKRoPE2D
 
@@ -94,46 +94,17 @@ def accept_fa4_boundaries(
     batch_size: int,
     device: torch.device,
 ) -> AcceptedCuSeqlens:
-    """Validate boundary contents once, then rematerialize private CUDA offsets."""
+    """Promote constructor-sealed offsets to the private FA4 capability."""
 
-    if type(boundaries) is not ValidatedCuSeqlens:
-        raise TypeError("packed entry requires a ValidatedCuSeqlens input")
-    lengths = boundaries.sequence_lengths
-    if type(lengths) is not tuple or not lengths or any(
-        type(length) is not int or length <= 0 for length in lengths
-    ):
-        raise ValueError("validated boundaries contain invalid host lengths")
-    offsets = (0, *accumulate(lengths))
-    if (
-        boundaries.batch_size != len(lengths)
-        or boundaries.batch_size != batch_size
-        or boundaries.total_tokens != offsets[-1]
-        or boundaries.total_tokens != total_tokens
-        or boundaries.max_seqlen != max(lengths)
-    ):
-        raise ValueError("validated boundaries contain inconsistent host metadata")
-    if (
-        boundaries.tensor.ndim != 1
-        or boundaries.tensor.shape != (len(offsets),)
-        or boundaries.tensor.dtype != torch.int32
-        or not boundaries.tensor.is_contiguous()
-        or boundaries.tensor.device.type != device.type
-        or (
-            (device_index := getattr(device, "index", None)) is not None
-            and boundaries.tensor.device.index != device_index
-        )
-    ):
-        raise ValueError("validated boundaries contain inconsistent tensor metadata")
-
-    expected_cpu = torch.tensor(offsets, dtype=torch.int32, device="cpu")
-    actual_cpu = boundaries.tensor.detach().to(device="cpu", copy=True)
-    if not torch.equal(actual_cpu, expected_cpu):
-        raise ValueError("CUDA boundary values differ from validated host lengths")
-
-    private_tensor = expected_cpu.to(device=boundaries.tensor.device).contiguous()
+    lengths, tensor = validated_cu_seqlens_for_packed_entry(
+        boundaries,
+        total_tokens=total_tokens,
+        batch_size=batch_size,
+        device=device,
+    )
     return AcceptedCuSeqlens.create_for_entry(
         lengths,
-        private_tensor,
+        tensor,
         capability=_ACCEPTED_BOUNDARY_CAPABILITY,
     )
 

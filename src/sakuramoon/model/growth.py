@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import torch
+
 BASE_SLOT_IDS = (0, 1, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19, 21, 22)
 G1_NEW_SLOT_IDS = (2, 8, 14, 20)
 G2_NEW_SLOT_IDS = (5, 11, 17, 23)
@@ -46,6 +48,21 @@ def slot_growth(depth: int, slot_id: int, growth_alpha: float) -> float:
     if slot_id not in active_slot_ids(depth):
         raise ValueError("slot is not active at the selected depth")
     return growth_alpha if slot_id in new_slot_ids(depth) else 1.0
+
+
+def packed_growth_alpha(
+    depth: int,
+    growth_alpha: float,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Materialize dynamic growth as a device scalar for regional compilation."""
+
+    active_slot_ids(depth)
+    if type(growth_alpha) is not float or not 0.0 <= growth_alpha <= 1.0:
+        raise ValueError("growth_alpha must be a float in [0,1]")
+    if not isinstance(reference, torch.Tensor) or not reference.is_floating_point():
+        raise TypeError("packed growth requires a floating-point reference tensor")
+    return reference.new_tensor(growth_alpha)
 
 
 def growth_ramp_updates(planned_updates: int) -> int:
@@ -95,6 +112,7 @@ __all__ = [
     "is_new_slot_fqn",
     "new_slot_fqn_prefixes",
     "new_slot_ids",
+    "packed_growth_alpha",
     "slot_growth",
     "slot_name",
 ]

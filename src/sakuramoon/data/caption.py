@@ -24,6 +24,8 @@ BODY_TAG_SOURCE_ORDER = TAG_SOURCE_ORDER[:-1]
 CANDIDATE_SOURCE_FIELDS = frozenset({"nsfw", "character", "copyright", "general"})
 CAPTION_DROPOUT_KEYS: tuple[str, ...] = (
     "all_condition",
+    "condition_route",
+    "condition_only",
     *TAG_SOURCE_ORDER,
     "candidate_source",
     "long_names",
@@ -255,6 +257,8 @@ class NlDropoutProbabilities:
 
 @dataclass(frozen=True)
 class CaptionDropoutProbabilities:
+    condition_route: float
+    condition_only: float
     tag: float
     candidate_source: float
     nl: NlDropoutProbabilities
@@ -263,6 +267,8 @@ class CaptionDropoutProbabilities:
         if type(self.nl) is not NlDropoutProbabilities:
             raise CaptionError("NL dropout probabilities use an invalid type")
         values = (
+            self.condition_route,
+            self.condition_only,
             self.tag,
             self.candidate_source,
             self.nl.long_names,
@@ -273,6 +279,11 @@ class CaptionDropoutProbabilities:
         )
         if any(type(value) is not float or not 0.0 <= value <= 1.0 for value in values):
             raise CaptionError("all dropout probabilities must be explicit floats")
+        if self.condition_route + self.condition_only > 1.0:
+            raise CaptionError(
+                "condition route and condition-only dropout probabilities "
+                "must sum to at most one"
+            )
         nl_values = (
             self.nl.long_names,
             self.nl.long_no_names,
@@ -287,6 +298,8 @@ class CaptionDropoutProbabilities:
 @dataclass(frozen=True)
 class CaptionDropoutHits:
     all_condition: bool
+    condition_route: bool
+    condition_only: bool
     rating: bool
     year: bool
     aesthetic: bool
@@ -312,6 +325,8 @@ class CaptionDropoutHits:
     def as_mapping(self) -> dict[str, bool]:
         return {
             "all_condition": self.all_condition,
+            "condition_route": self.condition_route,
+            "condition_only": self.condition_only,
             "rating": self.rating,
             "year": self.year,
             "aesthetic": self.aesthetic,
@@ -335,6 +350,8 @@ class CaptionDropoutHits:
 @dataclass(frozen=True)
 class CaptionDropoutCounts:
     all_condition: int
+    condition_route: int
+    condition_only: int
     rating: int
     year: int
     aesthetic: int
@@ -362,6 +379,8 @@ class CaptionDropoutCounts:
     def as_mapping(self) -> dict[str, int]:
         return {
             "all_condition": self.all_condition,
+            "condition_route": self.condition_route,
+            "condition_only": self.condition_only,
             "rating": self.rating,
             "year": self.year,
             "aesthetic": self.aesthetic,
@@ -387,6 +406,8 @@ def empty_caption_dropout_hits(*, all_condition: bool = False) -> CaptionDropout
         raise CaptionError("all-condition dropout state must be an exact boolean")
     return CaptionDropoutHits(
         all_condition=all_condition,
+        condition_route=False,
+        condition_only=False,
         rating=False,
         year=False,
         aesthetic=False,
@@ -650,15 +671,32 @@ def build_caption_plan(
         characters=character,
         seed=seed,
     )
-    body_characters = (
-        ()
-        if condition is not None and condition.source == "character_text"
-        else character
-    )
-    body_artists = (
-        artists
-        if condition is not None and condition.source == "character_text"
-        else ()
+    condition_route_hit = False
+    condition_only_hit = False
+    if condition is not None:
+        route_value = _seed(seed, "dropout:condition_route_choice") / 2**64
+        condition_route_hit = route_value < probabilities.condition_route
+        condition_only_hit = (
+            not condition_route_hit
+            and route_value
+            < probabilities.condition_route + probabilities.condition_only
+        )
+    if condition_route_hit:
+        body_characters = character
+        body_artists = artists
+    else:
+        body_characters = (
+            ()
+            if condition is not None and condition.source == "character_text"
+            else character
+        )
+        body_artists = (
+            artists
+            if condition is not None and condition.source == "character_text"
+            else ()
+        )
+    routed_condition = (
+        None if condition_route_hit or condition_only_hit else condition
     )
     tags = _shuffle_tags(
         (
@@ -697,12 +735,14 @@ def build_caption_plan(
 
     return CaptionPlan(
         tags=tags,
-        condition=condition,
+        condition=routed_condition,
         nl_text=nl_text,
         selected_nl=selected_nl,
         all_condition_dropped=False,
         dropout_hits=CaptionDropoutHits(
             all_condition=False,
+            condition_route=condition_route_hit,
+            condition_only=condition_only_hit,
             rating=rating_hit,
             year=year_hit,
             aesthetic=aesthetic_hit,
