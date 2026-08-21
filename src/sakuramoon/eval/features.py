@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import tarfile
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Queue
 from typing import Protocol, cast
 
 import torch
@@ -332,12 +335,47 @@ def validation_dataset_fingerprint(
     return digest.hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class _ValidationImageJob:
+    index: int
+    payload: bytes
+
+
+_QUEUE_SENTINEL = _ValidationImageJob(-1, b"")
+_POOL_STOP = _ValidationImageJob(-1, b"pool-stop")
+
+
+def _decode_validation_image(
+    payload: bytes, *, output_size: int, sample_id: str
+) -> torch.Tensor:
+    try:
+        with Image.open(io.BytesIO(payload)) as image:
+            tensor = vision_functional.pil_to_tensor(image.convert("RGB"))
+    except (OSError, ValueError) as error:
+        raise EvaluationFeatureError(
+            f"validation image cannot be decoded: {sample_id}"
+        ) from error
+    return (
+        functional.interpolate(
+            tensor.unsqueeze(0).float(),
+            size=(output_size, output_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+        .squeeze(0)
+        .round()
+        .clamp(0.0, 255.0)
+        .to(torch.uint8)
+    )
+
+
 def iter_validation_image_batches(
     root: Path,
     count: int,
     batch_size: int,
     *,
     output_size: int,
+    max_workers: int | None = None,
 ) -> Iterator[ValidationImageBatch]:
     if type(count) is not int or count <= 0:
         raise ValueError("validation image count must be positive")
@@ -345,76 +383,158 @@ def iter_validation_image_batches(
         raise ValueError("validation image batch size must be positive")
     if type(output_size) is not int or output_size <= 0:
         raise ValueError("validation output size must be positive")
+    if max_workers is not None and (type(max_workers) is not int or max_workers <= 0):
+        raise ValueError("validation image worker count must be positive")
     archives = sorted(root.rglob("*.tar"))
     if not archives:
         raise EvaluationFeatureError(f"validation tar files are absent: {root}")
 
-    current_images: list[torch.Tensor] = []
-    current_ids: list[str] = []
-    observed_ids: set[str] = set()
-    observed = 0
+    # Phase 1: single-threaded header scan (no payload reads) so the global
+    # image sequence, the prefix truncation at ``count``, and the duplicate
+    # check run before any decoding, exactly as the sequential reader did.
+    tasks: list[tuple[Path, list[tarfile.TarInfo], int]] = []
+    sample_ids: list[str] = []
+    seen: set[str] = set()
     for archive in archives:
+        members: list[tarfile.TarInfo] = []
         with tarfile.open(archive, "r:*") as handle:
             for member in handle:
-                if observed >= count:
-                    break
-                if (
-                    not member.isfile()
-                    or Path(member.name).suffix.casefold() not in _IMAGE_SUFFIXES
+                if not member.isfile() or (
+                    Path(member.name).suffix.casefold() not in _IMAGE_SUFFIXES
                 ):
                     continue
-                source = handle.extractfile(member)
-                if source is None:
-                    raise EvaluationFeatureError(
-                        f"validation member cannot be read: {archive}:{member.name}"
-                    )
-                try:
-                    with Image.open(io.BytesIO(source.read())) as image:
-                        tensor = vision_functional.pil_to_tensor(image.convert("RGB"))
-                except (OSError, ValueError) as error:
-                    raise EvaluationFeatureError(
-                        f"validation image cannot be decoded: {archive}:{member.name}"
-                    ) from error
-                tensor = (
-                    functional.interpolate(
-                        tensor.unsqueeze(0).float(),
-                        size=(output_size, output_size),
-                        mode="bilinear",
-                        align_corners=False,
-                    )
-                    .squeeze(0)
-                    .round()
-                    .clamp(0.0, 255.0)
-                    .to(torch.uint8)
-                )
-                sample_id = (
-                    f"{archive.relative_to(root).as_posix()}::{member.name}"
-                )
-                if sample_id in observed_ids:
+                sample_id = f"{archive.relative_to(root).as_posix()}::{member.name}"
+                if sample_id in seen:
                     raise EvaluationFeatureError(
                         f"validation image selection is duplicated: {sample_id}"
                     )
-                observed_ids.add(sample_id)
-                current_images.append(tensor)
-                current_ids.append(sample_id)
-                observed += 1
-                if len(current_images) == batch_size:
-                    yield ValidationImageBatch(
-                        tuple(current_ids), torch.stack(current_images)
-                    )
-                    current_images = []
-                    current_ids = []
-            if observed >= count:
-                break
-    if current_images:
-        yield ValidationImageBatch(tuple(current_ids), torch.stack(current_images))
-    if observed != count:
+                seen.add(sample_id)
+                sample_ids.append(sample_id)
+                members.append(member)
+        if members:
+            tasks.append((archive, members, len(sample_ids) - len(members)))
+    if len(sample_ids) < count:
         raise EvaluationFeatureError(
-            f"validation images are incomplete: {observed}/{count}"
+            f"validation images are incomplete: {len(sample_ids)}/{count}"
         )
-    if len(observed_ids) != count:
+    selected = sample_ids[:count]
+    del seen
+
+    # Phase 2: parallel payload reads and decodes.  Each archive is read by
+    # its own reader thread (a tar handle is thread-confined); payloads go
+    # through a bounded job queue into a pool of decoder threads, and the
+    # caller consumes finished tensors in global order.  One sentinel is
+    # emitted per reader so the pool drains without blocking forever.
+    results: list[torch.Tensor | None] = [None] * count
+    job_error: list[BaseException | None] = [None]
+    job_queue: Queue[_ValidationImageJob] = Queue(maxsize=512)
+    condition = threading.Condition()
+    reader_done = 0  # guarded by ``condition``
+
+    def reader(
+        archive_path: Path,
+        members: list[tarfile.TarInfo],
+        offset: int,
+    ) -> None:
+        try:
+            if job_error[0] is None:
+                with tarfile.open(archive_path, "r:*") as handle:
+                    for position, member in enumerate(members):
+                        global_index = offset + position
+                        if global_index >= count:
+                            break
+                        source = handle.extractfile(member)
+                        if source is None:
+                            raise EvaluationFeatureError(
+                                f"validation member cannot be read: "
+                                f"{archive_path}:{member.name}"
+                            )
+                        job_queue.put(_ValidationImageJob(global_index, source.read()))
+        except BaseException as error:  # noqa: BLE001 - report through the pool
+            if job_error[0] is None:
+                job_error[0] = error
+        finally:
+            job_queue.put(_QUEUE_SENTINEL)
+
+    def decoder() -> None:
+        nonlocal reader_done
+        while True:
+            job = job_queue.get()
+            try:
+                if job is _POOL_STOP:
+                    break
+                if job is _QUEUE_SENTINEL:
+                    with condition:
+                        reader_done += 1
+                        if reader_done == len(tasks):
+                            # Every reader finished, so all real jobs are
+                            # queued; release each decoder (including this
+                            # one) from the shared queue.
+                            for _ in range(workers):
+                                job_queue.put(_POOL_STOP)
+                    continue
+                if job_error[0] is None:
+                    results[job.index] = _decode_validation_image(
+                        job.payload,
+                        output_size=output_size,
+                        sample_id=selected[job.index],
+                    )
+            except BaseException as error:  # noqa: BLE001 - report through the pool
+                if job_error[0] is None:
+                    job_error[0] = error
+            finally:
+                job_queue.task_done()
+                with condition:
+                    condition.notify_all()
+
+    workers = max_workers or min(8, os.cpu_count() or 1)
+    original_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        readers = [
+            threading.Thread(
+                target=reader,
+                args=(archive_path, members, offset),
+                name="validation-image-reader",
+                daemon=True,
+            )
+            for archive_path, members, offset in tasks
+        ]
+        decoders = [
+            threading.Thread(
+                target=decoder, name="validation-image-decoder", daemon=True
+            )
+            for _ in range(workers)
+        ]
+        for thread in [*readers, *decoders]:
+            thread.start()
+        for position in range(0, count, batch_size):
+            end = min(position + batch_size, count)
+            with condition:
+                while (
+                    any(results[index] is None for index in range(position, end))
+                    and job_error[0] is None
+                ):
+                    condition.wait(timeout=1.0)
+            if job_error[0] is not None:
+                raise EvaluationFeatureError(
+                    f"validation image pipeline failed: {job_error[0]}"
+                )
+            batch_images = [
+                cast(torch.Tensor, results[index]) for index in range(position, end)
+            ]
+            for index in range(position, end):
+                results[index] = None
+            yield ValidationImageBatch(
+                tuple(selected[position:end]), torch.stack(batch_images)
+            )
+        for thread in [*readers, *decoders]:
+            thread.join()
+    finally:
+        torch.set_num_threads(original_threads)
+    if job_error[0] is not None:
         raise EvaluationFeatureError(
-            "validation image selection is incomplete or duplicated"
+            f"validation image pipeline failed: {job_error[0]}"
         )
 
 
