@@ -43,7 +43,11 @@ from sakuramoon.data.serialize import (
     FramingContract,
 )
 from sakuramoon.distributed import DistributedProgress
-from sakuramoon.encoders.mage_vae import FrozenMageVAE, load_local_mage_vae
+from sakuramoon.encoders.mage_vae import (
+    FrozenMageVAE,
+    compile_vae_methods,
+    load_local_mage_vae,
+)
 from sakuramoon.encoders.qwen import QwenRuntime, load_local_qwen
 from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
 from sakuramoon.model.growth import active_slot_ids, growth_ramp_updates
@@ -801,6 +805,9 @@ def _run_accepted_lifecycle(
     )
     _log("加载 Mage VAE")
     vae = load_local_mage_vae(repository_root, device)
+    if config.kernels.vae_torch_compile:
+        vae = compile_vae_methods(vae)
+        _log("Mage VAE encode/decode 已启用 torch.compile (opt-in)")
     _log(f"构建 {config.stage.depth} 层 DiT")
     module = build_trainable_composite_from_config(config, device=device)
     _log("构建优化器")
@@ -1331,6 +1338,9 @@ def run_production_evaluation(
     )
     print("[eval] 加载 Mage VAE", flush=True)
     vae = load_local_mage_vae(root, device)
+    if config.kernels.vae_torch_compile:
+        vae = compile_vae_methods(vae)
+        print("[eval] Mage VAE encode/decode 已启用 torch.compile (opt-in)", flush=True)
     print(f"[eval] 加载 update {update} DiT", flush=True)
     module = load_inference_artifact(
         exact_checkpoint,

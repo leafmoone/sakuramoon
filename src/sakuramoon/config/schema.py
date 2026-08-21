@@ -713,6 +713,10 @@ class KernelsConfig(StrictModel):
         "default", "reduce-overhead", "max-autotune-no-cudagraphs"
     ] = "default"
     torch_compile_dynamic: bool = False
+    # Opt-in benchmark knob: torch.compile the frozen Mage-VAE encode/decode
+    # methods. Off by default; when enabled the compile cost is paid once and
+    # reused from the inductor cache (G1 shapes are fixed: 256x256 images).
+    vae_torch_compile: bool = False
     dtype: Literal["bfloat16"]
     native_gqa: Literal[True]
     repeat_kv_heads: Literal[False]

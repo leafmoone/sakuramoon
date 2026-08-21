@@ -566,4 +566,23 @@ def load_local_mage_vae(repository_root: Path, device: torch.device) -> FrozenMa
     return FrozenMageVAE(model)
 
 
-__all__ = ["FrozenMageVAE", "MageVAE", "load_local_mage_vae"]
+def compile_vae_methods(
+    vae: FrozenMageVAE, *, mode: str = "default"
+) -> FrozenMageVAE:
+    """Opt-in benchmark knob: wrap the frozen VAE's encode/decode in torch.compile.
+
+    Off by default. The G1 training loop has fixed shapes (256x256 images and
+    matching latents, constant micro-batch size), so the compile cost is paid
+    once per process and then served from the inductor cache.
+    """
+    vae.encode = torch.compile(vae.encode, mode=mode)  # type: ignore[method-assign]
+    vae.decode = torch.compile(vae.decode, mode=mode)  # type: ignore[method-assign]
+    return vae
+
+
+__all__ = [
+    "FrozenMageVAE",
+    "MageVAE",
+    "compile_vae_methods",
+    "load_local_mage_vae",
+]
