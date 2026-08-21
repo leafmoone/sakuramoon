@@ -64,6 +64,11 @@ copy_old_slots = false
 [kernels]
 torch_compile_enabled = true
 torch_compile_dynamic = true
+# src A/B bench (2026-08-22, resume 61900, steady 30 updates each):
+# default mode 16.47 s/update vs max-autotune-no-cudagraphs 15.67 s/update (-4.9%,
+# gain in backward 8.09->7.26 s; autotune keeps fp32 accumulation, no TF32).
+# window=4/8 and vae_torch_compile measured non-beneficial / unsupported on DTK.
+torch_compile_mode = "max-autotune-no-cudagraphs"
 
 [optimizer]
 # LR held flat vs the 760-batch run: 0.0000475 * 800 / 256 = 0.0001484375.
