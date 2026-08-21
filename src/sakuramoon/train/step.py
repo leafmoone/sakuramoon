@@ -229,6 +229,7 @@ class SingleGpuStep:
         self._samples = 0
         self._loss_sum: torch.Tensor | None = None
         self._device: torch.device | None = None
+        self._nonfinite_seen: torch.Tensor | None = None
         self._failed = False
         self._detection_phase: str | None = None
 
@@ -263,11 +264,14 @@ class SingleGpuStep:
             raise ValueError("per_sample_loss must retain a gradient graph")
         if self._device is not None and per_sample_loss.device != self._device:
             raise ValueError("all accumulated losses must share one device")
-        if not bool(torch.isfinite(per_sample_loss).all().item()):
-            error = FloatingPointError("per-sample loss is nonfinite")
-            self._detection_phase = "backward"
-            self._abort_preserving(error)
-            raise error
+        # Device-side finiteness flag: accumulate on-device so backward stays
+        # sync-free. finish_update syncs the flag once at the update boundary
+        # and aborts the whole update if any microbatch loss was nonfinite.
+        flag = torch.logical_not(torch.isfinite(per_sample_loss).all())
+        if self._nonfinite_seen is None:
+            self._nonfinite_seen = flag
+        else:
+            self._nonfinite_seen = torch.logical_or(self._nonfinite_seen, flag)
 
         loss_sum = per_sample_loss.sum()
         try:
@@ -326,15 +330,36 @@ class SingleGpuStep:
             attempted_updates=self._state.attempted_updates + 1,
         )
         self._state = attempted
+        if self._nonfinite_seen is not None and bool(self._nonfinite_seen.item()):
+            # Deferred detection boundary: the flag records that a backward
+            # loss was nonfinite; the single sync happens here, once per
+            # update. detection_phase stays "backward" because the failure
+            # originates in the per-sample losses, not in finalize.
+            error = FloatingPointError("per-sample loss is nonfinite")
+            self._detection_phase = "backward"
+            self._failed = True
+            try:
+                with _record_phase(phase_timer, "zero_grad"):
+                    self.optimizer.zero_grad(set_to_none=True)
+            except BaseException as cleanup_error:  # noqa: BLE001
+                raise BaseExceptionGroup(
+                    "update failed and gradient cleanup failed",
+                    [error, cleanup_error],
+                ) from None
+            raise error
         parameters = tuple(
             parameter for parameter in self.module.parameters() if parameter.requires_grad
         )
         try:
             with _record_phase(phase_timer, "clip"):
                 gradient_scale = 1.0 / self._samples
-                for parameter in parameters:
-                    if parameter.grad is not None:
-                        parameter.grad.mul_(gradient_scale)
+                gradients = [
+                    parameter.grad
+                    for parameter in parameters
+                    if parameter.grad is not None
+                ]
+                if gradients:
+                    torch._foreach_mul_(gradients, gradient_scale)
                 condition_encoder_grad_norm = _parameter_grad_norm(
                     self.module,
                     predicate=lambda name, _parameter: (
@@ -458,6 +483,7 @@ class SingleGpuStep:
         self._samples = 0
         self._loss_sum = None
         self._device = None
+        self._nonfinite_seen = None
         return result
 
 

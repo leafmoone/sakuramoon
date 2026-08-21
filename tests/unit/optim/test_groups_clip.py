@@ -251,3 +251,39 @@ def test_fp32_global_clip_rejects_nonfinite_before_mutation() -> None:
         clip_grad_norm_fp32((parameter,), max_norm=1.0)
 
     torch.testing.assert_close(parameter.grad, before, equal_nan=True)
+
+
+def test_fp32_global_clip_multi_tensor_matches_per_parameter_reference() -> None:
+    torch.manual_seed(2026)  # pyright: ignore[reportUnknownMemberType]
+    parameters = [
+        nn.Parameter(torch.randn(64, 128, dtype=torch.bfloat16))
+        for _ in range(256)
+    ]
+    parameters += [
+        nn.Parameter(torch.randn(333, dtype=torch.float32)) for _ in range(64)
+    ]
+    for parameter in parameters:
+        parameter.grad = torch.randn_like(parameter)
+    before = [parameter.grad.clone() for parameter in parameters]
+
+    reference_squared = torch.zeros((), dtype=torch.float32)
+    for grad in before:
+        reference_squared.add_(grad.float().square().sum())
+    reference_norm = reference_squared.sqrt()
+    reference_coefficient = (
+        1.0 / reference_norm.clamp_min(1e-12)
+    ).clamp_max(1.0)
+
+    result = clip_grad_norm_fp32(parameters, max_norm=1.0)
+
+    torch.testing.assert_close(
+        result.pre_clip_norm, reference_norm, atol=1e-5, rtol=1e-5
+    )
+    torch.testing.assert_close(
+        result.coefficient, reference_coefficient, atol=1e-6, rtol=1e-6
+    )
+    for parameter, grad_before in zip(parameters, before, strict=True):
+        expected = grad_before * (result.coefficient.to(parameter.grad.dtype))
+        torch.testing.assert_close(
+            parameter.grad.float(), expected.float(), atol=1e-2, rtol=1e-2
+        )

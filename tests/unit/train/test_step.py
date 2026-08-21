@@ -320,7 +320,9 @@ def test_loss_failure_and_zero_grad_failure_are_both_preserved(failure: str) -> 
         state=SingleGpuUpdateState.initial(),
     )
     if failure == "nonfinite":
-        loss = (parameter * torch.tensor(float("nan"))).reshape(1)
+        step.backward((parameter * torch.tensor(float("nan"))).reshape(1))
+        with pytest.raises(BaseExceptionGroup) as captured:
+            step.finish_update()
     else:
         loss = parameter.clone().reshape(1)
 
@@ -331,8 +333,8 @@ def test_loss_failure_and_zero_grad_failure_are_both_preserved(failure: str) -> 
             fail_backward
         )
 
-    with pytest.raises(BaseExceptionGroup) as captured:
-        step.backward(loss)
+        with pytest.raises(BaseExceptionGroup) as captured:
+            step.backward(loss)
 
     expected = FloatingPointError if failure == "nonfinite" else RuntimeError
     assert [type(error) for error in captured.value.exceptions] == [expected, OSError]
@@ -351,9 +353,10 @@ def test_nonfinite_loss_aborts_attempt_and_clears_gradients() -> None:
         state=SingleGpuUpdateState.initial(),
     )
     step.backward((parameter - 1.0).square().reshape(1))
+    step.backward((parameter * torch.tensor(float("nan"))).reshape(1))
 
     with pytest.raises(FloatingPointError, match="nonfinite"):
-        step.backward((parameter * torch.tensor(float("nan"))).reshape(1))
+        step.finish_update()
 
     assert step.state == SingleGpuUpdateState(1, 0, 0)
     assert parameter.grad is None
