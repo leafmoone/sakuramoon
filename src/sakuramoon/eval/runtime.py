@@ -774,8 +774,8 @@ class TrainingEvaluator:
             result_path,
         )
 
-    def evaluate(self, update: int) -> EvaluationResult | None:
-        if not self.due(update):
+    def evaluate(self, update: int, *, force: bool = False) -> EvaluationResult | None:
+        if not force and not self.due(update):
             raise ValueError("evaluation update is not due")
         print(
             f"[eval] update={update} rank={self.rank}/{self.world_size} "
