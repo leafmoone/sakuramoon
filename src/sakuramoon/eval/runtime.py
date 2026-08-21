@@ -6,10 +6,10 @@ import dataclasses
 import hashlib
 import math
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Iterator
 from typing import cast
 
 import tomli_w
