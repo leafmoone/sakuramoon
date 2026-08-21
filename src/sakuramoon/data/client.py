@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,13 @@ from sakuramoon.data.service_protocol import (
     canonical_json_bytes,
     parse_frame,
 )
+
+# A single round-trip can transiently fail while the data service is busy
+# (startup window, cache I/O bursts from concurrent shard downloads). Retry
+# transport-level failures with a bounded backoff; protocol-level rejections
+# (invalid frame, session mismatch) still fail immediately.
+_TRANSPORT_ATTEMPTS = 3
+_TRANSPORT_RETRY_BASE_SECONDS = 2.0
 
 
 class DataServiceUnavailable(RuntimeError):
@@ -64,23 +72,31 @@ class DataServiceClient:
         frame = canonical_json_bytes(payload)
         if len(frame) > MAX_SERVICE_FRAME_BYTES:
             raise DataServiceUnavailable("data service request exceeds the frame bound")
-        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        connection.settimeout(self.request_timeout_seconds)
-        try:
-            connection.connect(str(self.socket_path))
-            connection.sendall(frame)
-            response = _recv(connection)
-        except (OSError, TimeoutError):
-            raise DataServiceUnavailable("data service is unavailable") from None
-        finally:
-            connection.close()
+        response = self._request_transport(frame)
         if response.get("ok") is not True:
             reason = response.get("error")
             detail = reason if isinstance(reason, str) and reason else "unknown error"
-            raise DataServiceUnavailable(
-                f"data service rejected the request: {detail}"
-            )
+            raise DataServiceUnavailable(f"data service rejected the request: {detail}")
         return response
+
+    def _request_transport(self, frame: bytes) -> dict[str, Any]:
+        last_error: OSError | None = None
+        for attempt in range(_TRANSPORT_ATTEMPTS):
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.settimeout(self.request_timeout_seconds)
+            try:
+                connection.connect(str(self.socket_path))
+                connection.sendall(frame)
+                response = _recv(connection)
+            except (OSError, TimeoutError) as error:
+                last_error = error
+                if attempt + 1 < _TRANSPORT_ATTEMPTS:
+                    time.sleep(_TRANSPORT_RETRY_BASE_SECONDS * (2**attempt))
+                continue
+            finally:
+                connection.close()
+            return response
+        raise DataServiceUnavailable("data service is unavailable") from last_error
 
     def _health_identity(self) -> tuple[DataServiceSessionIdentity, bool]:
         response = self._request(
@@ -201,7 +217,10 @@ class RankedDataServiceClient:
 
     def acknowledge(self, descriptor: ShardLeaseDescriptor) -> None:
         original = self._leases.pop(descriptor.lease_id, None)
-        if original is None or replace(original, worker_id=descriptor.worker_id) != descriptor:
+        if (
+            original is None
+            or replace(original, worker_id=descriptor.worker_id) != descriptor
+        ):
             raise DataServiceUnavailable("rank-local lease identity changed")
         self._delegate.acknowledge(original)
 
