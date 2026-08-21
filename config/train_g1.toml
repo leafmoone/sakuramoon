@@ -60,6 +60,11 @@ copy_old_slots = false
 torch_compile_enabled = true
 torch_compile_dynamic = true
 
+[optimizer]
+# LR held flat vs the 760-batch run: 0.0000475 * 800 / 256 = 0.0001484375.
+# (base.toml provides the remaining optimizer fields via deep merge.)
+base_lr = 0.0000475
+
 [stage]
 name = "G1"
 enabled = true
@@ -67,10 +72,11 @@ predecessor = "S0"
 world_size = 2
 depth = 20
 resolution = 256
-local_batch = 19
+local_batch = 20
 accumulation = 20
-# base_lr=0.00005 at reference_batch=256 -> actual_lr=0.0001484375 for global_batch=760.
-global_batch = 760
+# global_batch=800 with base_lr=0.0000475 (see [optimizer]) -> actual_lr=0.0001484375,
+# held flat vs the 760-batch run (base_lr=0.00005 at reference_batch=256).
+global_batch = 800
 activation_checkpoint_mode = "none"
 planned_updates = 110000
 manual_finalize = true
