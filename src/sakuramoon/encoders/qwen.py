@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ QWEN_DENSE_LENGTHS = tuple(
     for condition_bucket in CONDITION_BUCKETS
 )
 QWEN_DENSE_GROUP_SIZE = 32
+QWEN_FAST_PATH_PROBE_LENGTH = 290
 
 
 @dataclass(frozen=True)
@@ -239,6 +241,147 @@ class FrozenQwenEncoder(nn.Module):
         )
 
 
+@dataclass(frozen=True)
+class QwenFastPathFacts:
+    """Observed evidence for the Qwen fast-path preflight gate.
+
+    ``conv_layer_count`` counts only the linear-attention layers, which are
+    the ones that carry a causal-conv1d kernel (``Qwen3_5GatedDeltaNet``).
+    The full-attention layers do not carry conv kernels and are excluded.
+    """
+
+    flag_available: bool
+    conv_module: str | None
+    wired_conv_layers: int
+    conv_layer_count: int
+    layer_count: int
+
+
+def _iter_linear_conv_kernels(layers: nn.ModuleList) -> list:
+    """Return the per-linear-layer conv kernel (or None) in layer order."""
+    kernels = []
+    for layer in layers:
+        if getattr(layer, "block_type", None) == "linear_attention":
+            kernels.append(
+                getattr(getattr(layer, "linear_attn", None), "causal_conv1d_fn", None)
+            )
+    return kernels
+
+
+def require_qwen_fast_path(encoder: FrozenQwenEncoder) -> QwenFastPathFacts:
+    """Production training must not run on the Transformers PyTorch fallback.
+
+    The DTK Transformers fork selects the FLA/causal-conv1d kernels at import
+    time.  When the FLA wheel or the causal-conv1d shim is missing the model
+    silently trains on the slower PyTorch implementation, so the production
+    preflight fails closed on either missing piece: the import-time flag or
+    the per-linear-layer conv wiring.
+    """
+
+    layers = getattr(encoder.model, "layers", None)
+    if not isinstance(layers, nn.ModuleList) or len(layers) != 24:
+        raise RuntimeError("Qwen fast path cannot be verified: model exposes no decoder layers")
+    conv_functions = _iter_linear_conv_kernels(layers)
+    conv_layer_count = len(conv_functions)
+    wired_conv_layers = sum(conv is not None for conv in conv_functions)
+    conv_module = next(
+        (getattr(conv, "__module__", None) for conv in conv_functions if conv is not None),
+        None,
+    )
+    facts = QwenFastPathFacts(
+        flag_available=bool(is_fast_path_available),
+        conv_module=conv_module,
+        wired_conv_layers=wired_conv_layers,
+        conv_layer_count=conv_layer_count,
+        layer_count=len(layers),
+    )
+    if (
+        not facts.flag_available
+        or conv_layer_count == 0
+        or facts.wired_conv_layers != facts.conv_layer_count
+    ):
+        raise RuntimeError(
+            "Qwen3.5 fast path is not fully active "
+            f"(is_fast_path_available={facts.flag_available}, conv kernels wired on "
+            f"{facts.wired_conv_layers}/{facts.conv_layer_count} linear-attention layers, "
+            f"conv module={facts.conv_module!r}). "
+            "Production training must not run on the Transformers PyTorch "
+            "fallback. Install the FLA wheel and keep the causal-conv1d "
+            "shim on PYTHONPATH."
+        )
+    return facts
+
+
+def probe_qwen_fast_path(
+    encoder: FrozenQwenEncoder,
+    probe_rows: int,
+    *,
+    probe_length: int = QWEN_FAST_PATH_PROBE_LENGTH,
+    timed_launches: int = 2,
+) -> float:
+    """Return the mean wall-clock seconds per homogeneous Qwen launch.
+
+    One warm-up launch absorbs allocation and first-kernel costs.  The probe
+    follows the length-aware single-launch path and is only used as preflight
+    evidence, never as a training input.
+
+    The full-attention layers use SDPA; the probe pins the always-available
+    "math" SDPA backend so the probe stays robust even when the flash /
+    efficient kernels are absent from the environment.  The FLA fast path
+    under test lives in the linear-attention layers and is independent of the
+    SDPA backend choice, so this does not weaken the fast-path evidence.
+    """
+
+    if type(probe_rows) is not int or probe_rows <= 0:
+        raise ValueError("probe_rows must be a positive integer")
+    if type(timed_launches) is not int or timed_launches <= 0:
+        raise ValueError("timed_launches must be a positive integer")
+    if probe_length not in QWEN_DENSE_LENGTHS:
+        raise ValueError("probe_length must be a supported Qwen dense bucket")
+    device = next(encoder.model.parameters()).device
+    input_ids = torch.randint(
+        1, 32_768, (probe_rows, probe_length), device=device, dtype=torch.long
+    )
+    attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+    dense_lengths = (probe_length,) * probe_rows
+    sdpa_backend = _probe_sdpa_backend()
+    with torch.inference_mode():
+        with sdpa_backend():
+            encoder.forward(input_ids, attention_mask, dense_lengths=dense_lengths)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        started = time.perf_counter()
+        with sdpa_backend():
+            for _ in range(timed_launches):
+                encoder.forward(input_ids, attention_mask, dense_lengths=dense_lengths)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+    return (time.perf_counter() - started) / timed_launches
+
+
+def _probe_sdpa_backend():
+    """A context manager pinning the always-available "math" SDPA backend.
+
+    Falls back to a no-op context when the SDPA backend selector is not
+    present in the environment (the probe then uses whatever backend the
+    process default picks).
+    """
+
+    from contextlib import contextmanager
+
+    try:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+    except ImportError:  # very old torch without the SDPA backend selector
+
+        @contextmanager
+        def _no_op():
+            yield
+
+        return _no_op
+
+    return lambda: sdpa_kernel(SDPBackend.MATH)
+
+
 def load_local_qwen(
     repository_root: Path,
     device: torch.device,
@@ -300,8 +443,12 @@ __all__ = [
     "HIDDEN_STATE_BLOCKS",
     "QWEN_DENSE_GROUP_SIZE",
     "QWEN_DENSE_LENGTHS",
+    "QWEN_FAST_PATH_PROBE_LENGTH",
     "FrozenQwenEncoder",
     "QwenEncoderOutput",
+    "QwenFastPathFacts",
     "QwenRuntime",
     "load_local_qwen",
+    "probe_qwen_fast_path",
+    "require_qwen_fast_path",
 ]

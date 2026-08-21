@@ -50,6 +50,7 @@ PREFLIGHT_CHECKS = (
     "data_service",
     "single_gpu_runtime",
     "frozen_encoders",
+    "qwen_fast_path",
     "optimizer_parameters",
 )
 
@@ -421,6 +422,29 @@ def build_single_gpu_preflight_checks(
             if any(parameter.requires_grad for parameter in encoder.parameters()):
                 raise RuntimeError(f"{name} encoder exposes trainable parameters")
 
+    def qwen_fast_path() -> None:
+        from sakuramoon.encoders.qwen import (
+            QWEN_FAST_PATH_PROBE_LENGTH,
+            FrozenQwenEncoder,
+            probe_qwen_fast_path,
+            require_qwen_fast_path,
+        )
+
+        if not isinstance(qwen, FrozenQwenEncoder):
+            raise PreflightError("the production qwen binding is not a FrozenQwenEncoder")
+        facts = require_qwen_fast_path(qwen)
+        probe_rows = loaded.config.stage.local_batch
+        seconds = probe_qwen_fast_path(qwen, probe_rows)
+        print(
+            "[preflight] qwen_fast_path gate "
+            f"(conv={facts.conv_module}, "
+            f"{facts.wired_conv_layers}/{facts.conv_layer_count} linear-attention "
+            f"layers wired); probe "
+            f"({probe_rows} rows x {QWEN_FAST_PATH_PROBE_LENGTH} tokens = "
+            f"{seconds:.2f} s/launch)",
+            flush=True,
+        )
+
     def optimizer_parameters() -> None:
         from sakuramoon.checkpoint.artifact import validate_optimizer_coverage
 
@@ -438,6 +462,7 @@ def build_single_gpu_preflight_checks(
         ("data_service", data_service),
         ("single_gpu_runtime", single_gpu_runtime),
         ("frozen_encoders", frozen_encoders),
+        ("qwen_fast_path", qwen_fast_path),
         ("optimizer_parameters", optimizer_parameters),
     )
     return SingleGpuPreflightPlan(
