@@ -73,11 +73,38 @@ def _timed(
     return durations, peak_gib
 
 
+def _plans_from_args(raw: str) -> dict[str, int | None]:
+    """Map a comma-separated plan list to {label: group_size}.
+
+    ``none`` means ungrouped (one padded launch); any integer is a dense group
+    size. The default covers the production no-op (32) plus the real-workload
+    candidate set (19/16/10/8/4) for local_batch=19.
+    """
+    plans: dict[str, int | None] = {}
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if item == "none":
+            plans["ungrouped"] = None
+        else:
+            size = int(item)
+            plans[f"sorted_chunks_{size}"] = size
+    if not plans:
+        raise ValueError("at least one plan is required")
+    return plans
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--batch", type=int, default=128)
+    parser.add_argument("--batch", type=int, default=19)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument(
+        "--plans",
+        default="none,64,32,19,16,10,8,4",
+        help="comma list: 'none' (ungrouped) and/or dense group sizes",
+    )
     args = parser.parse_args()
     if args.batch <= 0 or args.repeats <= 0:
         raise ValueError("batch and repeats must be positive")
@@ -111,11 +138,7 @@ def main() -> int:
     lengths = _profile_lengths(args.batch)
     input_ids, attention_mask = _inputs(lengths, device)
 
-    plans: dict[str, int | None] = {
-        "ungrouped": None,
-        "sorted_chunks_64": 64,
-        "sorted_chunks_32": 32,
-    }
+    plans = _plans_from_args(args.plans)
 
     # Compile/warm every shape before measured runs.
     for group_size in plans.values():

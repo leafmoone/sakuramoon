@@ -27,7 +27,15 @@ QWEN_DENSE_LENGTHS = tuple(
     EXPECTED_PREFIX_TOKENS + condition_bucket
     for condition_bucket in CONDITION_BUCKETS
 )
-QWEN_DENSE_GROUP_SIZE = 32
+# Default dense launch group for the length-aware Qwen fast path.  The
+# production local batch is 19, so any group size >= 19 is a single padded
+# launch (a no-op relative to per-bucket tiling).  A batch-19 benchmark
+# (scripts/benchmark_qwen_dense_groups.py, --batch 19) shows group size 10
+# splits the sorted rows into two launches (padded to 226 and 482) that avoid
+# padding the short rows out to 482, running ~15% faster than the no-op
+# 32; smaller groups add launch overhead (8 ~ break-even, 4 is slower).
+# 10 is optimal for the fixed local batch 19; re-measure if the batch moves.
+QWEN_DENSE_GROUP_SIZE = 10
 QWEN_FAST_PATH_PROBE_LENGTH = 290
 
 
