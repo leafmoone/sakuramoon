@@ -88,12 +88,12 @@ def _eager_composite_calls(composite: torch.nn.Module) -> Iterator[None]:
         call_impl = getattr(module, "_compiled_call_impl", None)
         if call_impl is not None:
             compiled.append((module, call_impl))
-            setattr(module, "_compiled_call_impl", None)
+            module._compiled_call_impl = None
     try:
         yield
     finally:
         for module, call_impl in compiled:
-            setattr(module, "_compiled_call_impl", call_impl)
+            module._compiled_call_impl = call_impl
 
 
 def _conditional_plan(case: PromptCase) -> CaptionPlan:

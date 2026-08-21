@@ -72,12 +72,12 @@ from sakuramoon.train.runtime import (
     run_single_gpu_training,
 )
 from sakuramoon.train.sampling import TrainingSampler
-from sakuramoon.train.step import SingleGpuUpdateState, TrainableComposite
 from sakuramoon.train.stage import (
     GrowthProgress,
     canonical_growth_alpha,
     checkpoint_reason,
 )
+from sakuramoon.train.step import SingleGpuUpdateState, TrainableComposite
 
 
 class ProductionReadinessError(RuntimeError):

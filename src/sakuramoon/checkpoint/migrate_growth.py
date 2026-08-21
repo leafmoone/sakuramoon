@@ -260,10 +260,14 @@ def _migrate_model(
     if expected_new != frozenset(new_tensors) or old_names - target_names:
         raise CheckpointError("target model FQN delta is not exactly the approved G1 growth")
     if any(name not in old_names and not (
-        name.startswith("dit.blocks.slot_02.")
-        or name.startswith("dit.blocks.slot_08.")
-        or name.startswith("dit.blocks.slot_14.")
-        or name.startswith("dit.blocks.slot_20.")
+        name.startswith(
+            (
+                "dit.blocks.slot_02.",
+                "dit.blocks.slot_08.",
+                "dit.blocks.slot_14.",
+                "dit.blocks.slot_20.",
+            )
+        )
         or name in {
             "dit.conditioner.block_biases.slot_02",
             "dit.conditioner.block_biases.slot_08",
@@ -354,10 +358,14 @@ def _migrate_optimizer(
     added_names = target_names - frozenset(old_id_by_name)
     if not added_names or any(
         not (
-            name.startswith("dit.blocks.slot_02.")
-            or name.startswith("dit.blocks.slot_08.")
-            or name.startswith("dit.blocks.slot_14.")
-            or name.startswith("dit.blocks.slot_20.")
+            name.startswith(
+                (
+                    "dit.blocks.slot_02.",
+                    "dit.blocks.slot_08.",
+                    "dit.blocks.slot_14.",
+                    "dit.blocks.slot_20.",
+                )
+            )
             or name in {
                 "dit.conditioner.block_biases.slot_02",
                 "dit.conditioner.block_biases.slot_08",
@@ -445,7 +453,7 @@ def migrate_checkpoint(
         raise FileExistsError(f"migration temporary path already exists: {temporary}")
     try:
         shutil.copytree(source, temporary, symlinks=False)
-        architecture, old_names = _migrate_model(
+        architecture, _ = _migrate_model(
             temporary,
             identity=identity,
             migration_seed=migration_seed,

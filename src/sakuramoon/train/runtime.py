@@ -61,13 +61,13 @@ from sakuramoon.train.loop import (
     SingleGpuTrainingLoop,
     SuccessfulLoopObservation,
 )
+from sakuramoon.train.stage import canonical_growth_alpha
 from sakuramoon.train.step import (
     SingleGpuUpdateState,
     StepOptimizer,
     TrainableComposite,
     TrainableCompositeInputs,
 )
-from sakuramoon.train.stage import canonical_growth_alpha
 
 if TYPE_CHECKING:
     from sakuramoon.train.preflight import (
