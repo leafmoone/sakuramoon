@@ -7,7 +7,7 @@ image_count = 24
 output_subdir = "sample"
 
 [run]
-run_id = "g1-production-20layer-256-bs38-acc10-20260820"
+run_id = "g1_256_bs760"
 stage = "G1"
 seed = 44
 
@@ -70,7 +70,7 @@ accumulation = 20
 # base_lr=0.00005 at reference_batch=256 -> actual_lr=0.0001484375 for global_batch=760.
 global_batch = 760
 activation_checkpoint_mode = "none"
-planned_updates = 15000
+planned_updates = 110000
 manual_finalize = true
 automatic_transition = false
 
