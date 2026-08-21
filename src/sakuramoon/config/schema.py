@@ -531,6 +531,17 @@ class TrainingSamplingConfig(StrictModel):
     every_updates: PositiveInt = 1000
     image_count: PositiveInt = 12
     output_subdir: Annotated[str, StringConstraints(min_length=1)] = "sample"
+    fixed_cohort: Literal["neutral", "locked"] = "neutral"
+    longitudinal_pin_update: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def validate_cohort_consistency(self) -> TrainingSamplingConfig:
+        if self.fixed_cohort == "locked" and self.image_count != 60:
+            raise ValueError(
+                "fixed_cohort=locked requires image_count=60 "
+                "(12 dynamic plus 4 locked condition pairs of 12 variants)"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_output_subdir(self) -> TrainingSamplingConfig:
@@ -674,14 +685,18 @@ class StageConfig(StrictModel):
             or self.depth != 16
             or self.resolution != 256
         ):
-            raise ValueError("S0 topology must be world_size=2, depth=16, resolution=256")
+            raise ValueError(
+                "S0 topology must be world_size=2, depth=16, resolution=256"
+            )
         if self.name == "G1" and (
             self.predecessor != "S0"
             or self.world_size != 2
             or self.depth != 20
             or self.resolution != 256
         ):
-            raise ValueError("G1 topology must be S0->G1 at world_size=2, depth=20, resolution=256")
+            raise ValueError(
+                "G1 topology must be S0->G1 at world_size=2, depth=20, resolution=256"
+            )
         return self
 
 
@@ -862,9 +877,7 @@ class RuntimeConfig(StrictModel):
         elif not self.stage.enabled:
             raise ValueError("selected stage must be enabled")
         accepted_backends = (
-            {"native", "accelerate"}
-            if self.stage.name in {"S0", "G1"}
-            else {"ddp"}
+            {"native", "accelerate"} if self.stage.name in {"S0", "G1"} else {"ddp"}
         )
         if self.distributed.backend not in accepted_backends:
             raise ValueError("distributed backend does not match the selected stage")
@@ -875,7 +888,9 @@ class RuntimeConfig(StrictModel):
                 and self.distributed.world_size <= 1
             )
         ):
-            raise ValueError("S0/G1 distributed backend and world size are inconsistent")
+            raise ValueError(
+                "S0/G1 distributed backend and world size are inconsistent"
+            )
         if self.distributed.world_size != self.stage.world_size:
             raise ValueError("distributed and stage world_size must match")
         if self.growth.enabled != (self.stage.name in {"G1", "G2"}):

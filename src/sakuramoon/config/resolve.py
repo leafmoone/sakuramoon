@@ -14,7 +14,7 @@ from sakuramoon.config.schema import RuntimeConfig
 def resolved_config_bytes(config: RuntimeConfig) -> bytes:
     """Serialize a validated config with stable schema order and no secret values."""
 
-    payload = config.model_dump(mode="python", by_alias=True)
+    payload = config.model_dump(mode="python", by_alias=True, exclude_none=True)
     redacted = redact_mapping(payload)
     return tomli_w.dumps(redacted).encode("utf-8")
 
@@ -22,7 +22,9 @@ def resolved_config_bytes(config: RuntimeConfig) -> bytes:
 def write_resolved_config(config: RuntimeConfig, destination: Path) -> None:
     """Atomically write resolved TOML."""
 
-    lexical_destination = destination if destination.is_absolute() else Path.cwd() / destination
+    lexical_destination = (
+        destination if destination.is_absolute() else Path.cwd() / destination
+    )
     if lexical_destination.is_symlink():
         raise ValueError(f"refusing to replace symlink: {destination}")
     current = Path(lexical_destination.anchor)
@@ -32,17 +34,23 @@ def write_resolved_config(config: RuntimeConfig, destination: Path) -> None:
             raise ValueError(f"resolved-config parent may not be a symlink: {current}")
         if current.exists():
             if not current.is_dir():
-                raise ValueError(f"resolved-config parent is not a directory: {current}")
+                raise ValueError(
+                    f"resolved-config parent is not a directory: {current}"
+                )
         else:
             current.mkdir()
             if current.is_symlink() or not current.is_dir():
-                raise ValueError(f"could not create safe resolved-config parent: {current}")
+                raise ValueError(
+                    f"could not create safe resolved-config parent: {current}"
+                )
     payload = resolved_config_bytes(config)
     temporary = lexical_destination.with_name(
         f".{lexical_destination.name}.{os.getpid()}.tmp"
     )
     if temporary.exists() or temporary.is_symlink():
-        raise FileExistsError(f"temporary resolved-config path already exists: {temporary}")
+        raise FileExistsError(
+            f"temporary resolved-config path already exists: {temporary}"
+        )
     try:
         with temporary.open("xb") as handle:
             handle.write(payload)

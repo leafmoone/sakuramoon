@@ -109,6 +109,23 @@ _CFG_BRANCH_COUNT = 24
 _GEOMETRY_PROTOCOL = "tiered-zoom-v1"
 _TOTAL_VARIANT_COUNT = 24
 _TOTAL_CFG_BRANCH_COUNT = 48
+_LOCKED_FIXED_PAIR_COUNT = 4
+_LOCKED_FIXED_VARIANT_COUNT = _LOCKED_FIXED_PAIR_COUNT * _VARIANT_COUNT
+_LOCKED_TOTAL_VARIANT_COUNT = _VARIANT_COUNT + _LOCKED_FIXED_VARIANT_COUNT
+
+
+def _pinned_selector_update(update: int, pin: int | None) -> int | None:
+    """Update counter that seeds the dynamic pair selector.
+
+    With a pin, every update at or beyond the pin shares the selector seeded
+    by the pinned update (longitudinal pinning); otherwise each update seeds
+    its own selector and the result is ``None``.
+    """
+    if pin is not None and update >= pin:
+        return pin
+    return None
+
+
 _DIAGNOSTIC_ITEM_INDICES = (0, 2, 4)
 _DIAGNOSTIC_TIMESTEPS = (0.2, 0.5, 0.8)
 
@@ -312,9 +329,7 @@ def _conditioning_inputs(
     )
     active_condition = torch.tensor(
         tuple(
-            index
-            for index, item in enumerate(captions)
-            if not item.use_null_condition
+            index for index, item in enumerate(captions) if not item.use_null_condition
         ),
         dtype=torch.long,
         device=device,
@@ -445,9 +460,7 @@ def _build_variant_items(
         if any(condition is None for condition in source_conditions):
             raise TrainingSamplingError("variant condition is unavailable")
         typed_conditions = tuple(
-            condition
-            for condition in source_conditions
-            if condition is not None
+            condition for condition in source_conditions if condition is not None
         )
         protocols = {
             (condition.source, condition.role) for condition in typed_conditions
@@ -458,9 +471,7 @@ def _build_variant_items(
             ConditionRequest(
                 source=typed_conditions[0].source,
                 role=typed_conditions[0].role,
-                tags=tuple(
-                    tag for item in typed_conditions for tag in item.tags
-                ),
+                tags=tuple(tag for item in typed_conditions for tag in item.tags),
             )
             if typed_conditions
             else None
@@ -702,19 +713,29 @@ class TrainingSampler:
         self.device = device
         self.growth_alpha = growth_alpha
         image_count = config.sampling.training.image_count
-        if image_count not in (_VARIANT_COUNT, _TOTAL_VARIANT_COUNT):
+        fixed_cohort = config.sampling.training.fixed_cohort
+        if image_count not in (
+            _VARIANT_COUNT,
+            _TOTAL_VARIANT_COUNT,
+            _LOCKED_TOTAL_VARIANT_COUNT,
+        ):
             raise ValueError(
                 "training sampling image_count must be "
-                f"{_VARIANT_COUNT} (single dynamic cohort) or "
-                f"{_TOTAL_VARIANT_COUNT} (dynamic plus fixed-neutral cohorts)"
+                f"{_VARIANT_COUNT} (single dynamic cohort), "
+                f"{_TOTAL_VARIANT_COUNT} (dynamic plus fixed-neutral cohort), or "
+                f"{_LOCKED_TOTAL_VARIANT_COUNT} "
+                "(dynamic plus locked condition pairs)"
             )
         self.fixed_condition_pairs = (
-            load_fixed_condition_pairs(
-                repository_root / config.evaluation.prompt_path
-            )
+            load_fixed_condition_pairs(repository_root / config.evaluation.prompt_path)
             if config.evaluation.enabled
             else ()
         )
+        if fixed_cohort == "locked" and not self.fixed_condition_pairs:
+            raise ValueError(
+                "fixed_cohort=locked requires the enabled evaluation prompt "
+                "manifest with the locked condition pairs"
+            )
         self.output_root = (
             repository_directory(repository_root, config.paths.checkpoint_dir)
             / config.sampling.training.output_subdir
@@ -797,10 +818,7 @@ class TrainingSampler:
         )
         diagnostics["condition_token_after_modality_rms"] = _metric_float(
             "condition_token_after_modality_rms",
-            0.5 * (
-                _tensor_rms(condition_after[0])
-                + _tensor_rms(condition_after[1])
-            ),
+            0.5 * (_tensor_rms(condition_after[0]) + _tensor_rms(condition_after[1])),
         )
         diagnostics["null_condition_after_modality_rms"] = _metric_float(
             "null_condition_after_modality_rms",
@@ -833,9 +851,7 @@ class TrainingSampler:
         latent_batch = noise.to(dit.input_projection.weight.dtype)
         batch, channels, height, width = latent_batch.shape
         projected_image = dit.input_projection(
-            latent_batch.permute(0, 2, 3, 1).reshape(
-                batch * height * width, channels
-            )
+            latent_batch.permute(0, 2, 3, 1).reshape(batch * height * width, channels)
         ).reshape(batch, height * width, dit.hidden_size)
         diagnostics["image_token_rms"] = _metric_float(
             "image_token_rms", _tensor_rms(projected_image)
@@ -869,8 +885,7 @@ class TrainingSampler:
             main_token_indices=inputs.main_token_indices.index_select(0, indices),
             main_mask=inputs.main_mask.index_select(0, indices),
             main_token_lengths=tuple(
-                inputs.main_token_lengths[index]
-                for index in _DIAGNOSTIC_ITEM_INDICES
+                inputs.main_token_lengths[index] for index in _DIAGNOSTIC_ITEM_INDICES
             ),
             condition_token_indices=inputs.condition_token_indices.index_select(
                 0, indices
@@ -882,8 +897,7 @@ class TrainingSampler:
             ).flatten(),
             latents=(latent_batch[0],) * 3,
             image_coordinates=tuple(
-                inputs.image_coordinates[index]
-                for index in _DIAGNOSTIC_ITEM_INDICES
+                inputs.image_coordinates[index] for index in _DIAGNOSTIC_ITEM_INDICES
             ),
             size_scale=inputs.size_scale.index_select(0, indices),
             aspect=inputs.aspect.index_select(0, indices),
@@ -1014,9 +1028,7 @@ class TrainingSampler:
             condition_mask=condition_mask,
             use_null_condition=use_null,
             active_condition_sample_indices=active_condition,
-            latents=tuple(
-                noise.to(torch.bfloat16) for noise in noise_rows
-            ),
+            latents=tuple(noise.to(torch.bfloat16) for noise in noise_rows),
             image_coordinates=coordinates,
             timestep=torch.zeros(batch, dtype=torch.float32, device=self.device),
             size_scale=torch.full(
@@ -1076,13 +1088,13 @@ class TrainingSampler:
             "global_A_B_delta_rms",
         ):
             diagnostics[f"fixed_{key}"] = sum(item[key] for item in global_values) / 4
-        diagnostics["fixed_condition_global_projection_weight_rms"] = global_values[
-            0
-        ]["condition_global_projection_weight_rms"]
+        diagnostics["fixed_condition_global_projection_weight_rms"] = global_values[0][
+            "condition_global_projection_weight_rms"
+        ]
         if all("global_A_B_cosine" in item for item in global_values):
-            diagnostics["fixed_global_A_B_cosine"] = sum(
-                item["global_A_B_cosine"] for item in global_values
-            ) / 4
+            diagnostics["fixed_global_A_B_cosine"] = (
+                sum(item["global_A_B_cosine"] for item in global_values) / 4
+            )
 
         group_indices = {
             "all": range(4),
@@ -1110,30 +1122,26 @@ class TrainingSampler:
                 swap_values.append(
                     _metric_float(
                         "fixed_dit_swap_relative_rms",
-                        _tensor_rms(
-                            predictions[offset] - predictions[offset + 1]
-                        )
+                        _tensor_rms(predictions[offset] - predictions[offset + 1])
                         / denominator,
                     )
                 )
                 null_values.append(
                     _metric_float(
                         "fixed_dit_null_relative_rms",
-                        _tensor_rms(
-                            predictions[offset] - predictions[offset + 2]
-                        )
+                        _tensor_rms(predictions[offset] - predictions[offset + 2])
                         / denominator,
                     )
                 )
             suffix = f"t{round(timestep_value * 10):02d}"
             for group, pair_indices in group_indices.items():
                 selected = tuple(pair_indices)
-                diagnostics[f"fixed_{group}_dit_swap_relative_rms_{suffix}"] = (
-                    sum(swap_values[index] for index in selected) / len(selected)
-                )
-                diagnostics[f"fixed_{group}_dit_null_relative_rms_{suffix}"] = (
-                    sum(null_values[index] for index in selected) / len(selected)
-                )
+                diagnostics[f"fixed_{group}_dit_swap_relative_rms_{suffix}"] = sum(
+                    swap_values[index] for index in selected
+                ) / len(selected)
+                diagnostics[f"fixed_{group}_dit_null_relative_rms_{suffix}"] = sum(
+                    null_values[index] for index in selected
+                ) / len(selected)
         return diagnostics
 
     def _generate_batch(
@@ -1301,8 +1309,12 @@ class TrainingSampler:
                 "training sampler was called for a non-due update"
             )
         candidates = self._candidates(measurements)
+        pin = self.config.sampling.training.longitudinal_pin_update
+        pinned_update = _pinned_selector_update(update, pin)
+        pin_active = pinned_update is not None
+        selector_update = pinned_update if pin_active else update
         selector = random.Random(
-            f"{self.config.run.seed}\0training-sample-pair\0{update}"
+            f"{self.config.run.seed}\0training-sample-pair\0{selector_update}"
         )
         pair = _select_prompt_pair(candidates, selector)
         shared_seed = selector.randrange(2**63)
@@ -1316,9 +1328,10 @@ class TrainingSampler:
             EXPECTED_SUFFIX_TOKENS,
             padding_token_id,
         )
-        two_cohorts = (
-            self.config.sampling.training.image_count == _TOTAL_VARIANT_COUNT
-        )
+        image_count = self.config.sampling.training.image_count
+        neutral_cohort = image_count == _TOTAL_VARIANT_COUNT
+        locked_cohort = image_count == _LOCKED_TOTAL_VARIANT_COUNT
+        two_cohorts = neutral_cohort or locked_cohort
         items = _build_variant_items(
             pair,
             tokenizer=self.qwen.tokenizer,
@@ -1327,7 +1340,10 @@ class TrainingSampler:
         )
         fixed_pair: _PromptPair | None = None
         fixed_items: tuple[TrainingSampleItem, ...] = ()
-        if two_cohorts:
+        fixed_groups: list[
+            tuple[_PromptPair, tuple[TrainingSampleItem, ...], int, str]
+        ] = []
+        if neutral_cohort:
             fixed_pair = _fixed_neutral_prompt_pair(
                 tokenizer=self.qwen.tokenizer,
                 framing=framing,
@@ -1338,6 +1354,28 @@ class TrainingSampler:
                 tokenizer=self.qwen.tokenizer,
                 framing=framing,
                 resolution=self.config.stage.resolution,
+            )
+        elif locked_cohort:
+            for locked_pair in self.fixed_condition_pairs:
+                locked_prompts = self._fixed_prompt_pair(locked_pair, framing=framing)
+                locked_items = _build_variant_items(
+                    locked_prompts,
+                    tokenizer=self.qwen.tokenizer,
+                    framing=framing,
+                    resolution=self.config.stage.resolution,
+                )
+                fixed_groups.append(
+                    (
+                        locked_prompts,
+                        locked_items,
+                        locked_pair.a.seed % (2**63),
+                        locked_pair.label,
+                    )
+                )
+            fixed_items = tuple(
+                item
+                for _locked_prompts, locked_items, _seed, _label in fixed_groups
+                for item in locked_items
             )
 
         step_root = self.output_root / f"step-{update}"
@@ -1353,25 +1391,63 @@ class TrainingSampler:
                 )
                 fixed_images: tuple[torch.Tensor, ...] = ()
                 fixed_diagnostics: dict[str, float] = {}
-                if two_cohorts:
+                if neutral_cohort:
+                    assert fixed_pair is not None
                     fixed_images, fixed_diagnostics = self._generate_batch(
                         fixed_items,
                         shared_seed=FIXED_NEUTRAL_SHARED_SEED,
                         framing=framing,
                         include_fixed_diagnostics=False,
                     )
+                elif locked_cohort:
+                    locked_batch_images: list[torch.Tensor] = []
+                    for (
+                        _locked_prompts,
+                        locked_items,
+                        locked_seed,
+                        _label,
+                    ) in fixed_groups:
+                        locked_images, _locked_diagnostics = self._generate_batch(
+                            locked_items,
+                            shared_seed=locked_seed,
+                            framing=framing,
+                            include_fixed_diagnostics=False,
+                        )
+                        locked_batch_images.extend(locked_images)
+                    fixed_images = tuple(locked_batch_images)
                 dynamic_paths = tuple(
                     step_root / f"{item.ordinal + 1:02d}-{item.variant}.png"
                     for item in items
                 )
+                fixed_group_paths: list[tuple[Path, ...]] = []
+                if neutral_cohort:
+                    fixed_group_paths.append(
+                        tuple(
+                            step_root
+                            / f"{_VARIANT_COUNT + item.ordinal + 1:02d}-fixed-neutral-{item.variant}.png"
+                            for item in fixed_items
+                        )
+                    )
+                elif locked_cohort:
+                    offset = 0
+                    for (
+                        _locked_prompts,
+                        locked_items,
+                        _locked_seed,
+                        label,
+                    ) in fixed_groups:
+                        fixed_group_paths.append(
+                            tuple(
+                                step_root
+                                / f"{_VARIANT_COUNT + offset + index + 1:02d}-fixed-{label}-{item.variant}.png"
+                                for index, item in enumerate(locked_items)
+                            )
+                        )
+                        offset += len(locked_items)
                 fixed_paths = tuple(
-                    step_root
-                    / f"{_VARIANT_COUNT + item.ordinal + 1:02d}-fixed-neutral-{item.variant}.png"
-                    for item in fixed_items
+                    path for group in fixed_group_paths for path in group
                 )
-                for item, image, path in zip(
-                    items, images, dynamic_paths, strict=True
-                ):
+                for item, image, path in zip(items, images, dynamic_paths, strict=True):
                     array = image.permute(1, 2, 0).contiguous().numpy()
                     Image.fromarray(array).save(path)
                 for item, image, path in zip(
@@ -1385,7 +1461,11 @@ class TrainingSampler:
 
         paths = dynamic_paths + fixed_paths
         expected_variant_count = (
-            _TOTAL_VARIANT_COUNT if two_cohorts else _VARIANT_COUNT
+            _LOCKED_TOTAL_VARIANT_COUNT
+            if locked_cohort
+            else _TOTAL_VARIANT_COUNT
+            if two_cohorts
+            else _VARIANT_COUNT
         )
         if len(paths) != expected_variant_count or not all(
             path.is_file() for path in paths
@@ -1400,7 +1480,7 @@ class TrainingSampler:
             )
             for item in items
         )
-        if two_cohorts:
+        if neutral_cohort:
             assert fixed_pair is not None
             wandb_captions = wandb_captions + tuple(
                 self._wandb_caption(
@@ -1411,6 +1491,22 @@ class TrainingSampler:
                 )
                 for item in fixed_items
             )
+        elif locked_cohort:
+            for (
+                locked_prompts,
+                locked_items,
+                locked_seed,
+                label,
+            ), group_paths in zip(fixed_groups, fixed_group_paths, strict=True):
+                for item in locked_items:
+                    wandb_captions = wandb_captions + (
+                        self._wandb_caption(
+                            item,
+                            pair=locked_prompts,
+                            shared_seed=locked_seed,
+                            cohort=f"fixed-{label}",
+                        ),
+                    )
         records = [
             _variant_metadata(
                 item,
@@ -1423,7 +1519,7 @@ class TrainingSampler:
             )
             for item, path in zip(items, dynamic_paths, strict=True)
         ]
-        if two_cohorts:
+        if neutral_cohort:
             assert fixed_pair is not None
             records.extend(
                 _variant_metadata(
@@ -1437,28 +1533,63 @@ class TrainingSampler:
                 )
                 for item, path in zip(fixed_items, fixed_paths, strict=True)
             )
+        elif locked_cohort:
+            for (
+                locked_prompts,
+                locked_items,
+                locked_seed,
+                label,
+            ), group_paths in zip(fixed_groups, fixed_group_paths, strict=True):
+                records.extend(
+                    _variant_metadata(
+                        item,
+                        path,
+                        pair=locked_prompts,
+                        shared_seed=locked_seed,
+                        update=update,
+                        repository_root=self.repository_root,
+                        cohort=f"fixed-{label}",
+                        fixed_pair_label=label,
+                    )
+                    for item, path in zip(locked_items, group_paths, strict=True)
+                )
+        cohort_names = (
+            ["dynamic"]
+            if not two_cohorts
+            else (
+                ["dynamic", "fixed-neutral"]
+                if neutral_cohort
+                else ["dynamic"]
+                + [f"fixed-{label}" for _prompts, _items, _seed, label in fixed_groups]
+            )
+        )
+        state_count = (
+            _LOCKED_TOTAL_VARIANT_COUNT
+            if locked_cohort
+            else _TOTAL_VARIANT_COUNT
+            if two_cohorts
+            else _VARIANT_COUNT
+        )
         metadata = {
-            "schema_version": 5,
+            "schema_version": 6 if locked_cohort else 5,
             "geometry_protocol": _GEOMETRY_PROTOCOL,
             "update": update,
             "profile": self.config.sampling.profile,
             "A_sample_id": pair.a.sample_id,
             "B_sample_id": pair.b.sample_id,
             "shared_seed": shared_seed,
-            "state_count": (
-                _TOTAL_VARIANT_COUNT if two_cohorts else _VARIANT_COUNT
-            ),
-            "cfg_branch_count": (
-                _TOTAL_CFG_BRANCH_COUNT if two_cohorts else _CFG_BRANCH_COUNT
-            ),
+            **({"selector_update": selector_update} if pin_active else {}),
+            "state_count": state_count,
+            "cfg_branch_count": _CFG_BRANCH_COUNT * len(cohort_names),
             "cohort_state_count": _VARIANT_COUNT,
             "cohort_cfg_branch_count": _CFG_BRANCH_COUNT,
-            "cohorts": (
-                ["dynamic", "fixed-neutral"] if two_cohorts else ["dynamic"]
-            ),
+            "cohorts": cohort_names,
             "condition_diagnostics": diagnostics,
-            **({"fixed_neutral_condition_diagnostics": fixed_diagnostics}
-               if two_cohorts else {}),
+            **(
+                {"fixed_neutral_condition_diagnostics": fixed_diagnostics}
+                if neutral_cohort
+                else {}
+            ),
             "initial_noise": (
                 "one_base_noise_per_cohort_repeated_12"
                 if two_cohorts
@@ -1475,7 +1606,7 @@ class TrainingSampler:
             },
             "records": records,
         }
-        if two_cohorts:
+        if neutral_cohort:
             assert fixed_pair is not None
             metadata["fixed_neutral"] = {
                 "shared_seed": FIXED_NEUTRAL_SHARED_SEED,
@@ -1485,6 +1616,18 @@ class TrainingSampler:
                     "B": _prompt_metadata(fixed_pair.b),
                 },
             }
+        elif locked_cohort:
+            metadata["fixed_pairs"] = [
+                {
+                    "label": label,
+                    "shared_seed": seed,
+                    "condition_sources": {
+                        "A": _prompt_metadata(locked_prompts.a),
+                        "B": _prompt_metadata(locked_prompts.b),
+                    },
+                }
+                for locked_prompts, _items, seed, label in fixed_groups
+            ]
         metadata_path = step_root / "metadata.json"
         temporary = step_root / f".metadata.{update}.tmp"
         temporary.write_text(
@@ -1496,9 +1639,9 @@ class TrainingSampler:
             raise TrainingSamplingError("training sample metadata was not committed")
         print(
             f"[sample] update={update} saved "
-            f"{_TOTAL_VARIANT_COUNT if two_cohorts else _VARIANT_COUNT} variants "
-            f"across {2 if two_cohorts else 1} cohort"
-            f"{'s' if two_cohorts else ''}: {step_root}",
+            f"{state_count} variants "
+            f"across {len(cohort_names)} cohort"
+            f"{'s' if len(cohort_names) > 1 else ''}: {step_root}",
             flush=True,
         )
         return TrainingSampleResult(update, paths, wandb_captions, diagnostics)

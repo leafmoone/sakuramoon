@@ -28,5 +28,8 @@ def valid_payload(secret_environment: dict[str, str]) -> dict[str, Any]:
         environment=secret_environment,
     )
     return loaded.config.model_dump(
-        mode="python", by_alias=True, exclude_computed_fields=True
+        mode="python",
+        by_alias=True,
+        exclude_computed_fields=True,
+        exclude_none=True,
     )
