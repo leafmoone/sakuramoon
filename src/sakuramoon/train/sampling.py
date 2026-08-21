@@ -50,6 +50,11 @@ from sakuramoon.train.condition_diagnostics import (
 from sakuramoon.train.condition_diagnostics import (
     tensor_rms as _tensor_rms,
 )
+from sakuramoon.train.fixed_sample_prompts import (
+    FIXED_NEUTRAL_PROMPTS,
+    FIXED_NEUTRAL_SHARED_SEED,
+    fixed_neutral_provenance,
+)
 from sakuramoon.train.runtime import RuntimeMeasurement
 from sakuramoon.train.step import TrainableComposite, TrainableCompositeInputs
 
@@ -102,6 +107,8 @@ _VARIANT_NAMES = tuple(definition[0] for definition in _VARIANT_DEFINITIONS)
 _VARIANT_COUNT = 12
 _CFG_BRANCH_COUNT = 24
 _GEOMETRY_PROTOCOL = "tiered-zoom-v1"
+_TOTAL_VARIANT_COUNT = 24
+_TOTAL_CFG_BRANCH_COUNT = 48
 _DIAGNOSTIC_ITEM_INDICES = (0, 2, 4)
 _DIAGNOSTIC_TIMESTEPS = (0.2, 0.5, 0.8)
 
@@ -192,6 +199,37 @@ def _unconditional_plan() -> CaptionPlan:
         all_condition_dropped=True,
         dropout_hits=_ALL_DROPPED,
     )
+
+
+def _fixed_neutral_prompt_pair(
+    *,
+    tokenizer: TokenEncoder,
+    framing: FramingContract,
+    resolution: int,
+) -> _PromptPair:
+    """Build the immutable Hiten/WLOP prompt pair for the fixed gallery."""
+    prompts: list[_PostDropoutPrompt] = []
+    for record in FIXED_NEUTRAL_PROMPTS:
+        plan = record.caption_plan()
+        caption = serialize_caption(plan, tokenizer, framing)
+        if caption.plan.condition is None:
+            raise TrainingSamplingError(
+                f"fixed neutral prompt {record.sample_id} lost its condition"
+            )
+        prompts.append(
+            _PostDropoutPrompt(
+                sample_id=record.sample_id,
+                caption=caption,
+                # The serializer may drop complete trailing body tags to honor
+                # the token budget; retain the governed serialized plan.
+                plan=caption.plan,
+                observed_height=resolution,
+                observed_width=resolution,
+            )
+        )
+    if len(prompts) != 2:
+        raise TrainingSamplingError("fixed neutral prompt cohort is incomplete")
+    return _PromptPair(prompts[0], prompts[1])
 
 
 def _parse_shape_key(value: str) -> tuple[int, int]:
@@ -458,19 +496,27 @@ def _build_variant_items(
     return result
 
 
+def _require_image_batch(
+    items: tuple[TrainingSampleItem, ...],
+) -> tuple[int, int]:
+    if type(items) is not tuple or not items:
+        raise TrainingSamplingError("training sampler requires a nonempty image batch")
+    height, width = items[0].height, items[0].width
+    if any((item.height, item.width) != (height, width) for item in items):
+        raise TrainingSamplingError("training sample variants have mixed output sizes")
+    return height, width
+
+
 def _require_variant_batch(
     items: tuple[TrainingSampleItem, ...],
 ) -> tuple[int, int]:
-    if type(items) is not tuple or len(items) != _VARIANT_COUNT:
+    if len(items) != _VARIANT_COUNT:
         raise TrainingSamplingError("training sampler requires exactly 12 variants")
     if tuple(item.variant for item in items) != _VARIANT_NAMES:
         raise TrainingSamplingError(
             "training sample variants are incomplete or reordered"
         )
-    height, width = items[0].height, items[0].width
-    if any((item.height, item.width) != (height, width) for item in items):
-        raise TrainingSamplingError("training sample variants have mixed output sizes")
-    return height, width
+    return _require_image_batch(items)
 
 
 def _coordinate_maps(
@@ -478,7 +524,7 @@ def _coordinate_maps(
     *,
     device: torch.device,
 ) -> tuple[torch.Tensor, ...]:
-    _require_variant_batch(items)
+    _require_image_batch(items)
     maps = tuple(
         full_canvas_crop_coordinates(
             item.height // 16,
@@ -498,12 +544,15 @@ def _shared_initial_noise(
     height: int,
     width: int,
     shared_seed: int,
+    count: int = _VARIANT_COUNT,
     device: torch.device,
 ) -> torch.Tensor:
     if type(shared_seed) is not int or not 0 <= shared_seed < 2**63:
         raise TrainingSamplingError("shared sample seed must be a 63-bit integer")
     if height <= 0 or width <= 0 or height % 16 or width % 16:
         raise TrainingSamplingError("shared noise canvas is invalid")
+    if type(count) is not int or count <= 0:
+        raise TrainingSamplingError("shared noise batch count is invalid")
     generator = torch.Generator(device=device)
     generator.manual_seed(shared_seed)
     base_noise = torch.randn(
@@ -512,7 +561,7 @@ def _shared_initial_noise(
         device=device,
         dtype=torch.float32,
     )
-    return base_noise.repeat(_VARIANT_COUNT, 1, 1, 1)
+    return base_noise.repeat(count, 1, 1, 1)
 
 
 def _tag_metadata(tag: Tag) -> dict[str, str]:
@@ -572,13 +621,15 @@ def _variant_metadata(
     shared_seed: int,
     update: int,
     repository_root: Path,
+    cohort: str = "dynamic",
+    fixed_pair_label: str | None = None,
 ) -> dict[str, object]:
     main = _source_for_label(pair, item.main_source)
     condition_sources = tuple(
         _source_for_label(pair, label) for label in item.condition_sources
     )
     left, top, right, bottom = item.crop_box
-    return {
+    metadata = {
         "update": update,
         "A_sample_id": pair.a.sample_id,
         "B_sample_id": pair.b.sample_id,
@@ -617,6 +668,10 @@ def _variant_metadata(
         },
         "coordinate_type": item.coordinate_type,
     }
+    metadata["cohort"] = cohort
+    if fixed_pair_label is not None:
+        metadata["fixed_pair"] = fixed_pair_label
+    return metadata
 
 
 class TrainingSampler:
@@ -646,6 +701,13 @@ class TrainingSampler:
         self.vae = vae
         self.device = device
         self.growth_alpha = growth_alpha
+        image_count = config.sampling.training.image_count
+        if image_count not in (_VARIANT_COUNT, _TOTAL_VARIANT_COUNT):
+            raise ValueError(
+                "training sampling image_count must be "
+                f"{_VARIANT_COUNT} (single dynamic cohort) or "
+                f"{_TOTAL_VARIANT_COUNT} (dynamic plus fixed-neutral cohorts)"
+            )
         self.fixed_condition_pairs = (
             load_fixed_condition_pairs(
                 repository_root / config.evaluation.prompt_path
@@ -657,6 +719,13 @@ class TrainingSampler:
             repository_directory(repository_root, config.paths.checkpoint_dir)
             / config.sampling.training.output_subdir
         )
+
+    def set_growth_alpha(self, value: float) -> None:
+        """Select the canonical alpha for the update being sampled."""
+
+        if type(value) is not float or not 0.0 <= value <= 1.0:
+            raise ValueError("growth_alpha must be a float in [0,1]")
+        self.growth_alpha = value
 
     def due(self, update: int) -> bool:
         settings = self.config.sampling.training
@@ -878,6 +947,8 @@ class TrainingSampler:
         *,
         framing: FramingContract,
     ) -> dict[str, float]:
+        if not self.fixed_condition_pairs:
+            return {}
         if len(self.fixed_condition_pairs) != 4:
             raise TrainingSamplingError(
                 "fixed condition diagnostics require exactly four pairs"
@@ -1071,6 +1142,7 @@ class TrainingSampler:
         *,
         shared_seed: int,
         framing: FramingContract,
+        include_fixed_diagnostics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         height, width = _require_variant_batch(items)
         conditional = tuple(item.caption for item in items)
@@ -1147,7 +1219,8 @@ class TrainingSampler:
             device=self.device,
         )
         diagnostics = self._condition_diagnostics(inputs, conditioning, noise)
-        diagnostics.update(self._fixed_condition_diagnostics(framing=framing))
+        if include_fixed_diagnostics:
+            diagnostics.update(self._fixed_condition_diagnostics(framing=framing))
 
         def velocity(state: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
             if state.shape != noise.shape or timestep.shape != (_VARIANT_COUNT,):
@@ -1204,8 +1277,10 @@ class TrainingSampler:
         *,
         pair: _PromptPair,
         shared_seed: int,
+        cohort: str,
     ) -> str:
         return (
+            f"cohort={cohort}\n"
             f"variant={item.variant}\n"
             f"A_sample_id={pair.a.sample_id}\n"
             f"B_sample_id={pair.b.sample_id}\n"
@@ -1241,12 +1316,29 @@ class TrainingSampler:
             EXPECTED_SUFFIX_TOKENS,
             padding_token_id,
         )
+        two_cohorts = (
+            self.config.sampling.training.image_count == _TOTAL_VARIANT_COUNT
+        )
         items = _build_variant_items(
             pair,
             tokenizer=self.qwen.tokenizer,
             framing=framing,
             resolution=self.config.stage.resolution,
         )
+        fixed_pair: _PromptPair | None = None
+        fixed_items: tuple[TrainingSampleItem, ...] = ()
+        if two_cohorts:
+            fixed_pair = _fixed_neutral_prompt_pair(
+                tokenizer=self.qwen.tokenizer,
+                framing=framing,
+                resolution=self.config.stage.resolution,
+            )
+            fixed_items = _build_variant_items(
+                fixed_pair,
+                tokenizer=self.qwen.tokenizer,
+                framing=framing,
+                resolution=self.config.stage.resolution,
+            )
 
         step_root = self.output_root / f"step-{update}"
         step_root.mkdir(parents=True, exist_ok=False)
@@ -1259,23 +1351,66 @@ class TrainingSampler:
                     shared_seed=shared_seed,
                     framing=framing,
                 )
-                paths = tuple(
+                fixed_images: tuple[torch.Tensor, ...] = ()
+                fixed_diagnostics: dict[str, float] = {}
+                if two_cohorts:
+                    fixed_images, fixed_diagnostics = self._generate_batch(
+                        fixed_items,
+                        shared_seed=FIXED_NEUTRAL_SHARED_SEED,
+                        framing=framing,
+                        include_fixed_diagnostics=False,
+                    )
+                dynamic_paths = tuple(
                     step_root / f"{item.ordinal + 1:02d}-{item.variant}.png"
                     for item in items
                 )
-                for item, image, path in zip(items, images, paths, strict=True):
+                fixed_paths = tuple(
+                    step_root
+                    / f"{_VARIANT_COUNT + item.ordinal + 1:02d}-fixed-neutral-{item.variant}.png"
+                    for item in fixed_items
+                )
+                for item, image, path in zip(
+                    items, images, dynamic_paths, strict=True
+                ):
+                    array = image.permute(1, 2, 0).contiguous().numpy()
+                    Image.fromarray(array).save(path)
+                for item, image, path in zip(
+                    fixed_items, fixed_images, fixed_paths, strict=True
+                ):
                     array = image.permute(1, 2, 0).contiguous().numpy()
                     Image.fromarray(array).save(path)
         finally:
             self.composite.train(was_training)
             torch.cuda.empty_cache()
 
-        if len(paths) != _VARIANT_COUNT or not all(path.is_file() for path in paths):
+        paths = dynamic_paths + fixed_paths
+        expected_variant_count = (
+            _TOTAL_VARIANT_COUNT if two_cohorts else _VARIANT_COUNT
+        )
+        if len(paths) != expected_variant_count or not all(
+            path.is_file() for path in paths
+        ):
             raise TrainingSamplingError("saved sample files are incomplete")
         wandb_captions = tuple(
-            self._wandb_caption(item, pair=pair, shared_seed=shared_seed)
+            self._wandb_caption(
+                item,
+                pair=pair,
+                shared_seed=shared_seed,
+                cohort="dynamic",
+            )
             for item in items
         )
+        if two_cohorts:
+            assert fixed_pair is not None
+            wandb_captions = wandb_captions + tuple(
+                self._wandb_caption(
+                    item,
+                    pair=fixed_pair,
+                    shared_seed=FIXED_NEUTRAL_SHARED_SEED,
+                    cohort="fixed-neutral",
+                )
+                for item in fixed_items
+            )
         records = [
             _variant_metadata(
                 item,
@@ -1284,21 +1419,51 @@ class TrainingSampler:
                 shared_seed=shared_seed,
                 update=update,
                 repository_root=self.repository_root,
+                cohort="dynamic",
             )
-            for item, path in zip(items, paths, strict=True)
+            for item, path in zip(items, dynamic_paths, strict=True)
         ]
+        if two_cohorts:
+            assert fixed_pair is not None
+            records.extend(
+                _variant_metadata(
+                    item,
+                    path,
+                    pair=fixed_pair,
+                    shared_seed=FIXED_NEUTRAL_SHARED_SEED,
+                    update=update,
+                    repository_root=self.repository_root,
+                    cohort="fixed-neutral",
+                )
+                for item, path in zip(fixed_items, fixed_paths, strict=True)
+            )
         metadata = {
-            "schema_version": 3,
+            "schema_version": 5,
             "geometry_protocol": _GEOMETRY_PROTOCOL,
             "update": update,
             "profile": self.config.sampling.profile,
             "A_sample_id": pair.a.sample_id,
             "B_sample_id": pair.b.sample_id,
             "shared_seed": shared_seed,
-            "state_count": _VARIANT_COUNT,
-            "cfg_branch_count": _CFG_BRANCH_COUNT,
+            "state_count": (
+                _TOTAL_VARIANT_COUNT if two_cohorts else _VARIANT_COUNT
+            ),
+            "cfg_branch_count": (
+                _TOTAL_CFG_BRANCH_COUNT if two_cohorts else _CFG_BRANCH_COUNT
+            ),
+            "cohort_state_count": _VARIANT_COUNT,
+            "cohort_cfg_branch_count": _CFG_BRANCH_COUNT,
+            "cohorts": (
+                ["dynamic", "fixed-neutral"] if two_cohorts else ["dynamic"]
+            ),
             "condition_diagnostics": diagnostics,
-            "initial_noise": "single_base_noise_repeated_12",
+            **({"fixed_neutral_condition_diagnostics": fixed_diagnostics}
+               if two_cohorts else {}),
+            "initial_noise": (
+                "one_base_noise_per_cohort_repeated_12"
+                if two_cohorts
+                else "single_base_noise_repeated_12"
+            ),
             "cfg_coordinate_sharing": True,
             "output_size": {
                 "height": self.config.stage.resolution,
@@ -1310,6 +1475,16 @@ class TrainingSampler:
             },
             "records": records,
         }
+        if two_cohorts:
+            assert fixed_pair is not None
+            metadata["fixed_neutral"] = {
+                "shared_seed": FIXED_NEUTRAL_SHARED_SEED,
+                "provenance": fixed_neutral_provenance(),
+                "condition_sources": {
+                    "A": _prompt_metadata(fixed_pair.a),
+                    "B": _prompt_metadata(fixed_pair.b),
+                },
+            }
         metadata_path = step_root / "metadata.json"
         temporary = step_root / f".metadata.{update}.tmp"
         temporary.write_text(
@@ -1320,7 +1495,10 @@ class TrainingSampler:
         if not metadata_path.is_file():
             raise TrainingSamplingError("training sample metadata was not committed")
         print(
-            f"[sample] update={update} saved {_VARIANT_COUNT} variants: {step_root}",
+            f"[sample] update={update} saved "
+            f"{_TOTAL_VARIANT_COUNT if two_cohorts else _VARIANT_COUNT} variants "
+            f"across {2 if two_cohorts else 1} cohort"
+            f"{'s' if two_cohorts else ''}: {step_root}",
             flush=True,
         )
         return TrainingSampleResult(update, paths, wandb_captions, diagnostics)

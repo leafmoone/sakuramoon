@@ -30,9 +30,11 @@ class StageSpec:
 
 
 STAGE_SPECS: dict[str, StageSpec] = {
-    "S0": StageSpec("S0", None, 1, 16, 256),
-    "S1": StageSpec("S1", "S0", 4, 16, 256),
-    "G1": StageSpec("G1", "S1", 4, 20, 256),
+    # Production S0 is already a two-rank 256px stage.  G1 therefore grows
+    # directly from S0; S1 remains only as a legacy persisted name.
+    "S0": StageSpec("S0", None, 2, 16, 256),
+    "S1": StageSpec("S1", "S0", 2, 16, 256),
+    "G1": StageSpec("G1", "S0", 2, 20, 256),
     "S2": StageSpec("S2", "G1", 4, 20, 512),
     "G2": StageSpec("G2", "S2", 4, 24, 512),
     "S3": StageSpec("S3", "G2", 4, 24, 512),
@@ -212,6 +214,24 @@ def validate_checkpoint_stage(state: RawCheckpointState, expected: StageSpec) ->
         raise ValueError("source checkpoint axes do not match the source stage")
 
 
+def canonical_growth_alpha(
+    growth: GrowthCheckpointState, successful_update: int
+) -> float:
+    """Return the alpha for a persisted successful-update edge."""
+
+    if type(successful_update) is not int or successful_update < 0:
+        raise ValueError("successful update must be a nonnegative integer")
+    if growth.ramp_start_successful_update is None:
+        return 1.0
+    assert growth.ramp_updates is not None
+    if successful_update < growth.ramp_start_successful_update:
+        raise ValueError("successful update precedes growth ramp origin")
+    return half_cosine_growth_alpha(
+        successful_update - growth.ramp_start_successful_update,
+        growth.ramp_updates,
+    )
+
+
 def transition_checkpoint_state(
     source: RawCheckpointState,
     request: StageTransitionRequest,
@@ -260,6 +280,7 @@ __all__ = [
     "StageSpec",
     "StageTransitionRequest",
     "checkpoint_reason",
+    "canonical_growth_alpha",
     "stage_spec",
     "transition_checkpoint_state",
     "validate_checkpoint_stage",

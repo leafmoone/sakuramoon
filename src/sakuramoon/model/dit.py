@@ -25,7 +25,13 @@ from sakuramoon.model.attention import (
     dense_attention_mask,
 )
 from sakuramoon.model.block import DiTBlock, PackedDiTBlock
-from sakuramoon.model.growth import active_slot_ids, slot_growth, slot_name
+from sakuramoon.model.growth import (
+    active_slot_ids,
+    new_slot_ids,
+    packed_growth_alpha,
+    slot_growth,
+    slot_name,
+)
 from sakuramoon.model.output_head import FinalOutputHead
 
 ActivationCheckpointMode = Literal["none", "alternating", "all"]
@@ -775,8 +781,20 @@ class PackedDiT(nn.Module):
             self.active_slot_ids,
         )
         joint = packed.tokens
+        growth_slots = new_slot_ids(self.depth)
+        dynamic_growth = (
+            packed_growth_alpha(self.depth, growth_alpha, packed.tokens)
+            if growth_slots
+            else None
+        )
         for active_index, slot_id in enumerate(self.active_slot_ids):
-            growth = slot_growth(self.depth, slot_id, growth_alpha)
+            growth = (
+                dynamic_growth
+                if slot_id in growth_slots
+                else slot_growth(self.depth, slot_id, growth_alpha)
+            )
+            if growth is None:
+                raise RuntimeError("new growth slots require a device growth scalar")
             block = self.blocks[slot_name(slot_id)]
             modulation = condition.block.for_active_index(active_index)
             if _checkpoint_block_at(

@@ -293,6 +293,29 @@ def build_training_metric(
             "condition_global_projection_grad_norm",
             update.condition_global_projection_grad_norm,
         ),
+        growth_alpha=update.growth_alpha,
+        growth_new_slot_grad_norm=(
+            0.0
+            if update.growth_new_slot_grad_norm is None
+            else _scalar_float(
+                "growth_new_slot_grad_norm", update.growth_new_slot_grad_norm
+            )
+        ),
+        growth_new_block_grad_norm=(
+            0.0
+            if update.growth_new_block_grad_norm is None
+            else _scalar_float(
+                "growth_new_block_grad_norm", update.growth_new_block_grad_norm
+            )
+        ),
+        growth_new_conditioner_grad_norm=(
+            0.0
+            if update.growth_new_conditioner_grad_norm is None
+            else _scalar_float(
+                "growth_new_conditioner_grad_norm",
+                update.growth_new_conditioner_grad_norm,
+            )
+        ),
         clip_fraction=float(coefficient < 1.0),
         learning_rate=observation.learning_rate,
         timestep_min=timestep_min,

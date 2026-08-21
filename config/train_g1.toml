@@ -1,0 +1,102 @@
+extends = ["base.toml"]
+
+[sampling.training]
+enabled = true
+every_updates = 200
+image_count = 24
+output_subdir = "sample"
+
+[run]
+run_id = "g1-production-20layer-256-bs38-acc10-20260820"
+stage = "G1"
+seed = 44
+
+[paths]
+run_dir = "runs/g1"
+checkpoint_dir = "output_model/g1"
+artifact_dir = "artifacts/g1"
+
+[distributed]
+backend = "accelerate"
+world_size = 2
+frozen_encoders_outside_wrapper = true
+automatic_backend_fallback = false
+
+[checkpoint]
+full_every_updates = 100
+slots = 2
+
+[data.cache]
+low_watermark_gib = 192
+high_watermark_gib = 256
+download_concurrency = 8
+verified_shard_lookahead = 48
+persistent_workers_per_rank = 8
+ready_batches_per_rank = 8
+
+[data.service]
+request_timeout_seconds = 30.0
+lease_channel_capacity = 24
+ack_channel_capacity = 24
+
+[data.transport]
+connect_timeout_seconds = 10.0
+read_timeout_seconds = 30.0
+stream_chunk_bytes = 1048576
+streams_per_shard = 4
+
+[growth]
+enabled = true
+alpha_schedule = "half_cosine"
+alpha_fraction = 0.02
+min_updates = 1000
+max_updates = 5000
+random_new_slots = true
+copy_old_slots = false
+
+[kernels]
+torch_compile_enabled = true
+torch_compile_dynamic = true
+
+[stage]
+name = "G1"
+enabled = true
+predecessor = "S0"
+world_size = 2
+depth = 20
+resolution = 256
+local_batch = 19
+accumulation = 20
+# base_lr=0.00005 at reference_batch=256 -> actual_lr=0.0001484375 for global_batch=760.
+global_batch = 760
+activation_checkpoint_mode = "none"
+planned_updates = 15000
+manual_finalize = true
+automatic_transition = false
+
+[logging]
+local_jsonl_path = "artifacts/g1/metrics.jsonl"
+flush_every_updates = 1
+async_remote = true
+noise_observation_boundary = 0.95
+observer_queue_capacity = 64
+observer_event_timeout_seconds = 30.0
+
+[wandb]
+enabled = true
+retry_jsonl_path = "artifacts/g1/wandb-retry.jsonl"
+queue_capacity = 64
+
+[evaluation]
+enabled = true
+every_updates = 5000
+sample_count = 1000
+real_sample_count = 34849
+batch_size = 64
+is_splits = 10
+kid_subsets = 100
+kid_subset_size = 1000
+prompt_path = "data/validation-cohorts/s0-validation-50k-v1/validation-prompts.json"
+validation_shard_root = "data/validation-cohorts/s0-validation-50k-v1/shards"
+output_dir = "output_model/evaluation/g1"
+sampling_profile = "preview"

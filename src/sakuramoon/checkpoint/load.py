@@ -61,6 +61,7 @@ _RAW_SIDECARS = {
     "train_state/rng/rank-0.safetensors",
     "train_state/trainer_state.json",
 }
+_OPTIONAL_RAW_SIDECARS = {"train_state/growth_migration.json"}
 
 
 class _SafeSlice(Protocol):
@@ -172,7 +173,10 @@ def _validate_raw_sidecars(
     }
     if "train_state/data_state.json" in sidecars:
         raise CheckpointError("legacy raw data sidecar is unsupported")
-    if sidecars != _RAW_SIDECARS:
+    if sidecars not in {
+        frozenset(_RAW_SIDECARS),
+        frozenset(_RAW_SIDECARS | _OPTIONAL_RAW_SIDECARS),
+    }:
         raise CheckpointError("raw checkpoint sidecars are unknown or missing")
     model_records = _model_manifest_records(checkpoint / "model")
     outer_model = {

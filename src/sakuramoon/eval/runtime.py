@@ -6,8 +6,10 @@ import dataclasses
 import hashlib
 import math
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Iterator
 from typing import cast
 
 import tomli_w
@@ -75,6 +77,23 @@ class EvaluationResult:
 
 _NO_DROPOUT = empty_caption_dropout_hits()
 _ALL_DROPPED = empty_caption_dropout_hits(all_condition=True)
+
+
+@contextmanager
+def _eager_composite_calls(composite: torch.nn.Module) -> Iterator[None]:
+    """Temporarily bypass regional compiled call slots during evaluation."""
+
+    compiled: list[tuple[torch.nn.Module, object]] = []
+    for module in composite.modules():
+        call_impl = getattr(module, "_compiled_call_impl", None)
+        if call_impl is not None:
+            compiled.append((module, call_impl))
+            setattr(module, "_compiled_call_impl", None)
+    try:
+        yield
+    finally:
+        for module, call_impl in compiled:
+            setattr(module, "_compiled_call_impl", call_impl)
 
 
 def _conditional_plan(case: PromptCase) -> CaptionPlan:
@@ -299,7 +318,8 @@ def _generate(
             guidance_scale=config.cfg.scale,
         )
 
-    sampled = sample_profile(velocity, noise, profile=evaluation.sampling_profile)
+    with _eager_composite_calls(composite):
+        sampled = sample_profile(velocity, noise, profile=evaluation.sampling_profile)
     decoded = vae.decode(sampled.state.to(torch.bfloat16))
     if not bool(torch.isfinite(decoded).all().item()):
         raise EvaluationError("VAE produced nonfinite validation images")
@@ -404,6 +424,13 @@ class TrainingEvaluator:
         self.output = repository_directory(repository_root, self.evaluation.output_dir)
         self._feature_models: EvaluationFeatureModels | None = None
         self._real_features: ImageFeatureBatch | None = None
+
+    def set_growth_alpha(self, value: float) -> None:
+        """Select the canonical alpha for the update being evaluated."""
+
+        if type(value) is not float or not 0.0 <= value <= 1.0:
+            raise ValueError("growth_alpha must be a float in [0,1]")
+        self.growth_alpha = value
 
     def due(self, update: int) -> bool:
         return update > 0 and update % self.evaluation.every_updates == 0
