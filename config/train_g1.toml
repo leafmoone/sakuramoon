@@ -1,8 +1,13 @@
 extends = ["base.toml"]
 
 [sampling.training]
+# G1 ramp is complete: 60-image sample every 200 updates is over-observation on
+# the critical path (rank0 sample -> publish -> telemetry -> evaluation ->
+# progress.synchronize -> training continues). Lowered to every 1000 updates to
+# recover wall-clock samples/day. The 5000-update evaluation stays as the fixed
+# concept probe; the full concept benchmark runs at 10000 (see 120-concept suite).
 enabled = true
-every_updates = 200
+every_updates = 1000
 image_count = 60
 output_subdir = "sample"
 fixed_cohort = "locked"
