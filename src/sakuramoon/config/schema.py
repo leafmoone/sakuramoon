@@ -796,7 +796,7 @@ class EvaluationEnabledConfig(StrictModel):
             return value
         payload = cast(dict[str, object], value)
         if "real_sample_count" in payload or "sample_count" not in payload:
-            return value
+            return payload
         updated: dict[str, object] = dict(payload)
         updated["real_sample_count"] = payload["sample_count"]
         return updated
