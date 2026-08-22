@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from sakuramoon.train.step import TrainableComposite
 
 _SUITE_DIR = "data/concept-benchmarks/concept-120-v1"
-_DANBOORU_API = "https://danbooru.donewtf.k/api/v1/posts.json"
+_DANBOORU_API = "https://danbooru.danbooru.net/posts.json"
 _USER_AGENT = "sakuramoon-concept-suite/1.0"
 _HTTP_TIMEOUT = 120
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -131,14 +131,18 @@ def _fetch_reference_urls(post_ids: tuple[int, ...]) -> dict[int, str]:
     urls: dict[int, str] = {}
     for start in range(0, len(post_ids), _REF_PAGE_SIZE):
         batch = post_ids[start : start + _REF_PAGE_SIZE]
-        query = urllib.parse.urlencode(
-            {
-                "ids": ",".join(str(post_id) for post_id in batch),
-                "per_page": str(len(batch)),
-                "fields[0]": "file_url",
-                "fields[1]": "sample_url",
-            }
-        )
+        params = {
+            "ids": ",".join(str(post_id) for post_id in batch),
+            "per_page": str(len(batch)),
+            "fields[0]": "file_url",
+            "fields[1]": "sample_url",
+        }
+        # The live Danbooru API is behind a JS challenge / ad-gate; a request
+        # carrying the account API key (dk) reaches the API layer directly.
+        api_key = os.environ.get("DANBOORU_API_KEY", "").strip()
+        if api_key:
+            params["dk"] = api_key
+        query = urllib.parse.urlencode(params)
         posts: object = json.loads(_http_get(f"{_DANBOORU_API}?{query}"))
         if type(posts) is not list:
             raise RuntimeError("Danbooru API returned an unexpected document")
