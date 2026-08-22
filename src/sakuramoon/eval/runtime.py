@@ -6,7 +6,7 @@ import dataclasses
 import hashlib
 import math
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,7 +134,11 @@ def _index_tensor(
 
 
 def _conditioning_inputs(
-    cases: tuple[PromptCase, ...], tokenizer: object, device: torch.device
+    cases: tuple[PromptCase, ...],
+    tokenizer: object,
+    device: torch.device,
+    *,
+    plan_for: Callable[[PromptCase], CaptionPlan] = _conditional_plan,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -157,7 +161,7 @@ def _conditioning_inputs(
     )
     serialized: list[SerializedCaption] = []
     for case in cases:
-        caption = serialize_caption(_conditional_plan(case), encoder, framing)
+        caption = serialize_caption(plan_for(case), encoder, framing)
         serialized.append(caption)
     unconditional = serialize_caption(_unconditional_plan(), encoder, framing)
     serialized.extend(unconditional for _ in cases)
@@ -236,6 +240,7 @@ def _generate(
     vae: FrozenMageVAE,
     device: torch.device,
     growth_alpha: float,
+    plan_for: Callable[[PromptCase], CaptionPlan] = _conditional_plan,
 ) -> torch.Tensor:
     height, width = cases[0].height, cases[0].width
     if any((item.height, item.width) != (height, width) for item in cases):
@@ -250,7 +255,12 @@ def _generate(
         condition_mask,
         use_null,
         active_condition,
-    ) = _conditioning_inputs(cases, qwen.tokenizer, device)
+    ) = _conditioning_inputs(
+        cases,
+        qwen.tokenizer,
+        device,
+        plan_for=plan_for,
+    )
     qwen_states = qwen.encoder(input_ids, attention_mask).hidden_states
     branch_count = len(cases) * 2
     size_scale = torch.full(
@@ -434,6 +444,40 @@ class TrainingEvaluator:
 
     def due(self, update: int) -> bool:
         return update > 0 and update % self.evaluation.every_updates == 0
+
+    @torch.inference_mode()
+    def generate(
+        self, cases: tuple[PromptCase, ...], *, null: bool = False
+    ) -> torch.Tensor:
+        """Generate images for explicit prompt cases with the current checkpoint.
+
+        ``null=True`` generates every case with the fully dropped condition
+        (the online unconditional plan) while keeping each case's seed and
+        shape, so a null pass contrasts conditioning against an identical
+        noise stream.  Returns uint8 ``[N, 3, H, W]`` images.
+        """
+        evaluation = self.evaluation
+        if evaluation.enabled is not True:
+            raise EvaluationError("generation requires evaluation.enabled=true")
+        if null:
+
+            def plan_for(case: PromptCase) -> CaptionPlan:
+                del case
+                return _unconditional_plan()
+
+        else:
+            plan_for = _conditional_plan
+        return _generate(
+            cases,
+            config=self.config,
+            evaluation=evaluation,
+            composite=self.composite,
+            qwen=self.qwen,
+            vae=self.vae,
+            device=self.device,
+            growth_alpha=self.growth_alpha,
+            plan_for=plan_for,
+        )
 
     def _models(self) -> EvaluationFeatureModels:
         if self._feature_models is None:
