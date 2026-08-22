@@ -58,9 +58,7 @@ class RemoteRunFactory(Protocol):
     ) -> ManagedRemoteRun: ...
 
 
-MetricContextProvider = Callable[
-    ["SuccessfulTrainingObservation"], UpdateMetricContext
-]
+MetricContextProvider = Callable[["SuccessfulTrainingObservation"], UpdateMetricContext]
 
 
 class RemoteInitializationUnavailable(ConnectionError):
@@ -99,8 +97,10 @@ class _ResilientManagedRemoteRun:
 
 
 def _require_managed_run(value: object) -> ManagedRemoteRun:
-    if value is None or not callable(getattr(value, "log", None)) or not callable(
-        getattr(value, "finish", None)
+    if (
+        value is None
+        or not callable(getattr(value, "log", None))
+        or not callable(getattr(value, "finish", None))
     ):
         raise TypeError("remote run factory must return callable log/finish methods")
     return cast(ManagedRemoteRun, value)
@@ -134,7 +134,7 @@ def initialize_wandb_run(
         type(resume_from_update) is not int or resume_from_update < 0
     ):
         raise ValueError("W&B resume update must be a non-negative integer")
-    init_kwargs: dict[str, object] = {
+    init_kwargs: dict[str, Any] = {
         "project": project,
         "entity": entity,
         "id": run_id,
@@ -255,9 +255,7 @@ class TrainingTelemetryAssembly:
             components.append(("remote", self.remote.close))
         run = self.run
         if run is not None and self.finish_remote_run:
-            components.append(
-                ("remote_run", lambda: run.finish(exit_code=exit_code))
-            )
+            components.append(("remote_run", lambda: run.finish(exit_code=exit_code)))
         components.append(("local", self.local.close))
         _close_components(tuple(components))
 
@@ -358,7 +356,9 @@ def build_training_telemetry_from_config(
                 queue_capacity=config.wandb.queue_capacity,
             )
         observer = AsyncTrainingMetricObserver(
-            MetricsPublisher(local, remote if remote is not None else _NoopMetricSink()),
+            MetricsPublisher(
+                local, remote if remote is not None else _NoopMetricSink()
+            ),
             context_provider=context_provider,
             queue_capacity=config.logging.observer_queue_capacity,
             event_timeout_seconds=config.logging.observer_event_timeout_seconds,
@@ -487,9 +487,7 @@ def build_trainable_composite_from_config(
     observed: dict[str, Any] = export_trainable_composite(module)
     if observed != document:
         raise ValueError("assembled trainable composite differs from resolved config")
-    module.dit.set_activation_checkpoint_mode(
-        config.stage.activation_checkpoint_mode
-    )
+    module.dit.set_activation_checkpoint_mode(config.stage.activation_checkpoint_mode)
     return module
 
 

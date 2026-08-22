@@ -115,10 +115,11 @@ def test_background_training_resets_interrupt_and_termination_signals(
     monkeypatch: Any,
 ) -> None:
     observed: list[tuple[int, object]] = []
-    monkeypatch.setattr(
-        "sakuramoon.cli.train.signal.signal",
-        lambda number, handler: observed.append((number, handler)),
-    )
+
+    def fake_signal(number: int, handler: object) -> None:
+        observed.append((number, handler))
+
+    monkeypatch.setattr("sakuramoon.cli.train.signal.signal", fake_signal)
 
     _install_shutdown_signal_handlers()
 
