@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, Self, cast
-from uuid import uuid4
 
 import torch
 
@@ -116,10 +115,18 @@ def initialize_wandb_run(
     resume_policy: str,
     resume_from_update: int | None,
 ) -> ManagedRemoteRun:
-    """Start W&B, using a grouped continuation run for checkpoint resumes."""
+    """Start W&B under the fixed run id, re-attaching on checkpoint resumes.
+
+    Every process attaches to the same remote run (``id=run_id``) instead of
+    minting a suffixed continuation id. With ``finish_on_close = false`` the
+    run stays open between restarts, so ``resume="allow"`` continues the same
+    remote run. If the fixed id is already owned by a remote run that cannot be
+    re-attached from this machine, fall back to a new run under the same
+    name and group so training never fails on telemetry.
+    """
 
     import wandb
-    from wandb.errors import AuthenticationError, CommError
+    from wandb.errors import AuthenticationError, CommError, UsageError
 
     if resume_policy != "allow":
         raise ValueError("W&B resume policy must be allow")
@@ -127,39 +134,29 @@ def initialize_wandb_run(
         type(resume_from_update) is not int or resume_from_update < 0
     ):
         raise ValueError("W&B resume update must be a non-negative integer")
+    init_kwargs: dict[str, object] = {
+        "project": project,
+        "entity": entity,
+        "id": run_id,
+        "name": run_id,
+        "group": run_id,
+        "job_type": "train-continuation" if resume_from_update is not None else "train",
+        "dir": str(run_directory),
+        "mode": "online",
+        "resume": resume_policy,
+        "reinit": "create_new",
+        "save_code": False,
+    }
+    if resume_from_update is not None:
+        init_kwargs["config"] = {"resume_from_update": resume_from_update}
     try:
-        if resume_from_update is None:
-            run = wandb.init(
-                project=project,
-                entity=entity,
-                id=run_id,
-                name=run_id,
-                dir=str(run_directory),
-                mode="online",
-                resume="allow",
-                reinit="create_new",
-                save_code=False,
-            )
-        else:
-            suffix = f"-u{resume_from_update}-{uuid4().hex[:8]}"
-            continuation_id = f"{run_id[: 128 - len(suffix)]}{suffix}"
-            run = wandb.init(
-                project=project,
-                entity=entity,
-                id=continuation_id,
-                name=continuation_id,
-                group=run_id,
-                job_type="train-continuation",
-                config={
-                    "source_run_id": run_id,
-                    "resume_from_update": resume_from_update,
-                },
-                dir=str(run_directory),
-                mode="online",
-                resume="never",
-                reinit="create_new",
-                save_code=False,
-            )
+        try:
+            run = wandb.init(**init_kwargs)
+        except UsageError:
+            # The fixed id is owned by a remote run that cannot be
+            # re-attached here; keep the stable display name and group.
+            init_kwargs.pop("id")
+            run = wandb.init(**init_kwargs)
     except AuthenticationError:
         raise
     except (ConnectionError, CommError):
@@ -201,12 +198,14 @@ class TrainingTelemetryAssembly:
         remote: AsyncWandbSink | None,
         local: DurableJsonlSink,
         run: ManagedRemoteRun | None,
+        finish_remote_run: bool = True,
     ) -> None:
         self.phase_timer = phase_timer
         self.observer = observer
         self.remote = remote
         self.local = local
         self.run = run
+        self.finish_remote_run = finish_remote_run
         self._closed = False
 
     def submit_wandb_metrics(
@@ -255,7 +254,7 @@ class TrainingTelemetryAssembly:
         if self.remote is not None:
             components.append(("remote", self.remote.close))
         run = self.run
-        if run is not None:
+        if run is not None and self.finish_remote_run:
             components.append(
                 ("remote_run", lambda: run.finish(exit_code=exit_code))
             )
@@ -371,6 +370,7 @@ def build_training_telemetry_from_config(
             remote=remote,
             local=local,
             run=run,
+            finish_remote_run=config.wandb.finish_on_close,
         )
     except BaseException as error:  # noqa: BLE001 - construction cleanup boundary
         cleanup: list[BaseException] = []
@@ -379,7 +379,7 @@ def build_training_telemetry_from_config(
             components.append(observer.close)
         if remote is not None:
             components.append(remote.close)
-        if run is not None:
+        if run is not None and config.wandb.finish_on_close:
             components.append(lambda: run.finish(exit_code=1))
         if local is not None:
             components.append(local.close)

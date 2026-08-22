@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import signal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import wandb
@@ -23,8 +23,15 @@ from sakuramoon.cli.train import (
     _install_shutdown_signal_handlers,
 )
 from sakuramoon.config import load_config
-from sakuramoon.config.assembly import initialize_wandb_run
+from sakuramoon.config.assembly import (
+    ManagedRemoteRun,
+    TrainingTelemetryAssembly,
+    initialize_wandb_run,
+)
 from sakuramoon.model.growth import active_slot_ids
+from sakuramoon.telemetry.metrics import DurableJsonlSink
+from sakuramoon.telemetry.observer import AsyncTrainingMetricObserver
+from sakuramoon.telemetry.timers import PhaseTimer
 from sakuramoon.train.production import _resume_state_for_config
 from sakuramoon.train.step import SingleGpuUpdateState
 
@@ -187,7 +194,7 @@ def test_resume_rebinds_only_checkpoint_cadence_policy() -> None:
     assert config.evaluation.every_updates == 5_000
 
 
-def test_wandb_resume_creates_grouped_continuation_run(
+def test_wandb_resume_reattaches_fixed_run_id(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -198,10 +205,6 @@ def test_wandb_resume_creates_grouped_continuation_run(
         return _FakeRun()
 
     monkeypatch.setattr(wandb, "init", fake_init)
-    monkeypatch.setattr(
-        "sakuramoon.config.assembly.uuid4",
-        lambda: type("_Uuid", (), {"hex": "0123456789abcdef"})(),
-    )
 
     initialize_wandb_run(
         project="sakuramoon",
@@ -212,12 +215,106 @@ def test_wandb_resume_creates_grouped_continuation_run(
         resume_from_update=1200,
     )
 
-    assert captured["id"] == "s0-production-u1200-01234567"
-    assert captured["name"] == captured["id"]
+    assert captured["id"] == "s0-production"
+    assert captured["name"] == "s0-production"
     assert captured["group"] == "s0-production"
     assert captured["job_type"] == "train-continuation"
-    assert captured["resume"] == "never"
-    assert captured["config"] == {
-        "source_run_id": "s0-production",
-        "resume_from_update": 1200,
-    }
+    assert captured["resume"] == "allow"
+    assert captured["reinit"] == "create_new"
+    assert captured["save_code"] is False
+    assert captured["mode"] == "online"
+    assert captured["config"] == {"resume_from_update": 1200}
+
+
+def test_wandb_fresh_start_uses_fixed_run_id(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_init(**kwargs: object) -> _FakeRun:
+        captured.update(kwargs)
+        return _FakeRun()
+
+    monkeypatch.setattr(wandb, "init", fake_init)
+
+    initialize_wandb_run(
+        project="sakuramoon",
+        entity="owner",
+        run_id="s0-production",
+        run_directory=tmp_path,
+        resume_policy="allow",
+        resume_from_update=None,
+    )
+
+    assert captured["id"] == "s0-production"
+    assert captured["name"] == "s0-production"
+    assert captured["job_type"] == "train"
+    assert captured["resume"] == "allow"
+    assert "config" not in captured
+
+
+def test_wandb_fixed_id_collision_falls_back_to_grouped_run(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    from wandb.errors import UsageError
+
+    calls: list[dict[str, object]] = []
+
+    def fake_init(**kwargs: object) -> _FakeRun:
+        calls.append(dict(kwargs))
+        if "id" in kwargs:
+            raise UsageError("run id already exists")
+        return _FakeRun()
+
+    monkeypatch.setattr(wandb, "init", fake_init)
+
+    initialize_wandb_run(
+        project="sakuramoon",
+        entity="owner",
+        run_id="s0-production",
+        run_directory=tmp_path,
+        resume_policy="allow",
+        resume_from_update=1200,
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["id"] == "s0-production"
+    assert "id" not in calls[1]
+    assert calls[1]["name"] == "s0-production"
+    assert calls[1]["group"] == "s0-production"
+
+
+def test_wandb_close_honors_finish_on_close() -> None:
+    finished: list[int | None] = []
+
+    class _RecordingRun(_FakeRun):
+        def finish(self, exit_code: int | None = None) -> None:
+            finished.append(exit_code)
+
+    class _FakeClose:
+        def close(self) -> None:
+            return None
+
+    open_assembly = TrainingTelemetryAssembly(
+        phase_timer=cast(PhaseTimer, _FakeClose()),
+        observer=cast(AsyncTrainingMetricObserver, _FakeClose()),
+        remote=None,
+        local=cast(DurableJsonlSink, _FakeClose()),
+        run=cast(ManagedRemoteRun, _RecordingRun()),
+        finish_remote_run=False,
+    )
+    open_assembly.close(exit_code=0)
+    assert finished == []
+
+    closed_assembly = TrainingTelemetryAssembly(
+        phase_timer=cast(PhaseTimer, _FakeClose()),
+        observer=cast(AsyncTrainingMetricObserver, _FakeClose()),
+        remote=None,
+        local=cast(DurableJsonlSink, _FakeClose()),
+        run=cast(ManagedRemoteRun, _RecordingRun()),
+        finish_remote_run=True,
+    )
+    closed_assembly.close(exit_code=1)
+    assert finished == [1]

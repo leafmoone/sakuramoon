@@ -749,7 +749,10 @@ class WandbConfig(StrictModel):
     retry_jsonl_path: Annotated[str, StringConstraints(min_length=1)]
     queue_capacity: BoundedQueueCapacity
     replay_retry_on_start: Literal[True]
-    finish_on_close: Literal[True]
+    # False keeps the remote run open after a clean close so the next
+    # training start re-attaches to the same run id instead of creating a
+    # new remote run; true closes the run permanently on every close.
+    finish_on_close: bool
     resume_policy: Literal["allow"]
 
 

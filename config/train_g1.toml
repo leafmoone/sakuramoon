@@ -104,6 +104,11 @@ observer_event_timeout_seconds = 30.0
 enabled = true
 retry_jsonl_path = "artifacts/g1/wandb-retry.jsonl"
 queue_capacity = 64
+# Keep the remote run open after clean closes: every restart re-attaches to
+# the same fixed run id (g1_256_bs760) via resume="allow" instead of minting
+# a new remote run. Finish the run manually (wandb UI/API) only when this
+# training run is truly final.
+finish_on_close = false
 
 [evaluation]
 enabled = true
