@@ -165,6 +165,14 @@ def test_manifest_rejects_bad_refs() -> None:
         ConceptManifest.from_bytes(_concepts_bytes(negative))
 
 
+def test_manifest_accepts_null_stratum() -> None:
+    concepts = _concepts()
+    concepts[1]["stratum"] = None
+    manifest = ConceptManifest.from_bytes(_concepts_bytes(concepts))
+    assert manifest.concepts[0].stratum == 4
+    assert manifest.concepts[1].stratum is None
+
+
 def test_prompt_case_builders() -> None:
     manifest = _manifest()
     canonical = canonical_prompt_cases(manifest, height=512, width=512)

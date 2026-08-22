@@ -88,7 +88,7 @@ class ConceptSpec:
     id: str
     type: str
     tier: str
-    stratum: int
+    stratum: int | None
     tag: str
     count: int
     meta_tag: str
@@ -210,7 +210,10 @@ def _parse_concept(value: object, index: int) -> ConceptSpec:
     tier = _require_str(record["tier"], f"concept {concept_id} tier")
     if tier not in _TIERS:
         raise ConceptSuiteError(f"concept {concept_id} tier is invalid")
-    stratum = _require_int(record["stratum"], f"concept {concept_id} stratum")
+    stratum_raw = record["stratum"]
+    stratum = None if stratum_raw is None else _require_int(
+        stratum_raw, f"concept {concept_id} stratum"
+    )
     tag = _require_str(record["tag"], f"concept {concept_id} tag")
     if "think" in tag:
         raise ConceptSuiteError(f"concept {concept_id} tag is invalid")
