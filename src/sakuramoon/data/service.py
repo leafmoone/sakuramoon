@@ -6,6 +6,7 @@ import errno
 import fcntl
 import json
 import os
+import random
 import secrets
 import socket
 import stat
@@ -121,7 +122,15 @@ class _QueueStore:
 
     def new(self, cycle: int) -> _QueueState:
         paths = list(self.paths)
-        secrets.SystemRandom().shuffle(paths)
+        # Deterministic per-cycle order: the cross-cycle lookahead in
+        # _schedule_lookahead pre-downloads the NEXT cycle's leading shards
+        # while the current cycle still drains. Those pre-downloads only
+        # match the order the real epoch roll produces when every cycle's
+        # shuffle is a pure function of its cycle number, so the boundary
+        # finds a warm pipeline instead of a cold-start download gap that
+        # starves the DDP ranks and trips the 300s NCCL watchdog.
+        seed = (0x9E3779B97F4A7C15 * (cycle + 1)) & 0xFFFFFFFFFFFFFFFF
+        random.Random(seed).shuffle(paths)
         return _QueueState(cycle, tuple(_Row(path, "pending") for path in paths))
 
     def _validate(self, state: _QueueState) -> None:
@@ -353,7 +362,19 @@ class DataSupplyService:
 
     def _schedule_lookahead(self) -> None:
         occupied = len(self._ready) + len(self._futures)
-        for path in self._pending_paths():
+        candidates = list(self._pending_paths())
+        if len(candidates) < self.limits.verified_shard_lookahead:
+            # Cross-cycle lookahead: once the current cycle is about to drain,
+            # start downloading the NEXT cycle's leading shards (deterministic
+            # per-cycle order) so the epoch boundary stays warm instead of a
+            # cold-start download gap that starves the DDP ranks.
+            seen = set(candidates)
+            for row in self.store.new(self.state.cycle + 1).rows:
+                if row.path in seen or occupied >= self.limits.verified_shard_lookahead:
+                    break
+                seen.add(row.path)
+                candidates.append(row.path)
+        for path in candidates:
             if occupied >= self.limits.verified_shard_lookahead:
                 break
             if path in self._ready or path in self._futures:
