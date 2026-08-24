@@ -88,9 +88,7 @@ def has_valid_alpha(image: Image.Image) -> bool:
 
     if image.mode in ("RGBA", "LA"):
         return True
-    if image.mode == "P" and "transparency" in image.info:
-        return True
-    return False
+    return image.mode == "P" and "transparency" in image.info
 
 
 def composite_to_white(image: Image.Image, *, color: int = 255) -> Image.Image:
@@ -214,12 +212,12 @@ class TransparentWhiteTelemetry:
     """
 
     __slots__ = (
-        "tagged",
         "composited",
-        "missing_alpha",
-        "special_alpha",
         "conflict_bg",
+        "missing_alpha",
         "nl_suppressed",
+        "special_alpha",
+        "tagged",
     )
 
     def __init__(self) -> None:

@@ -17,6 +17,7 @@ import webdataset as wds
 from PIL import Image
 from torch.utils.data import IterableDataset, get_worker_info
 
+from sakuramoon.config.schema import DataTransparentBackgroundConfig
 from sakuramoon.data.buckets import BucketShape
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
@@ -51,7 +52,6 @@ from sakuramoon.data.transparent_white import (
     TransparentWhiteTelemetry,
     apply_transparent_white,
 )
-from sakuramoon.config.schema import DataTransparentBackgroundConfig
 
 CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
 MetadataAdapter = Callable[[Mapping[str, object]], Mapping[str, object]]
