@@ -35,6 +35,7 @@ from sakuramoon.data.pipeline import (
 )
 from sakuramoon.data.serialize import FramingContract, TokenEncoder
 from sakuramoon.data.service_protocol import ShardLeaseDescriptor
+from sakuramoon.data.spatial_crop import SpatialCropPolicy
 
 
 class ProductionDataError(ValueError):
@@ -690,6 +691,10 @@ class ProductionPipelineFactory:
             generate_base_buckets(self.config.data.buckets),
             self.config.stage.resolution,
         )
+        spatial_policy = SpatialCropPolicy.from_config(
+            self.config.data.spatial_crop,
+            min_crop_retention=self.config.data.image.min_crop_retention,
+        )
         pipeline = WebDatasetPipeline(
             shard_paths=(descriptor.local_path,),
             shard_records=(descriptor.record,),
@@ -706,6 +711,7 @@ class ProductionPipelineFactory:
             base_seed=self.config.run.seed,
             stage=self.config.stage.name,
             cycle_index=descriptor.cycle_index,
+            spatial_policy=spatial_policy,
         )
         _require_spawn_serializable(pipeline, "production pipeline")
         return pipeline

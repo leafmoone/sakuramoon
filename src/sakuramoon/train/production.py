@@ -61,6 +61,9 @@ from sakuramoon.train.preflight import (
     ProductionSingleGpuCheckpointPublisher,
     RestoredSingleGpuCheckpoint,
     build_single_gpu_preflight_checks,
+    diff_resolved_toml_paths,
+    record_data_policy_transition,
+    require_spatial_transition_allowlist,
     require_static_single_gpu_preflight,
     restore_single_gpu_checkpoint,
     run_single_gpu_preflight,
@@ -241,8 +244,54 @@ def _require_exact_checkpoint_path(checkpoint: Path) -> Path:
 def _publish_resolved_config(loaded: LoadedConfig, repository_root: Path) -> Path:
     run_root = repository_directory(repository_root, loaded.config.paths.run_dir)
     destination = run_root / "resolved.toml"
+    if destination.is_file():
+        previous = destination.read_text(encoding="utf-8")
+        if previous != loaded.resolved_toml:
+            changed = diff_resolved_toml_paths(previous, loaded.resolved_toml)
+            require_spatial_transition_allowlist(changed)
+            record_data_policy_transition(
+                repository_directory(
+                    repository_root, loaded.config.paths.artifact_dir
+                )
+                / "data_policy_transition.json",
+                {
+                    "kind": "resolved-config-diff",
+                    "policy_class": "data-only",
+                    "changed_toml_paths": list(changed),
+                    "recorded_at_unix_ns": time.time_ns(),
+                },
+            )
     write_resolved_config(loaded.config, destination)
     return destination.resolve(strict=True)
+
+
+def _record_spatial_resume_transition(
+    loaded: LoadedConfig, repository_root: Path, resume: Path
+) -> None:
+    """Append the checkpoint-resume record of the shifted-bucket cutover."""
+
+    config = loaded.config
+    if not config.data.spatial_crop.enabled:
+        return
+    artifact_path = (
+        repository_directory(repository_root, config.paths.artifact_dir)
+        / "data_policy_transition.json"
+    )
+    record_data_policy_transition(
+        artifact_path,
+        {
+            "kind": "checkpoint-resume",
+            "policy_class": "data-only",
+            "resume_checkpoint": str(resume),
+            "spatial_crop": config.data.spatial_crop.model_dump(),
+            "recorded_at_unix_ns": time.time_ns(),
+        },
+        skip_if_duplicate_of_last=(
+            "kind",
+            "resume_checkpoint",
+            "spatial_crop",
+        ),
+    )
 
 
 def _build_optimizer(
@@ -850,6 +899,8 @@ def _run_accepted_lifecycle(
         restored.state,
         runtime_growth_alpha=restored.state.growth.alpha,
     )
+    if is_main_process and resume is not None:
+        _record_spatial_resume_transition(loaded, repository_root, resume)
     if accelerator is not None and rank > 0:
         resumed_seed = (
             config.run.seed
@@ -967,6 +1018,7 @@ def _run_accepted_lifecycle(
             optimizer=optimizer,
             restored_checkpoint=restored,
             checkpoint_publisher=publisher,
+            transition_artifact=artifact_root / "data_policy_transition.json",
         )
         preflight_report = artifact_root / (
             f"preflight-{restored.state.trainer.successful_updates}"

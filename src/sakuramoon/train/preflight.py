@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from collections.abc import Callable
+import time
+import tomllib
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -57,6 +59,135 @@ PREFLIGHT_CHECKS = (
 
 class PreflightError(RuntimeError):
     """A required preflight check failed."""
+
+
+SPATIAL_TRANSITION_ROOT = "data.spatial_crop"
+DATA_POLICY_TRANSITION_KIND = "sakuramoon.data_policy_transition.v1"
+
+
+def _toml_leaf_paths(document: object) -> dict[str, object]:
+    """Flatten a decoded TOML document into dotted-leaf-path values."""
+
+    leaves: dict[str, object] = {}
+
+    def visit(node: object, prefix: str) -> None:
+        if isinstance(node, dict):
+            if not node and prefix:
+                leaves[prefix] = None
+            for key, value in node.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                if isinstance(value, dict):
+                    visit(value, path)
+                else:
+                    leaves[path] = value
+
+    visit(document, "")
+    return leaves
+
+
+def diff_resolved_toml_paths(previous: str, current: str) -> tuple[str, ...]:
+    """Dotted-leaf paths whose resolved-TOML values differ between two texts.
+
+    Added and removed paths are reported as well; identical texts yield an
+    empty tuple.
+    """
+
+    previous_leaves = _toml_leaf_paths(tomllib.loads(previous))
+    current_leaves = _toml_leaf_paths(tomllib.loads(current))
+    changed: set[str] = set()
+    for path in set(previous_leaves) | set(current_leaves):
+        if path in previous_leaves and path in current_leaves:
+            if previous_leaves[path] != current_leaves[path]:
+                changed.add(path)
+        else:
+            changed.add(path)
+    return tuple(sorted(changed))
+
+
+def require_spatial_transition_allowlist(changed: tuple[str, ...]) -> None:
+    """Fail unless every changed leaf path is the spatial-crop data policy.
+
+    The shifted-bucket cutover is a data strategy change, not a model
+    architecture change: in an existing run directory exactly the
+    ``data.spatial_crop`` table may differ, and nothing else. Any other
+    resolved-config drift is a hard preflight failure.
+    """
+
+    for path in changed:
+        if path != SPATIAL_TRANSITION_ROOT and not path.startswith(
+            SPATIAL_TRANSITION_ROOT + "."
+        ):
+            raise ValueError(
+                "resolved config transition changes a path outside the data "
+                f"policy allowlist: {path}"
+            )
+
+
+def record_data_policy_transition(
+    artifact_path: Path,
+    record: Mapping[str, object],
+    *,
+    skip_if_duplicate_of_last: tuple[str, ...] = (),
+) -> Path:
+    """Append one data-policy transition record to the run artifact.
+
+    The artifact is a JSON document with a fixed ``kind`` and a growing
+    ``records`` list; it is written atomically and only the main process
+    may call this for a given run. When ``skip_if_duplicate_of_last``
+    names fields that all match the previous record, the append is a
+    no-op (idempotent restarts).
+    """
+
+    kind = record.get("kind")
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("transition record requires a nonempty kind string")
+    policy_class = record.get("policy_class")
+    if not isinstance(policy_class, str) or not policy_class:
+        raise ValueError("transition record requires a nonempty policy_class string")
+    timestamp = record.get("recorded_at_unix_ns")
+    if type(timestamp) is not int or timestamp <= 0:
+        raise ValueError("transition record requires a positive integer timestamp")
+    payload: dict[str, object] | None = None
+    if artifact_path.is_file():
+        try:
+            raw = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = None
+        if isinstance(raw, dict):
+            payload = raw
+    if payload is None:
+        payload = {"kind": DATA_POLICY_TRANSITION_KIND, "records": []}
+    records = payload.get("records")
+    if (
+        payload.get("kind") != DATA_POLICY_TRANSITION_KIND
+        or not isinstance(records, list)
+    ):
+        raise ValueError(
+            f"existing data policy transition artifact has an unknown shape: "
+            f"{artifact_path}"
+        )
+    if records and skip_if_duplicate_of_last:
+        last = records[-1]
+        if isinstance(last, dict) and all(
+            last.get(key) == record.get(key) for key in skip_if_duplicate_of_last
+        ):
+            return artifact_path
+    records.append(dict(record))
+    document = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    temporary = artifact_path.with_name(
+        f".{artifact_path.name}.{os.getpid()}.tmp"
+    )
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(document)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, artifact_path)
+    finally:
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
+    return artifact_path
 
 
 def require_logging_checkpoint_contracts(
@@ -360,6 +491,7 @@ def build_single_gpu_preflight_checks(
     optimizer: object,
     restored_checkpoint: RestoredSingleGpuCheckpoint,
     checkpoint_publisher: _SingleGpuCheckpointPublisher,
+    transition_artifact: Path | None = None,
 ) -> SingleGpuPreflightPlan:
     """Build cheap checks for resources that are about to enter training."""
 
@@ -381,8 +513,22 @@ def build_single_gpu_preflight_checks(
         raise PreflightError("training runtime resources are inconsistent")
 
     def resolved_config() -> None:
-        if resolved_config_path.read_text(encoding="utf-8") != loaded.resolved_toml:
+        published = resolved_config_path.read_text(encoding="utf-8")
+        if published == loaded.resolved_toml:
+            return
+        if transition_artifact is None:
             raise ValueError("resolved config file differs from the loaded TOML")
+        changed = diff_resolved_toml_paths(published, loaded.resolved_toml)
+        require_spatial_transition_allowlist(changed)
+        record_data_policy_transition(
+            transition_artifact,
+            {
+                "kind": "resolved-config-diff",
+                "policy_class": "data-only",
+                "changed_toml_paths": list(changed),
+                "recorded_at_unix_ns": time.time_ns(),
+            },
+        )
 
     def output_paths() -> None:
         require_logging_checkpoint_contracts(loaded.config, repository_root)
@@ -540,11 +686,16 @@ def run_single_gpu_preflight(
 
 __all__ = [
     "AcceptedPreflight",
+    "DATA_POLICY_TRANSITION_KIND",
     "PreflightError",
+    "SPATIAL_TRANSITION_ROOT",
     "ProductionSingleGpuCheckpointPublisher",
     "RestoredSingleGpuCheckpoint",
     "build_single_gpu_preflight_checks",
+    "diff_resolved_toml_paths",
+    "record_data_policy_transition",
     "require_accepted_preflight",
+    "require_spatial_transition_allowlist",
     "require_static_single_gpu_preflight",
     "restore_single_gpu_checkpoint",
     "run_single_gpu_preflight",

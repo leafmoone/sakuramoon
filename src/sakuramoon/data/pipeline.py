@@ -24,7 +24,11 @@ from sakuramoon.data.caption import (
     ConditionMode,
     build_caption_plan,
 )
-from sakuramoon.data.image_ops import ImageRejected, prepare_image
+from sakuramoon.data.image_ops import (
+    ImageRejected,
+    normalize_image,
+    prepare_image,
+)
 from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.metadata import (
     MetadataFieldMapping,
@@ -36,6 +40,11 @@ from sakuramoon.data.serialize import (
     SerializedCaption,
     TokenEncoder,
     serialize_caption,
+)
+from sakuramoon.data.spatial_crop import (
+    ShiftedBucketPlan,
+    SpatialCropPolicy,
+    plan_shifted_bucket,
 )
 
 CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
@@ -134,6 +143,10 @@ class RngIdentity:
     sample_id: int
     caption_seed: int
     crop_seed: int
+    spatial_policy_seed: int = 0
+    spatial_zoom_seed: int = 0
+    spatial_offset_x_seed: int = 0
+    spatial_offset_y_seed: int = 0
 
 
 @dataclass(frozen=True)
@@ -144,6 +157,16 @@ class ImageAudit:
     resized_height: int
     crop_box: tuple[int, int, int, int]
     crop_retention: float
+    crop_policy: str = "aspect_bucket"
+    spatial_selected: bool = False
+    spatial_applied: bool = False
+    spatial_fallback_reason: str = "none"
+    base_crop_retention: float = 0.0
+    final_crop_retention: float = 0.0
+    requested_equivalent_zoom: float = 0.0
+    actual_equivalent_zoom: float = 0.0
+    normalized_offset_x: float = 0.0
+    normalized_offset_y: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -232,6 +255,18 @@ def rng_identity(
         sample_id=sample_id,
         caption_seed=_domain_seed(base_seed, stage, cycle_index, sample_id, "caption"),
         crop_seed=_domain_seed(base_seed, stage, cycle_index, sample_id, "crop"),
+        spatial_policy_seed=_domain_seed(
+            base_seed, stage, cycle_index, sample_id, "spatial-policy"
+        ),
+        spatial_zoom_seed=_domain_seed(
+            base_seed, stage, cycle_index, sample_id, "spatial-zoom"
+        ),
+        spatial_offset_x_seed=_domain_seed(
+            base_seed, stage, cycle_index, sample_id, "spatial-offset-x"
+        ),
+        spatial_offset_y_seed=_domain_seed(
+            base_seed, stage, cycle_index, sample_id, "spatial-offset-y"
+        ),
     )
 
 
@@ -295,6 +330,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         base_seed: int,
         stage: str,
         cycle_index: int,
+        spatial_policy: SpatialCropPolicy | None = None,
     ) -> None:
         super().__init__()
         _validate_local_shard_paths(shard_paths)
@@ -331,6 +367,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             or stage != stage.strip()
             or type(cycle_index) is not int
             or cycle_index < 0
+            or not (
+                spatial_policy is None
+                or isinstance(spatial_policy, SpatialCropPolicy)  # pyright: ignore[reportUnnecessaryIsInstance]
+            )
         ):
             raise PipelineSampleError("pipeline construction fields are invalid")
         self.shard_paths = shard_paths
@@ -348,6 +388,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.base_seed = base_seed
         self.stage = stage
         self.cycle_index = cycle_index
+        self.spatial_policy = spatial_policy
         self._lease_managed = False
 
     def _process(
@@ -436,6 +477,24 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                     crop_seed=identity.crop_seed,
                     source_size=(source_width, source_height),
                 )
+                spatial_plan: ShiftedBucketPlan | None = None
+                spatial_image: Image.Image | None = None
+                if self.spatial_policy is not None and self.spatial_policy.enabled:
+                    spatial_plan = plan_shifted_bucket(
+                        processed.assignment,
+                        self.spatial_policy,
+                        source_size=(source_width, source_height),
+                        policy_seed=identity.spatial_policy_seed,
+                        zoom_seed=identity.spatial_zoom_seed,
+                        offset_x_seed=identity.spatial_offset_x_seed,
+                        offset_y_seed=identity.spatial_offset_y_seed,
+                    )
+                    if spatial_plan.applied:
+                        normalized = normalize_image(decoded)
+                        spatial_image = normalized.resize(
+                            (spatial_plan.canvas_width, spatial_plan.canvas_height),
+                            resample=Image.Resampling.LANCZOS,
+                        ).crop(spatial_plan.crop_box)
         except ImageRejected as error:
             _trace_sample(shard_record.path, metadata.id, f"reject:{error.reason}")
             self.rejection_observer(error.reason)
@@ -448,6 +507,59 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             self.rejection_observer("decode_error")
             return None
         assignment = processed.assignment
+        if spatial_plan is not None and spatial_image is not None:
+            sample_image: Image.Image = spatial_image
+            audit = ImageAudit(
+                source_width=assignment.source_width,
+                source_height=assignment.source_height,
+                resized_width=spatial_plan.canvas_width,
+                resized_height=spatial_plan.canvas_height,
+                crop_box=spatial_plan.crop_box,
+                crop_retention=spatial_plan.final_crop_retention,
+                crop_policy="shifted_bucket",
+                spatial_selected=True,
+                spatial_applied=True,
+                spatial_fallback_reason="none",
+                base_crop_retention=spatial_plan.base_crop_retention,
+                final_crop_retention=spatial_plan.final_crop_retention,
+                requested_equivalent_zoom=spatial_plan.requested_equivalent_zoom,
+                actual_equivalent_zoom=spatial_plan.actual_equivalent_zoom,
+                normalized_offset_x=spatial_plan.normalized_offset_x,
+                normalized_offset_y=spatial_plan.normalized_offset_y,
+            )
+        else:
+            # Ordinary aspect-bucket crop: bit-identical to the pre-spatial
+            # behavior when no policy is enabled, and the literal fallback
+            # when the policy is enabled but this sample was not selected or
+            # the shifted-bucket geometry is infeasible.
+            sample_image = processed.image
+            normal_zoom = 1.0 / math.sqrt(assignment.crop_retention)
+            if spatial_plan is None:
+                selected = False
+                fallback_reason = "none"
+                requested_zoom = 0.0
+            else:
+                selected = spatial_plan.fallback_reason != "not_selected"
+                fallback_reason = spatial_plan.fallback_reason
+                requested_zoom = spatial_plan.requested_equivalent_zoom
+            audit = ImageAudit(
+                source_width=assignment.source_width,
+                source_height=assignment.source_height,
+                resized_width=assignment.resized_width,
+                resized_height=assignment.resized_height,
+                crop_box=processed.crop_box,
+                crop_retention=assignment.crop_retention,
+                crop_policy="aspect_bucket",
+                spatial_selected=selected,
+                spatial_applied=False,
+                spatial_fallback_reason=fallback_reason,
+                base_crop_retention=assignment.crop_retention,
+                final_crop_retention=assignment.crop_retention,
+                requested_equivalent_zoom=requested_zoom,
+                actual_equivalent_zoom=normal_zoom,
+                normalized_offset_x=0.0,
+                normalized_offset_y=0.0,
+            )
         _trace_sample(
             shard_record.path,
             metadata.id,
@@ -456,23 +568,21 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             + f" src={assignment.source_width}x{assignment.source_height}"
             + f" resized={assignment.resized_width}x{assignment.resized_height}"
             + f" bucket={assignment.bucket.width}x{assignment.bucket.height}"
-            + f" cap={len(caption.input_ids)}",
+            + f" cap={len(caption.input_ids)}"
+            + (
+                f" spatial={spatial_plan.fallback_reason}"
+                if spatial_plan is not None
+                else ""
+            ),
         )
         return PipelineSample(
             sample_id=metadata.id,
             source_shard=shard_record.path,
-            image=_uint8_chw(processed.image),
+            image=_uint8_chw(sample_image),
             target_height=assignment.bucket.height,
             target_width=assignment.bucket.width,
             caption=caption,
-            audit=ImageAudit(
-                source_width=assignment.source_width,
-                source_height=assignment.source_height,
-                resized_width=assignment.resized_width,
-                resized_height=assignment.resized_height,
-                crop_box=processed.crop_box,
-                crop_retention=assignment.crop_retention,
-            ),
+            audit=audit,
             rng=identity,
             padding_token_id=self.framing.padding_token_id,
         )
@@ -534,6 +644,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             base_seed=self.base_seed,
             stage=self.stage,
             cycle_index=cycle_index,
+            spatial_policy=self.spatial_policy,
         )
         pipeline._lease_managed = True
         return pipeline

@@ -36,6 +36,7 @@ from sakuramoon.data.service_protocol import (
     DataServiceSessionIdentity,
     ShardLeaseDescriptor,
 )
+from sakuramoon.data.spatial_crop import SpatialCropCounts, aggregate_spatial_crop
 
 _WORKER_CONTEXT = mp.get_context("spawn")
 _MAX_TORCH_SEED = 2**64 - 1
@@ -70,6 +71,7 @@ class TrainingBatch:
     source_shards: tuple[str, ...]
     audits: tuple[ImageAudit, ...]
     rng_identities: tuple[RngIdentity, ...]
+    spatial_crop: SpatialCropCounts
     # Exact post-dropout/post-assembly captions are retained for periodic samples.
     captions: tuple[SerializedCaption, ...] = ()
 
@@ -473,6 +475,9 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         source_shards=tuple(sample.source_shard for sample in samples),
         audits=tuple(sample.audit for sample in samples),
         rng_identities=tuple(sample.rng for sample in samples),
+        spatial_crop=aggregate_spatial_crop(
+            tuple(sample.audit for sample in samples)
+        ),
         captions=tuple(sample.caption for sample in samples),
     )
 

@@ -17,6 +17,10 @@ from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
     CONDITION_ROUTE_KEYS,
 )
+from sakuramoon.data.spatial_crop import (
+    SPATIAL_FALLBACK_REASONS,
+    ZOOM_HISTOGRAM_LABELS,
+)
 
 CORE_TIMING_PHASES = (
     "data",
@@ -53,8 +57,22 @@ NOISE_T_BIN_LABELS = tuple(
     f"bin_{index:02d}_t{index * 5:03d}_{(index + 1) * 5:03d}"
     for index in range(NOISE_T_BIN_COUNT)
 )
-TRAINING_METRIC_SCHEMA_VERSION = 8
+TRAINING_METRIC_SCHEMA_VERSION = 9
 DROPOUT_KEYS = CAPTION_DROPOUT_KEYS
+def _spatial_default_fallback_reasons(effective_batch: int) -> Mapping[str, int]:
+    """Default spatial-crop table for an update with no spatial activity.
+
+    Every effective sample was neither selected nor applied, so all of them
+    are accounted for under ``not_selected`` and the fixed keys stay complete.
+    """
+    reasons = {reason: 0 for reason in SPATIAL_FALLBACK_REASONS}
+    reasons["not_selected"] = effective_batch
+    return MappingProxyType(reasons)
+
+
+def _spatial_default_zoom_histogram() -> Mapping[str, int]:
+    """Default all-zero zoom histogram (no applied crops)."""
+    return MappingProxyType({label: 0 for label in ZOOM_HISTOGRAM_LABELS})
 
 
 def _finite_float(name: str, value: float, *, minimum: float | None = None) -> None:
@@ -110,6 +128,15 @@ class TrainingMetric:
     growth_new_slot_grad_norm: float = 0.0
     growth_new_block_grad_norm: float = 0.0
     growth_new_conditioner_grad_norm: float = 0.0
+    spatial_crop_selected: int = 0
+    spatial_crop_applied: int = 0
+    spatial_fallback_reasons: Mapping[str, int] | None = None
+    spatial_zoom_histogram: Mapping[str, int] | None = None
+    spatial_actual_zoom_mean: float = 0.0
+    spatial_actual_zoom_max: float = 0.0
+    spatial_abs_offset_x_mean: float = 0.0
+    spatial_abs_offset_y_mean: float = 0.0
+    spatial_both_axes_count: int = 0
 
     def __post_init__(self) -> None:
         _nonnegative_int("successful_update", self.successful_update, positive=True)
@@ -214,6 +241,86 @@ class TrainingMetric:
             )
         for phase, duration in self.phase_seconds.items():
             _finite_float(f"phase_seconds.{phase}", duration, minimum=0.0)
+        for name in (
+            "spatial_crop_selected",
+            "spatial_crop_applied",
+            "spatial_both_axes_count",
+        ):
+            _nonnegative_int(name, getattr(self, name))
+        if self.spatial_crop_applied > self.spatial_crop_selected:
+            raise ValueError(
+                "spatial crop applied count exceeds selected count"
+            )
+        if self.spatial_both_axes_count > self.spatial_crop_applied:
+            raise ValueError(
+                "spatial crop both-axes count exceeds applied count"
+            )
+        if self.spatial_fallback_reasons is None:
+            object.__setattr__(
+                self,
+                "spatial_fallback_reasons",
+                _spatial_default_fallback_reasons(self.effective_batch),
+            )
+        if self.spatial_zoom_histogram is None:
+            object.__setattr__(
+                self,
+                "spatial_zoom_histogram",
+                _spatial_default_zoom_histogram(),
+            )
+        if set(self.spatial_fallback_reasons) != set(SPATIAL_FALLBACK_REASONS):
+            raise ValueError(
+                "spatial crop fallback reasons must contain every fixed key"
+            )
+        for key, value in self.spatial_fallback_reasons.items():
+            _nonnegative_int(f"spatial_fallback_reasons.{key}", value)
+            if value > self.effective_batch:
+                raise ValueError(
+                    "spatial crop fallback count exceeds effective batch"
+                )
+        if sum(self.spatial_fallback_reasons.values()) != self.effective_batch:
+            raise ValueError(
+                "spatial crop fallback counts must equal effective batch"
+            )
+        if set(self.spatial_zoom_histogram) != set(ZOOM_HISTOGRAM_LABELS):
+            raise ValueError(
+                "spatial crop zoom histogram must contain every fixed label"
+            )
+        for key, value in self.spatial_zoom_histogram.items():
+            _nonnegative_int(f"spatial_zoom_histogram.{key}", value)
+        if sum(self.spatial_zoom_histogram.values()) != self.spatial_crop_applied:
+            raise ValueError(
+                "spatial crop zoom histogram must cover applied samples"
+            )
+        for name in (
+            "spatial_actual_zoom_mean",
+            "spatial_actual_zoom_max",
+            "spatial_abs_offset_x_mean",
+            "spatial_abs_offset_y_mean",
+        ):
+            _finite_float(name, getattr(self, name), minimum=0.0)
+        if self.spatial_crop_applied == 0:
+            if (
+                self.spatial_actual_zoom_mean != 0.0
+                or self.spatial_actual_zoom_max != 0.0
+                or self.spatial_abs_offset_x_mean != 0.0
+                or self.spatial_abs_offset_y_mean != 0.0
+            ):
+                raise ValueError(
+                    "spatial crop aggregates must be zero when nothing was applied"
+                )
+        elif self.spatial_actual_zoom_max < self.spatial_actual_zoom_mean:
+            raise ValueError(
+                "spatial crop zoom max must cover the zoom mean"
+            )
+        if (
+            self.spatial_crop_applied > 0
+            and self.spatial_actual_zoom_mean < 1.0
+        ):
+            raise ValueError(
+                "applied spatial crop zoom mean must be at least 1.0"
+            )
+        if self.spatial_abs_offset_x_mean > 1.0 or self.spatial_abs_offset_y_mean > 1.0:
+            raise ValueError("spatial crop offset means must not exceed one")
         object.__setattr__(
             self, "dropout_hits", MappingProxyType(dict(self.dropout_hits))
         )
@@ -224,6 +331,16 @@ class TrainingMetric:
         )
         object.__setattr__(
             self, "phase_seconds", MappingProxyType(dict(self.phase_seconds))
+        )
+        object.__setattr__(
+            self,
+            "spatial_fallback_reasons",
+            MappingProxyType(dict(self.spatial_fallback_reasons)),
+        )
+        object.__setattr__(
+            self,
+            "spatial_zoom_histogram",
+            MappingProxyType(dict(self.spatial_zoom_histogram)),
         )
 
     def as_json_mapping(self) -> dict[str, object]:
@@ -270,7 +387,18 @@ class TrainingMetric:
             "growth_alpha": self.growth_alpha,
             "growth_new_slot_grad_norm": self.growth_new_slot_grad_norm,
             "growth_new_block_grad_norm": self.growth_new_block_grad_norm,
-            "growth_new_conditioner_grad_norm": self.growth_new_conditioner_grad_norm,
+            "growth_new_conditioner_grad_norm": (
+                self.growth_new_conditioner_grad_norm
+            ),
+            "spatial_crop_selected": self.spatial_crop_selected,
+            "spatial_crop_applied": self.spatial_crop_applied,
+            "spatial_fallback_reasons": dict(self.spatial_fallback_reasons),
+            "spatial_zoom_histogram": dict(self.spatial_zoom_histogram),
+            "spatial_actual_zoom_mean": self.spatial_actual_zoom_mean,
+            "spatial_actual_zoom_max": self.spatial_actual_zoom_max,
+            "spatial_abs_offset_x_mean": self.spatial_abs_offset_x_mean,
+            "spatial_abs_offset_y_mean": self.spatial_abs_offset_y_mean,
+            "spatial_both_axes_count": self.spatial_both_axes_count,
         }
 
     def as_wandb_mapping(self) -> dict[str, int | float]:
@@ -289,6 +417,21 @@ class TrainingMetric:
         )
         payload.update(
             {f"phase_seconds/{key}": value for key, value in self.phase_seconds.items()}
+        )
+        # Fixed spatial-crop fields always publish, including strict zeros:
+        # the canary gates read them directly and a missing key would mask a
+        # silent policy regression.
+        payload.update(
+            {
+                f"spatial_fallback_reasons/{key}": value
+                for key, value in self.spatial_fallback_reasons.items()
+            }
+        )
+        payload.update(
+            {
+                f"spatial_zoom_histogram/{key}": value
+                for key, value in self.spatial_zoom_histogram.items()
+            }
         )
         # Do not publish an empty bin as a numeric zero.  A zero would be
         # interpreted by W&B as an observed loss and would pull sparse

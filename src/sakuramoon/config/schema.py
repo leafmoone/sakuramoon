@@ -285,6 +285,31 @@ class DataBucketsConfig(StrictModel):
     transpose_closed: Literal[True]
 
 
+class DataSpatialCropConfig(StrictModel):
+    """Strict shifted-bucket spatial crop policy (zoom/shift training data)."""
+
+    enabled: bool
+    mode: Literal["shifted_bucket"]
+    probability: Annotated[ExactFloat, Field(ge=0.0, le=1.0)]
+    min_equivalent_zoom: Annotated[ExactFloat, Field(gt=1.0)]
+    max_equivalent_zoom: Annotated[ExactFloat, Field(gt=1.0)]
+    zoom_distribution: Literal["sqrt_uniform_high"]
+    offset_distribution: Literal["uniform_independent"]
+    fallback_to_aspect_bucket: Literal[True]
+
+    @model_validator(mode="after")
+    def validate_spatial_crop(self) -> DataSpatialCropConfig:
+        if self.min_equivalent_zoom >= self.max_equivalent_zoom:
+            raise ValueError(
+                "spatial crop min_equivalent_zoom must be below max_equivalent_zoom"
+            )
+        if self.enabled and self.probability <= 0.0:
+            raise ValueError("spatial crop probability must be positive when enabled")
+        if not self.enabled and self.probability != 0.0:
+            raise ValueError("spatial crop probability must be zero when disabled")
+        return self
+
+
 class DataConfig(StrictModel):
     source: DataSourceConfig
     manifest: DataManifestConfig
@@ -295,6 +320,17 @@ class DataConfig(StrictModel):
     validation: DataValidationConfig
     image: DataImageConfig
     buckets: DataBucketsConfig
+    spatial_crop: DataSpatialCropConfig
+
+    @model_validator(mode="after")
+    def validate_spatial_crop_retention(self) -> DataConfig:
+        max_zoom = self.spatial_crop.max_equivalent_zoom
+        if 1.0 / max_zoom**2 < self.image.min_crop_retention:
+            raise ValueError(
+                "spatial crop max_equivalent_zoom violates the "
+                "min_crop_retention guard (1/max_zoom**2 must reach it exactly)"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_service_worker_capacities(self) -> DataConfig:
