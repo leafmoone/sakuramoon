@@ -1,0 +1,71 @@
+# transparent_background white-composite canary: a sample whose general tag
+# semantically matches transparent_background and carries a usable per-pixel
+# alpha is composited onto a solid white canvas BEFORE resize/crop, its trigger
+# tag is rewritten to white_background (serialized "white background"), and
+# every training NL candidate is cleared (sample-level NL off). Missing alpha,
+# special alpha effects, and conflicting explicit backgrounds are rejected and
+# counted; rejected samples never reach Qwen/VAE/DiT.
+#
+# Data-strategy change only -- model, loss, optimizer, LR schedule, growth and
+# budget are untouched, and the shifted_bucket spatial crop stays OFF (inherited
+# from base.toml, where it is disabled). Extends the live G1 run config and
+# overrides exactly:
+#   - run identity and fully independent run/checkpoint/artifact paths
+#   - [stage]: local_batch 19 / accum 20 -> global 760 (world 2), automatic_transition false
+#   - [data.transparent_background]: enabled + reject sets
+#
+# Canary deploy (section 18) resumes from the latest COMPLETE checkpoint at
+# deploy time (PRE_TRANSPARENT_POLICY) via scripts/training_stack.sh; run
+# 500-1000 updates (section 19) with the hard gates before promotion.
+
+extends = ["train_g1.toml"]
+
+[run]
+run_id = "g1_transparent_white"
+
+[paths]
+run_dir = "runs/g1_transparent_white"
+checkpoint_dir = "output_model/g1_transparent_white"
+artifact_dir = "artifacts/g1_transparent_white"
+
+[logging]
+local_jsonl_path = "artifacts/g1_transparent_white/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/g1_transparent_white/wandb-retry.jsonl"
+
+[evaluation]
+output_dir = "output_model/evaluation/g1_transparent_white"
+
+# §17 canary batch shape: 19 * 20 * 2 = 760 global. LR/optimizer/growth/budget
+# inherit unchanged from train_g1.toml (base_lr flat, half-cosine growth,
+# planned_updates 110000); only the data-batching and the transparent policy
+# move.
+[stage]
+local_batch = 19
+accumulation = 20
+global_batch = 760
+automatic_transition = false
+
+# §5 strict config. base.toml supplies the defaults; the canary turns the
+# policy on and fixes the reject sets. trigger/replacement/composite are spelled
+# out explicitly (they equal the base.toml defaults) so the canary is
+# self-documenting regardless of TOML merge depth.
+[data.transparent_background]
+enabled = true
+trigger_tag = "transparent_background"
+replacement_tag = "white_background"
+composite_color = "white"
+# Special alpha effects: the image's alpha is unreliable, compositing would be
+# wrong -> strict reject + count (section 4).
+special_alpha_tags = ["alpha_transparency", "thumbnail_surprise"]
+# Conflicting explicit background: a transparent tag co-occurring with an
+# explicit background tag is a data error -> strict reject + count (section 4).
+conflict_background_tags = [
+    "white_background",
+    "black_background",
+    "blue_background",
+    "green_background",
+    "pink_background",
+    "grey_background",
+]

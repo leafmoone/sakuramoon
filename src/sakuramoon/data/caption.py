@@ -6,6 +6,8 @@ import random
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from sakuramoon.data.tag_identity import tag_match_key
+
 ALL_CONDITION_DROPOUT = 0.10
 TAG_SOURCE_ORDER = (
     "rating",
@@ -501,10 +503,17 @@ def _drop_source_tags(
 ) -> tuple[tuple[Tag, ...], bool]:
     indexed = tuple(enumerate(_field_tags(fields, source)))
     if candidate_source_hit and source in CANDIDATE_SOURCE_FIELDS:
+        # Comparison-only membership: normalize the separator/case of both
+        # sides so a space-form tag still matches an underscore candidate (and
+        # vice versa). The deterministic dropout seed below still uses the raw
+        # ``tag.canonical``, so this does not change any RNG draw.
+        candidate_keys = frozenset(
+            tag_match_key(candidate) for candidate in fields.candidate_tags
+        )
         indexed = tuple(
             (index, tag)
             for index, tag in indexed
-            if tag.canonical not in fields.candidate_tags
+            if tag_match_key(tag.canonical) not in candidate_keys
         )
     retained: list[Tag] = []
     hit = False

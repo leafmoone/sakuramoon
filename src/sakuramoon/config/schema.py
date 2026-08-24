@@ -310,6 +310,48 @@ class DataSpatialCropConfig(StrictModel):
         return self
 
 
+class DataTransparentBackgroundConfig(StrictModel):
+    """Strict transparent-background white-composite policy (data-strategy only).
+
+    Base runs keep ``enabled = false`` (the ordinary path is bit-identical); the
+    canary enables it. When enabled, a sample whose general tag matches
+    ``trigger_tag`` (via the comparison-only ``tag_match_key``) is composited
+    onto a white canvas BEFORE resize/crop, its trigger tag is rewritten to
+    ``replacement_tag`` (serialized as "white background"), and all training NL
+    candidates are cleared. Samples with missing/invalid alpha, a special alpha
+    effect, or a conflicting explicit background are strictly rejected and
+    counted (they never reach Qwen/VAE/DiT). This changes data strategy only:
+    no model / loss / optimizer / LR / batch / shifted-bucket interaction.
+    """
+
+    enabled: bool
+    trigger_tag: Literal["transparent_background"] = "transparent_background"
+    replacement_tag: Literal["white_background"] = "white_background"
+    composite_color: Literal["white"] = "white"
+    conflict_background_tags: StringTuple = ()
+    special_alpha_tags: StringTuple = ()
+
+    @model_validator(mode="after")
+    def validate_transparent_background(self) -> DataTransparentBackgroundConfig:
+        if self.trigger_tag == self.replacement_tag:
+            raise ValueError(
+                "transparent_background trigger_tag and replacement_tag must differ"
+            )
+        for tag in (*self.conflict_background_tags, *self.special_alpha_tags):
+            if (
+                type(tag) is not str
+                or not tag
+                or tag != tag.strip()
+                or "\n" in tag
+                or "\r" in tag
+                or "\0" in tag
+            ):
+                raise ValueError(
+                    "transparent_background tag sets must be non-empty trim-stable strings"
+                )
+        return self
+
+
 class DataConfig(StrictModel):
     source: DataSourceConfig
     manifest: DataManifestConfig
@@ -321,6 +363,7 @@ class DataConfig(StrictModel):
     image: DataImageConfig
     buckets: DataBucketsConfig
     spatial_crop: DataSpatialCropConfig
+    transparent_background: DataTransparentBackgroundConfig
 
     @model_validator(mode="after")
     def validate_spatial_crop_retention(self) -> DataConfig:
