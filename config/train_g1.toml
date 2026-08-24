@@ -123,3 +123,6 @@ prompt_path = "data/validation-cohorts/s0-validation-50k-v1/validation-prompts.j
 validation_shard_root = "data/validation-cohorts/s0-validation-50k-v1/shards"
 output_dir = "output_model/evaluation/g1"
 sampling_profile = "preview"
+concept_suite_enabled = true
+concept_suite_manifest = "data/concept-benchmarks/concept-120-v1/manifest-120-v1-refs341b.json"
+concept_suite_refs_root = "concept-refs/concept-120-v1"

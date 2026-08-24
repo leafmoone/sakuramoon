@@ -445,6 +445,59 @@ class TrainingEvaluator:
     def due(self, update: int) -> bool:
         return update > 0 and update % self.evaluation.every_updates == 0
 
+    def run_concept_suite(self, update: int) -> dict[str, float] | None:
+        """Run the optional concept suite against the live model.
+
+        Rank zero only, called after the FID evaluation of the same update.
+        Returns flattened suite metrics, or ``None`` when the suite is
+        disabled.  Failures are logged and swallowed so the suite can
+        never abort a training run.
+        """
+        evaluation = self.evaluation
+        if not evaluation.concept_suite_enabled:
+            return None
+        if not self.is_main_process:
+            return None
+        from sakuramoon.eval.concept_suite import (
+            run_concept_suite as _run_concept_suite,
+        )
+        from sakuramoon.eval.concepts import ConceptManifest
+
+        try:
+            manifest_path = self.root / evaluation.concept_suite_manifest
+            manifest = ConceptManifest.from_json(manifest_path)
+            refs_root = (
+                self.root / evaluation.concept_suite_refs_root
+                if evaluation.concept_suite_refs_root
+                else manifest_path.parent / "refs"
+            )
+            run_dir = self.output / "concept-suite" / f"update-{update}"
+            print(
+                f"[eval] concept suite 启动 update={update} "
+                f"(manifest={manifest_path.name}, n_concepts="
+                f"{len(manifest.concepts)})",
+                flush=True,
+            )
+            flat = _run_concept_suite(
+                self,
+                update=update,
+                manifest=manifest,
+                refs_root=refs_root,
+                run_dir=run_dir,
+                batch_size=40,
+            )
+            print(
+                f"[eval] concept suite 完成: {run_dir}",
+                flush=True,
+            )
+            return flat
+        except Exception as error:
+            print(
+                f"[eval] concept suite 跳过 update={update}: {error}",
+                flush=True,
+            )
+            return None
+
     @torch.inference_mode()
     def generate(
         self, cases: tuple[PromptCase, ...], *, null: bool = False

@@ -788,6 +788,11 @@ class EvaluationEnabledConfig(StrictModel):
     validation_shard_root: Annotated[str, StringConstraints(min_length=1)]
     output_dir: Annotated[str, StringConstraints(min_length=1)]
     sampling_profile: Literal["preview", "balanced", "reference"]
+    concept_suite_enabled: bool = False
+    concept_suite_manifest: Annotated[str, StringConstraints(min_length=1)] = (
+        "data/concept-benchmarks/concept-120-v1/manifest-120-v1-refs341b.json"
+    )
+    concept_suite_refs_root: Annotated[str, StringConstraints(min_length=1)] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -815,6 +820,12 @@ class EvaluationEnabledConfig(StrictModel):
             path = PurePosixPath(value)
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError("evaluation paths must be repository-relative")
+        for value in (self.concept_suite_manifest, self.concept_suite_refs_root):
+            if value is None:
+                continue
+            path = PurePosixPath(value)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError("concept suite paths must be repository-relative")
         return self
 
     @property

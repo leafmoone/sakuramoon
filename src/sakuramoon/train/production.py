@@ -1118,6 +1118,16 @@ def _run_accepted_lifecycle(
                                 },
                                 successful_update=update,
                             )
+
+                            suite_metrics = evaluator.run_concept_suite(update)
+                            if suite_metrics:
+                                telemetry.submit_wandb_metrics(
+                                    {
+                                        f"evaluation/concept/{key}": value
+                                        for key, value in suite_metrics.items()
+                                    },
+                                    successful_update=update,
+                                )
                     progress.synchronize(
                         f"observer/update-{update}/complete"
                     )
