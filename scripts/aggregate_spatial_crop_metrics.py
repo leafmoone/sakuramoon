@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Read-only spatial-crop telemetry aggregation for the canary gates.
 
 Reads the durable training-metric JSONL (schema version 9) and reports the
@@ -59,7 +58,7 @@ def _read_records(path: Path) -> Iterator[dict[str, object]]:
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{line_number}: {exc}") from exc
             if not isinstance(record, dict):
-                raise ValueError(f"{path}:{line_number}: record is not an object")
+                raise TypeError(f"{path}:{line_number}: record is not an object")
             yield record
 
 
@@ -93,28 +92,22 @@ def aggregate(metrics: Path, pass_samples: int = DEFAULT_PASS_SAMPLES) -> dict[s
             spatial_histogram = record.get("spatial_zoom_histogram")
             applied = record.get("spatial_crop_applied")
             selected = record.get("spatial_crop_selected")
-            values = {
+            int_values = {
                 "successful_update": record_id,
                 "effective_batch": effective_batch,
                 "spatial_crop_applied": applied,
                 "spatial_crop_selected": selected,
                 "spatial_both_axes_count": record.get("spatial_both_axes_count"),
-                "spatial_actual_zoom_mean": record.get("spatial_actual_zoom_mean"),
-                "spatial_actual_zoom_max": record.get("spatial_actual_zoom_max"),
-                "spatial_abs_offset_x_mean": record.get("spatial_abs_offset_x_mean"),
-                "spatial_abs_offset_y_mean": record.get(
-                    "spatial_abs_offset_y_mean"
-                ),
             }
-            for name, value in values.items():
+            for name, value in int_values.items():
                 if not isinstance(value, int) or isinstance(value, bool):
-                    raise ValueError(
+                    raise TypeError(
                         f"{path}: {name} must be an integer, got {value!r}"
                     )
-            zoom_mean = values["spatial_actual_zoom_mean"]
-            zoom_max_value = values["spatial_actual_zoom_max"]
-            offset_x_mean = values["spatial_abs_offset_x_mean"]
-            offset_y_mean = values["spatial_abs_offset_y_mean"]
+            zoom_mean = record.get("spatial_actual_zoom_mean")
+            zoom_max_value = record.get("spatial_actual_zoom_max")
+            offset_x_mean = record.get("spatial_abs_offset_x_mean")
+            offset_y_mean = record.get("spatial_abs_offset_y_mean")
             for name, value in (
                 ("spatial_actual_zoom_mean", zoom_mean),
                 ("spatial_actual_zoom_max", zoom_max_value),
@@ -126,13 +119,13 @@ def aggregate(metrics: Path, pass_samples: int = DEFAULT_PASS_SAMPLES) -> dict[s
                         f"{path}: {name} must be a finite float, got {value!r}"
                     )
             if not isinstance(spatial_fallback, dict):
-                raise ValueError(f"{path}: spatial_fallback_reasons is not an object")
+                raise TypeError(f"{path}: spatial_fallback_reasons is not an object")
             if set(spatial_fallback) != set(SPATIAL_FALLBACK_REASONS):
                 raise ValueError(
                     f"{path}: spatial_fallback_reasons keys differ from the fixed set"
                 )
             if not isinstance(spatial_histogram, dict):
-                raise ValueError(f"{path}: spatial_zoom_histogram is not an object")
+                raise TypeError(f"{path}: spatial_zoom_histogram is not an object")
             if set(spatial_histogram) != set(ZOOM_HISTOGRAM_LABELS):
                 raise ValueError(
                     f"{path}: spatial_zoom_histogram keys differ from the fixed set"
@@ -157,7 +150,7 @@ def aggregate(metrics: Path, pass_samples: int = DEFAULT_PASS_SAMPLES) -> dict[s
             samples_total += effective_batch
             selected_total += selected
             applied_total += applied
-            both_axes_total += values["spatial_both_axes_count"]
+            both_axes_total += int_values["spatial_both_axes_count"]
             zoom_weighted_sum += zoom_mean * applied
             offset_x_weighted_sum += offset_x_mean * applied
             offset_y_weighted_sum += offset_y_mean * applied
