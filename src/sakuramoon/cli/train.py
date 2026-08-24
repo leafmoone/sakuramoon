@@ -116,6 +116,84 @@ def _configure_torchinductor_cache(project_root: object) -> Path:
     return cache_path
 
 
+def _parse_cpulist(text: str) -> set[int]:
+    """Parse a Linux cpulist string (e.g. '48-63' or '0-3,16-19') into a set."""
+
+    cpus: set[int] = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            low, high = part.split("-", 1)
+            cpus.update(range(int(low), int(high) + 1))
+        else:
+            cpus.add(int(part))
+    return cpus
+
+
+def _apply_numa_pin() -> None:
+    """Pin this rank to its HCU's home NUMA node (env-gated; no-op if unset).
+
+    SAKURAMOON_NUMA_PIN: comma-separated NUMA node ids indexed by LOCAL_RANK
+    (falling back to RANK), e.g. "3,1" pins rank0 -> node3 and rank1 -> node1.
+    Sets only the process CPU affinity (os.sched_setaffinity); host memory then
+    follows the kernel's local-allocation policy to the same node. Reversible:
+    clearing the env var restores the previous (unpinned) behaviour.
+    """
+
+    spec = os.environ.get("SAKURAMOON_NUMA_PIN", "").strip()
+    if not spec:
+        return
+    rank_value = os.environ.get("LOCAL_RANK", os.environ.get("RANK", ""))
+    try:
+        rank_index = int(rank_value)
+    except (TypeError, ValueError):
+        print(
+            "[train] SAKURAMOON_NUMA_PIN set but RANK/LOCAL_RANK unknown; "
+            "skipping NUMA pin",
+            flush=True,
+        )
+        return
+    nodes = [part.strip() for part in spec.split(",")]
+    if rank_index >= len(nodes) or not nodes[rank_index]:
+        print(
+            f"[train] SAKURAMOON_NUMA_PIN has no entry for rank {rank_index}; "
+            "skipping NUMA pin",
+            flush=True,
+        )
+        return
+    node_id = int(nodes[rank_index])
+    cpulist_file = Path(f"/sys/devices/system/node/node{node_id}/cpulist")
+    try:
+        cpus = _parse_cpulist(cpulist_file.read_text().strip())
+    except (OSError, ValueError) as exc:
+        print(
+            f"[train] NUMA pin: cannot read cpulist for node {node_id}: {exc}",
+            flush=True,
+        )
+        return
+    if not cpus:
+        print(
+            f"[train] NUMA pin: empty cpulist for node {node_id}; skipping",
+            flush=True,
+        )
+        return
+    set_affinity = getattr(os, "sched_setaffinity", None)
+    if set_affinity is None:
+        print(
+            "[train] NUMA pin: os.sched_setaffinity unavailable on this platform; "
+            "skipping",
+            flush=True,
+        )
+        return
+    set_affinity(0, cpus)
+    print(
+        f"[train] NUMA pin: rank {rank_index} -> node {node_id} (cpus {sorted(cpus)})",
+        flush=True,
+    )
+
+
 def _install_shutdown_signal_handlers() -> None:
     """Make background/nohup jobs interruptible so owned workers are closed."""
 
@@ -150,6 +228,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             "--evaluate-only cannot be combined with --resume or --preflight-only"
         )
+    _apply_numa_pin()
     allocator_config = _configure_cuda_allocator()
     config_root = args.config_root.resolve(strict=True)
     if not config_root.is_dir():
