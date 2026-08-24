@@ -333,7 +333,7 @@ class DataTransparentBackgroundConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_transparent_background(self) -> DataTransparentBackgroundConfig:
-        if self.trigger_tag == self.replacement_tag:
+        if self.trigger_tag == self.replacement_tag:  # pyright: ignore[reportUnnecessaryComparison]
             raise ValueError(
                 "transparent_background trigger_tag and replacement_tag must differ"
             )

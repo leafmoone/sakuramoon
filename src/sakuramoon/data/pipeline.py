@@ -381,7 +381,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             )
             or not (
                 transparent_policy is None
-                or isinstance(transparent_policy, DataTransparentBackgroundConfig)
+                or isinstance(transparent_policy, DataTransparentBackgroundConfig)  # pyright: ignore[reportUnnecessaryIsInstance]
             )
         ):
             raise PipelineSampleError("pipeline construction fields are invalid")
@@ -490,6 +490,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                     self.transparent_telemetry.record(tw.outcome)
                     if tw.outcome.is_reject:
                         reason = tw.outcome.observer_reason
+                        assert reason is not None  # reject outcomes always carry a reason
                         _trace_sample(
                             shard_record.path, metadata.id, f"reject:{reason}"
                         )
