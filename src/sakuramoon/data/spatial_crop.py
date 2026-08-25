@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from sakuramoon.data.buckets import BucketAssignment
@@ -289,8 +288,8 @@ class SpatialCropCounts:
 
     selected: int
     applied: int
-    fallback_reasons: MappingProxyType[str, int]
-    zoom_histogram: MappingProxyType[str, int]
+    fallback_reasons: Mapping[str, int]
+    zoom_histogram: Mapping[str, int]
     actual_zoom_sum: float
     actual_zoom_max: float
     abs_offset_x_sum: float
@@ -399,8 +398,8 @@ def aggregate_spatial_crop(audits: Iterable[object]) -> SpatialCropCounts:
     return SpatialCropCounts(
         selected=selected,
         applied=applied,
-        fallback_reasons=MappingProxyType(fallback_reasons),
-        zoom_histogram=MappingProxyType(zoom_histogram),
+        fallback_reasons=dict(fallback_reasons),
+        zoom_histogram=dict(zoom_histogram),
         actual_zoom_sum=zoom_sum,
         actual_zoom_max=zoom_max,
         abs_offset_x_sum=offset_x_sum,
