@@ -38,7 +38,8 @@ retry_jsonl_path = "artifacts/g1_transparent_white/wandb-retry.jsonl"
 output_dir = "output_model/evaluation/g1_transparent_white"
 
 # §17 canary batch shape: 19 * 20 * 2 = 760 global. LR/optimizer/growth/budget
-# inherit unchanged from train_g1.toml (base_lr flat, half-cosine growth,
+# inherit unchanged from train_g1.toml (base_lr=0.00005 from base.toml, so
+# actual_lr=0.00005*760/256=0.0001484375 here, half-cosine growth,
 # planned_updates 110000); only the data-batching and the transparent policy
 # move.
 [stage]

@@ -71,9 +71,11 @@ torch_compile_dynamic = true
 torch_compile_mode = "max-autotune-no-cudagraphs"
 
 [optimizer]
-# LR held flat vs the 760-batch run: 0.0000475 * 800 / 256 = 0.0001484375.
+# No base_lr override: inherit the S0-tuned base_lr=0.00005 from base.toml and
+# let the JLT rule auto-scale the actual LR with the configured global batch
+# (0.00005 * 800 / 256 = 0.00015625 here). base_lr is a config anchor that a
+# future run may re-tune; it is never a mechanism that pins the actual LR.
 # (base.toml provides the remaining optimizer fields via deep merge.)
-base_lr = 0.0000475
 
 [stage]
 name = "G1"
@@ -84,8 +86,8 @@ depth = 20
 resolution = 256
 local_batch = 20
 accumulation = 20
-# global_batch=800 with base_lr=0.0000475 (see [optimizer]) -> actual_lr=0.0001484375,
-# held flat vs the 760-batch run (base_lr=0.00005 at reference_batch=256).
+# global_batch=800 with base_lr=0.00005 inherited from base.toml (see
+# [optimizer]) -> actual_lr=0.00015625 (JLT auto-scaled, reference_batch=256).
 global_batch = 800
 activation_checkpoint_mode = "none"
 planned_updates = 110000
