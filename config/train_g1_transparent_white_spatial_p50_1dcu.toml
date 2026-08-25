@@ -1,0 +1,31 @@
+# G1 1-DCU transparent-white + spatial p50 canary (single-accelerator hosts).
+#
+# Extends the p50 transparent-white spatial combo (transparent policy ON:
+# full reject set + white-background composite/rewrite; spatial shifted
+# bucket p=0.50 zoom 1.02-1.10 sqrt_uniform_high) and pins the 1-distributed
+# protocol for 1-HCU canary hosts (e.g. sakrua6):
+#
+#   world_size 1, local_batch 20, accumulation 20, global_batch 400
+#   base_lr 0.0000475 (inherited) -> actual_lr = 0.0000475 * 400 / 256
+#                                   = 0.00007421875
+#
+# Matches the 1-dcu p50 spatial canary checkpoint regime (ckpt_78800): the
+# B1 resume contract pins the source checkpoint's saved optimizer LR and
+# batch protocol to this config exactly; the B4 envelope audit bounds the
+# cutover data-policy transition (spatial p50 -> + transparent ON).
+#
+# Launch via scripts/training_stack.sh with RESUME_CHECKPOINT pointing at
+# the cutover source checkpoint (e.g. output_model/g1_spatial_p50/
+# ckpt_78800_raw-78800-update-cadence).
+
+extends = ["train_g1_transparent_white_spatial_p50.toml"]
+
+[distributed]
+backend = "native"
+world_size = 1
+
+[stage]
+world_size = 1
+local_batch = 20
+accumulation = 20
+global_batch = 400

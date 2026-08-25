@@ -35,3 +35,24 @@ def test_combo_config_enables_both_policies(name: str, probability: float) -> No
     # The resolved document carries both policy sections (B4 envelope roots).
     assert "[data.spatial_crop]" in loaded.resolved_toml
     assert "[data.transparent_background]" in loaded.resolved_toml
+
+
+def test_1dcu_combo_config_pins_single_distributed_protocol() -> None:
+    """The 1-DCU canary pins world 1 / batch 400 on top of the p50 combo,
+    keeping the saved-LR/batch protocol of the 1-dcu p50 checkpoint regime."""
+    loaded = load_config(
+        CONFIG_ROOT / "train_g1_transparent_white_spatial_p50_1dcu.toml",
+        config_root=CONFIG_ROOT,
+        validate_secrets=False,
+    )
+    assert loaded.config.distributed.backend == "native"
+    assert loaded.config.distributed.world_size == 1
+    stage = loaded.config.stage
+    assert stage.world_size == 1
+    assert stage.local_batch == 20
+    assert stage.accumulation == 20
+    assert stage.global_batch == 400
+    # Inherited from the combo base: policies ON, 475 LR anchor.
+    assert loaded.config.data.transparent_background.enabled is True
+    assert loaded.config.data.spatial_crop.probability == 0.5
+    assert loaded.config.optimizer.base_lr == 0.0000475

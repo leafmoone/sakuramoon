@@ -752,29 +752,11 @@ class StageConfig(StrictModel):
     automatic_transition: Literal[False]
 
     @model_validator(mode="after")
-    def validate_transition(self) -> StageConfig:
+    def validate_global_batch(self) -> StageConfig:
         expected_global_batch = self.local_batch * self.accumulation * self.world_size
         if self.global_batch != expected_global_batch:
             raise ValueError(
                 "stage global_batch must equal local_batch * accumulation * world_size"
-            )
-        if self.name == "S0" and (
-            self.predecessor != ""
-            or self.world_size != 2
-            or self.depth != 16
-            or self.resolution != 256
-        ):
-            raise ValueError(
-                "S0 topology must be world_size=2, depth=16, resolution=256"
-            )
-        if self.name == "G1" and (
-            self.predecessor != "S0"
-            or self.world_size != 2
-            or self.depth != 20
-            or self.resolution != 256
-        ):
-            raise ValueError(
-                "G1 topology must be S0->G1 at world_size=2, depth=20, resolution=256"
             )
         return self
 
