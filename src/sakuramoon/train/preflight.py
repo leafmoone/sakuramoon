@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import time
@@ -54,6 +55,7 @@ PREFLIGHT_CHECKS = (
     "frozen_encoders",
     "qwen_fast_path",
     "optimizer_parameters",
+    "resume_contract",
 )
 
 
@@ -120,6 +122,77 @@ def require_spatial_transition_allowlist(changed: tuple[str, ...]) -> None:
             raise ValueError(
                 "resolved config transition changes a path outside the data "
                 f"policy allowlist: {path}"
+            )
+
+
+RESUME_CONTRACT_BATCH_LEAVES = (
+    "stage.global_batch",
+)
+"""Resolved-config leaves that define the resume batch protocol.
+
+The per-sample optimizer step is fixed by the base learning-rate anchor and
+the global batch; the exact learning-rate comparison below therefore covers
+any anchor drift, while the batch leaves pin the linear-scaling input.
+World-size, local-batch, and accumulation transitions that keep the global
+batch (for example the governed 1 -> 2 accelerator migration) remain
+supported.
+"""
+
+
+def require_resume_contract(
+    source_resolved_toml: str,
+    current_resolved_toml: str,
+    saved_group_lrs: tuple[float, ...] | None,
+    current_group_lrs: tuple[float, ...],
+) -> None:
+    """Fail-closed learning-rate and batch-protocol resume contract.
+
+    Resuming a checkpoint silently carries its optimizer moments into the
+    configured learning rate; a rate or batch-protocol mismatch (for
+    example cutting over into a live run from a different base_lr anchor)
+    is a protocol break, not a resume.  The contract therefore compares the
+    source checkpoint's batch-protocol leaves and every saved optimizer
+    group learning rate against the configured values with exact float
+    equality and fails closed on any drift.
+    """
+    if saved_group_lrs is None:
+        raise PreflightError(
+            "resume contract requires the source checkpoint's saved optimizer "
+            "learning rates"
+        )
+    try:
+        source_leaves = _toml_leaf_paths(tomllib.loads(source_resolved_toml))
+        current_leaves = _toml_leaf_paths(tomllib.loads(current_resolved_toml))
+    except tomllib.TOMLDecodeError:
+        raise PreflightError(
+            "resume contract cannot parse the resolved config"
+        ) from None
+    for leaf in RESUME_CONTRACT_BATCH_LEAVES:
+        if leaf not in source_leaves or leaf not in current_leaves:
+            raise PreflightError(
+                f"resume contract cannot locate {leaf} in the resolved configs"
+            )
+        source_value = source_leaves[leaf]
+        current_value = current_leaves[leaf]
+        if source_value != current_value:
+            raise PreflightError(
+                f"resume contract batch protocol drift: {leaf}="
+                f"{source_value!r} in the source checkpoint vs "
+                f"{current_value!r} configured"
+            )
+    if len(saved_group_lrs) != len(current_group_lrs):
+        raise PreflightError(
+            "resume contract optimizer group count differs from the source "
+            "checkpoint"
+        )
+    for group_index, (saved_lr, current_lr) in enumerate(
+        zip(saved_group_lrs, current_group_lrs, strict=True)
+    ):
+        if saved_lr != current_lr:
+            raise PreflightError(
+                f"resume contract learning-rate drift at optimizer group "
+                f"{group_index}: saved {saved_lr!r} != configured {current_lr!r} "
+                "(exact equality required)"
             )
 
 
@@ -269,6 +342,13 @@ class RestoredSingleGpuCheckpoint:
     payload_bytes: int
     module: nn.Module = field(repr=False)
     optimizer: IsolatedAdamW8bit = field(repr=False)
+    # Saved per-group learning rates, in group order: captured by the raw
+    # loader before it replaces them with the current configuration values.
+    # The resume contract compares them against the configured rate.  None
+    # only for objects constructed without the capture sink.
+    source_optimizer_lrs: tuple[float, ...] | None = field(
+        default=None, repr=False
+    )
 
 
 def _require_restored_checkpoint(
@@ -298,7 +378,14 @@ def restore_single_gpu_checkpoint(
         read_checkpoint_manifest,
     )
 
-    state = load_raw_checkpoint(checkpoint, module, optimizer, expected)
+    saved_lr_sink: list[float] = []
+    state = load_raw_checkpoint(
+        checkpoint,
+        module,
+        optimizer,
+        expected,
+        saved_lr_sink=saved_lr_sink,
+    )
     manifest = read_checkpoint_manifest(checkpoint)
     if manifest.kind is not CheckpointKind.RAW or manifest.identity != expected:
         raise PreflightError("restored raw model identity changed while loading")
@@ -312,6 +399,7 @@ def restore_single_gpu_checkpoint(
         payload_bytes=payload_bytes,
         module=module,
         optimizer=optimizer,
+        source_optimizer_lrs=tuple(saved_lr_sink),
     )
 
 
@@ -601,6 +689,34 @@ def build_single_gpu_preflight_checks(
             tuple((spec.name, spec.parameter) for spec in optimizer.audit.specs),
         )
 
+    def resume_contract() -> None:
+        if not isinstance(optimizer, IsolatedAdamW8bit):
+            raise PreflightError(
+                "resume contract requires the configured AdamW8 optimizer"
+            )
+        source_path = restored_checkpoint.path / "resolved_config.toml"
+        try:
+            source_toml = source_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            raise PreflightError(
+                "resume contract cannot read the source checkpoint resolved config"
+            ) from None
+        current_group_lrs: list[float] = []
+        for group in optimizer.optimizer.param_groups:
+            lr = group.get("lr")
+            if type(lr) is not float or not math.isfinite(lr):
+                raise PreflightError(
+                    "resume contract cannot read the configured optimizer "
+                    "learning rate"
+                )
+            current_group_lrs.append(lr)
+        require_resume_contract(
+            source_toml,
+            loaded.resolved_toml,
+            restored_checkpoint.source_optimizer_lrs,
+            tuple(current_group_lrs),
+        )
+
     checks = (
         ("resolved_config", resolved_config),
         ("output_paths", output_paths),
@@ -610,6 +726,7 @@ def build_single_gpu_preflight_checks(
         ("frozen_encoders", frozen_encoders),
         ("qwen_fast_path", qwen_fast_path),
         ("optimizer_parameters", optimizer_parameters),
+        ("resume_contract", resume_contract),
     )
     return SingleGpuPreflightPlan(
         checks=checks,
@@ -686,6 +803,7 @@ def run_single_gpu_preflight(
 
 __all__ = [
     "DATA_POLICY_TRANSITION_KIND",
+    "RESUME_CONTRACT_BATCH_LEAVES",
     "SPATIAL_TRANSITION_ROOT",
     "AcceptedPreflight",
     "PreflightError",
@@ -695,6 +813,7 @@ __all__ = [
     "diff_resolved_toml_paths",
     "record_data_policy_transition",
     "require_accepted_preflight",
+    "require_resume_contract",
     "require_spatial_transition_allowlist",
     "require_static_single_gpu_preflight",
     "restore_single_gpu_checkpoint",

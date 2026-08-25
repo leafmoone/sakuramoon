@@ -609,6 +609,12 @@ def _restore_checkpoint(
     # the trusted expected rate here makes checkpoint LR drift a hard load failure.
     _set_optimizer_learning_rate(optimizer, expected_rate)
     restored = restore_single_gpu_checkpoint(checkpoint, module, optimizer, identity)
+    if restored.source_optimizer_lrs is not None:
+        _log(
+            "resume learning-rate contract: "
+            f"source checkpoint group lrs={restored.source_optimizer_lrs!r}, "
+            f"configured rate={expected_rate!r}"
+        )
     resumed_state = _resume_state_for_config(loaded.config, restored.state)
     return replace(restored, state=resumed_state)
 

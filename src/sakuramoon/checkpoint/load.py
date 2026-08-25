@@ -7,6 +7,7 @@ import math
 import os
 import re
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol, Self, cast
 
@@ -686,7 +687,15 @@ def load_raw_checkpoint(
     module: nn.Module,
     optimizer: IsolatedAdamW8bit,
     expected: CheckpointIdentity,
+    *,
+    saved_lr_sink: list[float] | None = None,
 ) -> RawCheckpointState:
+    """Restore a RAW checkpoint, capturing the saved group learning rates.
+
+    ``saved_lr_sink`` receives the source checkpoint's per-group learning
+    rates (group order) before the loader replaces them with the current
+    configuration values; the preflight resume contract needs them.
+    """
     manifest = read_checkpoint_manifest(checkpoint)
     _validate_identity(manifest, expected, CheckpointKind.RAW)
     _validate_raw_sidecars(checkpoint, manifest)
@@ -739,6 +748,8 @@ def load_raw_checkpoint(
     saved_groups = cast(list[object], optimizer_state["param_groups"])
     if len(saved_groups) != len(current_groups):
         raise CheckpointError("optimizer state group count does not match")
+    if saved_lr_sink is not None:
+        _capture_saved_group_lrs(saved_groups, saved_lr_sink)
     runtime_optimizer_state = dict(optimizer_state)
     runtime_optimizer_state["param_groups"] = [
         {
@@ -760,6 +771,27 @@ def load_raw_checkpoint(
     )
     restore_rank_rng(rank_rng)
     return state
+
+
+def _capture_saved_group_lrs(
+    saved_groups: Sequence[object],
+    sink: list[float],
+) -> None:
+    """Record the saved per-group learning rates before the loader drops them.
+
+    The restore path replaces every saved group learning rate with the
+    current configuration value, so callers that must verify the source
+    checkpoint's effective rate (the preflight resume contract) need the
+    saved values captured here.  Malformed or non-finite rates fail closed
+    because they would poison the contract comparison.
+    """
+    for group in saved_groups:
+        if not isinstance(group, dict):
+            raise CheckpointError("optimizer parameter group is invalid")
+        lr = cast(dict[str, object], group).get("lr")
+        if type(lr) is not float or not math.isfinite(lr) or lr <= 0.0:
+            raise CheckpointError("saved optimizer learning rate is invalid")
+        sink.append(lr)
 
 
 def discover_complete_checkpoints(root: Path) -> tuple[Path, ...]:

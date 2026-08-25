@@ -6,12 +6,12 @@
 # special alpha effects, and conflicting explicit backgrounds are rejected and
 # counted; rejected samples never reach Qwen/VAE/DiT.
 #
-# Data-strategy change only -- model, loss, optimizer, LR schedule, growth and
-# budget are untouched, and the shifted_bucket spatial crop stays OFF (inherited
-# from base.toml, where it is disabled). Extends the live G1 run config and
-# overrides exactly:
+# Data-strategy change for model/loss/growth/budget -- they are untouched, and
+# the shifted_bucket spatial crop stays OFF (inherited from base.toml, where it
+# is disabled). Extends the live G1 run config and overrides exactly:
 #   - run identity and fully independent run/checkpoint/artifact paths
 #   - [stage]: local_batch 19 / accum 20 -> global 760 (world 2), automatic_transition false
+#   - [optimizer]: base_lr anchored to the live canary value (see section 17)
 #   - [data.transparent_background]: enabled + reject sets
 #
 # Canary deploy (section 18) resumes from the latest COMPLETE checkpoint at
@@ -37,16 +37,26 @@ retry_jsonl_path = "artifacts/g1_transparent_white/wandb-retry.jsonl"
 [evaluation]
 output_dir = "output_model/evaluation/g1_transparent_white"
 
-# §17 canary batch shape: 19 * 20 * 2 = 760 global. LR/optimizer/growth/budget
-# inherit unchanged from train_g1.toml (base_lr=0.00005 from base.toml, so
-# actual_lr=0.00005*760/256=0.0001484375 here, half-cosine growth,
-# planned_updates 110000); only the data-batching and the transparent policy
-# move.
+# §17 canary batch shape: 19 * 20 * 2 = 760 global. The transparent canary
+# anchors base_lr to the live p50 canary's 0.0000475 value (NOT the
+# train_g1.toml S0 0.00005 anchor) so the actual learning rate tracks the
+# live run's JLT scaling at whatever global batch the canary runs in:
+#   - 2-dcu canary:  0.0000475 * 760 / 256 = 0.000141015625
+#   - 1-dcu canary:  0.0000475 * 400 / 256 = 0.00007421875 (the live p50 rate)
+# Growth/budget inherit unchanged from train_g1.toml (half-cosine growth,
+# planned_updates 110000). The preflight "resume_contract" check verifies at
+# cutover that the source checkpoint's saved optimizer learning rate equals
+# this configured rate exactly (no tolerance); any drift fails the run.
 [stage]
 local_batch = 19
 accumulation = 20
 global_batch = 760
 automatic_transition = false
+
+# Live-canary LR anchor: keep the per-sample step on the p50 canary's value
+# across the transparent cut-over (see the section 17 note above).
+[optimizer]
+base_lr = 0.0000475
 
 # §5 strict config. base.toml supplies the defaults; the canary turns the
 # policy on and fixes the reject sets. trigger/replacement/composite are spelled
