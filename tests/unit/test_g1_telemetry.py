@@ -51,7 +51,7 @@ def test_growth_telemetry_is_in_jsonl_and_wandb_payloads() -> None:
     json_payload = metric.as_json_mapping()
     wandb_payload = metric.as_wandb_mapping()
 
-    assert json_payload["schema_version"] == TRAINING_METRIC_SCHEMA_VERSION == 8
+    assert json_payload["schema_version"] == TRAINING_METRIC_SCHEMA_VERSION == 9
     for key, value in (
         ("growth_alpha", 0.5),
         ("growth_new_slot_grad_norm", 0.75),

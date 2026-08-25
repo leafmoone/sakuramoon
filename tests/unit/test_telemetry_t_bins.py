@@ -124,6 +124,8 @@ def test_training_metric_omits_empty_t_bin_loss_from_wandb() -> None:
         metric,
         effective_batch=19,
         high_noise_sample_count=19,
+        spatial_fallback_reasons=None,
+        spatial_zoom_histogram=None,
         condition_routes={"artist_text": 7, "character_text": 6, "null": 6},
         t_bin_losses=tuple(
             0.0 if index == 18 else 1.0 for index in range(NOISE_T_BIN_COUNT)

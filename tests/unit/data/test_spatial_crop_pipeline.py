@@ -34,6 +34,7 @@ from sakuramoon.data.pipeline import (
 )
 from sakuramoon.data.serialize import MAIN_SUFFIX, SYSTEM_PREFIX, FramingContract
 from sakuramoon.data.spatial_crop import SpatialCropPolicy
+from sakuramoon.data.transparent_white import TransparentWhiteTelemetry
 
 _SHARD = "data/synthetic/shard-000000.tar"
 
@@ -97,6 +98,8 @@ def _pipeline(
     pipeline.min_crop_retention = 0.8
     pipeline.rejection_observer = lambda _reason: None
     pipeline.spatial_policy = spatial_policy
+    pipeline.transparent_policy = None
+    pipeline.transparent_telemetry = TransparentWhiteTelemetry()
     return cast(Any, pipeline)
 
 

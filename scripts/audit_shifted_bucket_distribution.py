@@ -76,7 +76,7 @@ def _synthetic_source(index: int, stream: random.Random) -> tuple[int, int]:
 
     aspect = 2.0 ** stream.uniform(-2.0, 2.0)
     short_edge = max(16, int(2.0 ** stream.uniform(7.0, 10.0)))
-    long_edge = max(short_edge, int(round(short_edge * aspect)))
+    long_edge = max(short_edge, round(short_edge * aspect))
     if aspect >= 1.0:
         return long_edge, short_edge
     return short_edge, long_edge
