@@ -64,7 +64,31 @@ class PreflightError(RuntimeError):
 
 
 SPATIAL_TRANSITION_ROOT = "data.spatial_crop"
+TRANSPARENT_TRANSITION_ROOT = "data.transparent_background"
 DATA_POLICY_TRANSITION_KIND = "sakuramoon.data_policy_transition.v1"
+
+DATA_POLICY_TRANSITION_ROOTS = (
+    SPATIAL_TRANSITION_ROOT,
+    TRANSPARENT_TRANSITION_ROOT,
+)
+"""Data-policy tables a governed cutover may enable, disable, or retune."""
+
+RESUME_TRANSITION_OPERATIONAL_LEAVES = (
+    "run.run_id",
+    "paths.run_dir",
+    "paths.checkpoint_dir",
+    "paths.artifact_dir",
+    "logging.local_jsonl_path",
+    "wandb.retry_jsonl_path",
+    "evaluation.output_dir",
+)
+"""Resolved-config leaves that carry a run's operational identity.
+
+A governed cutover moves a data strategy into a new run directory with its
+own identity, output paths, and log destinations; those leaves may differ.
+Anything outside these leaves and the enabled data-policy tables is a hard
+transition failure.
+"""
 
 
 def _toml_leaf_paths(document: object) -> dict[str, object]:
@@ -106,23 +130,45 @@ def diff_resolved_toml_paths(previous: str, current: str) -> tuple[str, ...]:
     return tuple(sorted(changed))
 
 
-def require_spatial_transition_allowlist(changed: tuple[str, ...]) -> None:
-    """Fail unless every changed leaf path is the spatial-crop data policy.
+def audit_resolved_config_transition(
+    previous: str,
+    current: str,
+    *,
+    operational_leaves: tuple[str, ...] = RESUME_TRANSITION_OPERATIONAL_LEAVES,
+    policy_roots: tuple[str, ...] = DATA_POLICY_TRANSITION_ROOTS,
+) -> tuple[str, ...]:
+    """Fail unless a resolved-config change stays inside the cutover envelope.
 
-    The shifted-bucket cutover is a data strategy change, not a model
-    architecture change: in an existing run directory exactly the
-    ``data.spatial_crop`` table may differ, and nothing else. Any other
-    resolved-config drift is a hard preflight failure.
+    A governed data-policy cutover may only move a run's operational
+    identity (run id, run/checkpoint/artifact paths, local log and W&B
+    retry files, evaluation output) and the tables of the data policies
+    that are enabled in EITHER document: enabling a policy, disabling one,
+    or retuning it. Any other drift (model, loss, optimizer, LR anchor,
+    growth, budget, batch) is a hard failure. Returns the changed leaf
+    paths so the transition artifact can record exactly what moved.
     """
 
+    changed = diff_resolved_toml_paths(previous, current)
+    previous_leaves = _toml_leaf_paths(tomllib.loads(previous))
+    current_leaves = _toml_leaf_paths(tomllib.loads(current))
+    allowed_roots = tuple(
+        root
+        for root in policy_roots
+        if previous_leaves.get(f"{root}.enabled") is True
+        or current_leaves.get(f"{root}.enabled") is True
+    )
     for path in changed:
-        if path != SPATIAL_TRANSITION_ROOT and not path.startswith(
-            SPATIAL_TRANSITION_ROOT + "."
+        if path in operational_leaves:
+            continue
+        if any(
+            path == root or path.startswith(root + ".") for root in allowed_roots
         ):
-            raise ValueError(
-                "resolved config transition changes a path outside the data "
-                f"policy allowlist: {path}"
-            )
+            continue
+        raise ValueError(
+            "resolved config transition changes a path outside the data "
+            f"policy allowlist: {path}"
+        )
+    return changed
 
 
 RESUME_CONTRACT_BATCH_LEAVES = (
@@ -606,8 +652,7 @@ def build_single_gpu_preflight_checks(
             return
         if transition_artifact is None:
             raise ValueError("resolved config file differs from the loaded TOML")
-        changed = diff_resolved_toml_paths(published, loaded.resolved_toml)
-        require_spatial_transition_allowlist(changed)
+        changed = audit_resolved_config_transition(published, loaded.resolved_toml)
         record_data_policy_transition(
             transition_artifact,
             {
@@ -716,6 +761,10 @@ def build_single_gpu_preflight_checks(
             restored_checkpoint.source_optimizer_lrs,
             tuple(current_group_lrs),
         )
+        # The strict contract above pins the LR/batch protocol; the audit
+        # below bounds the cutover itself to a data-policy move (operational
+        # identity plus enabled policy tables) and nothing else.
+        audit_resolved_config_transition(source_toml, loaded.resolved_toml)
 
     checks = (
         ("resolved_config", resolved_config),
@@ -803,18 +852,21 @@ def run_single_gpu_preflight(
 
 __all__ = [
     "DATA_POLICY_TRANSITION_KIND",
+    "DATA_POLICY_TRANSITION_ROOTS",
     "RESUME_CONTRACT_BATCH_LEAVES",
+    "RESUME_TRANSITION_OPERATIONAL_LEAVES",
     "SPATIAL_TRANSITION_ROOT",
+    "TRANSPARENT_TRANSITION_ROOT",
     "AcceptedPreflight",
     "PreflightError",
     "ProductionSingleGpuCheckpointPublisher",
     "RestoredSingleGpuCheckpoint",
+    "audit_resolved_config_transition",
     "build_single_gpu_preflight_checks",
     "diff_resolved_toml_paths",
     "record_data_policy_transition",
     "require_accepted_preflight",
     "require_resume_contract",
-    "require_spatial_transition_allowlist",
     "require_static_single_gpu_preflight",
     "restore_single_gpu_checkpoint",
     "run_single_gpu_preflight",

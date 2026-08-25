@@ -60,10 +60,9 @@ from sakuramoon.train.benchmark import BenchmarkTrace
 from sakuramoon.train.preflight import (
     ProductionSingleGpuCheckpointPublisher,
     RestoredSingleGpuCheckpoint,
+    audit_resolved_config_transition,
     build_single_gpu_preflight_checks,
-    diff_resolved_toml_paths,
     record_data_policy_transition,
-    require_spatial_transition_allowlist,
     require_static_single_gpu_preflight,
     restore_single_gpu_checkpoint,
     run_single_gpu_preflight,
@@ -247,8 +246,7 @@ def _publish_resolved_config(loaded: LoadedConfig, repository_root: Path) -> Pat
     if destination.is_file():
         previous = destination.read_text(encoding="utf-8")
         if previous != loaded.resolved_toml:
-            changed = diff_resolved_toml_paths(previous, loaded.resolved_toml)
-            require_spatial_transition_allowlist(changed)
+            changed = audit_resolved_config_transition(previous, loaded.resolved_toml)
             record_data_policy_transition(
                 repository_directory(
                     repository_root, loaded.config.paths.artifact_dir
@@ -265,32 +263,62 @@ def _publish_resolved_config(loaded: LoadedConfig, repository_root: Path) -> Pat
     return destination.resolve(strict=True)
 
 
-def _record_spatial_resume_transition(
+def _record_data_policy_resume_transition(
     loaded: LoadedConfig, repository_root: Path, resume: Path
 ) -> None:
-    """Append the checkpoint-resume record of the shifted-bucket cutover."""
+    """Append the checkpoint-resume record of a data-policy cutover.
+
+    One record per distinct (checkpoint, policy configuration) pair;
+    restarts at the same checkpoint with the same configuration are a
+    no-op. When the source checkpoint carries a different resolved config
+    the changed leaf paths are audited against the cutover envelope and
+    recorded so the transition artifact shows exactly what moved.
+    """
 
     config = loaded.config
-    if not config.data.spatial_crop.enabled:
+    spatial_enabled = config.data.spatial_crop.enabled
+    transparent_enabled = config.data.transparent_background.enabled
+    if not spatial_enabled and not transparent_enabled:
         return
-    artifact_path = (
-        repository_directory(repository_root, config.paths.artifact_dir)
-        / "data_policy_transition.json"
-    )
+    changed: tuple[str, ...] = ()
+    sidecar = resume / "resolved_config.toml"
+    if sidecar.is_file():
+        try:
+            source_toml = sidecar.read_text(encoding="utf-8")
+            if source_toml != loaded.resolved_toml:
+                changed = audit_resolved_config_transition(
+                    source_toml, loaded.resolved_toml
+                )
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"cannot audit the resume config transition: {exc}"
+            ) from None
+    record: dict[str, object] = {
+        "kind": "checkpoint-resume",
+        "policy_class": "data-only",
+        "resume_checkpoint": str(resume),
+        "recorded_at_unix_ns": time.time_ns(),
+    }
+    skip_keys = ("kind", "resume_checkpoint")
+    if spatial_enabled:
+        # JSON mode so the stored values are exactly what the JSON artifact
+        # round-trips back (sequences as lists): restart dedupe compares
+        # these fields against the previously written record.
+        record["spatial_crop"] = config.data.spatial_crop.model_dump(mode="json")
+        skip_keys = (*skip_keys, "spatial_crop")
+    if transparent_enabled:
+        record["transparent_background"] = (
+            config.data.transparent_background.model_dump(mode="json")
+        )
+        skip_keys = (*skip_keys, "transparent_background")
+    if changed:
+        record["resolved_config_changed_toml_paths"] = list(changed)
+        skip_keys = (*skip_keys, "resolved_config_changed_toml_paths")
     record_data_policy_transition(
-        artifact_path,
-        {
-            "kind": "checkpoint-resume",
-            "policy_class": "data-only",
-            "resume_checkpoint": str(resume),
-            "spatial_crop": config.data.spatial_crop.model_dump(),
-            "recorded_at_unix_ns": time.time_ns(),
-        },
-        skip_if_duplicate_of_last=(
-            "kind",
-            "resume_checkpoint",
-            "spatial_crop",
-        ),
+        repository_directory(repository_root, config.paths.artifact_dir)
+        / "data_policy_transition.json",
+        record,
+        skip_if_duplicate_of_last=skip_keys,
     )
 
 
@@ -914,7 +942,7 @@ def _run_accepted_lifecycle(
         runtime_growth_alpha=restored.state.growth.alpha,
     )
     if is_main_process and resume is not None:
-        _record_spatial_resume_transition(loaded, repository_root, resume)
+        _record_data_policy_resume_transition(loaded, repository_root, resume)
     if accelerator is not None and rank > 0:
         resumed_seed = (
             config.run.seed
