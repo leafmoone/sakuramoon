@@ -56,3 +56,35 @@ def test_1dcu_combo_config_pins_single_distributed_protocol() -> None:
     assert loaded.config.data.transparent_background.enabled is True
     assert loaded.config.data.spatial_crop.probability == 0.5
     assert loaded.config.optimizer.base_lr == 0.0000475
+
+
+def test_dst_cutover_combo_config_keeps_g1_800_protocol_and_s0_anchor() -> None:
+    """The dst cutover combo enables both data policies on top of the g1
+    production run config: the 800-batch protocol and the S0 base_lr anchor
+    (JLT-scaled to the g1 rate) are inherited untouched, and the 475
+    live-canary override is NOT carried into the live run."""
+    loaded = load_config(
+        CONFIG_ROOT / "train_g1_transparent_white_crop_800_s0.toml",
+        config_root=CONFIG_ROOT,
+        validate_secrets=False,
+    )
+    # g1 production identity + checkpoint dir (the cutover resume point).
+    assert loaded.config.run.run_id == "g1_256_bs760"
+    assert loaded.config.paths.checkpoint_dir == "output_model/g1"
+    # G1 800-batch protocol inherited from train_g1.toml, untouched.
+    stage = loaded.config.stage
+    assert stage.world_size == 2
+    assert stage.local_batch == 20
+    assert stage.accumulation == 20
+    assert stage.global_batch == 800
+    # S0 anchor inherited from base.toml (no [optimizer] override in the
+    # cutover file): JLT actual rate 0.00005 * 800 / 256.
+    assert loaded.config.optimizer.base_lr == 0.00005
+    assert loaded.config.scaled_learning_rate() == 0.00005 * 800 / 256
+    # Both data policies enabled with the p50 crop block.
+    data = loaded.config.data
+    assert data.transparent_background.enabled is True
+    assert data.spatial_crop.enabled is True
+    assert data.spatial_crop.probability == 0.5
+    assert data.spatial_crop.min_equivalent_zoom == 1.02
+    assert data.spatial_crop.max_equivalent_zoom == 1.10

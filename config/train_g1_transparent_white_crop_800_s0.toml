@@ -1,0 +1,63 @@
+# dst production cutover: continue the g1 run (checkpoint_dir =
+# output_model/g1, the dev train_g1.toml identity) with BOTH new data
+# policies enabled:
+#   - [data.transparent_background]: transparent_background ->
+#     white_background white-composite (sample-level NL off), canary's
+#     strict reject sets
+#   - [data.spatial_crop]: shifted_bucket 2D-RoPE zoom/shift, p=0.5,
+#     equivalent zoom 1.02-1.10 (the p50 canary crop block verbatim)
+#
+# Inherited UNCHANGED from train_g1.toml (no stage/optimizer override in
+# this file):
+#   - G1 800-batch shape: local_batch 20 * accumulation 20 * world 2
+#   - S0 base_lr = 0.00005 (inherited from base.toml, JLT-scaled to
+#     0.00005 * 800 / 256 = 0.00015625; deliberately NOT the 0.0000475
+#     live-canary anchor carried by the 760-batch transparent p50 configs)
+#   - g1 run identity + output_model/g1 checkpoint dir (resume point at
+#     cutover, e.g. ckpt_81500_raw-81500-update-cadence)
+#
+# Data-strategy change only -- model / loss / growth / budget untouched.
+# Launch via scripts/training_stack.sh (stack: data service + publisher +
+# training) with CONFIG_NAME set to this file and RESUME_CHECKPOINT pinned
+# to the complete cutover checkpoint.
+
+extends = ["train_g1.toml"]
+
+# §transparent-white (canary §5 strict config, reject sets verbatim): a sample
+# whose general tag semantically matches transparent_background and carries a
+# usable per-pixel alpha is composited onto a solid white canvas BEFORE
+# resize/crop, its trigger tag is rewritten to white_background (serialized
+# "white background"), and every training NL candidate is cleared
+# (sample-level NL off). Missing alpha, special alpha effects, and
+# conflicting explicit backgrounds are rejected and counted; rejected samples
+# never reach Qwen/VAE/DiT.
+[data.transparent_background]
+enabled = true
+trigger_tag = "transparent_background"
+replacement_tag = "white_background"
+composite_color = "white"
+# Special alpha effects: the image's alpha is unreliable, compositing would be
+# wrong -> strict reject + count (section 4).
+special_alpha_tags = ["alpha_transparency", "thumbnail_surprise"]
+# Conflicting explicit background: a transparent tag co-occurring with an
+# explicit background tag is a data error -> strict reject + count (section 4).
+conflict_background_tags = [
+    "white_background",
+    "black_background",
+    "blue_background",
+    "green_background",
+    "pink_background",
+    "grey_background",
+]
+
+# §spatial-crop (p50 canary crop block verbatim): full-canvas 2D RoPE
+# zoom/shift on 50% of samples, cropped back to the aspect bucket.
+[data.spatial_crop]
+enabled = true
+mode = "shifted_bucket"
+probability = 0.5
+min_equivalent_zoom = 1.02
+max_equivalent_zoom = 1.10
+zoom_distribution = "sqrt_uniform_high"
+offset_distribution = "uniform_independent"
+fallback_to_aspect_bucket = true
