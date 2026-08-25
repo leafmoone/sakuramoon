@@ -5,8 +5,9 @@ Covers the comparison-only tag identity, the effective-alpha-first composite
 silent no-op composite), the strict rejections (special alpha / conflicting
 background / missing alpha), the trigger-tag rewrite + NL clear, the
 ``fake_transparency``-does-not-trigger rule, the section-13 telemetry
-conservation, and the candidate-source normalization fix in
-:mod:`sakuramoon.data.caption`.
+conservation, the candidate deletion-set alignment + match-key dedup, the
+white-family co-occurrence dedup, and the candidate-source normalization fix
+in :mod:`sakuramoon.data.caption`.
 """
 
 from __future__ import annotations
@@ -236,6 +237,130 @@ class TestApplyPolicy:
         fields = _fields(Tag("transparent_background", "transparent_background"))
         assert is_transparent_tagged(fields, _config(enabled=False)) is False
         assert is_transparent_tagged(fields, _config()) is True
+
+
+class TestCandidateTagsRewrite:
+    """Candidate deletion-set alignment on composited samples (B6)."""
+
+    def test_trigger_drop_id_follows_replacement(self) -> None:
+        # A precomputed drop ID referencing the trigger would dangle after
+        # the rewrite (the trigger tag no longer exists): it follows the
+        # replacement tag so the candidate filter stays aligned.
+        fields = _fields(
+            Tag("transparent_background", "transparent_background"),
+            candidate=frozenset({"transparent_background", "cat"}),
+        )
+        result = apply_transparent_white(_rgba((0, 0, 0, 0)), fields, _config())
+        assert result.outcome is TransparentWhiteOutcome.COMPOSITED
+        assert result.fields.candidate_tags == frozenset({"white_background", "cat"})
+
+    def test_variant_spelling_of_trigger_rewrites_to_replacement(self) -> None:
+        # Space/case variants of the trigger match comparison-only and are
+        # rewritten to the canonical replacement spelling.
+        fields = _fields(
+            Tag("transparent_background", "transparent_background"),
+            candidate=frozenset({"Transparent Background", "cat"}),
+        )
+        result = apply_transparent_white(_rgba((0, 0, 0, 0)), fields, _config())
+        assert result.outcome is TransparentWhiteOutcome.COMPOSITED
+        assert result.fields.candidate_tags == frozenset({"white_background", "cat"})
+
+    def test_rewritten_and_existing_replacement_entries_collapse(self) -> None:
+        # A pre-existing replacement entry (any spelling) plus the rewritten
+        # trigger entry normalize to one match key: one spelling per key,
+        # the lexicographically minimal string.
+        fields = _fields(
+            Tag("transparent_background", "transparent_background"),
+            candidate=frozenset({"white_background", "White Background", "cat"}),
+        )
+        result = apply_transparent_white(_rgba((0, 0, 0, 0)), fields, _config())
+        assert result.outcome is TransparentWhiteOutcome.COMPOSITED
+        assert result.fields.candidate_tags == frozenset({"White Background", "cat"})
+
+    def test_not_tagged_keeps_candidates_bit_identical(self) -> None:
+        # The ordinary path never touches the candidate set (no
+        # normalization, no rewrite): the original object is returned.
+        fields = _fields(
+            Tag("cat", "cat"),
+            candidate=frozenset({"Transparent Background", "transparent_background"}),
+        )
+        result = apply_transparent_white(_rgba((0, 0, 0, 0)), fields, _config())
+        assert result.outcome is TransparentWhiteOutcome.NOT_TAGGED
+        assert result.fields is fields
+
+    def test_disabled_policy_keeps_candidates_bit_identical(self) -> None:
+        fields = _fields(
+            Tag("transparent_background", "transparent_background"),
+            candidate=frozenset({"transparent_background"}),
+        )
+        result = apply_transparent_white(
+            _rgba((0, 0, 0, 0)), fields, _config(enabled=False)
+        )
+        assert result.outcome is TransparentWhiteOutcome.NOT_TAGGED
+        assert result.fields is fields
+
+
+class TestWhiteDedup:
+    """White-family co-occurrence collapses to one entry (B6)."""
+
+    def test_self_duplicated_trigger_collapses_to_one(self) -> None:
+        fields = _fields(
+            Tag("transparent_background", "transparent_background"),
+            Tag("transparent_background", "transparent_background"),
+            Tag("cat", "cat"),
+        )
+        result = apply_transparent_white(_rgba((0, 0, 0, 0)), fields, _config())
+        assert result.outcome is TransparentWhiteOutcome.COMPOSITED
+        assert result.fields.general == (
+            Tag("white_background", "transparent_background"),
+            Tag("cat", "cat"),
+        )
+
+    def test_explicit_white_co_occurrence_keeps_trigger_canonical(self) -> None:
+        # An explicit white tag co-occurring with the trigger (empty
+        # conflict set): the first-listed white-family entry - the rewritten
+        # trigger with its original canonical - is kept, so the seed domain
+        # stays on the trigger.
+        fields = _fields(
+            Tag("transparent_background", "transparent_background"),
+            Tag("white_background", "white_background"),
+            Tag("cat", "cat"),
+        )
+        result = apply_transparent_white(
+            _rgba((0, 0, 0, 0)), fields, _config(conflict=())
+        )
+        assert result.outcome is TransparentWhiteOutcome.COMPOSITED
+        assert result.fields.general == (
+            Tag("white_background", "transparent_background"),
+            Tag("cat", "cat"),
+        )
+
+    def test_white_listed_first_keeps_white_canonical(self) -> None:
+        # Order matters: an explicit white tag listed before the trigger
+        # stays, and its canonical is the seed domain for that slot.
+        fields = _fields(
+            Tag("white_background", "white_background"),
+            Tag("transparent_background", "transparent_background"),
+        )
+        result = apply_transparent_white(
+            _rgba((0, 0, 0, 0)), fields, _config(conflict=())
+        )
+        assert result.outcome is TransparentWhiteOutcome.COMPOSITED
+        assert result.fields.general == (Tag("white_background", "white_background"),)
+
+    def test_conflict_set_still_rejects_co_occurrence(self) -> None:
+        # The canary conflict set covers white: the co-occurrence rejects
+        # before any rewrite (the original fields feed the ledger).
+        fields = _fields(
+            Tag("transparent_background", "transparent_background"),
+            Tag("white_background", "white_background"),
+        )
+        result = apply_transparent_white(
+            _rgba((0, 0, 0, 0)), fields, _config(conflict=("white_background",))
+        )
+        assert result.outcome is TransparentWhiteOutcome.REJECT_CONFLICT_BG
+        assert result.image is None
+        assert result.fields is fields
 
 
 class TestTelemetry:

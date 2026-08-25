@@ -10,8 +10,10 @@ matches) the policy:
    full opacity);
 2. if present, composites the alpha onto a solid white canvas BEFORE
    resize/crop, rewrites the trigger tag to ``white_background`` (which the
-   tokenizer surface serializes as "white background"), and clears every
-   training NL candidate (sample-level NL off); other tags are kept;
+   tokenizer surface serializes as "white background"), clears every
+   training NL candidate (sample-level NL off), aligns the candidate
+   deletion set with the rewrite, and collapses post-rewrite white-family
+   duplicates (see :func:`apply_transparent_white`); other tags are kept;
 3. if no effective alpha (no alpha channel, or a fully-opaque RGBA/LA/P/WebP
    alpha band), skips the sample with an explicit ``missing_alpha`` reason
    (v1) - a fully-opaque alpha band would make the composite a silent identity
@@ -27,6 +29,19 @@ returns ``NOT_TAGGED`` for it, leaving the image and fields unchanged.
 The rewritten trigger tag keeps its *original* ``canonical`` (the raw
 ``transparent_background``) so the dropout seed domain stays on the original
 value, while ``text`` becomes ``white_background`` for display/serialization.
+
+Candidate alignment and co-occurrence: on a composited sample the trigger
+drop IDs in ``candidate_tags`` would dangle (the trigger tag no longer
+exists) while a pre-existing ``white_background`` entry would delete the
+very background tag the composite now carries, so the deletion set is
+rewritten trigger -> replacement and collapsed to one spelling per
+comparison-only match key (the lexicographically minimal string wins; the
+normalized membership test downstream is a functional no-op and the
+dropout seed domain stays on the raw ``Tag.canonical``).  A
+self-duplicated trigger entry - or an explicit white tag co-occurring when
+the conflict set does not cover it - leaves at most one white-family entry
+in the rewritten general list: the first occurrence per match key wins, so
+the documented seed-domain intent is preserved for the trigger.
 """
 
 from __future__ import annotations
@@ -148,7 +163,8 @@ class TransparentWhiteResult:
     """Outcome of the policy for one sample.
 
     ``COMPOSITED``: ``image`` is the fresh white-composited RGB image and
-    ``fields`` carries the rewritten general tag plus cleared NL.
+    ``fields`` carries the rewritten general tag, the aligned candidate
+    deletion set, and cleared NL.
     ``NOT_TAGGED``: ``image``/``fields`` are the originals (ordinary path).
     Rejections: ``image`` is ``None`` and the sample must be dropped.
     """
@@ -209,13 +225,58 @@ def apply_transparent_white(
         else tag
         for tag, key in zip(fields.general, general_keys, strict=True)
     )
+    # (2b) white-dedup: a self-duplicated trigger entry rewrites twice, and
+    # an explicit white-family tag can co-occur when the conflict set does
+    # not cover it; keep the first occurrence per match key.
+    replacement_key = tag_match_key(config.replacement_tag)
+    seen_replacement = False
+    deduped_general: list[Tag] = []
+    for tag in new_general:
+        if tag_match_key(tag.text) == replacement_key:
+            if seen_replacement:
+                continue
+            seen_replacement = True
+        deduped_general.append(tag)
     cleared_nl = NlCandidates(None, None, None, None, None)
-    rewritten_fields = replace(fields, general=new_general, nl=cleared_nl)
+    rewritten_fields = replace(
+        fields,
+        general=tuple(deduped_general),
+        candidate_tags=_rewrite_candidate_tags(fields.candidate_tags, config),
+        nl=cleared_nl,
+    )
     return TransparentWhiteResult(
         outcome=TransparentWhiteOutcome.COMPOSITED,
         image=composited,
         fields=rewritten_fields,
     )
+
+
+def _rewrite_candidate_tags(
+    candidates: frozenset[str],
+    config: DataTransparentBackgroundConfig,
+) -> frozenset[str]:
+    """Align the candidate deletion set with a composited sample.
+
+    Trigger-matching drop IDs become the replacement tag, and the result is
+    collapsed to one spelling per comparison-only match key (the
+    lexicographically minimal string wins) so the normalized membership test
+    downstream sees exactly one drop ID per candidate.  The collapse is a
+    functional no-op (both spellings match the same tag) and never touches
+    the dropout seed domain, which stays on the raw ``Tag.canonical``.
+    """
+
+    trigger_key = tag_match_key(config.trigger_tag)
+    replacement_key = tag_match_key(config.replacement_tag)
+    groups: dict[str, list[str]] = {}
+    for candidate in candidates:
+        key = tag_match_key(candidate)
+        if key == trigger_key:
+            key = replacement_key
+            value = config.replacement_tag
+        else:
+            value = candidate
+        groups.setdefault(key, []).append(value)
+    return frozenset(min(values) for values in groups.values())
 
 
 _COMPOSITE_COLORS = {"white": 255}
