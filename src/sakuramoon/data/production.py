@@ -7,7 +7,7 @@ import os
 import re
 import secrets
 import weakref
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Never, SupportsIndex, cast
@@ -36,6 +36,7 @@ from sakuramoon.data.pipeline import (
 from sakuramoon.data.serialize import FramingContract, TokenEncoder
 from sakuramoon.data.service_protocol import ShardLeaseDescriptor
 from sakuramoon.data.spatial_crop import SpatialCropPolicy
+from sakuramoon.data.transparent_white import TRANSPARENT_REJECTION_KEYS
 
 
 class ProductionDataError(ValueError):
@@ -380,7 +381,11 @@ class ConfiguredDataLoader:
             )
 
     def batches(
-        self, pipeline: WebDatasetPipeline, client: DataLeaseClient
+        self,
+        pipeline: WebDatasetPipeline,
+        client: DataLeaseClient,
+        *,
+        transparent_rejection_ledger: MutableMapping[str, int] | None = None,
     ) -> Iterator[TrainingBatch]:
         self.require_identity(client)
         return iter_service_batches(
@@ -392,6 +397,7 @@ class ConfiguredDataLoader:
             pin_memory=self.pin_memory,
             drop_last=self.drop_last,
             length_sort_window_batches=self.length_sort_window_batches,
+            transparent_rejection_ledger=transparent_rejection_ledger,
         )
 
 
@@ -419,6 +425,13 @@ class ProductionBatchStreamIdentity:
 class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
     """Factory-issued process-local handle around the production batch iterator."""
 
+    # Slot annotations (no storage): the snapshot attributes are populated
+    # from factory kwargs or the iterator's own duck-typed attributes.  The
+    # duck-typed fallback can yield anything at runtime, so the slot is
+    # typed as a callable returning object and the public method narrows it
+    # with an isinstance guard.
+    _transparent_rejection_totals: Callable[[], object] | None
+
     __slots__ = (
         "__weakref__",
         "_closed",
@@ -427,6 +440,7 @@ class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
         "_owner_pid",
         "_ready_batch_depth",
         "_token",
+        "_transparent_rejection_totals",
     )
 
     def __init__(
@@ -437,6 +451,9 @@ class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
         token: str,
         authority: object,
         ready_batch_depth_snapshot: Callable[[], int] | None = None,
+        transparent_rejection_totals_snapshot: (
+            Callable[[], Mapping[str, int]] | None
+        ) = None,
     ) -> None:
         if authority is not _STREAM_AUTHORITY:
             raise ProductionDataError(
@@ -451,6 +468,23 @@ class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
             else inferred_snapshot
         )
         self._ready_batch_depth = snapshot if callable(snapshot) else None
+        # The factory always passes an explicit snapshot; the getattr
+        # fallback keeps duck-typed iterators working.  Its result is typed
+        # as `object` (the attribute is not declared on Iterator) and the
+        # cast documents that the fallback is used only when callable; the
+        # slot's object-returning type keeps the method's isinstance guard
+        # a real narrowing.
+        inferred_totals: object = getattr(
+            iterator, "transparent_rejection_totals_snapshot", None
+        )
+        self._transparent_rejection_totals = (
+            transparent_rejection_totals_snapshot
+            if transparent_rejection_totals_snapshot is not None
+            else cast(
+                Callable[[], object] | None,
+                inferred_totals if callable(inferred_totals) else None,
+            )
+        )
         self._token = token
         self._owner_pid = os.getpid()
         self._closed = False
@@ -504,6 +538,37 @@ class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
             raise ProductionDataError("live DataLoader ready-batch depth is invalid")
         return depth
 
+    def transparent_rejection_totals(self) -> Mapping[str, int]:
+        """Cumulative transparent-white reject totals since stream issuance.
+
+        Always returns the complete fixed-key table: a strict-zero table
+        when no reject ledger is attached (empty/legacy stream), so the
+        telemetry chain can publish the keys even for disabled policies.
+        """
+        self._require_live()
+        if self._transparent_rejection_totals is None:
+            return {key: 0 for key in TRANSPARENT_REJECTION_KEYS}
+        snapshot = self._transparent_rejection_totals()
+        if not isinstance(snapshot, Mapping):
+            # The duck-typed fallback may yield arbitrary objects; reject
+            # anything that is not a mapping before touching its keys.
+            raise ProductionDataError(
+                "transparent rejection totals snapshot is invalid"
+            )
+        totals = cast(Mapping[str, int], snapshot)
+        if set(totals.keys()) != set(TRANSPARENT_REJECTION_KEYS):
+            raise ProductionDataError(
+                "transparent rejection totals must carry exactly "
+                f"{TRANSPARENT_REJECTION_KEYS}"
+            )
+        for key, value in totals.items():
+            if type(value) is not int or value < 0:
+                raise ProductionDataError(
+                    f"transparent rejection total for {key} must be a "
+                    "nonnegative integer"
+                )
+        return totals
+
     def close(self) -> None:
         if os.getpid() != self._owner_pid:
             raise ProductionDataError(
@@ -537,6 +602,9 @@ def _issue_batch_stream(
     identity: ProductionBatchStreamIdentity,
     *,
     ready_batch_depth_snapshot: Callable[[], int] | None = None,
+    transparent_rejection_totals_snapshot: (
+        Callable[[], Mapping[str, int]] | None
+    ) = None,
 ) -> AcceptedProductionBatchStream:
     token = secrets.token_hex(32)
     stream = AcceptedProductionBatchStream(
@@ -545,6 +613,7 @@ def _issue_batch_stream(
         token=token,
         authority=_STREAM_AUTHORITY,
         ready_batch_depth_snapshot=ready_batch_depth_snapshot,
+        transparent_rejection_totals_snapshot=transparent_rejection_totals_snapshot,
     )
     _ACCEPTED_STREAMS[token] = stream
     return stream
@@ -728,17 +797,35 @@ class ProductionPipelineFactory:
             dataset_id=client.identity.dataset_id,
             session_id=client.identity.session_id,
         )
+        # Parent-side cumulative reject ledger (reliable per-shard channel).
+        # Every issued stream publishes a snapshot of it; an empty stream
+        # keeps the strict-zero table so the fixed keys stay visible.
+        ledger: dict[str, int] = dict.fromkeys(TRANSPARENT_REJECTION_KEYS, 0)
+
+        def totals_snapshot() -> dict[str, int]:
+            return dict(ledger)
+
         if client.health():
-            return _issue_batch_stream(iter(()), identity)
+            return _issue_batch_stream(
+                iter(()),
+                identity,
+                transparent_rejection_totals_snapshot=totals_snapshot,
+            )
         descriptor = client.lease(0)
         if descriptor is None:
-            return _issue_batch_stream(iter(()), identity)
+            return _issue_batch_stream(
+                iter(()),
+                identity,
+                transparent_rejection_totals_snapshot=totals_snapshot,
+            )
         return _issue_batch_stream(
             loader.batches(
                 self.pipeline_for_lease(descriptor),
                 _PreleasedClient(client, descriptor),
+                transparent_rejection_ledger=ledger,
             ),
             identity,
+            transparent_rejection_totals_snapshot=totals_snapshot,
         )
 
 

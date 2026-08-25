@@ -18,6 +18,10 @@ from sakuramoon.data.spatial_crop import (
     ZOOM_HISTOGRAM_LABELS,
     SpatialCropCounts,
 )
+from sakuramoon.data.transparent_white import (
+    TRANSPARENT_REJECTION_KEYS,
+    TransparentWhiteCounts,
+)
 from sakuramoon.telemetry.metrics import (
     DROPOUT_KEYS,
     NOISE_T_BIN_COUNT,
@@ -63,6 +67,11 @@ class UpdateMetricContext:
     samples_per_second: float
     ready_queue_depth: int
     supplemental_phase_seconds: Mapping[str, float]
+    # Parent-side cumulative transparent-white reject totals (reliable
+    # per-shard completion channel).  None publishes the strict-zero table so
+    # the fixed keys stay visible in the JSONL/W&B payloads even when the
+    # policy is disabled.
+    transparent_rejection_totals: Mapping[str, int] | None = None
 
     def __post_init__(self) -> None:
         if type(self.dit_flops) is not int or self.dit_flops <= 0:
@@ -80,6 +89,24 @@ class UpdateMetricContext:
             "supplemental_phase_seconds",
             MappingProxyType(dict(self.supplemental_phase_seconds)),
         )
+        if self.transparent_rejection_totals is not None:
+            totals = self.transparent_rejection_totals
+            if set(totals.keys()) != set(TRANSPARENT_REJECTION_KEYS):
+                raise ValueError(
+                    "transparent_rejection_totals must carry exactly "
+                    f"{TRANSPARENT_REJECTION_KEYS}"
+                )
+            for key, value in totals.items():
+                if type(value) is not int or value < 0:
+                    raise ValueError(
+                        f"transparent_rejection_totals[{key}] must be a "
+                        "nonnegative integer"
+                    )
+            object.__setattr__(
+                self,
+                "transparent_rejection_totals",
+                MappingProxyType(dict(totals)),
+            )
 
 
 def _noise_bucket(
@@ -277,6 +304,50 @@ def _spatial_crop_metrics(
     )
 
 
+def _transparent_white_metrics(
+    observation: SuccessfulTrainingObservation,
+) -> tuple[int, int, int]:
+    """Per-update sample-stream counters: (tagged, composited, nl_suppressed).
+
+    Rejected samples never produce a :class:`RuntimeMeasurement`, so the
+    per-update batch view only sees retained outcomes (tagged == composited,
+    reject counters structurally zero).  The reject running totals arrive
+    through ``UpdateMetricContext.transparent_rejection_totals`` from the
+    parent-side ledger, where the cross-channel conservation is checked.
+    """
+
+    tagged = 0
+    composited = 0
+    nl_suppressed = 0
+    for index, measurement in enumerate(observation.microbatches):
+        counts = measurement.transparent
+        if type(counts) is not TransparentWhiteCounts:
+            raise TypeError(
+                f"microbatches[{index}].transparent must be a "
+                "TransparentWhiteCounts"
+            )
+        if counts.missing_alpha or counts.special_alpha or counts.conflict_bg:
+            raise ValueError(
+                f"microbatches[{index}] batch-level transparent reject "
+                "counters must be zero"
+            )
+        tagged += counts.tagged
+        composited += counts.composited
+        nl_suppressed += counts.nl_suppressed
+    if nl_suppressed != composited:
+        raise ValueError(
+            "transparent-white conservation violated: nl_suppressed != composited"
+        )
+    if tagged != composited:
+        raise ValueError(
+            "transparent-white conservation violated: "
+            "tagged != composited in the retained-sample view"
+        )
+    if tagged > observation.loop.update.effective_samples:
+        raise ValueError("transparent tagged count exceeds effective batch")
+    return tagged, composited, nl_suppressed
+
+
 def _timestep_summary(
     observation: SuccessfulTrainingObservation,
 ) -> tuple[float, float, float, float]:
@@ -351,6 +422,9 @@ def build_training_metric(
     if coefficient < 0.0 or coefficient > 1.0:
         raise ValueError("clip coefficient must be in [0,1]")
     spatial = _spatial_crop_metrics(observation)
+    transparent_tagged, transparent_composited, transparent_nl_suppressed = (
+        _transparent_white_metrics(observation)
+    )
 
     return TrainingMetric(
         successful_update=update.state.successful_updates,
@@ -426,6 +500,10 @@ def build_training_metric(
         spatial_abs_offset_x_mean=spatial.abs_offset_x_mean,
         spatial_abs_offset_y_mean=spatial.abs_offset_y_mean,
         spatial_both_axes_count=spatial.both_axes_count,
+        transparent_tagged=transparent_tagged,
+        transparent_composited=transparent_composited,
+        transparent_nl_suppressed=transparent_nl_suppressed,
+        transparent_rejection_totals=context.transparent_rejection_totals,
     )
 
 

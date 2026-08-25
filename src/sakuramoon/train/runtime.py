@@ -40,6 +40,7 @@ from sakuramoon.data.production import (
 )
 from sakuramoon.data.serialize import SerializedCaption
 from sakuramoon.data.spatial_crop import SpatialCropCounts
+from sakuramoon.data.transparent_white import TransparentWhiteCounts
 from sakuramoon.encoders.mage_vae import FrozenMageVAE
 from sakuramoon.encoders.qwen import FrozenQwenEncoder
 from sakuramoon.model.attention import (
@@ -398,6 +399,7 @@ class RuntimeMeasurement:
     captions: tuple[SerializedCaption, ...]
     caption_plans: tuple[CaptionPlan, ...]
     spatial_crop: SpatialCropCounts
+    transparent: TransparentWhiteCounts
 
     def detached(self) -> RuntimeMeasurement:
         """Drop the autograd graph before handing facts to an async observer."""
@@ -419,6 +421,7 @@ class RuntimeMeasurement:
             captions=self.captions,
             caption_plans=self.caption_plans,
             spatial_crop=self.spatial_crop,
+            transparent=self.transparent,
         )
 
 
@@ -848,6 +851,7 @@ class SingleGpuBatchRuntime:
             captions=batch.captions,
             caption_plans=tuple(caption.plan for caption in batch.captions),
             spatial_crop=batch.spatial_crop,
+            transparent=batch.transparent,
         )
 
     def _loss(

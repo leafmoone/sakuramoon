@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
@@ -649,11 +649,13 @@ class _ProductionMetricContext:
         self,
         ready_queue_depth: ReadyQueueDepthObserver,
         world_size: int = 1,
+        transparent_rejection_totals: Callable[[], Mapping[str, int]] | None = None,
     ) -> None:
         if not callable(ready_queue_depth):
             raise TypeError("live ready-queue observer must be callable")
         self.ready_queue_depth = ready_queue_depth
         self.world_size = world_size
+        self.transparent_rejection_totals = transparent_rejection_totals
 
     def __call__(
         self, observation: SuccessfulTrainingObservation
@@ -664,6 +666,11 @@ class _ProductionMetricContext:
         depth = self.ready_queue_depth()
         if type(depth) is not int or depth < 0:
             raise ValueError("ready-queue observer returned an invalid depth")
+        rejection_totals = (
+            self.transparent_rejection_totals()
+            if self.transparent_rejection_totals is not None
+            else None
+        )
         return UpdateMetricContext(
             dit_flops=dit_flops,
             samples_per_second=(
@@ -673,6 +680,7 @@ class _ProductionMetricContext:
             ),
             ready_queue_depth=depth,
             supplemental_phase_seconds={},
+            transparent_rejection_totals=rejection_totals,
         )
 
 
@@ -1043,6 +1051,7 @@ def _run_accepted_lifecycle(
                 context_provider = _ProductionMetricContext(
                     batches.ready_batch_depth_snapshot,
                     world_size=config.distributed.world_size,
+                    transparent_rejection_totals=batches.transparent_rejection_totals,
                 )
                 telemetry = (
                     build_training_telemetry_from_config(

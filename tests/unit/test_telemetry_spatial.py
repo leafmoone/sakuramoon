@@ -103,12 +103,12 @@ def _applied_metric() -> TrainingMetric:
 
 
 class TestSchema:
-    def test_schema_version_is_nine(self) -> None:
-        assert TRAINING_METRIC_SCHEMA_VERSION == 9
+    def test_schema_version_is_ten(self) -> None:
+        assert TRAINING_METRIC_SCHEMA_VERSION == 10
 
     def test_json_payload_exposes_nested_spatial_tables(self) -> None:
         payload = _applied_metric().as_json_mapping()
-        assert payload["schema_version"] == 9
+        assert payload["schema_version"] == 10
         assert payload["spatial_crop_selected"] == 5
         assert payload["spatial_crop_applied"] == 4
         assert payload["spatial_both_axes_count"] == 2

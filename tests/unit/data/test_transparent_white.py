@@ -1,14 +1,17 @@
 """Unit tests for the transparent-background white-composite policy.
 
-Covers the comparison-only tag identity, the alpha-first composite, the strict
-rejections (special alpha / conflicting background / missing alpha), the
-trigger-tag rewrite + NL clear, the ``fake_transparency``-does-not-trigger rule,
-the section-13 telemetry conservation, and the candidate-source normalization
-fix in :mod:`sakuramoon.data.caption`.
+Covers the comparison-only tag identity, the effective-alpha-first composite
+(a fully-opaque RGBA/LA/P/WebP alpha band is a missing-alpha reject, not a
+silent no-op composite), the strict rejections (special alpha / conflicting
+background / missing alpha), the trigger-tag rewrite + NL clear, the
+``fake_transparency``-does-not-trigger rule, the section-13 telemetry
+conservation, and the candidate-source normalization fix in
+:mod:`sakuramoon.data.caption`.
 """
 
 from __future__ import annotations
 
+import io
 from typing import Any
 
 import pytest
@@ -23,11 +26,14 @@ from sakuramoon.data.caption import (
 )
 from sakuramoon.data.tag_identity import tag_match_key
 from sakuramoon.data.transparent_white import (
+    TRANSPARENT_REJECTION_KEYS,
+    TransparentWhiteCounts,
     TransparentWhiteOutcome,
     TransparentWhiteTelemetry,
+    aggregate_transparent_white,
     apply_transparent_white,
     composite_to_white,
-    has_valid_alpha,
+    has_effective_alpha,
     is_transparent_tagged,
 )
 
@@ -86,19 +92,44 @@ class TestTagMatchKey:
             tag_match_key("bad\ncontrol")
 
 
-class TestHasValidAlpha:
-    def test_rgba_and_la(self) -> None:
-        assert has_valid_alpha(_rgba((0, 0, 0, 255)))
-        assert has_valid_alpha(Image.new("LA", (4, 4), (128, 128)))
+class TestHasEffectiveAlpha:
+    def test_semi_transparent_rgba_and_la(self) -> None:
+        assert has_effective_alpha(_rgba((0, 0, 0, 128)))
+        assert has_effective_alpha(Image.new("LA", (4, 4), (128, 128)))
+
+    def test_fully_opaque_rgba_is_not_effective(self) -> None:
+        assert not has_effective_alpha(_rgba((0, 0, 0, 255)))
+
+    def test_fully_opaque_la_is_not_effective(self) -> None:
+        assert not has_effective_alpha(Image.new("LA", (4, 4), (128, 255)))
 
     def test_palette_transparency(self) -> None:
         palette = Image.new("P", (4, 4))
         palette.info["transparency"] = 0
-        assert has_valid_alpha(palette)
-        assert not has_valid_alpha(Image.new("P", (4, 4)))
+        assert has_effective_alpha(palette)
+        assert not has_effective_alpha(Image.new("P", (4, 4)))
+
+    def test_palette_transparency_unused_index_is_not_effective(self) -> None:
+        # Every pixel sits on palette index 1; the transparent index 0 is
+        # never used, so the alpha band is fully opaque.
+        palette = Image.new("P", (4, 4), 1)
+        palette.info["transparency"] = 0
+        assert not has_effective_alpha(palette)
+
+    def test_webp_alpha_survives_decode(self) -> None:
+        buffered = io.BytesIO()
+        _rgba((0, 0, 0, 128)).save(buffered, format="WEBP")
+        buffered.seek(0)
+        assert has_effective_alpha(Image.open(buffered))
+
+    def test_webp_without_alpha_is_not_effective(self) -> None:
+        buffered = io.BytesIO()
+        _rgb((255, 255, 255)).save(buffered, format="WEBP")
+        buffered.seek(0)
+        assert not has_effective_alpha(Image.open(buffered))
 
     def test_rgb_has_no_alpha(self) -> None:
-        assert not has_valid_alpha(_rgb((255, 255, 255)))
+        assert not has_effective_alpha(_rgb((255, 255, 255)))
 
 
 class TestCompositeToWhite:
@@ -152,6 +183,22 @@ class TestApplyPolicy:
         assert result.outcome is TransparentWhiteOutcome.REJECT_MISSING_ALPHA
         assert result.image is None
         assert result.outcome.observer_reason == "reject_missing_alpha"
+
+    def test_fully_opaque_rgba_rejects_missing_alpha(self) -> None:
+        # A fully-opaque alpha band is a no-op composite -> explicit reject,
+        # never a silent identity transform.
+        fields = _fields(Tag("transparent_background", "transparent_background"))
+        result = apply_transparent_white(_rgba((10, 20, 30, 255)), fields, _config())
+        assert result.outcome is TransparentWhiteOutcome.REJECT_MISSING_ALPHA
+        assert result.image is None
+
+    def test_fully_opaque_webp_rejects_missing_alpha(self) -> None:
+        fields = _fields(Tag("transparent_background", "transparent_background"))
+        buffered = io.BytesIO()
+        _rgba((10, 20, 30, 255)).save(buffered, format="WEBP")
+        buffered.seek(0)
+        result = apply_transparent_white(Image.open(buffered), fields, _config())
+        assert result.outcome is TransparentWhiteOutcome.REJECT_MISSING_ALPHA
 
     def test_special_alpha_rejects(self) -> None:
         fields = _fields(
@@ -262,6 +309,192 @@ class TestCandidateSourceNormalization:
             seed=12345,
         )
         assert retained == (Tag("transparent_background", "transparent_background"),)
+
+
+class TestTransparentWhiteCounts:
+    def test_zero_counts_construct(self) -> None:
+        counts = TransparentWhiteCounts(0, 0, 0, 0, 0, 0)
+        assert counts.tagged == 0
+
+    def test_valid_nonzero_counts(self) -> None:
+        counts = TransparentWhiteCounts(
+            tagged=3,
+            composited=2,
+            missing_alpha=1,
+            special_alpha=0,
+            conflict_bg=0,
+            nl_suppressed=2,
+        )
+        assert counts.tagged == counts.composited + counts.missing_alpha
+
+    def test_conservation_violation_raises(self) -> None:
+        with pytest.raises(ValueError, match="conservation"):
+            TransparentWhiteCounts(
+                tagged=4,
+                composited=2,
+                missing_alpha=1,
+                special_alpha=0,
+                conflict_bg=0,
+                nl_suppressed=2,
+            )
+
+    def test_negative_counter_raises(self) -> None:
+        with pytest.raises(ValueError, match="nonnegative"):
+            TransparentWhiteCounts(
+                tagged=1,
+                composited=0,
+                missing_alpha=-1,
+                special_alpha=0,
+                conflict_bg=0,
+                nl_suppressed=0,
+            )
+
+    def test_non_int_counter_raises(self) -> None:
+        for value in (1.0, True, "1"):
+            with pytest.raises(ValueError, match="nonnegative"):
+                TransparentWhiteCounts(
+                    tagged=value,  # type: ignore[arg-type]
+                    composited=1,
+                    missing_alpha=0,
+                    special_alpha=0,
+                    conflict_bg=0,
+                    nl_suppressed=1,
+                )
+
+    def test_nl_suppressed_mismatch_raises(self) -> None:
+        with pytest.raises(ValueError, match="conservation"):
+            TransparentWhiteCounts(
+                tagged=1,
+                composited=1,
+                missing_alpha=0,
+                special_alpha=0,
+                conflict_bg=0,
+                nl_suppressed=0,
+            )
+
+
+class _FakeSample:
+    def __init__(self, outcome: TransparentWhiteOutcome) -> None:
+        self.transparent_outcome = outcome
+
+
+class TestAggregateTransparentWhite:
+    def test_empty_stream_is_zero_counts(self) -> None:
+        counts = aggregate_transparent_white([])
+        assert counts == TransparentWhiteCounts(0, 0, 0, 0, 0, 0)
+
+    def test_mixed_outcomes_count_only_retained(self) -> None:
+        samples = [
+            _FakeSample(TransparentWhiteOutcome.COMPOSITED),
+            _FakeSample(TransparentWhiteOutcome.NOT_TAGGED),
+            _FakeSample(TransparentWhiteOutcome.COMPOSITED),
+        ]
+        counts = aggregate_transparent_white(samples)
+        assert counts.tagged == 2
+        assert counts.composited == 2
+        assert counts.nl_suppressed == 2
+        assert counts.missing_alpha == 0
+
+    def test_reject_outcome_on_retained_sample_raises(self) -> None:
+        for reject in (
+            TransparentWhiteOutcome.REJECT_MISSING_ALPHA,
+            TransparentWhiteOutcome.REJECT_SPECIAL_ALPHA,
+            TransparentWhiteOutcome.REJECT_CONFLICT_BG,
+        ):
+            with pytest.raises(ValueError, match="rejected"):
+                aggregate_transparent_white([_FakeSample(reject)])
+
+    def test_invalid_outcome_type_raises(self) -> None:
+        sample = _FakeSample("not_tagged")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="missing or invalid"):
+            aggregate_transparent_white([sample])
+
+    def test_sample_without_outcome_raises(self) -> None:
+        with pytest.raises(AttributeError):
+            aggregate_transparent_white([object()])
+
+
+class TestAggregateConservation:
+    """Section-13 conservation across the two channels.
+
+    The batch stream only sees retained samples (composited + untagged),
+    while the per-shard rejection ledger sees the discarded ones.  At the
+    cumulative level the two channels must add up exactly:
+
+    ``tagged_total == composited_total + missing + special + conflict``
+    and ``nl_suppressed_total == composited_total``.
+    """
+
+    def test_batch_stream_plus_rejection_ledger_conserve(self) -> None:
+        # One training stream: per-batch retained-sample aggregates.
+        batches: list[TransparentWhiteCounts] = [
+            # (composited per batch, nl_suppressed mirrors composited)
+            aggregate_transparent_white(
+                [
+                    _FakeSample(TransparentWhiteOutcome.COMPOSITED),
+                    _FakeSample(TransparentWhiteOutcome.NOT_TAGGED),
+                    _FakeSample(TransparentWhiteOutcome.COMPOSITED),
+                    _FakeSample(TransparentWhiteOutcome.NOT_TAGGED),
+                ]
+            ),
+            aggregate_transparent_white(
+                [
+                    _FakeSample(TransparentWhiteOutcome.COMPOSITED),
+                    _FakeSample(TransparentWhiteOutcome.NOT_TAGGED),
+                ]
+            ),
+            aggregate_transparent_white([_FakeSample(TransparentWhiteOutcome.NOT_TAGGED)]),
+        ]
+        composited_total = sum(batch.composited for batch in batches)
+        nl_total = sum(batch.nl_suppressed for batch in batches)
+        assert composited_total == 3
+        assert nl_total == composited_total
+
+        # The reliable per-shard rejection channel (fixed keys, cumulative).
+        ledger: dict[str, int] = dict.fromkeys(TRANSPARENT_REJECTION_KEYS, 0)
+        for key, total in (
+            ("reject_missing_alpha", 2),
+            ("reject_special_alpha", 1),
+            ("reject_conflict_bg", 1),
+        ):
+            ledger[key] = total
+
+        # A tagged sample either survives into the batch stream as
+        # composited or is counted exactly once in the ledger: the tagged
+        # total observed at the source is the sum of both channels.
+        tagged_total = composited_total + sum(ledger.values())
+        assert tagged_total == 7  # 3 composited + 2 missing + 1 special + 1 conflict
+        assert nl_total == composited_total
+        for batch in batches:
+            # Per-batch invariant: in the retained-sample view the reject
+            # counters are structurally zero and tagged == composited.
+            assert (
+                batch.tagged
+                == batch.composited
+                + batch.missing_alpha
+                + batch.special_alpha
+                + batch.conflict_bg
+            )
+            assert batch.missing_alpha == 0
+            assert batch.nl_suppressed == batch.composited
+
+    def test_rejection_keys_are_fixed_and_disjoint(self) -> None:
+        assert len(TRANSPARENT_REJECTION_KEYS) == 3
+        assert set(TRANSPARENT_REJECTION_KEYS) == {
+            "reject_missing_alpha",
+            "reject_special_alpha",
+            "reject_conflict_bg",
+        }
+        # The fixed keys must not overlap the per-batch count field names.
+        count_fields = {
+            "tagged",
+            "composited",
+            "missing_alpha",
+            "special_alpha",
+            "conflict_bg",
+            "nl_suppressed",
+        }
+        assert set(TRANSPARENT_REJECTION_KEYS).isdisjoint(count_fields)
 
 
 if __name__ == "__main__":

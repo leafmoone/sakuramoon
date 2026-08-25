@@ -48,6 +48,7 @@ from sakuramoon.data.spatial_crop import (
     plan_shifted_bucket,
 )
 from sakuramoon.data.transparent_white import (
+    TRANSPARENT_REJECTION_KEYS,
     TransparentWhiteOutcome,
     TransparentWhiteTelemetry,
     apply_transparent_white,
@@ -186,6 +187,10 @@ class PipelineSample:
     audit: ImageAudit
     rng: RngIdentity
     padding_token_id: int
+    # Per-sample transparent-white outcome.  Retained samples only carry
+    # NOT_TAGGED or COMPOSITED (rejects never reach this object); the default
+    # keeps the ordinary (untagged) path bit-identical.
+    transparent_outcome: TransparentWhiteOutcome = TransparentWhiteOutcome.NOT_TAGGED
 
 
 def _validate_local_shard_paths(shard_paths: tuple[Path, ...]) -> None:
@@ -405,6 +410,13 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.transparent_telemetry = (
             transparent_telemetry if transparent_telemetry is not None else TransparentWhiteTelemetry()
         )
+        # Per-shard reject counters of the reliable worker->parent channel.
+        # Each lease pipeline (and its local-shard clone) owns one fixed-key
+        # dict; the counters ride the shard completion message, so a parent
+        # can audit rejected samples that never produce a PipelineSample.
+        self._shard_transparent_rejections: dict[str, int] = dict.fromkeys(
+            TRANSPARENT_REJECTION_KEYS, 0
+        )
         self._lease_managed = False
 
     def _process(
@@ -491,6 +503,8 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                     if tw.outcome.is_reject:
                         reason = tw.outcome.observer_reason
                         assert reason is not None  # reject outcomes always carry a reason
+                        assert reason in self._shard_transparent_rejections
+                        self._shard_transparent_rejections[reason] += 1
                         _trace_sample(
                             shard_record.path, metadata.id, f"reject:{reason}"
                         )
@@ -500,12 +514,15 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                         assert tw.image is not None
                         work_image = tw.image
                         work_fields = tw.fields
+                        transparent_outcome = tw.outcome
                     else:
                         work_image = decoded
                         work_fields = fields
+                        transparent_outcome = tw.outcome
                 else:
                     work_image = decoded
                     work_fields = fields
+                    transparent_outcome = TransparentWhiteOutcome.NOT_TAGGED
             plan = build_caption_plan(
                 work_fields,
                 self.probabilities,
@@ -628,6 +645,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             audit=audit,
             rng=identity,
             padding_token_id=self.framing.padding_token_id,
+            transparent_outcome=transparent_outcome,
         )
 
 
@@ -693,6 +711,22 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         )
         pipeline._lease_managed = True
         return pipeline
+
+    def transparent_rejection_counts(self) -> dict[str, int]:
+        """Fixed-key reject counters of this pipeline's current shard.
+
+        Call after the shard's sample stream ends: the returned snapshot
+        carries the three reliable-channel reject keys (zero-filled) so a
+        shard completion can audit rejected samples that never produced a
+        :class:`PipelineSample`.  A conservation check against the shared
+        telemetry counters runs first so a corrupted counter pair cannot
+        be published.
+        """
+        self.transparent_telemetry.assert_conservation()
+        return {
+            key: self._shard_transparent_rejections[key]
+            for key in TRANSPARENT_REJECTION_KEYS
+        }
 
     def __iter__(self) -> Iterator[PipelineSample]:
         if get_worker_info() is not None and not self._lease_managed:

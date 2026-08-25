@@ -6,13 +6,16 @@ general tag semantically matches the trigger tag (``transparent_background``,
 matched via the comparison-only :func:`tag_match_key` so the space form also
 matches) the policy:
 
-1. requires a usable per-pixel alpha channel;
+1. requires an effective per-pixel alpha channel (at least one pixel below
+   full opacity);
 2. if present, composites the alpha onto a solid white canvas BEFORE
    resize/crop, rewrites the trigger tag to ``white_background`` (which the
    tokenizer surface serializes as "white background"), and clears every
    training NL candidate (sample-level NL off); other tags are kept;
-3. if no usable alpha, skips the sample with an explicit ``missing_alpha``
-   reason (v1);
+3. if no effective alpha (no alpha channel, or a fully-opaque RGBA/LA/P/WebP
+   alpha band), skips the sample with an explicit ``missing_alpha`` reason
+   (v1) - a fully-opaque alpha band would make the composite a silent identity
+   transform, so it is rejected like a missing channel;
 4. if the sample carries a special alpha effect or a conflicting explicit
    background, rejects it strictly and counts it (``fake_transparency`` alone
    does NOT trigger).
@@ -28,6 +31,7 @@ value, while ``text`` becomes ``white_background`` for display/serialization.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
 
@@ -38,12 +42,15 @@ from sakuramoon.data.caption import CaptionFields, NlCandidates, Tag
 from sakuramoon.data.tag_identity import tag_match_key
 
 __all__ = [
+    "TRANSPARENT_REJECTION_KEYS",
+    "TransparentWhiteCounts",
     "TransparentWhiteOutcome",
     "TransparentWhiteResult",
     "TransparentWhiteTelemetry",
+    "aggregate_transparent_white",
     "apply_transparent_white",
     "composite_to_white",
-    "has_valid_alpha",
+    "has_effective_alpha",
     "is_transparent_tagged",
 ]
 
@@ -77,18 +84,38 @@ _REJECT_OUTCOMES = frozenset(
     }
 )
 
+#: Fixed key set of the reliable worker->parent rejection channel.  Rejected
+#: samples never produce a :class:`PipelineSample`, so their counters cannot
+#: ride the batch/telemetry stream; each shard completion carries exactly
+#: these keys (zero-filled when the shard rejected nothing).
+TRANSPARENT_REJECTION_KEYS: tuple[str, ...] = (
+    TransparentWhiteOutcome.REJECT_MISSING_ALPHA.value,
+    TransparentWhiteOutcome.REJECT_SPECIAL_ALPHA.value,
+    TransparentWhiteOutcome.REJECT_CONFLICT_BG.value,
+)
 
-def has_valid_alpha(image: Image.Image) -> bool:
-    """True when the decoded image carries a usable per-pixel alpha channel.
 
-    ``RGBA`` and ``LA`` always qualify. A palette (``P``) image qualifies only
-    when it advertises transparency. Fully-opaque alphas still qualify (the
-    composite is then a no-op and stays well defined); they are not special.
+def has_effective_alpha(image: Image.Image) -> bool:
+    """True when the decoded image carries an *effective* alpha channel.
+
+    ``RGBA``/``LA`` images, palette (``P``) images advertising transparency,
+    and alpha-channel WebP (which decodes to ``RGBA``) qualify only when the
+    alpha band is actually below full opacity somewhere (``min < 255``).
+    A fully-opaque alpha band makes the white composite a no-op, so it is
+    routed to the explicit ``missing_alpha`` reject instead of a silent
+    identity transform.
     """
 
+    if image.size[0] == 0 or image.size[1] == 0:
+        return False
     if image.mode in ("RGBA", "LA"):
-        return True
-    return image.mode == "P" and "transparency" in image.info
+        alpha = image.getchannel("A")
+    elif image.mode == "P" and "transparency" in image.info:
+        alpha = image.convert("RGBA").getchannel("A")
+    else:
+        return False
+    low, _high = alpha.getextrema()
+    return low < 255
 
 
 def composite_to_white(image: Image.Image, *, color: int = 255) -> Image.Image:
@@ -166,8 +193,8 @@ def apply_transparent_white(
             fields=fields,
         )
 
-    # (3) no usable alpha -> explicit skip (v1).
-    if not has_valid_alpha(image):
+    # (3) no effective alpha (fully-opaque included) -> explicit skip (v1).
+    if not has_effective_alpha(image):
         return TransparentWhiteResult(
             outcome=TransparentWhiteOutcome.REJECT_MISSING_ALPHA,
             image=None,
@@ -269,3 +296,86 @@ class TransparentWhiteTelemetry:
             "transparent_conflict_bg": self.conflict_bg,
             "transparent_nl_suppressed": self.nl_suppressed,
         }
+
+
+@dataclass(frozen=True)
+class TransparentWhiteCounts:
+    """Fixed-key per-batch counters for the transparent-white policy.
+
+    Aggregated from the per-sample outcomes of the *retained* samples of one
+    batch, mirroring :class:`~sakuramoon.data.spatial_crop.SpatialCropCounts`.
+    Rejected samples produce no :class:`~sakuramoon.data.pipeline.PipelineSample`
+    and therefore no per-batch count: their counters are structurally zero in
+    the batch view and flow to the parent through the reliable per-shard
+    completion channel (``TRANSPARENT_REJECTION_KEYS``) instead.  The section-13
+    conservation invariants are enforced at construction time so a corrupted
+    aggregate can never reach the training metric.
+    """
+
+    tagged: int
+    composited: int
+    missing_alpha: int
+    special_alpha: int
+    conflict_bg: int
+    nl_suppressed: int
+
+    def __post_init__(self) -> None:
+        for name in (
+            "tagged",
+            "composited",
+            "missing_alpha",
+            "special_alpha",
+            "conflict_bg",
+            "nl_suppressed",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"transparent-white counter {name} must be a nonnegative integer")
+        if self.tagged != (
+            self.composited + self.missing_alpha + self.special_alpha + self.conflict_bg
+        ):
+            raise ValueError(
+                "transparent-white conservation violated: "
+                "tagged != composited + missing + special + conflict"
+            )
+        if self.nl_suppressed != self.composited:
+            raise ValueError(
+                "transparent-white conservation violated: "
+                "nl_suppressed != composited"
+            )
+
+
+def aggregate_transparent_white(samples: Iterable[object]) -> TransparentWhiteCounts:
+    """Aggregate the fixed transparent-white counters from per-sample outcomes.
+
+    ``samples`` are the retained samples of one batch; each carries a
+    ``transparent_outcome`` of type :class:`TransparentWhiteOutcome`.  The
+    aggregate is spawn-picklable (frozen plain ints) and safe to cross the
+    DataLoader worker boundary.
+    """
+
+    tagged = 0
+    composited = 0
+    for sample in samples:
+        outcome = sample.transparent_outcome  # type: ignore[attr-defined]
+        if not isinstance(outcome, TransparentWhiteOutcome):
+            raise TypeError("transparent outcome is missing or invalid on a sample")
+        if outcome is TransparentWhiteOutcome.NOT_TAGGED:
+            continue
+        tagged += 1
+        if outcome is TransparentWhiteOutcome.COMPOSITED:
+            composited += 1
+        else:
+            # Retained samples can only be NOT_TAGGED or COMPOSITED; a reject
+            # outcome here means the sample channel was fed a discarded sample.
+            raise ValueError(
+                f"retained sample carries a rejected transparent outcome: {outcome}"
+            )
+    return TransparentWhiteCounts(
+        tagged=composited,
+        composited=composited,
+        missing_alpha=0,
+        special_alpha=0,
+        conflict_bg=0,
+        nl_suppressed=composited,
+    )

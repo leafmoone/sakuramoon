@@ -7,8 +7,8 @@ import os
 import queue
 import sys
 import time
-from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, replace
+from collections.abc import Iterable, Iterator, MutableMapping
+from dataclasses import dataclass, field, replace
 from multiprocessing.queues import Queue as MultiprocessingQueue
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
@@ -37,6 +37,11 @@ from sakuramoon.data.service_protocol import (
     ShardLeaseDescriptor,
 )
 from sakuramoon.data.spatial_crop import SpatialCropCounts, aggregate_spatial_crop
+from sakuramoon.data.transparent_white import (
+    TRANSPARENT_REJECTION_KEYS,
+    TransparentWhiteCounts,
+    aggregate_transparent_white,
+)
 
 _WORKER_CONTEXT = mp.get_context("spawn")
 _MAX_TORCH_SEED = 2**64 - 1
@@ -72,6 +77,10 @@ class TrainingBatch:
     audits: tuple[ImageAudit, ...]
     rng_identities: tuple[RngIdentity, ...]
     spatial_crop: SpatialCropCounts
+    # Fixed-key transparent-white counters for the retained samples of this
+    # batch.  Rejects are structurally zero here (rejected samples produce
+    # no PipelineSample) and audit through the per-shard completion channel.
+    transparent: TransparentWhiteCounts
     # Exact post-dropout/post-assembly captions are retained for periodic samples.
     captions: tuple[SerializedCaption, ...] = ()
 
@@ -132,6 +141,12 @@ class _WorkerDone:
     shard_path: str
 
 
+def _zero_transparent_rejections() -> dict[str, int]:
+    """Zero-filled fixed-key reject table for a shard that rejected nothing."""
+
+    return dict.fromkeys(TRANSPARENT_REJECTION_KEYS, 0)
+
+
 @dataclass(frozen=True)
 class _WorkerCompletion:
     worker_id: int
@@ -139,6 +154,29 @@ class _WorkerCompletion:
     shard_path: str
     normal: bool
     error: str = ""
+    # Fixed-key transparent-white reject counters of the finished shard.
+    # Rejected samples never produce a PipelineSample, so these counters are
+    # the reliable channel that carries the rejects from worker to parent.
+    transparent_rejections: dict[str, int] = field(
+        default_factory=_zero_transparent_rejections
+    )
+
+    def __post_init__(self) -> None:
+        for key, value in self.transparent_rejections.items():
+            if key not in TRANSPARENT_REJECTION_KEYS:
+                raise CollateError(
+                    f"unknown transparent rejection key: {key}"
+                )
+            if type(value) is not int or value < 0:
+                raise CollateError(
+                    f"transparent rejection count for {key} must be a "
+                    "nonnegative integer"
+                )
+        if len(self.transparent_rejections) != len(TRANSPARENT_REJECTION_KEYS):
+            raise CollateError(
+                "transparent_rejections must carry exactly "
+                f"{TRANSPARENT_REJECTION_KEYS}"
+            )
 
 
 class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
@@ -226,6 +264,7 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
                 raise CollateError("persistent worker received an invalid command")
             if command.stop:
                 return
+            shard_pipeline: WebDatasetPipeline | None = None
             try:
                 shard_pipeline = self.pipeline._with_local_shards(  # pyright: ignore[reportPrivateUsage]
                     (command.local_path,),
@@ -258,6 +297,16 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
             except BaseException as error:
                 # Never let worker failures publish durable state.  The
                 # completion message is bounded and only carries diagnostics.
+                # Reject counters are best-effort here: a shard that crashed
+                # mid-stream still reports the rejects seen so far, and an
+                # uncreated shard pipeline reports the zero table.
+                if shard_pipeline is not None:
+                    try:
+                        reject_counts = shard_pipeline.transparent_rejection_counts()
+                    except BaseException:  # noqa: BLE001 - capture partial counters before re-raising
+                        reject_counts = _zero_transparent_rejections()
+                else:
+                    reject_counts = _zero_transparent_rejections()
                 self.completion_queue.put(
                     _WorkerCompletion(
                         worker_id=worker_id,
@@ -265,11 +314,19 @@ class _PersistentShardDataset(IterableDataset[_WorkerBatch | _WorkerDone]):
                         shard_path=command.shard_path,
                         normal=False,
                         error=f"{type(error).__name__}: {error}",
+                        transparent_rejections=reject_counts,
                     )
                 )
                 raise
+            assert shard_pipeline is not None
             self.completion_queue.put(
-                _WorkerCompletion(worker_id, worker_pid, command.shard_path, True)
+                _WorkerCompletion(
+                    worker_id=worker_id,
+                    worker_pid=worker_pid,
+                    shard_path=command.shard_path,
+                    normal=True,
+                    transparent_rejections=shard_pipeline.transparent_rejection_counts(),
+                )
             )
             # This marker is ordered after all batches in this worker's
             # DataLoader output stream.  The parent waits for both this marker
@@ -478,6 +535,7 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         spatial_crop=aggregate_spatial_crop(
             tuple(sample.audit for sample in samples)
         ),
+        transparent=aggregate_transparent_white(samples),
         captions=tuple(sample.caption for sample in samples),
     )
 
@@ -722,6 +780,7 @@ def iter_service_batches(
     pin_memory: bool,
     drop_last: bool,
     length_sort_window_batches: int = 1,
+    transparent_rejection_ledger: MutableMapping[str, int] | None = None,
 ) -> ServiceBatchIterator:
     """Drain service-issued leases without owning service/cache/state in trainer."""
 
@@ -733,6 +792,13 @@ def iter_service_batches(
         raise CollateError("batch_size and drop_last are invalid")
     if client.health():
         raise CollateError("data service has no training lease available")
+    if transparent_rejection_ledger is not None and (
+        set(transparent_rejection_ledger.keys()) != set(TRANSPARENT_REJECTION_KEYS)
+    ):
+        raise CollateError(
+            "transparent_rejection_ledger must carry exactly "
+            f"{TRANSPARENT_REJECTION_KEYS}"
+        )
 
     dataset = _PersistentShardDataset(
         pipeline,
@@ -791,6 +857,15 @@ def iter_service_batches(
             )
         if completion.worker_id != descriptor.worker_id:
             raise CollateError("persistent worker service identity drifted")
+        if transparent_rejection_ledger is not None:
+            # Normal completion finalizes the shard's reject counters; the
+            # ledger is the durable parent-side aggregate (failed shards are
+            # never retried in the same stream, so their partial counters
+            # stay out of the running total).
+            for key in TRANSPARENT_REJECTION_KEYS:
+                transparent_rejection_ledger[key] += int(
+                    completion.transparent_rejections[key]
+                )
         client.acknowledge(descriptor)
         del queued[shard_path]
         available_workers.append(descriptor.worker_id)

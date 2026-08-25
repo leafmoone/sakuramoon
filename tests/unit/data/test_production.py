@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import cast
 
 import pytest
@@ -14,6 +14,7 @@ from sakuramoon.data.production import (
     adapt_modelscope_metadata,
     parse_modelscope_caption_fields,
 )
+from sakuramoon.data.transparent_white import TRANSPARENT_REJECTION_KEYS
 
 
 class _DepthIterator(Iterator[TrainingBatch]):
@@ -266,3 +267,126 @@ def test_accepted_stream_fails_when_iterator_has_no_ready_depth_source() -> None
     with pytest.raises(ProductionDataError, match="unavailable"):
         stream.ready_batch_depth_snapshot()
     stream.close()
+
+
+class _TotalsIterator(Iterator[TrainingBatch]):
+    def __init__(self, totals: Mapping[str, int] | None) -> None:
+        self._totals = totals
+
+    def __next__(self) -> TrainingBatch:
+        raise StopIteration
+
+    def transparent_rejection_totals_snapshot(self) -> Mapping[str, int] | None:
+        return self._totals
+
+
+def _zero_totals() -> dict[str, int]:
+    return {key: 0 for key in TRANSPARENT_REJECTION_KEYS}
+
+
+def test_accepted_stream_publishes_strict_zero_totals_without_ledger() -> None:
+    stream = production_module._issue_batch_stream(  # pyright: ignore[reportPrivateUsage]
+        cast(Iterator[TrainingBatch], iter(())),
+        _stream_identity(),
+    )
+
+    assert stream.transparent_rejection_totals() == _zero_totals()
+    assert set(stream.transparent_rejection_totals()) == set(
+        TRANSPARENT_REJECTION_KEYS
+    )
+    stream.close()
+
+
+def test_accepted_stream_passes_explicit_totals_snapshot() -> None:
+    stream = production_module._issue_batch_stream(  # pyright: ignore[reportPrivateUsage]
+        cast(Iterator[TrainingBatch], iter(())),
+        _stream_identity(),
+        transparent_rejection_totals_snapshot=lambda: {
+            "reject_missing_alpha": 1,
+            "reject_special_alpha": 2,
+            "reject_conflict_bg": 3,
+        },
+    )
+
+    assert stream.transparent_rejection_totals() == {
+        "reject_missing_alpha": 1,
+        "reject_special_alpha": 2,
+        "reject_conflict_bg": 3,
+    }
+    stream.close()
+
+
+def test_accepted_stream_falls_back_to_duck_typed_totals_snapshot() -> None:
+    stream = production_module._issue_batch_stream(  # pyright: ignore[reportPrivateUsage]
+        _TotalsIterator(
+            {
+                "reject_missing_alpha": 5,
+                "reject_special_alpha": 0,
+                "reject_conflict_bg": 0,
+            }
+        ),
+        _stream_identity(),
+    )
+
+    assert stream.transparent_rejection_totals() == {
+        "reject_missing_alpha": 5,
+        "reject_special_alpha": 0,
+        "reject_conflict_bg": 0,
+    }
+    stream.close()
+
+
+def test_accepted_stream_rejects_totals_snapshot_with_missing_key() -> None:
+    stream = production_module._issue_batch_stream(  # pyright: ignore[reportPrivateUsage]
+        _TotalsIterator({"reject_missing_alpha": 1}),
+        _stream_identity(),
+    )
+
+    with pytest.raises(
+        ProductionDataError, match="must carry exactly"
+    ):
+        stream.transparent_rejection_totals()
+    stream.close()
+
+
+def test_accepted_stream_rejects_negative_total() -> None:
+    stream = production_module._issue_batch_stream(  # pyright: ignore[reportPrivateUsage]
+        _TotalsIterator(
+            {
+                "reject_missing_alpha": -1,
+                "reject_special_alpha": 0,
+                "reject_conflict_bg": 0,
+            }
+        ),
+        _stream_identity(),
+    )
+
+    with pytest.raises(
+        ProductionDataError, match="nonnegative"
+    ):
+        stream.transparent_rejection_totals()
+    stream.close()
+
+
+def test_accepted_stream_rejects_non_mapping_totals_snapshot() -> None:
+    stream = production_module._issue_batch_stream(  # pyright: ignore[reportPrivateUsage]
+        _TotalsIterator(None),
+        _stream_identity(),
+    )
+
+    with pytest.raises(
+        ProductionDataError, match="snapshot is invalid"
+    ):
+        stream.transparent_rejection_totals()
+    stream.close()
+
+
+def test_accepted_stream_totals_require_live_stream() -> None:
+    stream = production_module._issue_batch_stream(  # pyright: ignore[reportPrivateUsage]
+        cast(Iterator[TrainingBatch], iter(())),
+        _stream_identity(),
+    )
+    stream.close()
+
+    with pytest.raises(ProductionDataError, match="closed"):
+        stream.transparent_rejection_totals()

@@ -21,6 +21,7 @@ from sakuramoon.data.spatial_crop import (
     SPATIAL_FALLBACK_REASONS,
     ZOOM_HISTOGRAM_LABELS,
 )
+from sakuramoon.data.transparent_white import TRANSPARENT_REJECTION_KEYS
 
 CORE_TIMING_PHASES = (
     "data",
@@ -57,7 +58,7 @@ NOISE_T_BIN_LABELS = tuple(
     f"bin_{index:02d}_t{index * 5:03d}_{(index + 1) * 5:03d}"
     for index in range(NOISE_T_BIN_COUNT)
 )
-TRAINING_METRIC_SCHEMA_VERSION = 9
+TRAINING_METRIC_SCHEMA_VERSION = 10
 DROPOUT_KEYS = CAPTION_DROPOUT_KEYS
 def _spatial_default_fallback_reasons(effective_batch: int) -> Mapping[str, int]:
     """Default spatial-crop table for an update with no spatial activity.
@@ -73,6 +74,11 @@ def _spatial_default_fallback_reasons(effective_batch: int) -> Mapping[str, int]
 def _spatial_default_zoom_histogram() -> Mapping[str, int]:
     """Default all-zero zoom histogram (no applied crops)."""
     return MappingProxyType({label: 0 for label in ZOOM_HISTOGRAM_LABELS})
+
+
+def _transparent_default_rejection_totals() -> Mapping[str, int]:
+    """Default all-zero transparent-white reject totals (policy disabled)."""
+    return MappingProxyType({key: 0 for key in TRANSPARENT_REJECTION_KEYS})
 
 
 def _finite_float(name: str, value: float, *, minimum: float | None = None) -> None:
@@ -137,6 +143,14 @@ class TrainingMetric:
     spatial_abs_offset_x_mean: float = 0.0
     spatial_abs_offset_y_mean: float = 0.0
     spatial_both_axes_count: int = 0
+    # Per-update retained-sample counters (rejects are structurally zero here).
+    transparent_tagged: int = 0
+    transparent_composited: int = 0
+    transparent_nl_suppressed: int = 0
+    # Parent-side cumulative reject totals from the reliable per-shard
+    # completion channel; None is filled with the strict-zero fixed-key
+    # table in __post_init__ (post-init the field is never None or empty).
+    transparent_rejection_totals: Mapping[str, int] | None = None
 
     def __post_init__(self) -> None:
         _nonnegative_int("successful_update", self.successful_update, positive=True)
@@ -321,6 +335,33 @@ class TrainingMetric:
             )
         if self.spatial_abs_offset_x_mean > 1.0 or self.spatial_abs_offset_y_mean > 1.0:
             raise ValueError("spatial crop offset means must not exceed one")
+        for name in (
+            "transparent_tagged",
+            "transparent_composited",
+            "transparent_nl_suppressed",
+        ):
+            _nonnegative_int(name, getattr(self, name))
+        if self.transparent_nl_suppressed != self.transparent_composited:
+            raise ValueError(
+                "transparent-white conservation violated: "
+                "nl_suppressed != composited"
+            )
+        if self.transparent_tagged != self.transparent_composited:
+            raise ValueError(
+                "transparent-white conservation violated: "
+                "tagged != composited in the retained-sample view"
+            )
+        if self.transparent_tagged > self.effective_batch:
+            raise ValueError("transparent tagged count exceeds effective batch")
+        rejection_totals = self.transparent_rejection_totals
+        if rejection_totals is None:
+            rejection_totals = _transparent_default_rejection_totals()
+        if set(rejection_totals) != set(TRANSPARENT_REJECTION_KEYS):
+            raise ValueError(
+                "transparent rejection totals must contain every fixed key"
+            )
+        for key, value in rejection_totals.items():
+            _nonnegative_int(f"transparent_rejection_totals.{key}", value)
         object.__setattr__(
             self, "dropout_hits", MappingProxyType(dict(self.dropout_hits))
         )
@@ -341,6 +382,11 @@ class TrainingMetric:
             self,
             "spatial_zoom_histogram",
             MappingProxyType(dict(self.spatial_zoom_histogram)),
+        )
+        object.__setattr__(
+            self,
+            "transparent_rejection_totals",
+            MappingProxyType(dict(rejection_totals)),
         )
 
     def as_json_mapping(self) -> dict[str, object]:
@@ -399,6 +445,14 @@ class TrainingMetric:
             "spatial_abs_offset_x_mean": self.spatial_abs_offset_x_mean,
             "spatial_abs_offset_y_mean": self.spatial_abs_offset_y_mean,
             "spatial_both_axes_count": self.spatial_both_axes_count,
+            "transparent_tagged": self.transparent_tagged,
+            "transparent_composited": self.transparent_composited,
+            "transparent_nl_suppressed": self.transparent_nl_suppressed,
+            # __post_init__ guarantees a populated fixed-key table; the
+            # `or {}` only satisfies the type checker's Optional view.
+            "transparent_rejection_totals": dict(
+                self.transparent_rejection_totals or {}
+            ),
         }
 
     def as_wandb_mapping(self) -> dict[str, int | float]:
@@ -431,6 +485,18 @@ class TrainingMetric:
             {
                 f"spatial_zoom_histogram/{key}": value
                 for key, value in self.spatial_zoom_histogram.items()
+            }
+        )
+        # Cumulative transparent-white reject totals: fixed keys always
+        # publish, including strict zeros (disabled policy), so the canary
+        # gates can read them directly and a missing key cannot mask a
+        # silent channel regression.  __post_init__ guarantees a populated
+        # table; the `or {}` only satisfies the type checker's Optional view.
+        rejection_totals = self.transparent_rejection_totals or {}
+        payload.update(
+            {
+                f"transparent_rejection_totals/{key}": value
+                for key, value in rejection_totals.items()
             }
         )
         # Do not publish an empty bin as a numeric zero.  A zero would be
