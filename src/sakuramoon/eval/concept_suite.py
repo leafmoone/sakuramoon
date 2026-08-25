@@ -11,11 +11,11 @@ training run.
 from __future__ import annotations
 
 import os
-import tomli_w
 from dataclasses import asdict
 from pathlib import Path
 from typing import cast
 
+import tomli_w
 import torch
 
 from sakuramoon.eval.concepts import (

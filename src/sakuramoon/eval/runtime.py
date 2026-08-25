@@ -491,7 +491,7 @@ class TrainingEvaluator:
                 flush=True,
             )
             return flat
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 (optional concept suite must not abort training)
             print(
                 f"[eval] concept suite 跳过 update={update}: {error}",
                 flush=True,

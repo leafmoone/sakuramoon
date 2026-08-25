@@ -15,8 +15,8 @@ import torch
 
 from sakuramoon.data.spatial_crop import (
     SPATIAL_FALLBACK_REASONS,
-    SpatialCropCounts,
     ZOOM_HISTOGRAM_LABELS,
+    SpatialCropCounts,
 )
 from sakuramoon.telemetry.metrics import (
     DROPOUT_KEYS,

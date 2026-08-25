@@ -685,10 +685,10 @@ def run_single_gpu_preflight(
 
 
 __all__ = [
-    "AcceptedPreflight",
     "DATA_POLICY_TRANSITION_KIND",
-    "PreflightError",
     "SPATIAL_TRANSITION_ROOT",
+    "AcceptedPreflight",
+    "PreflightError",
     "ProductionSingleGpuCheckpointPublisher",
     "RestoredSingleGpuCheckpoint",
     "build_single_gpu_preflight_checks",
