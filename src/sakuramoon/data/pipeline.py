@@ -17,6 +17,7 @@ import webdataset as wds
 from PIL import Image
 from torch.utils.data import IterableDataset, get_worker_info
 
+from sakuramoon.config.schema import DataTransparentBackgroundConfig
 from sakuramoon.data.buckets import BucketShape
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
@@ -45,6 +46,11 @@ from sakuramoon.data.spatial_crop import (
     ShiftedBucketPlan,
     SpatialCropPolicy,
     plan_shifted_bucket,
+)
+from sakuramoon.data.transparent_white import (
+    TransparentWhiteOutcome,
+    TransparentWhiteTelemetry,
+    apply_transparent_white,
 )
 
 CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
@@ -331,6 +337,8 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         stage: str,
         cycle_index: int,
         spatial_policy: SpatialCropPolicy | None = None,
+        transparent_policy: DataTransparentBackgroundConfig | None = None,
+        transparent_telemetry: TransparentWhiteTelemetry | None = None,
     ) -> None:
         super().__init__()
         _validate_local_shard_paths(shard_paths)
@@ -371,6 +379,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 spatial_policy is None
                 or isinstance(spatial_policy, SpatialCropPolicy)  # pyright: ignore[reportUnnecessaryIsInstance]
             )
+            or not (
+                transparent_policy is None
+                or isinstance(transparent_policy, DataTransparentBackgroundConfig)  # pyright: ignore[reportUnnecessaryIsInstance]
+            )
         ):
             raise PipelineSampleError("pipeline construction fields are invalid")
         self.shard_paths = shard_paths
@@ -389,6 +401,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.stage = stage
         self.cycle_index = cycle_index
         self.spatial_policy = spatial_policy
+        self.transparent_policy = transparent_policy
+        self.transparent_telemetry = (
+            transparent_telemetry if transparent_telemetry is not None else TransparentWhiteTelemetry()
+        )
         self._lease_managed = False
 
     def _process(
@@ -437,13 +453,6 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             return None
         if not isinstance(fields, CaptionFields):
             raise PipelineSampleError("caption field parser returned an invalid value")
-        plan = build_caption_plan(
-            fields,
-            self.probabilities,
-            condition_mode=self.condition_mode,
-            seed=identity.caption_seed,
-        )
-        caption = serialize_caption(plan, self.tokenizer, self.framing)
         image_bytes = _image_bytes(sample)
         try:
             probe_width, probe_height = _probe_image_dimensions(image_bytes)
@@ -470,31 +479,65 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                     decoded.draft("RGB", _draft_request_size(self.buckets))
                 decoded.load()
                 image_mode = decoded.mode
-                processed = prepare_image(
-                    decoded,
-                    self.buckets,
-                    min_crop_retention=self.min_crop_retention,
-                    crop_seed=identity.crop_seed,
-                    source_size=(source_width, source_height),
-                )
-                spatial_plan: ShiftedBucketPlan | None = None
-                spatial_image: Image.Image | None = None
-                if self.spatial_policy is not None and self.spatial_policy.enabled:
-                    spatial_plan = plan_shifted_bucket(
-                        processed.assignment,
-                        self.spatial_policy,
-                        source_size=(source_width, source_height),
-                        policy_seed=identity.spatial_policy_seed,
-                        zoom_seed=identity.spatial_zoom_seed,
-                        offset_x_seed=identity.spatial_offset_x_seed,
-                        offset_y_seed=identity.spatial_offset_y_seed,
+                # Transparent-background white-composite policy (sections 6-12):
+                # alpha-first, applied BEFORE resize/crop. The ordinary (untagged)
+                # path is bit-identical: NOT_TAGGED keeps the decoded image and the
+                # original caption fields untouched.
+                if self.transparent_policy is not None:
+                    tw = apply_transparent_white(
+                        decoded, fields, self.transparent_policy
                     )
-                    if spatial_plan.applied:
-                        normalized = normalize_image(decoded)
-                        spatial_image = normalized.resize(
-                            (spatial_plan.canvas_width, spatial_plan.canvas_height),
-                            resample=Image.Resampling.LANCZOS,
-                        ).crop(spatial_plan.crop_box)
+                    self.transparent_telemetry.record(tw.outcome)
+                    if tw.outcome.is_reject:
+                        reason = tw.outcome.observer_reason
+                        assert reason is not None  # reject outcomes always carry a reason
+                        _trace_sample(
+                            shard_record.path, metadata.id, f"reject:{reason}"
+                        )
+                        self.rejection_observer(reason)
+                        return None
+                    if tw.outcome is TransparentWhiteOutcome.COMPOSITED:
+                        assert tw.image is not None
+                        work_image = tw.image
+                        work_fields = tw.fields
+                    else:
+                        work_image = decoded
+                        work_fields = fields
+                else:
+                    work_image = decoded
+                    work_fields = fields
+            plan = build_caption_plan(
+                work_fields,
+                self.probabilities,
+                condition_mode=self.condition_mode,
+                seed=identity.caption_seed,
+            )
+            caption = serialize_caption(plan, self.tokenizer, self.framing)
+            processed = prepare_image(
+                work_image,
+                self.buckets,
+                min_crop_retention=self.min_crop_retention,
+                crop_seed=identity.crop_seed,
+                source_size=(source_width, source_height),
+            )
+            spatial_plan: ShiftedBucketPlan | None = None
+            spatial_image: Image.Image | None = None
+            if self.spatial_policy is not None and self.spatial_policy.enabled:
+                spatial_plan = plan_shifted_bucket(
+                    processed.assignment,
+                    self.spatial_policy,
+                    source_size=(source_width, source_height),
+                    policy_seed=identity.spatial_policy_seed,
+                    zoom_seed=identity.spatial_zoom_seed,
+                    offset_x_seed=identity.spatial_offset_x_seed,
+                    offset_y_seed=identity.spatial_offset_y_seed,
+                )
+                if spatial_plan.applied:
+                    normalized = normalize_image(work_image)
+                    spatial_image = normalized.resize(
+                        (spatial_plan.canvas_width, spatial_plan.canvas_height),
+                        resample=Image.Resampling.LANCZOS,
+                    ).crop(spatial_plan.crop_box)
         except ImageRejected as error:
             _trace_sample(shard_record.path, metadata.id, f"reject:{error.reason}")
             self.rejection_observer(error.reason)
@@ -645,6 +688,8 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             stage=self.stage,
             cycle_index=cycle_index,
             spatial_policy=self.spatial_policy,
+            transparent_policy=self.transparent_policy,
+            transparent_telemetry=self.transparent_telemetry,
         )
         pipeline._lease_managed = True
         return pipeline

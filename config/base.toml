@@ -109,6 +109,14 @@ zoom_distribution = "sqrt_uniform_high"
 offset_distribution = "uniform_independent"
 fallback_to_aspect_bucket = true
 
+[data.transparent_background]
+enabled = false
+trigger_tag = "transparent_background"
+replacement_tag = "white_background"
+composite_color = "white"
+conflict_background_tags = []
+special_alpha_tags = []
+
 [caption]
 category_order = ["tags", "nl", "condition"]
 condition_mode = "artist_or_character"

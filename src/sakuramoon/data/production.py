@@ -712,6 +712,7 @@ class ProductionPipelineFactory:
             stage=self.config.stage.name,
             cycle_index=descriptor.cycle_index,
             spatial_policy=spatial_policy,
+            transparent_policy=self.config.data.transparent_background,
         )
         _require_spawn_serializable(pipeline, "production pipeline")
         return pipeline
