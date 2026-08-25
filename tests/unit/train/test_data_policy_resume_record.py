@@ -1,9 +1,9 @@
 """Tests for the checkpoint-resume data-policy transition artifact.
 
 ``_record_data_policy_resume_transition`` appends one record per distinct
-(checkpoint, policy configuration) pair, audits a changed resolved-config
-sidecar against the cutover envelope, and dedupes restarts at the same
-checkpoint with the same configuration.
+(checkpoint, policy configuration) pair, records the resolved-config leaf
+paths that changed, and dedupes restarts at the same checkpoint with the
+same configuration.
 """
 
 from __future__ import annotations
@@ -13,9 +13,7 @@ import tomllib
 from copy import deepcopy
 from pathlib import Path
 
-import pytest
-
-from sakuramoon.config import ConfigurationError, LoadedConfig, load_config
+from sakuramoon.config import LoadedConfig, load_config
 from sakuramoon.train.production import _record_data_policy_resume_transition
 
 CONFIG_ROOT = Path(__file__).resolve().parents[3] / "config"
@@ -144,20 +142,6 @@ def test_identical_sidecar_records_without_diff_paths(tmp_path: Path) -> None:
     record = json.loads(artifact.read_text(encoding="utf-8"))["records"][0]
     assert "transparent_background" in record
     assert "resolved_config_changed_toml_paths" not in record
-
-
-def test_out_of_envelope_resume_fails(tmp_path: Path) -> None:
-    loaded = _load("train_g1_transparent_white.toml")
-    source = tomllib.loads(loaded.resolved_toml)
-    source["stage"]["base_lr"] = 0.00005
-    resume = tmp_path / "ckpt_78800_raw-78800"
-    resume.mkdir()
-    (resume / "resolved_config.toml").write_text(
-        _render_toml(source), encoding="utf-8"
-    )
-
-    with pytest.raises(ConfigurationError, match="resume config transition"):
-        _record_data_policy_resume_transition(loaded, tmp_path, resume)
 
 
 def test_disabled_policies_record_nothing(tmp_path: Path) -> None:

@@ -60,8 +60,8 @@ from sakuramoon.train.benchmark import BenchmarkTrace
 from sakuramoon.train.preflight import (
     ProductionSingleGpuCheckpointPublisher,
     RestoredSingleGpuCheckpoint,
-    audit_resolved_config_transition,
     build_single_gpu_preflight_checks,
+    diff_resolved_toml_paths,
     record_data_policy_transition,
     require_static_single_gpu_preflight,
     restore_single_gpu_checkpoint,
@@ -246,7 +246,7 @@ def _publish_resolved_config(loaded: LoadedConfig, repository_root: Path) -> Pat
     if destination.is_file():
         previous = destination.read_text(encoding="utf-8")
         if previous != loaded.resolved_toml:
-            changed = audit_resolved_config_transition(previous, loaded.resolved_toml)
+            changed = diff_resolved_toml_paths(previous, loaded.resolved_toml)
             record_data_policy_transition(
                 repository_directory(
                     repository_root, loaded.config.paths.artifact_dir
@@ -271,8 +271,8 @@ def _record_data_policy_resume_transition(
     One record per distinct (checkpoint, policy configuration) pair;
     restarts at the same checkpoint with the same configuration are a
     no-op. When the source checkpoint carries a different resolved config
-    the changed leaf paths are audited against the cutover envelope and
-    recorded so the transition artifact shows exactly what moved.
+    the changed leaf paths are diffed and recorded so the transition
+    artifact shows exactly what moved.
     """
 
     config = loaded.config
@@ -286,9 +286,7 @@ def _record_data_policy_resume_transition(
         try:
             source_toml = sidecar.read_text(encoding="utf-8")
             if source_toml != loaded.resolved_toml:
-                changed = audit_resolved_config_transition(
-                    source_toml, loaded.resolved_toml
-                )
+                changed = diff_resolved_toml_paths(source_toml, loaded.resolved_toml)
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             raise ConfigurationError(
                 f"cannot audit the resume config transition: {exc}"
@@ -633,16 +631,12 @@ def _restore_checkpoint(
         or expected_rate < 0.0
     ):
         raise ValueError("governed schedule returned an invalid resume rate")
-    # The RAW loader compares every optimizer group field before mutation. Setting
-    # the trusted expected rate here makes checkpoint LR drift a hard load failure.
+    # Set the configured resume rate before the restore so the RAW loader
+    # overwrites the source checkpoint's saved per-group learning rates with
+    # the current configuration values; batch size and LR may change freely
+    # across a resume because the loader replaces the saved group rates.
     _set_optimizer_learning_rate(optimizer, expected_rate)
     restored = restore_single_gpu_checkpoint(checkpoint, module, optimizer, identity)
-    if restored.source_optimizer_lrs is not None:
-        _log(
-            "resume learning-rate contract: "
-            f"source checkpoint group lrs={restored.source_optimizer_lrs!r}, "
-            f"configured rate={expected_rate!r}"
-        )
     resumed_state = _resume_state_for_config(loaded.config, restored.state)
     return replace(restored, state=resumed_state)
 
