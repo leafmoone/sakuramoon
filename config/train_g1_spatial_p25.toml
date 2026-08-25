@@ -1,0 +1,43 @@
+# shifted_bucket_v1 canary: 25% of samples train the full-canvas 2D RoPE
+# zoom/shift on a larger canvas cropped back to the aspect bucket.
+#
+# Data strategy change only -- model architecture is untouched. Extends the
+# live G1 run config (bs800 / lr flat / seed 44) and overrides exactly:
+#   - run identity and fully independent run/checkpoint/artifact paths
+#   - [data.spatial_crop]: p=0.25, equivalent zoom 1.02-1.10
+#   - [stage].automatic_transition kept false (manual finalize only)
+#
+# Cutover resumes from ckpt_75800 (PRE_SPATIAL rollback point) via
+# scripts/training_stack.sh; see AGENTS.md for the launch contract.
+
+extends = ["train_g1.toml"]
+
+[run]
+run_id = "g1_spatial_p25"
+
+[paths]
+run_dir = "runs/g1_spatial_p25"
+checkpoint_dir = "output_model/g1_spatial_p25"
+artifact_dir = "artifacts/g1_spatial_p25"
+
+[logging]
+local_jsonl_path = "artifacts/g1_spatial_p25/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/g1_spatial_p25/wandb-retry.jsonl"
+
+[evaluation]
+output_dir = "output_model/evaluation/g1_spatial_p25"
+
+[stage]
+automatic_transition = false
+
+[data.spatial_crop]
+enabled = true
+mode = "shifted_bucket"
+probability = 0.25
+min_equivalent_zoom = 1.02
+max_equivalent_zoom = 1.10
+zoom_distribution = "sqrt_uniform_high"
+offset_distribution = "uniform_independent"
+fallback_to_aspect_bucket = true

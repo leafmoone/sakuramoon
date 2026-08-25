@@ -13,6 +13,11 @@ from typing import TYPE_CHECKING, Self
 
 import torch
 
+from sakuramoon.data.spatial_crop import (
+    SPATIAL_FALLBACK_REASONS,
+    SpatialCropCounts,
+    ZOOM_HISTOGRAM_LABELS,
+)
 from sakuramoon.telemetry.metrics import (
     DROPOUT_KEYS,
     NOISE_T_BIN_COUNT,
@@ -196,6 +201,82 @@ def _condition_route_counts(
     return totals
 
 
+@dataclass(frozen=True, slots=True)
+class _SpatialCropMetrics:
+    """Per-update spatial-crop aggregates with strict zero semantics."""
+
+    selected: int
+    applied: int
+    fallback_reasons: dict[str, int]
+    zoom_histogram: dict[str, int]
+    actual_zoom_mean: float
+    actual_zoom_max: float
+    abs_offset_x_mean: float
+    abs_offset_y_mean: float
+    both_axes_count: int
+
+
+def _spatial_crop_metrics(
+    observation: SuccessfulTrainingObservation,
+) -> _SpatialCropMetrics:
+    fallback_reasons = {reason: 0 for reason in SPATIAL_FALLBACK_REASONS}
+    zoom_histogram = {label: 0 for label in ZOOM_HISTOGRAM_LABELS}
+    selected = 0
+    applied = 0
+    both_axes = 0
+    zoom_sum = 0.0
+    zoom_max = 0.0
+    offset_x_sum = 0.0
+    offset_y_sum = 0.0
+    for index, measurement in enumerate(observation.microbatches):
+        counts = measurement.spatial_crop
+        if type(counts) is not SpatialCropCounts:
+            raise TypeError(
+                f"microbatches[{index}].spatial_crop must be a SpatialCropCounts"
+            )
+        selected += counts.selected
+        applied += counts.applied
+        both_axes += counts.both_axes_count
+        zoom_sum += counts.actual_zoom_sum
+        zoom_max = max(zoom_max, counts.actual_zoom_max)
+        offset_x_sum += counts.abs_offset_x_sum
+        offset_y_sum += counts.abs_offset_y_sum
+        for key, value in counts.fallback_reasons.items():
+            if key not in fallback_reasons:
+                raise ValueError(
+                    f"microbatches[{index}] spatial fallback reason {key} is not fixed"
+                )
+            fallback_reasons[key] += value
+        for key, value in counts.zoom_histogram.items():
+            if key not in zoom_histogram:
+                raise ValueError(
+                    f"microbatches[{index}] spatial zoom label {key} is not fixed"
+                )
+            zoom_histogram[key] += value
+    effective = observation.loop.update.effective_samples
+    if sum(fallback_reasons.values()) != effective:
+        raise ValueError("spatial crop fallback counts differ from effective batch")
+    if applied == 0:
+        zoom_mean = 0.0
+        offset_x_mean = 0.0
+        offset_y_mean = 0.0
+    else:
+        zoom_mean = zoom_sum / applied
+        offset_x_mean = offset_x_sum / applied
+        offset_y_mean = offset_y_sum / applied
+    return _SpatialCropMetrics(
+        selected=selected,
+        applied=applied,
+        fallback_reasons=fallback_reasons,
+        zoom_histogram=zoom_histogram,
+        actual_zoom_mean=zoom_mean,
+        actual_zoom_max=zoom_max,
+        abs_offset_x_mean=offset_x_mean,
+        abs_offset_y_mean=offset_y_mean,
+        both_axes_count=both_axes,
+    )
+
+
 def _timestep_summary(
     observation: SuccessfulTrainingObservation,
 ) -> tuple[float, float, float, float]:
@@ -269,6 +350,7 @@ def build_training_metric(
     coefficient = _scalar_float("clip.coefficient", update.clip.coefficient)
     if coefficient < 0.0 or coefficient > 1.0:
         raise ValueError("clip coefficient must be in [0,1]")
+    spatial = _spatial_crop_metrics(observation)
 
     return TrainingMetric(
         successful_update=update.state.successful_updates,
@@ -335,6 +417,15 @@ def build_training_metric(
         dropout_hits=_dropout_counts(observation),
         condition_routes=_condition_route_counts(observation),
         phase_seconds=_phase_seconds(observation, context),
+        spatial_crop_selected=spatial.selected,
+        spatial_crop_applied=spatial.applied,
+        spatial_fallback_reasons=spatial.fallback_reasons,
+        spatial_zoom_histogram=spatial.zoom_histogram,
+        spatial_actual_zoom_mean=spatial.actual_zoom_mean,
+        spatial_actual_zoom_max=spatial.actual_zoom_max,
+        spatial_abs_offset_x_mean=spatial.abs_offset_x_mean,
+        spatial_abs_offset_y_mean=spatial.abs_offset_y_mean,
+        spatial_both_axes_count=spatial.both_axes_count,
     )
 
 
