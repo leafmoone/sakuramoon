@@ -69,7 +69,13 @@ class FlowSampler:
     ) -> torch.Tensor:
         """Faithful (sigma=0) / seeded one-step (plan §5.4, §17.1)."""
         sigma_vec = self._sigma_vector(z_lr, sigma)
-        r0 = sample_source_noise(sigma_vec, z_lr.shape, generator=generator, dtype=z_lr.dtype)
+        r0 = sample_source_noise(
+            sigma_vec,
+            z_lr.shape,
+            generator=generator,
+            dtype=z_lr.dtype,
+            device=z_lr.device,
+        )
         return one_step(r0, self._v_fn(z_lr, cond, sigma_vec), z_lr)
 
     def four_step(
@@ -82,5 +88,13 @@ class FlowSampler:
     ) -> torch.Tensor:
         """Quality 4-step Heun (plan §5.5, §17.1)."""
         sigma_vec = self._sigma_vector(z_lr, sigma)
-        r0 = sample_source_noise(sigma_vec, z_lr.shape, generator=generator, dtype=z_lr.dtype)
-        return four_step_heun(r0, self._v_fn(z_lr, cond, sigma_vec), z_lr, last_euler=last_euler)
+        r0 = sample_source_noise(
+            sigma_vec,
+            z_lr.shape,
+            generator=generator,
+            dtype=z_lr.dtype,
+            device=z_lr.device,
+        )
+        return four_step_heun(
+            r0, self._v_fn(z_lr, cond, sigma_vec), z_lr, last_euler=last_euler
+        )

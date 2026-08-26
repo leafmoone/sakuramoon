@@ -1,0 +1,129 @@
+"""M3 latent flow loop unit tests (CPU-only; no HCU / VAE weights needed).
+
+Covers the deterministic-schedule contract (plan §11.5), the flow-target
+draws (plan §5), the validation metrics (plan §13 M3 checklist) and the
+FlowSampler adapter.
+"""
+
+import torch
+from anime_sr.config.schema import Config, LatentFlowSpec
+from anime_sr.train.latent_flow import (
+    _LatentVelocity,
+    build_flow_targets,
+    latent_sample_index,
+    latent_val_metrics,
+    velocity_cosine,
+)
+
+
+def test_latent_flow_spec_defaults() -> None:
+    lf = LatentFlowSpec()
+    assert lf.batch_size == 8
+    assert lf.save_every_steps == 1_000
+    assert lf.val_every_steps == 5_000
+    assert lf.val_samples == 8
+    assert lf.prefetch is True
+    assert lf.out_dir == "output_model/latent-flow"
+    cfg = Config()
+    assert isinstance(cfg.latent_flow, LatentFlowSpec)
+    cfg2 = Config(latent_flow=LatentFlowSpec(batch_size=4, prefetch=False))
+    cfg2.validate_all()
+    assert cfg2.latent_flow.batch_size == 4
+    assert cfg2.latent_flow.prefetch is False
+
+
+def test_schedule_matches_m2_formula() -> None:
+    n, bs, world = 10_000, 8, 2
+    for s in (0, 1, 24, 25, 99):
+        for r in range(world):
+            for i in range(bs):
+                expect = (s * (bs * world) + r * bs + i) % n
+                assert latent_sample_index(s, r, i, bs, world, n) == expect
+    # wrap-around on a small set
+    assert latent_sample_index(3, 0, 2, 8, 1, 5) == (3 * 8 + 0 + 2) % 5
+
+
+def test_flow_targets_reproducible_with_seeded_generator() -> None:
+    cfg = Config()
+    z_hr = torch.randn(4, 128, 8, 8) * 2.0
+    z_lr = torch.randn(4, 128, 8, 8) * 0.5
+    g1 = torch.Generator().manual_seed(123)
+    g2 = torch.Generator().manual_seed(123)
+    a = build_flow_targets(z_hr, z_lr, cfg, generator=g1)
+    b = build_flow_targets(z_hr, z_lr, cfg, generator=g2)
+    for x, y in zip(a, b):
+        assert torch.equal(x, y)
+    rt, v_star, sigma, t = a
+    # identity: rt = (1-t) r0 + t delta and v* = delta - r0
+    #  =>  r0 = rt - t * v*   (delta - v* = r0)
+    delta = z_hr - z_lr
+    r0 = rt - t.view(-1, 1, 1, 1) * v_star
+    assert torch.allclose(r0 + v_star, delta, atol=1e-6)
+    # zero-sigma samples must have r0 == 0 exactly (deterministic path)
+    zero = sigma == 0
+    assert zero.any()
+    assert torch.equal(r0[zero], torch.zeros_like(r0[zero]))
+    assert torch.allclose(sigma[~zero], sigma[~zero] * 1.0)  # nonzero branch
+    nz = sigma[~zero]
+    assert (nz >= 0.02 - 1e-6).all() and (nz <= 0.15 + 1e-6).all()
+    # t is a uniform time sample in [0, 1)
+    assert (t >= 0).all() and (t < 1.0).all()
+
+
+def test_flow_targets_sigma_mix_stats() -> None:
+    cfg = Config()
+    z_hr = torch.randn(64, 128, 8, 8)
+    z_lr = torch.randn(64, 128, 8, 8)
+    _, _, sigma, _ = build_flow_targets(z_hr, z_lr, cfg)
+    zero_frac = (sigma == 0).float().mean().item()
+    assert 0.5 < zero_frac < 0.95  # 0.75 +/- sampling noise (plan §5.6)
+
+
+def test_val_metrics_perfect_and_anchor() -> None:
+    z_hr = torch.randn(4, 128, 8, 8)
+    z_lr = z_hr + 0.5
+    m1 = latent_val_metrics(z_hr, z_lr, z_hr)  # perfect prediction
+    assert m1["l1"] == 0.0
+    assert m1["toward_frac"] == 1.0
+    m0 = latent_val_metrics(z_hr, z_lr, z_lr)  # pure anchor: never closer
+    assert m0["toward_frac"] == 0.0
+    # half the batch perfect, the other half overshooting (farther than
+    # the anchor) -> exactly 0.5 toward fraction
+    z_hat = torch.empty_like(z_hr)
+    z_hat[:2] = z_hr[:2]
+    z_hat[2:] = z_lr[2:] + 2.0 * (z_hr[2:] - z_lr[2:])
+    m_half = latent_val_metrics(z_hr, z_lr, z_hat)
+    assert m_half["toward_frac"] == 0.5
+
+
+def test_velocity_cosine() -> None:
+    v = torch.randn(4, 128, 8, 8)
+    assert abs(velocity_cosine(v, v) - 1.0) < 1e-5
+    assert velocity_cosine(v, -v) < -0.99
+    v2 = torch.zeros_like(v)
+    assert velocity_cosine(v, v2) == 0.0
+
+
+def test_latent_velocity_adapter() -> None:
+    import torch.nn as nn
+
+    class _FakeTrunk(nn.Module):
+        """Stand-in for the trunk signature (rt, z_lr, t, sigma, ...)."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, rt, z_lr, t, sigma):
+            self.calls += 1
+            return rt + z_lr
+
+    fake = _FakeTrunk()
+    adapter = _LatentVelocity(fake)  # type: ignore[arg-type]
+    rt = torch.zeros(2, 4, 4, 4)
+    z_lr = torch.ones(2, 4, 4, 4)
+    t = torch.full((2,), 0.5)
+    sigma = torch.zeros(2)
+    out = adapter(rt, t, sigma, z_lr)  # FlowSampler protocol: (rt, t, sigma, cond)
+    assert torch.allclose(out, rt + z_lr)
+    assert fake.calls == 1

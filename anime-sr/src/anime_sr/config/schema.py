@@ -411,6 +411,27 @@ class PixelBaselineSpec(_Frozen):
 
 
 # ---------------------------------------------------------------------------
+# M3/M4 latent flow run (plan §5, §13, §14; §4.3 pre-encode design)
+# ---------------------------------------------------------------------------
+class LatentFlowSpec(_Frozen):
+    """Latent flow-matching loop over a pre-encoded z_hr store.
+
+    z_hr is read from the LatentStore (fp16, crop pinned at box (0,0));
+    z_lr = E_Mage(Bicubic4x(LQ)) is computed on the fly by the frozen VAE
+    (plan §4.3). The exposure budget comes from [phase1] (the smoke overlay
+    shrinks it to the M3 100k-200k window); the loop mechanics live here."""
+
+    batch_size: int = 8
+    save_every_steps: int = 1_000
+    val_every_steps: int = 5_000
+    val_samples: int = 8
+    # double-buffered CPU prefetch: the next step's decode+crop+degrade batch
+    # is fetched while the current step computes (M1 #8: data-wait gate)
+    prefetch: bool = True
+    out_dir: str = "output_model/latent-flow"
+
+
+# ---------------------------------------------------------------------------
 # root
 # ---------------------------------------------------------------------------
 class Config(_Frozen):
@@ -432,6 +453,7 @@ class Config(_Frozen):
     inference: InferenceSpec = Field(default_factory=InferenceSpec)
     vae: VAESpec = Field(default_factory=VAESpec)
     pixel_baseline: PixelBaselineSpec = Field(default_factory=PixelBaselineSpec)
+    latent_flow: LatentFlowSpec = Field(default_factory=LatentFlowSpec)
 
     def validate_all(self) -> None:
         self.model.validate_structure()

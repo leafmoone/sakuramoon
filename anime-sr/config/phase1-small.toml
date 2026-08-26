@@ -1,0 +1,9 @@
+# Small-scale Phase I (M4, user scope: 200k-500k exposures).
+#   base.toml + data.toml + phase1-small.toml -> small M4 Phase I run
+# (the full M4 budget is the Phase1Spec default 6M-16M; this overlay shrinks
+#  the exposure window per the 2026-09-02 execution-scope decision).
+
+[phase1]
+exposure_target = 300000
+exposure_min = 200000
+exposure_max = 500000
