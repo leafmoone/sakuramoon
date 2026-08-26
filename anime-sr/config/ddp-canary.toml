@@ -1,0 +1,24 @@
+# M3 DDP canary (checklist #7 "DDP 与单卡等价" / DDP == single card).
+#
+# A 2-rank (world=2) run that resumes from a single-card smoke checkpoint and
+# continues to step 5000, where both runs write their validation metrics
+# (val_every_steps=5000). The canary must track the single-card smoke's
+# l1_1/l1_4/toward/cos_v closely (same starting optimizer state, same step;
+# DDP gradient averaging implies a small divergence, not a regime change).
+#
+# Launch (2 cards, from a 2000-step smoke ckpt):
+#
+#   torchrun --nproc_per_node=2 -m anime_sr.cli.train_latent_flow \
+#       --config config/base.toml config/data.toml config/smoke.toml \
+#              config/ddp-canary.toml \
+#       --index-dir ... --webp-dir ... --latent-dir ... --vae ... \
+#       --out-dir output_model/latent-flow-ddp-canary \
+#       --resume output_model/latent-flow-smoke/step-002000.pt
+#
+# Phase-1 window here: total = 80000 // (bs 8 x world 2) = 5000 steps, so a
+# resume at step 2000 runs exactly 3000 DDP steps up to the shared val point.
+
+[phase1]
+exposure_target = 80000
+exposure_min = 80000
+exposure_max = 80000
