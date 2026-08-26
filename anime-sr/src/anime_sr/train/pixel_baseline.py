@@ -11,10 +11,12 @@ Deterministic, resumable schedule (plan §11.5 contract):
 So a resume at step ``s0`` reproduces the exact data stream (bit-exact
 exposures), matching the M1 degradation/codec-bank determinism.
 
-The train stream is assembled on the main thread via ``SRDataset.fetch``
-(single-threaded and deterministic); the validation stream uses a plain
-``DataLoader`` (no shuffle). No shuffling anywhere: the exposure seed is
-the only randomness, and it is a pure function of (seed, sample, cycle,
+The train stream is assembled via ``SRDataset.fetch`` on a fixed-size
+thread pool (batch-parallel: worker ``i`` always serves the ``i``-th
+stream slot, so the exposure stream stays bit-exact vs the sequential
+schedule); the validation stream uses a plain ``DataLoader`` (no
+shuffle). No shuffling anywhere: the exposure seed is the only
+randomness, and it is a pure function of (seed, sample, cycle,
 exposure).
 """
 
@@ -24,6 +26,7 @@ import json
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -152,6 +155,10 @@ def run_pixel_baseline(
             f"steps {start_step}..{total}, device={device}"
         )
 
+    # Batch-parallel fetch: CPU decode + degradation is the step bottleneck;
+    # each worker serves exactly its stream slot, so the exposure stream is
+    # unchanged (determinism comes from the slot assignment, not the thread).
+    pool = ThreadPoolExecutor(max_workers=max(1, pb.batch_size), thread_name_prefix="fetch")
     t0 = time.time()
     for step in range(start_step, total):
         exp = step % _EXPOSURE_PER_CYCLE
@@ -160,11 +167,14 @@ def run_pixel_baseline(
         for g in opt.param_groups:
             g["lr"] = lr
 
+        futs = [
+            pool.submit(ds.fetch, _sample_index(step, rank, i, pb.batch_size, world_size, len(ds)), exp, cyc)
+            for i in range(pb.batch_size)
+        ]
         hrs: list[torch.Tensor] = []
         lqs: list[torch.Tensor] = []
-        for i in range(pb.batch_size):
-            idx = _sample_index(step, rank, i, pb.batch_size, world_size, len(ds))
-            hr, lq, _ = ds.fetch(idx, exposure_index=exp, data_cycle=cyc)
+        for f in futs:  # ordered: slot i -> futs[i] (same stream as sequential)
+            hr, lq, _ = f.result()
             hrs.append(hr)
             lqs.append(lq)
         hr = torch.stack(hrs).to(device, non_blocking=True)
@@ -190,6 +200,7 @@ def run_pixel_baseline(
                 flush=True,
             )
 
+    pool.shutdown(wait=True)
     _save_ckpt(out / "latest.pt", total, model, opt)
     if rank == 0:
         (out / "train-meta.json").write_text(
