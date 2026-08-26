@@ -1,0 +1,21 @@
+# M3 resume-continuity check (checklist #6 "resume 连续" / resume continuous).
+#
+# Single-card run that resumes a smoke checkpoint and runs exactly 1000 steps
+# (total = 32000 // (bs 8 x world 1) = 4000; resume at step 3000 -> 3000..4000).
+# Pass criteria: no loss spike at the resume boundary; the loss stream at
+# steps 3000-4000 tracks the same steps of a fresh single-card run (the
+# exposure stream is a deterministic function of the global step, so a resume
+# must reproduce it exactly).
+#
+# Launch:
+#   python -m anime_sr.cli.train_latent_flow \
+#       --config config/base.toml config/data.toml config/smoke.toml \
+#              config/resume-check.toml \
+#       --index-dir ... --webp-dir ... --latent-dir ... --vae ... \
+#       --out-dir output_model/latent-flow-resume-check \
+#       --resume output_model/latent-flow-smoke/step-003000.pt
+
+[phase1]
+exposure_target = 32000
+exposure_min = 32000
+exposure_max = 32000
