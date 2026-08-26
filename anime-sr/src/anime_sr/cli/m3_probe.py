@@ -30,6 +30,7 @@ payload uses "module."-prefixed keys and is not accepted here).
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -106,6 +107,15 @@ def main() -> int:
         f"-> {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M params"
     )
 
+    # The trunk's TimestepEmbedder computes sinusoidal features in fp32, so
+    # every trunk forward needs the train loop's autocast to downcast into
+    # the bf16 weights — mirroring latent_flow._validate_latent.
+    ac = (
+        (lambda: torch.autocast(device_type="cuda", dtype=torch.bfloat16))
+        if (dtype == torch.bfloat16 and device.type == "cuda")
+        else (lambda: nullcontext())
+    )
+
     vae = load_frozen_vae(a.vae, device, dtype)
     store = LatentStore(Path(a.latent_dir), a.bucket_hr)
     doc = read_index(Path(a.latent_dir))
@@ -151,15 +161,16 @@ def main() -> int:
         for k, sid in enumerate(picks):
             z_hr, z_lr, hr_crop = _prep(sid)
             g = torch.Generator(device=str(device)).manual_seed(0x5EED ^ k)
-            z1 = sampler.one_step(z_lr, z_lr, sigma=0.0, generator=g)
-            z4 = sampler.four_step(z_lr, z_lr, sigma=0.0, generator=g)
+            with ac():
+                z1 = sampler.one_step(z_lr, z_lr, sigma=0.0, generator=g)
+                z4 = sampler.four_step(z_lr, z_lr, sigma=0.0, generator=g)
             l1_1 = (z1 - z_hr).abs().mean().item()
             l1_4 = (z4 - z_hr).abs().mean().item()
             print(f"[probe] {sid} l1_1={l1_1:.4f} l1_4={l1_4:.4f}")
 
             pix_hr = hr_crop.unsqueeze(0)  # (1, 3, B, B) in [-1, 1]
-            pix1 = vae.decode(z1)
-            pix4 = vae.decode(z4)
+            pix1 = vae.decode(z1.to(vae.dtype))
+            pix4 = vae.decode(z4.to(vae.dtype))
             seam1 = _grid_seam(pix1[0], pix_hr[0])
             seam4 = _grid_seam(pix4[0], pix_hr[0])
             print(f"[probe] {sid} seam1={seam1:.2f}x seam4={seam4:.2f}x (<=1.5 OK)")
@@ -168,17 +179,17 @@ def main() -> int:
             _save_img(pix4[0], out / f"{sid}-4step.png")
 
     # #8: decoder gradient must reach the trunk (Stage-II plumbing), on the
-    # first probe sample, with a fresh graph
+    # first probe sample, with a fresh graph. The forward AND the backward
+    # run under the same autocast as the train loop.
     _, z_lr, hr_crop = _prep(picks[0])
     rt = torch.zeros_like(z_lr)  # sigma=0 => r_0 = 0
-    # t = 0 is exact in any dtype; match the model dtype so the bf16 trunk
-    # sees bf16 inputs (the train path downcasts an fp32 t under autocast).
     t0 = torch.zeros(z_lr.shape[0], device=device, dtype=dtype)
     sg = torch.zeros(z_lr.shape[0], device=device, dtype=dtype)
-    v_hat = model(rt, z_lr, t0, sg)
-    z_hat = z_lr + v_hat  # Euler 1-step at t=0
-    pix_hat = vae.decode_with_grad(z_hat.to(vae.dtype))
-    (pix_hat - hr_crop.unsqueeze(0)).abs().mean().backward()
+    with ac():
+        v_hat = model(rt, z_lr, t0, sg)
+        z_hat = z_lr + v_hat  # Euler 1-step at t=0
+        pix_hat = vae.decode_with_grad(z_hat.to(vae.dtype))
+        (pix_hat - hr_crop.unsqueeze(0)).abs().mean().backward()
     gnorms = [
         p.grad.detach().norm().item() for p in model.parameters() if p.grad is not None
     ]
