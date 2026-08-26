@@ -36,12 +36,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-dir", default=None, help="defaults to [pixel_baseline].out_dir")
     ap.add_argument("--bucket-hr", type=int, default=1024)
     ap.add_argument("--iterations", type=int, default=None, help="override [pixel_baseline].iterations")
+    ap.add_argument("--bank-dir", default=None, help="override [data].bank_dir (codec-bank LQ substitution)")
     ap.add_argument("--resume", default=None, help="ckpt to resume from (step/model/optimizer)")
     args = ap.parse_args(argv)
 
     cfg = load_config(*args.config)
     if args.iterations is not None:
         cfg.pixel_baseline.iterations = args.iterations
+    if args.bank_dir is not None:
+        cfg.data.bank_dir = args.bank_dir
     out_dir = args.out_dir or cfg.pixel_baseline.out_dir
 
     rank = int(os.environ.get("RANK", "0"))
