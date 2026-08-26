@@ -15,7 +15,9 @@ Usage (server):
         --n-crops 10000 --variants 2 --workers 32
 
 Resume-safe: existing variant files with the expected byte size are
-skipped; the index is rewritten atomically at the end.
+skipped; the index is rewritten atomically at the end. Concurrent-safe:
+variant writes go through per-worker ``.part`` files so duplicate recipe
+draws across crops merge via the atomic rename instead of racing.
 """
 
 from __future__ import annotations
@@ -124,7 +126,12 @@ def build_crop_job(job: dict[str, Any]) -> dict[str, Any]:
     )
     out = Path(job["out_dir"]) / VARIANT_DIR
     out.mkdir(parents=True, exist_ok=True)
-    work = Path(job["out_dir"]) / "_work" / sid
+    # variant_id is the sha1 of the *recipe*, so different crops can draw the
+    # same variant: concurrent workers may target one .bin at once. Keep the
+    # scratch dir per-worker (rmtree must never race a live encoder) and the
+    # .part unique per worker (os.replace is atomic; last writer wins and the
+    # bytes are the same recipe's encode).
+    work = Path(job["out_dir"]) / "_work" / f"{sid}.{os.getpid()}"
     lq_w = lq_h = job["lq"]
     entries: list[dict] = []
     n_skip = n_enc = 0
@@ -136,9 +143,12 @@ def build_crop_job(job: dict[str, Any]) -> dict[str, Any]:
         else:
             raw, n_bytes = encode_variant(crop, v, lq_w, lq_h, work)
             assert n_bytes == want
-            tmp = p.with_suffix(".part")
-            tmp.write_bytes(raw.read_bytes())
-            os.replace(tmp, p)
+            tmp = out / f"{v.variant_id}.{os.getpid()}.part"
+            try:
+                tmp.write_bytes(raw.read_bytes())
+                os.replace(tmp, p)
+            finally:
+                tmp.unlink(missing_ok=True)
             n_enc += 1
         entries.append(
             {
