@@ -104,8 +104,42 @@ def test_velocity_cosine() -> None:
     assert velocity_cosine(v, v2) == 0.0
 
 
+def test_val_lq_batching_for_interpolate_and_vae() -> None:
+    """Regression (M3 smoke crash at val step 5000): ``degrade_hr`` returns
+    the UNBATCHED LQ ``[3, h, w]``; both ``F.interpolate`` and the frozen
+    VAE's ``encode`` require a batch dim, so the val path must add one.
+    Feeding the 3D tensor straight into ``F.interpolate`` raises
+    "Input and output must have the same number of spatial dimensions"."""
+    import torch.nn.functional as F
+    from anime_sr.data.degradation import degrade_hr
+
+    cfg = Config()
+    # HR crops must be multiples of 64 (data-contract §1); smallest is 64
+    hr_crop = torch.rand(3, 64, 64, dtype=torch.float32) * 2.0 - 1.0
+    lq, _ = degrade_hr(
+        hr_crop,
+        cfg,
+        global_seed=1,
+        sample_id="s0",
+        data_cycle=0,
+        exposure_index=0,
+    )
+    # degrade_hr contract: unbatched [3, H/4, W/4]
+    assert lq.dim() == 3 and lq.shape == (3, 16, 16)
+
+    bucket_hr = 64
+    # the fix: batch dim for interpolate, drop it afterwards
+    lq_up = F.interpolate(
+        lq.unsqueeze(0), size=(bucket_hr, bucket_hr), mode="bicubic"
+    ).squeeze(0)
+    assert lq_up.shape == (3, bucket_hr, bucket_hr)
+    # the frozen VAE encode takes [B, 3, H, W]
+    enc_in = lq_up.unsqueeze(0)
+    assert enc_in.dim() == 4 and enc_in.shape == (1, 3, bucket_hr, bucket_hr)
+
+
 def test_latent_velocity_adapter() -> None:
-    import torch.nn as nn
+    from torch import nn
 
     class _FakeTrunk(nn.Module):
         """Stand-in for the trunk signature (rt, z_lr, t, sigma, ...)."""

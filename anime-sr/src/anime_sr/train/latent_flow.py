@@ -227,8 +227,12 @@ def _validate_latent(
                 data_cycle=_VAL_CYCLE,
                 exposure_index=_VAL_EXPOSURE,
             )
-            lq_up = F.interpolate(lq, size=(bucket_hr, bucket_hr), mode="bicubic")
-            z_lr = vae.encode(lq_up.to(vae.dtype))
+            # degrade_hr returns the unbatched LQ [3, h, w]; interpolate and
+            # the frozen VAE both take a batch dim (plan §4.3 anchor).
+            lq_up = F.interpolate(
+                lq.unsqueeze(0), size=(bucket_hr, bucket_hr), mode="bicubic"
+            ).squeeze(0)
+            z_lr = vae.encode(lq_up.unsqueeze(0).to(vae.dtype)).squeeze(0)
             z_hr = store.read(meta.sample_id).to(vae.dtype)
             z_hrs.append(z_hr)
             z_lrs.append(z_lr)

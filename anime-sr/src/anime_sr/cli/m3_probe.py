@@ -124,7 +124,9 @@ def main() -> int:
         hr_full = ds.decode_hr(meta)
         x, y = ds.crop(meta, 0, 0)
         hr_crop = hr_full[..., y : y + a.bucket_hr, x : x + a.bucket_hr].contiguous()
-        z_hr = store.read(sid)
+        # store/dataset tensors are unbatched ([128,h,w] / [3,B,B]); the
+        # sampler and frozen VAE take a batch dim, so keep everything 4D.
+        z_hr = store.read(sid).unsqueeze(0)
         lq, _ = degrade_hr(
             hr_crop,
             cfg,
@@ -135,7 +137,9 @@ def main() -> int:
         )
         z_lr = vae.encode(
             F.interpolate(
-                lq.float(), size=(a.bucket_hr, a.bucket_hr), mode="bicubic"
+                lq.float().unsqueeze(0),
+                size=(a.bucket_hr, a.bucket_hr),
+                mode="bicubic",
             ).to(vae.dtype)
         )
         return z_hr, z_lr, hr_crop
