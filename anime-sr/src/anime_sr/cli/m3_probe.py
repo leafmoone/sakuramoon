@@ -171,7 +171,9 @@ def main() -> int:
     # first probe sample, with a fresh graph
     _, z_lr, hr_crop = _prep(picks[0])
     rt = torch.zeros_like(z_lr)  # sigma=0 => r_0 = 0
-    t0 = torch.zeros(z_lr.shape[0], device=device)
+    # t = 0 is exact in any dtype; match the model dtype so the bf16 trunk
+    # sees bf16 inputs (the train path downcasts an fp32 t under autocast).
+    t0 = torch.zeros(z_lr.shape[0], device=device, dtype=dtype)
     sg = torch.zeros(z_lr.shape[0], device=device, dtype=dtype)
     v_hat = model(rt, z_lr, t0, sg)
     z_hat = z_lr + v_hat  # Euler 1-step at t=0

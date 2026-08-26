@@ -50,10 +50,11 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -199,6 +200,7 @@ def _validate_latent(
     rank: int,
     step: int,
     bucket_hr: int,
+    autocast: Callable[[], Any],
 ) -> None:
     """Quantitative M3 checklist subset on a fixed val slice (rank 0 only)."""
     if rank != 0:
@@ -240,15 +242,20 @@ def _validate_latent(
             z_lrs.append(z_lr)
         z_hr_b = torch.stack(z_hrs).to(device)
         z_lr_b = torch.stack(z_lrs).to(device)
-        z1 = sampler.one_step(z_lr_b, z_lr_b, sigma=0.0, generator=g)
-        z4 = sampler.four_step(z_lr_b, z_lr_b, sigma=0.0, generator=g)
+        # Run the model forwards under the same autocast as the train loop:
+        # build_flow_targets emits fp32 ``t``/``rt`` (the §5.3 uniform-t draw
+        # is fp32) which would otherwise hit the bf16 trunk weights raw.
+        with autocast():
+            z1 = sampler.one_step(z_lr_b, z_lr_b, sigma=0.0, generator=g)
+            z4 = sampler.four_step(z_lr_b, z_lr_b, sigma=0.0, generator=g)
         m1 = latent_val_metrics(z_hr_b, z_lr_b, z1)
         m4 = latent_val_metrics(z_hr_b, z_lr_b, z4)
         # flow-direction probe at a random t (reproducible per step)
-        rt, v_star, sigma, t = build_flow_targets(
-            z_hr_b, z_lr_b, cfg, generator=g, device=device
-        )
-        v_hat = mod(rt, z_lr_b, t, sigma)
+        with autocast():
+            rt, v_star, sigma, t = build_flow_targets(
+                z_hr_b, z_lr_b, cfg, generator=g, device=device
+            )
+            v_hat = mod(rt, z_lr_b, t, sigma)
         cos_v = velocity_cosine(v_hat, v_star)
     if was_training:
         mod.train()
@@ -420,7 +427,18 @@ def run_latent_flow(
 
         if (step + 1) % lf.val_every_steps == 0:
             _validate_latent(
-                model, vae, ds, order, n, store, cfg, device, rank, step + 1, bucket_hr
+                model,
+                vae,
+                ds,
+                order,
+                n,
+                store,
+                cfg,
+                device,
+                rank,
+                step + 1,
+                bucket_hr,
+                autocast,
             )
         if rank == 0 and (step + 1) % lf.save_every_steps == 0:
             _save_ckpt(out / f"step-{step + 1:07d}.pt", step + 1, model, opt)
