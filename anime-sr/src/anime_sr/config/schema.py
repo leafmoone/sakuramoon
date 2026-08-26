@@ -297,6 +297,97 @@ class VAESpec(_Frozen):
 
 
 # ---------------------------------------------------------------------------
+# data service (plan §10) + degradation (plan §11)
+# ---------------------------------------------------------------------------
+class DataSpec(_Frozen):
+    """Raw source + index outputs (plan §10.1-§10.3, config/data.toml [data])."""
+
+    raw_source: str = "danbooru-webdataset"
+    manifest_dir: str = "data/index"
+    outputs: list[str] = Field(
+        default_factory=lambda: [
+            "sr-eligibility-v1.parquet",
+            "shard-summary-v1.parquet",
+            "filter-report-v1.json",
+            "sr-validation-v1.json",
+        ]
+    )
+
+
+class FilterSpec(_Frozen):
+    """§10.4 filter funnel. Hard excludes are quality-gated: a fraction of
+    hard-excluded samples is sampled for human review before final drop."""
+
+    hard_exclude: list[str] = Field(
+        default_factory=lambda: [
+            "nsfw", "gore", "blood", "logo", "watermark", "signature", "text-heavy-ui"
+        ]
+    )
+    human_review_fraction: float = 0.35
+    priority_quality: list[str] = Field(default_factory=lambda: ["masterpiece", "best", "great", "good"])
+    aux_tags: list[str] = Field(default_factory=lambda: ["monochrome", "rough", "3d"])
+    aux_max_fraction: float = 0.20
+    crop_retention_min: float = 0.80
+    clean_score_stage: Literal["lazy"] = "lazy"
+    clean_score_cache: bool = True
+
+
+class ValidationSpec(_Frozen):
+    """§16.1 validation sets; train/validation zero overlap is structural."""
+
+    synthetic_pairs: int = 5000
+    stress_set: int = 500
+    real_lq_min: int = 200
+    real_lq_target: int = 500
+    zero_overlap: bool = True
+    # deterministic split: sample id is validation iff
+    # blake2b(sample_id) % 10000 < validation_permille.
+    validation_permille: int = 300
+
+
+class DegradationSpec(_Frozen):
+    """§11 degradation contract (ranges + weights mirror config/data.toml)."""
+
+    profiles: dict[str, float] = Field(
+        default_factory=lambda: {
+            "P0_clean": 0.10,
+            "P1_mild_web": 0.25,
+            "P2_normal_web": 0.35,
+            "P3_anime_codec": 0.20,
+            "P4_severe": 0.10,
+        }
+    )
+    blur_sigma: dict[str, list[float]] = Field(
+        default_factory=lambda: {
+            "mild": [0.1, 0.6],
+            "normal": [0.2, 1.2],
+            "severe": [0.5, 2.0],
+        }
+    )
+    gaussian_noise: dict[str, list[float]] = Field(
+        default_factory=lambda: {
+            "mild": [0.0, 2.0],
+            "normal": [0.0, 5.0],
+            "severe": [2.0, 10.0],
+        }
+    )
+    jpeg_quality: dict[str, list[float]] = Field(
+        default_factory=lambda: {
+            "mild": [80.0, 98.0],
+            "normal": [55.0, 90.0],
+            "severe": [30.0, 70.0],
+        }
+    )
+    codec_bank_hr_crops_min: int = 50_000
+    codec_bank_hr_crops_max: int = 100_000
+    codec_bank_versions_per_crop: list[int] = Field(default_factory=lambda: [1, 2])
+    codec_bank_batch_fraction: list[float] = Field(default_factory=lambda: [0.10, 0.20])
+    # §11.5: seed = H(global_seed, sample_id, data_cycle, exposure_index)
+    seed: str = "H(global_seed, sample_id, data_cycle, exposure_index)"
+    output_size: str = "hr/4 exact"
+
+
+# ---------------------------------------------------------------------------
 # root
 # ---------------------------------------------------------------------------
 class Config(_Frozen):
@@ -304,6 +395,10 @@ class Config(_Frozen):
     model: ModelSpec = Field(default_factory=ModelSpec)
     flow: FlowSpec = Field(default_factory=FlowSpec)
     buckets: BucketsSpec = Field(default_factory=BucketsSpec)
+    data: DataSpec = Field(default_factory=DataSpec)
+    filter: FilterSpec = Field(default_factory=FilterSpec)
+    validation: ValidationSpec = Field(default_factory=ValidationSpec)
+    degradation: DegradationSpec = Field(default_factory=DegradationSpec)
     phase1: Phase1Spec = Field(default_factory=Phase1Spec)
     phase2: Phase2Spec = Field(default_factory=Phase2Spec)
     optimizer: OptimizerSpec = Field(default_factory=OptimizerSpec)
