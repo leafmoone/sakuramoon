@@ -22,7 +22,7 @@ import hashlib
 import json
 import tarfile
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -172,6 +172,69 @@ def classify_quality(rec: MetaRecord, cfg: Config) -> MetaRecord:
 
 
 # ---------------------------------------------------------------------------
+# webp pixel-size recovery (the danbooru-v2 meta dimensions describe the
+# original post, NOT the shipped webp, which is often a resized variant)
+# ---------------------------------------------------------------------------
+def webp_header_size(header: bytes) -> tuple[int, int] | None:
+    """Read (width, height) from the first 64 bytes of a RIFF/WebP file.
+
+    Only the pixel dimensions are needed, so no codec decode: the RIFF size
+    field is the container length, not the picture size. Covers the VP8
+    (lossy), VP8L (lossless) and VP8X (extended) chunks. ``None`` for
+    non-WebP or headers too short to contain the dimension fields.
+    """
+    if len(header) < 25 or header[0:4] != b"RIFF" or header[8:12] != b"WEBP":
+        return None
+    chunk = header[12:16]
+    if chunk == b"VP8 ":
+        # chunk data @20: 3-byte frame tag, 3-byte start code, then 14-bit LE w/h
+        if len(header) < 30:
+            return None
+        w = int.from_bytes(header[26:28], "little") & 0x3FFF
+        h = int.from_bytes(header[28:30], "little") & 0x3FFF
+    elif chunk == b"VP8L":
+        # chunk data @20: 1-byte signature 0x2F, then 32-bit field LE @21:
+        # bits [17:4] = width-1, bits [31:18] = height-1
+        v = int.from_bytes(header[21:25], "little")
+        w = ((v >> 4) & 0x3FFF) + 1
+        h = ((v >> 18) & 0x3FFF) + 1
+    elif chunk == b"VP8X":
+        # chunk data @20: 4-byte flags, then 24-bit LE (width-1), (height-1)
+        if len(header) < 30:
+            return None
+        w = int.from_bytes(header[24:27], "little") + 1
+        h = int.from_bytes(header[27:30], "little") + 1
+    else:
+        return None
+    return (w, h) if w > 0 and h > 0 else None
+
+
+def collect_webp_sizes(webp_root: str | Path) -> dict[str, tuple[int, int]]:
+    """Map sample_id -> actual pixel size, read from extracted webp headers.
+
+    Layout: ``<webp_root>/<shard>.tar/<id>.webp`` (the extract contract).
+    ``.part`` files (still writing) are skipped; unreadable headers are
+    dropped (the caller's coverage check then fails loudly).
+    """
+    root = Path(webp_root)
+    out: dict[str, tuple[int, int]] = {}
+    n_bad = 0
+    for shard_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        for f in sorted(shard_dir.iterdir()):
+            if f.suffix != ".webp" or f.name.endswith(".part"):
+                continue
+            with f.open("rb") as fh:
+                size = webp_header_size(fh.read(64))
+            if size is None:
+                n_bad += 1
+                continue
+            out[f.stem] = size
+    if n_bad:
+        print(f"[sizes] WARN: {n_bad} webp headers unreadable (dropped)")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # eligibility
 # ---------------------------------------------------------------------------
 def _min_dim(rec: MetaRecord) -> int:
@@ -268,8 +331,15 @@ def build_index(
     shard_paths: Sequence[str | Path],
     cfg: Config,
     out_dir: str | Path,
+    size_overrides: Mapping[str, tuple[int, int]] | None = None,
 ) -> dict:
     """Scan shards, evaluate eligibility, write all four index artifacts.
+
+    ``size_overrides`` maps sample_id -> (width, height) and replaces the
+    meta dimensions before eligibility is evaluated (the danbooru-v2 meta
+    records the original post size, not the shipped webp). When given,
+    records without an override are counted in ``n_size_missing`` so a
+    caller can detect incomplete coverage.
 
     Returns a summary dict (also embedded in filter-report-v1.json).
     """
@@ -281,7 +351,23 @@ def build_index(
         records, summary = scan_shard(sp)
         all_records.extend(records)
         summaries.append(summary)
-    classified = [classify_quality(r, cfg) for r in all_records]
+    if size_overrides is not None:
+        n_missing = 0
+        corrected = []
+        for rec in all_records:
+            size = size_overrides.get(rec.sample_id)
+            if size is None:
+                n_missing += 1
+                corrected.append(rec)
+            elif (size[0], size[1]) != (rec.width, rec.height):
+                corrected.append(dataclasses.replace(rec, width=size[0], height=size[1]))
+            else:
+                corrected.append(rec)
+        all_records = corrected
+    else:
+        n_missing = 0
+        corrected = all_records
+    classified = [classify_quality(r, cfg) for r in corrected]
 
     n_total = len(classified)
     n_sfw = sum(1 for r in classified if r.nsfw == "sfw")
@@ -316,6 +402,8 @@ def build_index(
         "n_shards": len(summaries),
         "n_images": n_total,
         "n_unresolved": sum(s.n_unresolved for s in summaries),
+        "n_size_corrected": (n_total - n_missing) if size_overrides is not None else None,
+        "n_size_missing": n_missing if size_overrides is not None else None,
         "n_sfw": n_sfw,
         "n_eligible_train": n_eligible,
         "n_by_quality": n_by_quality,
@@ -328,7 +416,8 @@ def build_index(
         "paths": {"eligibility": p_elig, "shard_summary": p_shard, "validation": str(val_path)},
     }
     (out / "filter-report-v1.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"[index] {n_total} images: {n_eligible} train-eligible, {len(val)} validation, {len(excluded_ids)} excluded, {sum(s.n_unresolved for s in summaries)} unresolved")
+    size_note = f", sizes-corrected {n_total - n_missing}/{n_total}" if size_overrides is not None else ""
+    print(f"[index] {n_total} images: {n_eligible} train-eligible, {len(val)} validation, {len(excluded_ids)} excluded, {sum(s.n_unresolved for s in summaries)} unresolved{size_note}")
     return report
 
 

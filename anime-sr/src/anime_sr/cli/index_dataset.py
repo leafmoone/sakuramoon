@@ -66,6 +66,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--validation-permille", type=int, default=None, help="override split fraction (‰)")
     ap.add_argument("--extract", action="store_true", help="extract webp for the pipeline")
     ap.add_argument("--webp-dir", default=None, help="extraction target (default <out-dir>/../webp)")
+    ap.add_argument(
+        "--webp-sizes",
+        action="store_true",
+        help="index eligibility from ACTUAL webp pixel sizes (meta records the "
+        "original post size, not the shipped webp); requires complete extraction "
+        "under --webp-dir",
+    )
     args = ap.parse_args(argv)
 
     cfg = load_config(*args.config)
@@ -77,9 +84,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: no shard-*.tar under {args.shard_dir}", file=sys.stderr)
         return 2
 
+    size_overrides = None
+    if args.webp_sizes:
+        webp_dir = Path(args.webp_dir or str(Path(args.out_dir).parent / "webp"))
+        if not webp_dir.is_dir():
+            print(f"error: --webp-sizes needs complete extraction under {webp_dir} first", file=sys.stderr)
+            return 2
+        print(f"[sizes] reading webp headers under {webp_dir} ...")
+        size_overrides = index.collect_webp_sizes(webp_dir)
+        print(f"[sizes] {len(size_overrides)} actual sizes collected")
+
     # Uncaught exceptions propagate (repo rule: CLI prints the traceback,
     # no JSON-squashed errors) → interpreter exit code 1.
-    report = index.build_index(shards, cfg, args.out_dir)
+    report = index.build_index(shards, cfg, args.out_dir, size_overrides=size_overrides)
+    if size_overrides is not None and report.get("n_size_missing"):
+        raise SystemExit(
+            f"error: {report['n_size_missing']} indexed samples have no extracted webp — "
+            f"re-run extraction to completion, then rebuild with --webp-sizes"
+        )
     print(f"[index] wrote {args.out_dir} (eligibility writer: {report['writer']['sr-eligibility-v1']})")
     if args.extract:
         webp_dir = args.webp_dir or str(Path(args.out_dir).parent / "webp")
