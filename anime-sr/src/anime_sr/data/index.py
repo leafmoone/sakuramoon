@@ -58,6 +58,7 @@ class ShardSummary:
     shard: str
     n_images: int = 0
     n_sfw: int = 0
+    n_unresolved: int = 0  # json members dropped (null dims / malformed)
     bytes_total: int = 0
     min_size: int = 0
     max_size: int = 0
@@ -77,16 +78,29 @@ class Eligibility:
 # scanning
 # ---------------------------------------------------------------------------
 def _parse_meta(raw: bytes) -> MetaRecord | None:
-    """Parse one danbooru-v2 meta json; None when structurally invalid."""
+    """Parse one danbooru-v2 meta json; None when structurally invalid or
+    dimensionally unresolved (``image.width``/``height`` can be JSON null)."""
     try:
         m = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
-    img = m.get("image") or {}
-    w, h = int(img.get("width", 0)), int(img.get("height", 0))
+    if not isinstance(m, dict):
+        return None
+    img = m.get("image")
+    if not isinstance(img, dict):
+        img = {}
+    # ``.get("width", 0)`` default only fires when the key is *absent*; danbooru
+    # records with unresolved dimensions carry explicit JSON null → use `or 0`.
+    w = img.get("width") or 0
+    h = img.get("height") or 0
+    try:
+        w, h = int(w), int(h)
+    except (TypeError, ValueError):
+        return None
     if w <= 0 or h <= 0 or not m.get("id"):
         return None
-    release = (m.get("source") or {}).get("release", "")
+    source = m.get("source") or {}
+    release = source.get("release") or ""
     year = 0
     if "_" in release and release.split("_", 1)[1].isdigit():
         year = int(release.split("_", 1)[1])
@@ -98,7 +112,7 @@ def _parse_meta(raw: bytes) -> MetaRecord | None:
         rel_path="",  # filled by the caller
         width=w,
         height=h,
-        nsfw=str(m.get("nsfw", "")),
+        nsfw=str(m.get("nsfw") or ""),
         year=year,
         quality="",  # filled by the caller (needs filter config)
         tags_general=general,
@@ -130,6 +144,7 @@ def scan_shard(shard_path: str | Path, progress: bool = True) -> tuple[list[Meta
                     continue
                 rec = _parse_meta(f.read())
                 if rec is None:
+                    summary.n_unresolved += 1
                     continue
                 rec = dataclasses.replace(rec, shard=path.name, rel_path=base + ".webp")
                 summary.n_images += 1
@@ -300,6 +315,7 @@ def build_index(
         "version": 1,
         "n_shards": len(summaries),
         "n_images": n_total,
+        "n_unresolved": sum(s.n_unresolved for s in summaries),
         "n_sfw": n_sfw,
         "n_eligible_train": n_eligible,
         "n_by_quality": n_by_quality,
@@ -312,7 +328,7 @@ def build_index(
         "paths": {"eligibility": p_elig, "shard_summary": p_shard, "validation": str(val_path)},
     }
     (out / "filter-report-v1.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"[index] {n_total} images: {n_eligible} train-eligible, {len(val)} validation, {len(excluded_ids)} excluded")
+    print(f"[index] {n_total} images: {n_eligible} train-eligible, {len(val)} validation, {len(excluded_ids)} excluded, {sum(s.n_unresolved for s in summaries)} unresolved")
     return report
 
 

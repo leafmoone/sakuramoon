@@ -23,7 +23,7 @@ from anime_sr.data.index import (
 CFG = Config()
 
 
-def _meta(id_: int, w: int, h: int, nsfw: str = "sfw", general: list[str] | None = None) -> str:
+def _meta(id_: int, w: int | None, h: int | None, nsfw: str = "sfw", general: list[str] | None = None) -> str:
     return json.dumps(
         {
             "schema_version": 1,
@@ -39,13 +39,14 @@ def _meta(id_: int, w: int, h: int, nsfw: str = "sfw", general: list[str] | None
 def _make_shard(tmp_path: Path, name: str = "shard-000000.tar") -> Path:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tf:
-        cases = [
+        cases: list[tuple[int, int | None, int | None, str, list[str] | None]] = [
             (1001, 2000, 1500, "sfw", ["masterpiece", "illustration"]),  # priority, all buckets
             (1002, 900, 800, "sfw", None),  # regular, 512/768 only
             (1003, 400, 300, "sfw", None),  # too small for any bucket
             (1004, 1600, 1200, "nsfw", None),  # nsfw hard exclude
             (1005, 1600, 1200, "sfw", ["watermark"]),  # hard-tag exclude
             (1006, 3000, 2000, "sfw", ["monochrome"]),  # aux pool
+            (1007, None, None, "sfw", None),  # unresolved dims (JSON null) → dropped
         ]
         for cid, w, h, nsfw, general in cases:
             stem = f"danbooru/5.9/1_2024/{cid}"
@@ -65,8 +66,9 @@ def _make_shard(tmp_path: Path, name: str = "shard-000000.tar") -> Path:
 def test_scan_shard(tmp_path: Path) -> None:
     p = _make_shard(tmp_path)
     records, summary = scan_shard(p, progress=False)
-    assert len(records) == 6
+    assert len(records) == 6  # 1007 (null dims) is dropped as unresolved
     assert summary.n_images == 6 and summary.n_sfw == 5
+    assert summary.n_unresolved == 1
     r1 = next(r for r in records if r.sample_id == "1001")
     assert r1.rel_path == "danbooru/5.9/1_2024/1001.webp"
     assert r1.width == 2000 and r1.year == 2024 and r1.nsfw == "sfw"
@@ -96,6 +98,7 @@ def test_build_index_artifacts(tmp_path: Path) -> None:
     out = tmp_path / "index"
     report = build_index([str(shard)], CFG, out)
     assert report["n_images"] == 6
+    assert report["n_unresolved"] == 1
     assert report["n_eligible_train"] == 3  # 1001, 1002, 1006
     # eligibility table readable back (parquet or jsonl)
     rows = list(iter_index(report["paths"]["eligibility"]))
