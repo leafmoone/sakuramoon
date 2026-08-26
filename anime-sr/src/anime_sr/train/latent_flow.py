@@ -228,11 +228,13 @@ def _validate_latent(
                 exposure_index=_VAL_EXPOSURE,
             )
             # degrade_hr returns the unbatched LQ [3, h, w]; interpolate and
-            # the frozen VAE both take a batch dim (plan §4.3 anchor).
+            # the frozen VAE both take a batch dim (plan §4.3 anchor). The
+            # val slice is built on CPU (decode_hr), but the frozen VAE
+            # lives on its device — move in, like the train path (l387).
             lq_up = F.interpolate(
                 lq.unsqueeze(0), size=(bucket_hr, bucket_hr), mode="bicubic"
             ).squeeze(0)
-            z_lr = vae.encode(lq_up.unsqueeze(0).to(vae.dtype)).squeeze(0)
+            z_lr = vae.encode(lq_up.unsqueeze(0).to(vae.device, vae.dtype)).squeeze(0)
             z_hr = store.read(meta.sample_id).to(vae.dtype)
             z_hrs.append(z_hr)
             z_lrs.append(z_lr)

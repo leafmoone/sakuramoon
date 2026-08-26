@@ -126,7 +126,9 @@ def main() -> int:
         hr_crop = hr_full[..., y : y + a.bucket_hr, x : x + a.bucket_hr].contiguous()
         # store/dataset tensors are unbatched ([128,h,w] / [3,B,B]); the
         # sampler and frozen VAE take a batch dim, so keep everything 4D.
-        z_hr = store.read(sid).unsqueeze(0)
+        # decode_hr / degrade_hr stay on CPU; the frozen VAE and the model
+        # live on ``device``, so all tensors fed to them move there.
+        z_hr = store.read(sid).unsqueeze(0).to(device)
         lq, _ = degrade_hr(
             hr_crop,
             cfg,
@@ -140,9 +142,9 @@ def main() -> int:
                 lq.float().unsqueeze(0),
                 size=(a.bucket_hr, a.bucket_hr),
                 mode="bicubic",
-            ).to(vae.dtype)
+            ).to(vae.device, vae.dtype)
         )
-        return z_hr, z_lr, hr_crop
+        return z_hr, z_lr, hr_crop.to(device)
 
     sampler = FlowSampler(_LatentVelocity(model))
     with torch.no_grad():
