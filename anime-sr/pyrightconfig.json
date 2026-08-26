@@ -1,0 +1,9 @@
+{
+  "include": ["src/anime_sr", "tests"],
+  "exclude": [
+    "src/anime_sr/vae/mage_vae_impl.py"
+  ],
+  "extraPaths": ["src"],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "standard"
+}

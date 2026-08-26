@@ -1,0 +1,71 @@
+# M3 smoke model (plan §13 M3): ~15-20M U-Flow, 100k-200k exposures.
+# NOT the frozen v1.0 model — a structure/correctness canary. Overlay on base.toml.
+#
+# M3 must verify (checklist, plan §13): flow direction correct; 1-step output
+# moves toward HR; 4-step not worse than 1-step; non-square buckets correct;
+# window mask correct; resume continuous; DDP == single card; decoder
+# gradient reaches the trunk; no window seams. If M3 fails, no formal training.
+
+[model.uflow]
+# dims [192, 256, 384], depths [2, 2, 4, 2, 2] (plan §13 M3)
+head_dim = 64
+
+[[model.uflow.stages]]
+grid = 64
+dim = 192
+depth = 2
+q_heads = 3
+kv_heads = 1
+ffn = 576
+attention = "window-8"
+
+[[model.uflow.stages]]
+grid = 32
+dim = 256
+depth = 2
+q_heads = 4
+kv_heads = 2
+ffn = 768
+attention = "window-8"
+
+[[model.uflow.stages]]
+grid = 16
+dim = 384
+depth = 4
+q_heads = 6
+kv_heads = 2
+ffn = 1152
+attention = "global"
+
+[[model.uflow.stages]]
+grid = 32
+dim = 256
+depth = 2
+q_heads = 4
+kv_heads = 2
+ffn = 768
+attention = "window-8"
+
+[[model.uflow.stages]]
+grid = 64
+dim = 192
+depth = 2
+q_heads = 3
+kv_heads = 1
+ffn = 576
+attention = "window-8"
+
+[model]
+param_budget_m = [15.0, 20.0]
+
+[model.output_head]
+# smoke-only: follow the 64x64 stage dim (192) instead of the frozen 384
+dim_in = 192
+dim_out = 128
+zero_init_out = true
+
+[phase1]
+# M3 exposure budget (100k-200k), single bucket 128->512
+exposure_target = 200000
+exposure_min = 100000
+exposure_max = 200000

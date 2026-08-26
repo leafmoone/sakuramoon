@@ -1,0 +1,16 @@
+# M4 hardware benchmark (plan §15.2). Run via `python -m anime_sr.cli.benchmark`
+# (CLI lands with M4). The model is hardware-fixed; only the knobs below change.
+
+[benchmark]
+resolutions = [512, 768, 1024]
+microbatches = [1, 2, 4]
+checkpoint_modes = ["none", "selective", "full"]
+attention_backends = ["sdpa", "flash"]
+warmup = 20
+timed_iterations = 100
+
+[selection]
+# pick the config with max throughput among those that pass:
+peak_reserved_fraction = 0.88
+require_no_oom = true
+require_no_non_finite = true

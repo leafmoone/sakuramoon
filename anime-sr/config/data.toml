@@ -1,0 +1,54 @@
+# M1 data contract (plan §10, §11). See docs/data-contract.md + degradation-v1.md.
+
+[data]
+# raw source continues from the existing Danbooru WebDataset dataset (plan §10.1)
+raw_source = "danbooru-webdataset"
+manifest_dir = "data/index"
+outputs = [
+  "sr-eligibility-v1.parquet",
+  "shard-summary-v1.parquet",
+  "filter-report-v1.json",
+  "sr-validation-v1.json",
+]
+
+[filter]
+# §10.4 hard exclusions; 35% of hard-excluded samples are human-reviewed
+# (quality-gated) before they are dropped.
+hard_exclude = ["nsfw", "gore", "blood", "logo", "watermark", "signature", "text-heavy-ui"]
+human_review_fraction = 0.35
+priority_quality = ["masterpiece", "best", "great", "good"]
+# aux pool: monochrome / rough / 3d tags — capped at 20% of the dataset
+aux_tags = ["monochrome", "rough", "3d"]
+aux_max_fraction = 0.20
+# crops must retain >= 80% of a subject to be kept
+crop_retention_min = 0.80
+# clean-score: computed lazily, cached
+clean_score_stage = "lazy"
+clean_score_cache = true
+
+[validation]
+# §16.1: synthetic pairs 5000 (1000 per degradation profile), stress 500,
+# real LQ min 200 / target 500. Zero overlap with training.
+synthetic_pairs = 5000
+stress_set = 500
+real_lq_min = 200
+real_lq_target = 500
+zero_overlap = true
+
+[degradation]
+# §11.1 profile sampling weights (P0 still applies 4x downsample, no extra damage)
+profiles = { P0_clean = 0.10, P1_mild_web = 0.25, P2_normal_web = 0.35, P3_anime_codec = 0.20, P4_severe = 0.10 }
+# §11.2 initial ranges (mild / normal / severe)
+blur_sigma = { mild = [0.1, 0.6], normal = [0.2, 1.2], severe = [0.5, 2.0] }
+gaussian_noise = { mild = [0.0, 2.0], normal = [0.0, 5.0], severe = [2.0, 10.0] }
+jpeg_quality = { mild = [80, 98], normal = [55, 90], severe = [30, 70] }
+# §11.3 offline codec bank: 50k-100k HR crops, 1-2 codec versions per crop,
+# feeds 10-20% of online batches
+codec_bank_hr_crops_min = 50000
+codec_bank_hr_crops_max = 100000
+codec_bank_versions_per_crop = [1, 2]
+codec_bank_batch_fraction = [0.10, 0.20]
+# deterministic seed (plan §11.5): H(global_seed, sample_id, data_cycle, exposure_index)
+seed = "H(global_seed, sample_id, data_cycle, exposure_index)"
+# final LQ size must be exactly HR/4
+output_size = "hr/4 exact"

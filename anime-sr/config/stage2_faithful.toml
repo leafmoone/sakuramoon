@@ -1,0 +1,48 @@
+# M5 Phase II: one-step faithful (plan §12.2/§12.3, §13 M5, §14.2/§14.3).
+# Overlay on base.toml (and inherits [hardware] from stage1_flow.toml when both given).
+
+[phase2]
+exposure_target = 2000000
+exposure_min = 1000000
+exposure_max = 4000000
+size_mix = { "192" = 0.2, "256" = 0.8 }
+# 50% random-t flow batches (L_FM only) + 50% t=0 one-step decode batches
+# (L_FM + pixel + edge + flat + perceptual). random-t must stay: otherwise
+# 4-step ability degrades (plan §13 M5).
+batch_mix = { random_t_flow = 0.5, one_step_decode = 0.5 }
+
+[phase2.loss]
+# plan §12.2 fixed loss weights
+flow = 1.0
+pixel = 1.0
+pixel_charbonnier_eps = 0.001
+edge = 0.10
+flat = 0.05
+perceptual = 0.05
+perceptual_hr = 512
+
+[phase2.optimizer_lrs]
+# plan §14.2 per-group LRs
+uflow = 2e-5
+pixel_encoder = 5e-5
+decoder_adapters = 1e-4
+vae_base = 0.0
+
+[phase2.grad_calibration]
+# plan §12.3: 2000-update calibration windows; if a term's gradient magnitude
+# misses its window, rescale its weight once (not repeatedly)
+target_updates = 2000
+pixel = [0.25, 0.50]
+edge = [0.05, 0.15]
+flat = [0.03, 0.10]
+perceptual = [0.05, 0.15]
+
+[hardware]
+dtype = "bf16"
+ddp = true
+fsdp = false
+attention_backend = "sdpa-correctness"
+activation_checkpointing = "selective"
+target_latent_tokens_phase2 = 65536
+max_accumulation = 64
+overflow_policy = "halve_tokens_lr_x0.7"

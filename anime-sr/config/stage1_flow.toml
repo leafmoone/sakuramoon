@@ -1,0 +1,62 @@
+# M4 Phase I: flow-only residual training (plan §13 M4 + §14.1). Overlay on base.toml.
+
+[phase1]
+exposure_target = 10000000
+exposure_min = 6000000
+exposure_max = 16000000
+# extra 0.5M exposures at 100% 256->1024 after the curriculum
+final_256_extra_exposures = 500000
+loss = "fm"
+
+# §13 M4 resolution curriculum (fractions of the Phase-I budget)
+[[phase1.curriculum]]
+label = "I-A"
+fraction = 0.20
+mix = { "128" = 1.0 }
+
+[[phase1.curriculum]]
+label = "I-B"
+fraction = 0.30
+mix = { "128" = 0.5, "192" = 0.3, "256" = 0.2 }
+
+[[phase1.curriculum]]
+label = "I-C"
+fraction = 0.30
+mix = { "128" = 0.2, "192" = 0.3, "256" = 0.5 }
+
+[[phase1.curriculum]]
+label = "I-D"
+fraction = 0.20
+mix = { "128" = 0.1, "192" = 0.2, "256" = 0.7 }
+
+[optimizer]
+# plan §14.1
+name = "adamw"
+lr = 0.00015
+betas = [0.9, 0.95]
+eps = 1e-8
+weight_decay = 0.05
+no_decay = ["norm", "bias", "layerscale", "position", "gates"]
+
+[scheduler]
+warmup_fraction = 0.03
+type = "cosine"
+min_lr_ratio = 0.10
+
+[gradient]
+clip_norm = 1.0
+
+[ema]
+# plan §14.3: half-life by samples, so hardware/batch changes don't shift semantics
+half_life_samples = 500000
+
+[hardware]
+# plan §15.1/§15.3/§15.4 (concrete micro-batch/accumulation from §15.2 benchmark)
+dtype = "bf16"
+ddp = true
+fsdp = false
+attention_backend = "sdpa-correctness"
+activation_checkpointing = "selective"
+target_latent_tokens_phase1 = 131072
+max_accumulation = 64
+overflow_policy = "halve_tokens_lr_x0.7"
