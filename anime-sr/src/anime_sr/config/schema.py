@@ -312,6 +312,8 @@ class DataSpec(_Frozen):
             "sr-validation-v1.json",
         ]
     )
+    # §11.4: offline real-codec LQ bank (None = disabled, synthetic chain only)
+    bank_dir: str | None = None
 
 
 class FilterSpec(_Frozen):
@@ -382,6 +384,9 @@ class DegradationSpec(_Frozen):
     codec_bank_hr_crops_max: int = 100_000
     codec_bank_versions_per_crop: list[int] = Field(default_factory=lambda: [1, 2])
     codec_bank_batch_fraction: list[float] = Field(default_factory=lambda: [0.10, 0.20])
+    # the fraction of the training batch whose LQ comes from the codec bank
+    # (one value inside codec_bank_batch_fraction); 0.0 = synthetic chain only
+    codec_bank_fraction: float = 0.15
     # §11.5: seed = H(global_seed, sample_id, data_cycle, exposure_index)
     seed: str = "H(global_seed, sample_id, data_cycle, exposure_index)"
     output_size: str = "hr/4 exact"

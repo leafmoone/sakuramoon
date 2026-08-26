@@ -24,7 +24,8 @@ from torch.utils.data import Dataset
 from anime_sr.config.schema import Config
 from anime_sr.data import index as index_mod
 from anime_sr.data.buckets import check_buckets, crop_box
-from anime_sr.data.degradation import degrade_hr
+from anime_sr.data.codec_bank import CodecBank
+from anime_sr.data.degradation import degrade_hr, exposure_seed
 
 _EXPOSURE_PER_CYCLE = 25  # exposures per image before the data cycle advances (§11.5)
 
@@ -69,16 +70,25 @@ class SRDataset(Dataset):
         bucket_hr: int = 1024,
         split: str = "train",
         global_seed: int = 42,
+        bank: CodecBank | None = None,
     ) -> None:
         if split not in ("train", "validation"):
             raise ValueError(f"split must be train|validation, got {split}")
         if bucket_hr not in {b.hr for b in check_buckets(cfg)}:
             raise ValueError(f"bucket_hr {bucket_hr} not in the frozen bucket table")
+        if bank is not None:
+            lo, hi = cfg.degradation.codec_bank_batch_fraction
+            if not (lo <= cfg.degradation.codec_bank_fraction <= hi):
+                raise ValueError(
+                    f"codec_bank_fraction {cfg.degradation.codec_bank_fraction} "
+                    f"outside the frozen range {lo}-{hi} (plan §11.4)"
+                )
         self.webp_dir = Path(webp_dir)
         self.cfg = cfg
         self.bucket = next(b for b in check_buckets(cfg) if b.hr == bucket_hr)
         self.split = split
         self.global_seed = global_seed
+        self.bank = bank
         self.samples: list[SampleMeta] = []
         for row in index_mod.iter_index(find_eligibility(index_dir)):
             meta = SampleMeta(
@@ -144,6 +154,34 @@ class SRDataset(Dataset):
             data_cycle=data_cycle,
             exposure_index=exposure_index,
         )
+        if self.bank is not None:
+            seed = exposure_seed(self.global_seed, meta.sample_id, data_cycle, exposure_index)
+            frac = self.cfg.degradation.codec_bank_fraction
+            if self.bank.bank_fraction_hit(meta.sample_id, seed, frac):
+                # §11.4: 10-20% of the batch takes its LQ from the offline
+                # real-codec bank instead of the synthetic chain (deterministic
+                # per sample + exposure seed; the synthetic lq is kept as the
+                # fallback for samples missing from the bank).
+                try:
+                    arr = self.bank.variants_for(meta.sample_id, seed, k=1)[0]
+                except KeyError:
+                    arr = None
+                if arr is not None:
+                    want = (self.bucket.hr // 4, self.bucket.hr // 4)
+                    if (arr.shape[0], arr.shape[1]) != want:
+                        raise RuntimeError(
+                            f"codec bank LQ {arr.shape[1]}x{arr.shape[0]} for {meta.sample_id} "
+                            f"does not match bucket {self.bucket.hr} ({want}); rebuild the bank "
+                            f"for this bucket"
+                        )
+                    lq = (
+                        torch.from_numpy(arr.copy())
+                        .permute(2, 0, 1)
+                        .float()
+                        .mul(2.0 / 255.0)
+                        .sub(1.0)
+                        .to(hr_crop.device)
+                    )
         return hr_crop, lq, meta
 
     def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor, SampleMeta]:
