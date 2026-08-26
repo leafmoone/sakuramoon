@@ -271,10 +271,12 @@ def run_latent_flow(
     """Train (or resume) the M3/M4 latent flow model; returns the final step."""
     lf = cfg.latent_flow
     p1 = cfg.phase1
-    total = p1.exposure_target
-    if not (p1.exposure_min <= total <= p1.exposure_max):
+    # plan §15.1: the exposure budget is a SAMPLE budget (hardware-invariant);
+    # one step consumes batch_size * world_size samples across all ranks.
+    total = p1.exposure_target // (lf.batch_size * world_size)
+    if not (p1.exposure_min <= p1.exposure_target <= p1.exposure_max):
         raise ValueError(
-            f"phase1.exposure_target {total} outside the frozen "
+            f"phase1.exposure_target {p1.exposure_target} outside the frozen "
             f"[{p1.exposure_min}, {p1.exposure_max}] window"
         )
     out = Path(out_dir)
@@ -330,7 +332,8 @@ def run_latent_flow(
     if rank == 0:
         print(
             f"[latent] {n_params / 1e6:.2f}M params, {n} crops (bucket {bucket_hr}), "
-            f"bs={bs} x world={world_size}, steps {start_step}..{total}, "
+            f"bs={bs} x world={world_size}, steps {start_step}..{total} "
+            f"({p1.exposure_target} samples), "
             f"prefetch={lf.prefetch}, device={device}, dtype={dtype}"
         )
 
@@ -439,7 +442,7 @@ def run_latent_flow(
             "n_params_m": round(n_params / 1e6, 2),
             "batch_size": bs,
             "prefetch": lf.prefetch,
-            "phase1_target": total,
+            "exposure_target_samples": p1.exposure_target,
             "data_wait_pct": 100.0 * t_data_cum / max(1e-9, t_data_cum + t_comp_cum),
         }
         (out / "train-meta.json").write_text(json.dumps(meta, indent=2))
