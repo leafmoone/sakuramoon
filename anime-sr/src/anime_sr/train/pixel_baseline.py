@@ -160,6 +160,8 @@ def run_pixel_baseline(
     # unchanged (determinism comes from the slot assignment, not the thread).
     pool = ThreadPoolExecutor(max_workers=max(1, pb.batch_size), thread_name_prefix="fetch")
     t0 = time.time()
+    t_data_cum = 0.0  # M1 stress telemetry (plan §M1#8): data-wait fraction of step time
+    t_comp_cum = 0.0
     for step in range(start_step, total):
         exp = step % _EXPOSURE_PER_CYCLE
         cyc = step // _EXPOSURE_PER_CYCLE
@@ -167,6 +169,7 @@ def run_pixel_baseline(
         for g in opt.param_groups:
             g["lr"] = lr
 
+        tf = time.time()
         futs = [
             pool.submit(ds.fetch, _sample_index(step, rank, i, pb.batch_size, world_size, len(ds)), exp, cyc)
             for i in range(pb.batch_size)
@@ -179,7 +182,10 @@ def run_pixel_baseline(
             lqs.append(lq)
         hr = torch.stack(hrs).to(device, non_blocking=True)
         lq = torch.stack(lqs).to(device, non_blocking=True)
-
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)  # attribute the H2D transfer to the data phase
+        t_data_cum += time.time() - tf
+        tc = time.time()
         with autocast():
             out_t = model(lq)
             loss = pb.l1_weight * (out_t - hr).abs().mean() + pb.l2_weight * ((out_t - hr) ** 2).mean()
@@ -188,24 +194,35 @@ def run_pixel_baseline(
         if cfg.gradient.clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.gradient.clip_norm)
         opt.step()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        t_comp_cum += time.time() - tc
 
         if val_loader is not None and (step + 1) % pb.val_every_steps == 0:
             _validate(model, val_loader, device, rank, step)
         if rank == 0 and (step + 1) % pb.save_every_steps == 0:
             _save_ckpt(out / f"step-{step + 1:07d}.pt", step + 1, model, opt)
         if rank == 0 and ((step + 1) % 50 == 0 or step + 1 == total):
+            done = step + 1 - start_step
+            wait_pct = 100.0 * t_data_cum / max(1e-9, t_data_cum + t_comp_cum) if done >= 50 else -1.0
+            extra = f" data_wait={wait_pct:.1f}%" if done >= 50 else ""
             print(
                 f"[baseline] step {step + 1}/{total} loss={loss.item():.4f} lr={lr:.2e} "
-                f"({(step + 1 - start_step) / max(1e-3, time.time() - t0):.1f} it/s)",
+                f"({(step + 1 - start_step) / max(1e-3, time.time() - t0):.1f} it/s){extra}",
                 flush=True,
             )
 
     pool.shutdown(wait=True)
     _save_ckpt(out / "latest.pt", total, model, opt)
     if rank == 0:
-        (out / "train-meta.json").write_text(
-            json.dumps({"iterations": total, "bucket_hr": bucket_hr, "base_channels": pb.base_channels, "depth": pb.depth})
-        )
+        meta = {
+            "iterations": total,
+            "bucket_hr": bucket_hr,
+            "base_channels": pb.base_channels,
+            "depth": pb.depth,
+            "data_wait_pct": 100.0 * t_data_cum / max(1e-9, t_data_cum + t_comp_cum),
+        }
+        (out / "train-meta.json").write_text(json.dumps(meta, indent=2))
         print(f"[baseline] done: {out / 'latest.pt'}", flush=True)
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()
