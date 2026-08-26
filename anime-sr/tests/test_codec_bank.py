@@ -158,7 +158,11 @@ def test_encode_variant_double_pass(tmp_path: Path) -> None:
 # pipeline wiring: bank substitution in SRDataset.fetch
 # ---------------------------------------------------------------------------
 def _make_real_shard(tmp_path: Path) -> Path:
-    """A shard tar whose webp members are *real* (decodable) images."""
+    """A shard tar whose webp members are *real* (decodable) images.
+
+    2001-2010 fall in the train split; 9006 and 9270 fall in the
+    validation split (blake2b(id)%10000 < 300, checked locally at write time).
+    """
     cases = [
         (2001, 700, 600, "sfw"),
         (2002, 900, 800, "sfw"),
@@ -170,6 +174,8 @@ def _make_real_shard(tmp_path: Path) -> Path:
         (2008, 900, 800, "sfw"),
         (2009, 700, 600, "sfw"),
         (2010, 900, 800, "sfw"),
+        (9006, 700, 600, "sfw"),
+        (9270, 700, 600, "sfw"),
     ]
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tf:

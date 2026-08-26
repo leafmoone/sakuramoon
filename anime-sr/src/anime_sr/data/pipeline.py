@@ -191,7 +191,7 @@ class SRDataset(Dataset):
 
 
 def make_loader(
-    dataset: SRDataset,
+    dataset: torch.utils.data.Dataset,
     *,
     batch_size: int = 8,
     num_workers: int = 0,

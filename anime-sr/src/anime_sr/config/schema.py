@@ -393,6 +393,24 @@ class DegradationSpec(_Frozen):
 
 
 # ---------------------------------------------------------------------------
+# M2 pixel baseline run (plan §M2, step 7)
+# ---------------------------------------------------------------------------
+class PixelBaselineSpec(_Frozen):
+    """Small-scale pixel-baseline pilot (plan §M2: fidelity floor, not final quality)."""
+
+    iterations: int = 100_000
+    batch_size: int = 8
+    base_channels: int = 160  # plan §M2 band 5M-10M (160/2 -> ~9.5M)
+    depth: int = 2
+    l1_weight: float = 1.0
+    l2_weight: float = 0.0
+    save_every_steps: int = 1_000
+    val_every_steps: int = 5_000
+    num_workers: int = 4
+    out_dir: str = "output_model/pixel-baseline"
+
+
+# ---------------------------------------------------------------------------
 # root
 # ---------------------------------------------------------------------------
 class Config(_Frozen):
@@ -413,6 +431,7 @@ class Config(_Frozen):
     hardware: HardwareSpec = Field(default_factory=HardwareSpec)
     inference: InferenceSpec = Field(default_factory=InferenceSpec)
     vae: VAESpec = Field(default_factory=VAESpec)
+    pixel_baseline: PixelBaselineSpec = Field(default_factory=PixelBaselineSpec)
 
     def validate_all(self) -> None:
         self.model.validate_structure()

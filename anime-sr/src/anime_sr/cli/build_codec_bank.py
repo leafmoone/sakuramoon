@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sys
 import time
@@ -137,7 +138,7 @@ def build_crop_job(job: dict[str, Any]) -> dict[str, Any]:
             assert n_bytes == want
             tmp = p.with_suffix(".part")
             tmp.write_bytes(raw.read_bytes())
-            tmp.rename(p)
+            os.replace(tmp, p)
             n_enc += 1
         entries.append(
             {
@@ -228,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     p = out_dir / INDEX_NAME
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(doc), encoding="utf-8")
-    tmp.rename(p)
+    os.replace(tmp, p)
     n_variants = sum(len(e) for e in samples_idx.values())
     print(f"[bank] wrote {p} ({len(samples_idx)} samples, {n_variants} variants)")
     cc = Counter(e["codec"] for entries in samples_idx.values() for e in entries)
