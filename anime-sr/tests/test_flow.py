@@ -11,6 +11,7 @@ Endpoint contracts:
 
 from __future__ import annotations
 
+import pytest
 import torch
 from anime_sr.flow.path import (
     interpolate,
@@ -20,7 +21,9 @@ from anime_sr.flow.path import (
 )
 from anime_sr.flow.solver import (
     HEUN_TIMESTEPS,
+    euler_trajectory,
     four_step_heun,
+    heun_trajectory,
     one_step,
     step_heun,
 )
@@ -128,3 +131,69 @@ def test_sample_source_noise_unit_scale() -> None:
     r0 = sample_source_noise(sigma, (512, 4, 8, 8), generator=gen)
     assert torch.abs(r0.std() - 1.0) < 0.1
     assert torch.abs(r0.mean()) < 0.1
+
+
+def test_euler_trajectory_n1_equals_one_step() -> None:
+    """N=1 Euler trajectory is one_step minus the z_lr offset (plan §5.4)."""
+    r0 = torch.randn(SHAPE)
+    delta = torch.randn(SHAPE)
+    z_lr = torch.randn(SHAPE)
+    v_fn = lambda rt, t: target_velocity(delta, r0)
+    r1, states = euler_trajectory(r0, v_fn, 1)
+    assert len(states) == 1
+    assert torch.allclose(states[0], r1)
+    assert torch.allclose(z_lr + r1, one_step(r0, v_fn, z_lr))
+
+
+def test_heun_trajectory_n4_equals_four_step_heun() -> None:
+    """N=4 last-euler Heun trajectory == four_step_heun (7 evaluations)."""
+    r0 = torch.randn(SHAPE)
+    delta = torch.randn(SHAPE)
+    z_lr = torch.randn(SHAPE)
+    v_fn = lambda rt, t: target_velocity(delta, r0)
+    r4, states = heun_trajectory(r0, v_fn, 4, last_euler=True)
+    assert len(states) == 4
+    z_hat_ref = four_step_heun(r0, v_fn, z_lr)
+    assert torch.allclose(z_lr + r4, z_hat_ref, atol=1e-6)
+    assert torch.allclose(states[-1], r4)
+
+
+def test_trajectory_states_land_on_exact_path() -> None:
+    """With v = v* (constant) the exact path is r_t = r0 + t*v*; every
+    sub-step state must land on it (Euler and last-euler Heun)."""
+    r0 = torch.randn(SHAPE)
+    delta = torch.randn(SHAPE)
+    v_star = target_velocity(delta, r0)
+    v_fn = lambda rt, t: v_star
+    for solver, n in (("euler", 2), ("euler", 8), ("heun", 2), ("heun", 8)):
+        if solver == "euler":
+            r_final, states = euler_trajectory(r0, v_fn, n)
+        else:
+            r_final, states = heun_trajectory(r0, v_fn, n, last_euler=True)
+        assert len(states) == n
+        for k, s in enumerate(states):
+            expect = r0 + ((k + 1) / n) * v_star
+            assert torch.allclose(s, expect, atol=1e-5), f"{solver} n={n} k={k}"
+        # endpoint: the full path r0 + v* (plan §5.4 "z_hat = z_lr + delta")
+        assert torch.allclose(r_final, r0 + v_star, atol=1e-5)
+
+
+def test_trajectory_zero_model() -> None:
+    """v = 0: every state stays at r0 (nothing moves)."""
+    r0 = torch.randn(SHAPE)
+    v_zero = lambda rt, t: torch.zeros_like(rt)
+    r_final, states = euler_trajectory(r0, v_zero, 4)
+    assert torch.allclose(r_final, r0)
+    assert all(torch.allclose(s, r0) for s in states)
+    r_final, states = heun_trajectory(r0, v_zero, 3, last_euler=False)
+    assert torch.allclose(r_final, r0)
+    assert all(torch.allclose(s, r0) for s in states)
+
+
+def test_trajectory_rejects_bad_n_steps() -> None:
+    v_zero = lambda rt, t: torch.zeros(SHAPE)
+    r0 = torch.zeros(SHAPE)
+    with pytest.raises(ValueError):
+        euler_trajectory(r0, v_zero, 0)
+    with pytest.raises(ValueError):
+        heun_trajectory(r0, v_zero, 0)

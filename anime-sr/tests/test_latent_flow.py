@@ -22,14 +22,21 @@ def test_latent_flow_spec_defaults() -> None:
     assert lf.save_every_steps == 1_000
     assert lf.val_every_steps == 5_000
     assert lf.val_samples == 8
-    assert lf.prefetch is True
+    assert lf.prefetch_depth == 2  # double-buffered M3 default
     assert lf.out_dir == "output_model/latent-flow"
     cfg = Config()
     assert isinstance(cfg.latent_flow, LatentFlowSpec)
-    cfg2 = Config(latent_flow=LatentFlowSpec(batch_size=4, prefetch=False))
+    cfg2 = Config(latent_flow=LatentFlowSpec(batch_size=4, prefetch_depth=0))
     cfg2.validate_all()
     assert cfg2.latent_flow.batch_size == 4
-    assert cfg2.latent_flow.prefetch is False
+    assert cfg2.latent_flow.prefetch_depth == 0  # sync canary mode
+
+
+def test_prefetch_depth_quad_config() -> None:
+    """M1 #8 Phase I override: quad buffering via [latent_flow] prefetch_depth."""
+    cfg = Config(latent_flow=LatentFlowSpec(prefetch_depth=4))
+    cfg.validate_all()
+    assert cfg.latent_flow.prefetch_depth == 4
 
 
 def test_schedule_matches_m2_formula() -> None:
@@ -161,3 +168,83 @@ def test_latent_velocity_adapter() -> None:
     out = adapter(rt, t, sigma, z_lr)  # FlowSampler protocol: (rt, t, sigma, cond)
     assert torch.allclose(out, rt + z_lr)
     assert fake.calls == 1
+
+
+def _no_autocast():
+    from contextlib import nullcontext
+
+    return nullcontext()
+
+
+def test_endpoint_consistency_exact_field() -> None:
+    """Revised M3 #3: with the exact (constant) field, delta_hat_t == delta at
+    every probe time, so every endpoint L1 is 0."""
+    from anime_sr.train.latent_flow import endpoint_consistency
+    from torch import nn
+
+    z_hr = torch.randn(4, 8, 8, 8)
+    z_lr = torch.randn(4, 8, 8, 8)
+    delta = z_hr - z_lr
+
+    class _ExactField(nn.Module):
+        def forward(self, rt, z_lr_, t, sigma):
+            return delta
+
+    ep = endpoint_consistency(
+        _ExactField(), z_hr, z_lr, _no_autocast, torch.device("cpu")
+    )
+    assert set(ep) == {"ep_l1_t0", "ep_l1_t25", "ep_l1_t50", "ep_l1_t75"}
+    for k, v in ep.items():
+        assert v < 1e-5, f"{k}={v}"
+
+
+def test_trajectory_deviation_exact_field() -> None:
+    """Revised M3 #3: with the exact field every solver trajectory lands on
+    r_true(t) = t*delta (r0 = 0), so D_t == 0 at every sub-step end."""
+    from anime_sr.train.latent_flow import trajectory_deviation
+    from torch import nn
+
+    z_hr = torch.randn(4, 8, 8, 8)
+    z_lr = torch.randn(4, 8, 8, 8)
+    delta = z_hr - z_lr
+
+    class _ExactField(nn.Module):
+        def forward(self, rt, z_lr_, t, sigma):
+            return delta
+
+    dev = torch.device("cpu")
+    for solver, n in (("euler", 4), ("heun", 4)):
+        d = trajectory_deviation(
+            _ExactField(), z_hr, z_lr, solver=solver, n_steps=n,
+            autocast=_no_autocast, device=dev,
+        )
+        assert list(d) == [f"D_t{round((k + 1) / n * 100):03d}" for k in range(n)]
+        for k, v in d.items():
+            assert v < 1e-5, f"{solver} {k}={v}"
+
+
+def test_endpoint_deviation_zero_field_internal_consistency() -> None:
+    """Zero model (v = 0): 1-step L1, the endpoint L1 at t=0 and the
+    trajectory D at t=1 (euler, N=1) must all equal |z_lr - z_hr| — the
+    revised-#3 metrics are internally consistent (revised M3 #3)."""
+    from anime_sr.train.latent_flow import endpoint_consistency, trajectory_deviation
+    from torch import nn
+
+    z_hr = torch.randn(2, 8, 8, 8)
+    z_lr = torch.randn(2, 8, 8, 8)
+    l1_1 = (z_lr - z_hr).abs().mean().item()
+
+    class _ZeroField(nn.Module):
+        def forward(self, rt, z_lr_, t, sigma):
+            return torch.zeros_like(rt)
+
+    dev = torch.device("cpu")
+    ep = endpoint_consistency(_ZeroField(), z_hr, z_lr, _no_autocast, dev)
+    d1 = trajectory_deviation(
+        _ZeroField(), z_hr, z_lr, solver="euler", n_steps=1,
+        autocast=_no_autocast, device=dev,
+    )
+    assert abs(ep["ep_l1_t0"] - l1_1) < 1e-6  # endpoint at t=0 == 1-step L1
+    assert abs(d1["D_t100"] - l1_1) < 1e-6  # D at t=1 (euler N=1) == 1-step L1
+    # and the zero field degrades gracefully: later probes are no worse than t=0
+    assert ep["ep_l1_t75"] <= ep["ep_l1_t0"] + 1e-6

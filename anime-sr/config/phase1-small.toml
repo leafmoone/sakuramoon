@@ -7,3 +7,9 @@
 exposure_target = 300000
 exposure_min = 200000
 exposure_max = 500000
+
+# M1 #8 data-wait fix (M2 10k canary measured 82.5% data-wait on double
+# buffering): quad-buffer the Phase I producer so the 122.67M U-Flow
+# accelerator consumer never starves (steady-state producer >= 1.25x consumer).
+[latent_flow]
+prefetch_depth = 4

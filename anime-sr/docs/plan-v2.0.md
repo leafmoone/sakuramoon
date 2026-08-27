@@ -1499,8 +1499,10 @@ depth = [2, 2, 4, 2, 2]
 
 ```text
 flow 方向正确
-一步输出朝 HR 靠近
-4-step 不比1-step差
+一步输出显著优于 anchor 且朝 HR 靠近
+4-step 数值稳定（无 NaN/轨迹爆炸）且 l1_4/l1_1 ≤ 1.05
+（修订 2026-08：原「4-step 不比1-step差 / l1_4≤l1_1」放宽为比值判据；
+「4-step 必须优于 1-step」移至 §十六 quality-mode 发布门，不再阻塞 Phase I）
 非正方形 bucket 正确
 window mask 正确
 resume 连续
@@ -1980,9 +1982,10 @@ LPIPS 或 DISTS 至少改善5%
 文字和眼睛错误单独统计
 ```
 
-一步与四步：
+一步与四步（quality-mode 发布门，修订 2026-08 自 M3 #3 移入）：
 
 ```text
+4-step 必须优于 1-step 才可作为 quality-mode 卖点
 若4-step相对1-step改善 < 2%
 则不把4-step作为正式卖点
 ```

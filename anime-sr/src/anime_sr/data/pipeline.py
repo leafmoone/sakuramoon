@@ -13,6 +13,7 @@ training with a multi-exposure schedule calls :meth:`fetch` with explicit
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -130,6 +131,33 @@ class SRDataset(Dataset):
         arr = np.asarray(img, dtype=np.uint8).copy()
         t = torch.from_numpy(arr).permute(2, 0, 1).float()
         return t * (2.0 / 255.0) - 1.0
+
+    def decode_hr_timed(self, meta: SampleMeta) -> tuple[torch.Tensor, dict[str, float]]:
+        """:meth:`decode_hr` with shard/decode sub-stage wall times (M1 #8
+        producer profiling, §13 M3 data-throughput gate).
+
+        Returns ``(hr_full, {"shard": t, "decode": t})`` — bit-exact with
+        ``decode_hr`` (same operations, same order), split into the webp file
+        open (``shard``; the shards are extracted webp dirs, so the raw
+        WebDataset tar is already unpacked and is not a stage here) and the
+        PIL decode -> tensor (``decode``; the lazy file read lands in this
+        window).
+        """
+        p = self._webp_path(meta)
+        if not p.is_file():
+            raise FileNotFoundError(f"webp missing (extract shards first): {p}")
+        t_open = time.perf_counter()
+        img = Image.open(p)
+        t_shard = time.perf_counter() - t_open
+        t_dec0 = time.perf_counter()
+        img = img.convert("RGB")
+        if (img.width, img.height) != (meta.width, meta.height):
+            raise RuntimeError(f"size mismatch for {p}: {img.size} vs ({meta.width}, {meta.height})")
+        arr = np.asarray(img, dtype=np.uint8).copy()
+        t = torch.from_numpy(arr).permute(2, 0, 1).float()
+        out = t * (2.0 / 255.0) - 1.0
+        t_decode = time.perf_counter() - t_dec0
+        return out, {"shard": t_shard, "decode": t_decode}
 
     def crop(self, meta: SampleMeta, data_cycle: int, exposure_index: int) -> tuple[int, int]:
         seed_box = box_seed(meta.sample_id, data_cycle, exposure_index)

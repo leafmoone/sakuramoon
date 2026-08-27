@@ -15,7 +15,9 @@ import torch
 __all__ = [
     "HEUN_TIMESTEPS",
     "VelocityFn",
+    "euler_trajectory",
     "four_step_heun",
+    "heun_trajectory",
     "one_step",
     "step_euler",
     "step_heun",
@@ -75,3 +77,58 @@ def four_step_heun(
         r = step_heun(r, 0.75, 0.25, v_fn)
     # r is the integrated residual endpoint (= delta_hat); final latent (plan §5.4).
     return z_lr + r
+
+
+def euler_trajectory(
+    r0: torch.Tensor, v_fn: VelocityFn, n_steps: int
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Generic N-step Euler over [0, 1] (plan §5.4); the sweep generalization.
+
+    Splits [0, 1] into ``n_steps`` equal sub-steps (``dt = 1 / n_steps``).
+    Returns ``(r_final, states)`` where ``states[k]`` is the residual state
+    after sub-step ``k + 1`` (at ``t = (k + 1) / n_steps``). The caller forms
+    the final latent as ``z_lr + r_final`` (plan §5.4). ``n_steps = 1``
+    reduces to :func:`one_step` with ``r0`` already the source state.
+    """
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps}")
+    dt = 1.0 / n_steps
+    r = r0
+    states: list[torch.Tensor] = []
+    for k in range(n_steps):
+        r = step_euler(r, v_fn(r, k * dt), dt)
+        states.append(r)
+    return r, states
+
+
+def heun_trajectory(
+    r0: torch.Tensor,
+    v_fn: VelocityFn,
+    n_steps: int,
+    last_euler: bool = True,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Generic N-step Heun over [0, 1] (plan §5.5 generalization, sweep use).
+
+    ``n_steps`` equal sub-steps (``dt = 1 / n_steps``), each a Heun
+    predictor-corrector (two velocity evaluations), the last sub-step
+    degrading to Euler when ``last_euler`` (saves one evaluation). Returns
+    ``(r_final, states)`` with ``states[k]`` at ``t = (k + 1) / n_steps``.
+    With ``n_steps = 4, last_euler = True`` this matches :func:`four_step_heun`
+    (7 evaluations, states at 0.25 / 0.5 / 0.75 / 1.0).
+    """
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps}")
+    dt = 1.0 / n_steps
+    r = r0
+    states: list[torch.Tensor] = []
+    for k in range(n_steps):
+        t = k * dt
+        v0 = v_fn(r, t)
+        r_pred = step_euler(r, v0, dt)
+        if k == n_steps - 1 and last_euler:
+            r = r_pred  # Euler final sub-step: one evaluation
+        else:
+            v1 = v_fn(r_pred, t + dt)
+            r = r + 0.5 * dt * (v0 + v1)
+        states.append(r)
+    return r, states

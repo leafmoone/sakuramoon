@@ -41,13 +41,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bucket-hr", type=int, default=1024)
     ap.add_argument("--resume", default=None, help="checkpoint to resume from")
     ap.add_argument(
-        "--no-prefetch", action="store_true", help="disable double-buffered prefetch"
+        "--no-prefetch",
+        action="store_true",
+        help="synchronous data (prefetch_depth=0; M2-style canary)",
+    )
+    ap.add_argument(
+        "--prefetch-depth",
+        type=int,
+        default=None,
+        help="override [latent_flow].prefetch_depth (2=double, 4=quad)",
     )
     args = ap.parse_args(argv)
 
     cfg = load_config(*args.config)
     if args.no_prefetch:
-        cfg.latent_flow.prefetch = False
+        cfg.latent_flow.prefetch_depth = 0
+    elif args.prefetch_depth is not None:
+        cfg.latent_flow.prefetch_depth = args.prefetch_depth
     out_dir = args.out_dir or cfg.latent_flow.out_dir
 
     rank = int(os.environ.get("RANK", "0"))

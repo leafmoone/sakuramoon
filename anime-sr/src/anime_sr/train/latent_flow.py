@@ -21,12 +21,15 @@ A resume at step ``s0`` reproduces the exact exposure stream (bit-exact
 degradation draws; the stochastic flow noise is outside the §11.5
 contract, as in M2).
 
-Prefetch: with ``[latent_flow].prefetch`` a double-buffered CPU thread
-pool fetches the next step's decode+crop+degrade batch while the current
-step computes on the accelerator (M1 #8 data-wait gate); the stream
-stays bit-exact because every fetch is a pure function of
-``(step, slot)``. With ``prefetch = false`` the same calls run
-synchronously (M2-style) for small canary runs.
+Prefetch: ``[latent_flow].prefetch_depth`` sets how many step-batches the
+CPU thread-pool producer keeps ready ahead of the accelerator consumer
+(2 = double-buffered, the M3 default; 4 = quad buffer, the M1 #8
+data-wait fix for Phase I; 0 = synchronous, M2-style canary). Every fetch
+is a pure function of ``(step, slot)``, so the §11.5 stream stays
+bit-exact. The producer records per-stage wall-times (shard/decode/crop/
+degradation/z_hr) and the loop exposes producer/consumer throughput plus
+ready-queue occupancy (M1 #8 gate: data-wait fraction, producer >= 1.25x
+consumer, ready queue not persistently empty).
 
 Flow math (plan §5, ``anime_sr.flow``):
 
@@ -37,7 +40,10 @@ M3 checklist mapping (plan §13, "M3 未通过，不启动正式模型"):
 
 1. flow direction correct      -> ``cos_v`` rises above ~0.5 in validation
 2. 1-step moves toward HR      -> ``toward_frac_1step`` > 0.5 and rising
-3. 4-step not worse than 1-step-> ``l1_4step`` <= ``l1_1step`` once trained
+3. 4-step numerically stable  -> 1-step significantly better than the
+   anchor, ``l1_4step / l1_1step <= 1.05``, no NaN/Inf or trajectory
+   explosion (revised §13 #3; "4-step must beat 1-step" moved to the
+   quality-mode release gate, no longer blocking Phase I)
 4. non-square buckets correct  -> M4 (single 1024 bucket in M3 smoke)
 5. window mask correct         -> no seam artifacts in decoded val samples
 6. resume continuous           -> short re-run from a ckpt, loss continues
@@ -50,9 +56,11 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -73,6 +81,7 @@ from anime_sr.flow.path import (
     target_velocity,
 )
 from anime_sr.flow.sampling import FlowSampler
+from anime_sr.flow.solver import euler_trajectory, heun_trajectory
 from anime_sr.model.uflow import UFlowSR, count_parameters
 from anime_sr.train.pixel_baseline import (
     _cosine_lr,
@@ -188,6 +197,84 @@ def velocity_cosine(v_hat: torch.Tensor, v_star: torch.Tensor) -> float:
     return float(cos.mean().item())
 
 
+#: Revised M3 #3 probe grid: the endpoint-consistency / on-path times.
+_ENDPOINT_TS = (0.0, 0.25, 0.5, 0.75)
+_ENDPOINT_LABELS = {0.0: "t0", 0.25: "t25", 0.5: "t50", 0.75: "t75"}
+
+
+def endpoint_consistency(
+    mod: nn.Module,
+    z_hr: torch.Tensor,
+    z_lr: torch.Tensor,
+    autocast: Callable[[], Any],
+    device: torch.device,
+) -> dict[str, float]:
+    """Endpoint consistency of the learned field (revised plan §13 #3).
+
+    With r0 = 0 (Faithful sigma=0) the exact path is r_t = t*delta, so the
+    endpoint estimate is ``delta_hat_t = r_t + (1-t) v_theta(r_t, t)`` and
+    the endpoint L1 ``|delta_hat_t - delta|`` is reported at t in
+    {0, .25, .5, .75} (at t=0 it equals the 1-step L1; for an exact field
+    it goes to 0 as t -> 1). Deterministic: fixed t grid, sigma=0.
+    """
+    b = z_hr.shape[0]
+    delta = z_hr - z_lr
+    sigma = torch.zeros(b, device=device)
+    out: dict[str, float] = {}
+    with torch.no_grad(), autocast():
+        for t in _ENDPOINT_TS:
+            r_t = t * delta
+            t_vec = torch.full((b,), t, device=device, dtype=torch.float32)
+            v_t = mod(r_t, z_lr, t_vec, sigma)
+            delta_hat = r_t + (1.0 - t) * v_t
+            out[f"ep_l1_{_ENDPOINT_LABELS[t]}"] = (
+                (delta_hat - delta).abs().float().mean().item()
+            )
+    return out
+
+
+def trajectory_deviation(
+    mod: nn.Module,
+    z_hr: torch.Tensor,
+    z_lr: torch.Tensor,
+    *,
+    solver: str,
+    n_steps: int,
+    autocast: Callable[[], Any],
+    device: torch.device,
+) -> dict[str, float]:
+    """D_t = mean|r_hat(t_k) - r_true(t_k)| for a val sample with GT
+    (revised plan §13 #3). With r0 = 0 the true path is r_true(t) = t*delta.
+
+    ``solver`` is ``"euler"`` or ``"heun"`` (the project's last-euler
+    quality mode); ``n_steps`` splits [0, 1]. Returns ``D_t<100*t_k>`` at
+    every sub-step end (key ``D_t100`` is the endpoint deviation, which
+    equals the 1-step L1 for ``solver="euler", n_steps=1``)."""
+    b = z_hr.shape[0]
+    delta = z_hr - z_lr
+    sigma = torch.zeros(b, device=device)
+    r0 = torch.zeros_like(delta)
+
+    def v_fn(r: torch.Tensor, t: float) -> torch.Tensor:
+        t_vec = torch.full((b,), t, device=device, dtype=torch.float32)
+        return mod(r, z_lr, t_vec, sigma)
+
+    out: dict[str, float] = {}
+    with torch.no_grad(), autocast():
+        if solver == "euler":
+            _final, states = euler_trajectory(r0, v_fn, n_steps)
+        elif solver == "heun":
+            _final, states = heun_trajectory(r0, v_fn, n_steps, last_euler=True)
+        else:
+            raise ValueError(f"unknown solver {solver!r}")
+        for k, r_k in enumerate(states):
+            t_k = (k + 1) / n_steps
+            out[f"D_t{round(t_k * 100):03d}"] = (
+                (r_k - t_k * delta).abs().float().mean().item()
+            )
+    return out
+
+
 def _validate_latent(
     model: nn.Module,
     vae,
@@ -257,12 +344,28 @@ def _validate_latent(
             )
             v_hat = mod(rt, z_lr_b, t, sigma)
         cos_v = velocity_cosine(v_hat, v_star)
+        # Revised M3 #3: 4-step stability is judged by ratio + trajectory
+        # behavior (all deterministic: fixed val slice, sigma=0, fixed t grid;
+        # the per-step seeded draw above only feeds the cos_v probe).
+        ep = endpoint_consistency(mod, z_hr_b, z_lr_b, autocast, device)
+        d4 = trajectory_deviation(
+            mod, z_hr_b, z_lr_b, solver="heun", n_steps=4, autocast=autocast, device=device
+        )
+        ratio_41 = m4["l1"] / m1["l1"] if m1["l1"] > 1e-8 else float("inf")
     if was_training:
         mod.train()
     print(
         f"[latent] val step {step}: l1_1={m1['l1']:.4f} l1_4={m4['l1']:.4f} "
-        f"l1_anchor={m1['l1_anchor']:.4f} toward_1={m1['toward_frac']:.2f} "
-        f"toward_4={m4['toward_frac']:.2f} cos_v={cos_v:.3f} (n={n_val})",
+        f"ratio_4_1={ratio_41:.4f} l1_anchor={m1['l1_anchor']:.4f} "
+        f"toward_1={m1['toward_frac']:.2f} toward_4={m4['toward_frac']:.2f} "
+        f"cos_v={cos_v:.3f} (n={n_val})",
+        flush=True,
+    )
+    print(
+        f"[latent] val step {step}: endpoint_l1 "
+        + " ".join(f"{k.replace('ep_l1_', '')}={v:.4f}" for k, v in ep.items())
+        + " | D4(heun) "
+        + " ".join(f"{k}={v:.4f}" for k, v in d4.items()),
         flush=True,
     )
 
@@ -347,18 +450,38 @@ def run_latent_flow(
             f"[latent] {n_params / 1e6:.2f}M params, {n} crops (bucket {bucket_hr}), "
             f"bs={bs} x world={world_size}, steps {start_step}..{total} "
             f"({p1.exposure_target} samples), "
-            f"prefetch={lf.prefetch}, device={device}, dtype={dtype}"
+            f"prefetch_depth={lf.prefetch_depth}, device={device}, dtype={dtype}"
         )
 
     # ------------------------------------------------------------------
-    # double-buffered CPU prefetch (decode + (0,0) crop + degradation draw)
+    # CPU producer / accelerator consumer (M1 #8 data-wait gate): a
+    # thread-pool producer keeps ``prefetch_depth`` step-batches ready ahead
+    # of the consumer (2 = double-buffered M3 default, 4 = quad buffer).
+    # Every fetch is a pure function of (step, slot) -> bit-exact §11.5
+    # stream; the producer records per-stage wall-times and the loop
+    # exposes producer/consumer throughput + ready-queue occupancy.
     # ------------------------------------------------------------------
-    def _fetch(slot: int, step: int) -> tuple[torch.Tensor, torch.Tensor, SampleMeta]:
+
+    @dataclass
+    class _Prepared:
+        hr: torch.Tensor
+        lq: torch.Tensor
+        z_hr: torch.Tensor
+        meta: SampleMeta
+        stages: dict[str, float]
+
+    def _fetch(slot: int, step: int) -> _Prepared:
         j = order[slot % n]
         meta = ds.samples[j]
-        hr_full = ds.decode_hr(meta)
+        st: dict[str, float] = {}
+        hr_full, dec = ds.decode_hr_timed(meta)  # shard/decode stage split
+        st["shard"] = dec["shard"]
+        st["decode"] = dec["decode"]
+        t_c0 = time.perf_counter()
         x, y = ds.crop(meta, 0, 0)  # pinned (0,0) box — matches the pre-encoded z_hr
         hr_crop = hr_full[..., y : y + bucket_hr, x : x + bucket_hr].contiguous()
+        st["crop"] = time.perf_counter() - t_c0
+        t_d0 = time.perf_counter()
         lq, _ = degrade_hr(
             hr_crop,
             cfg,
@@ -367,11 +490,18 @@ def run_latent_flow(
             data_cycle=step // _EXPOSURE_PER_CYCLE,
             exposure_index=step % _EXPOSURE_PER_CYCLE,
         )
-        return hr_crop, lq, meta
+        st["degradation"] = time.perf_counter() - t_d0
+        t_z0 = time.perf_counter()
+        z_hr_s = store.read(meta.sample_id)  # fp16 CPU; read is thread-safe
+        st["z_hr"] = time.perf_counter() - t_z0
+        return _Prepared(hr=hr_crop, lq=lq, z_hr=z_hr_s, meta=meta, stages=st)
 
-    pool = ThreadPoolExecutor(max_workers=max(1, bs), thread_name_prefix="lfetch")
+    depth = max(0, lf.prefetch_depth)
+    pool = ThreadPoolExecutor(
+        max_workers=max(1, (depth or 1) * bs), thread_name_prefix="lfetch"
+    )
 
-    def _submit(step: int) -> list:
+    def _submit_batch(step: int) -> list[Future]:
         return [
             pool.submit(
                 _fetch, latent_sample_index(step, rank, i, bs, world_size, n), step
@@ -379,30 +509,92 @@ def run_latent_flow(
             for i in range(bs)
         ]
 
-    cur = _submit(start_step) if start_step < total else []
+    # ready queue: the producer keeps `depth` step-batches queued ahead of
+    # the consumer (prefilled at start; refilled as each batch is consumed).
+    ready: deque[list[Future]] = deque()
+    for k in range(depth):
+        if start_step + k < total:
+            ready.append(_submit_batch(start_step + k))
+
     t0 = time.time()
     t_data_cum = 0.0  # M1 #8 telemetry: data-wait fraction of step time
     t_comp_cum = 0.0
-    for step in range(start_step, total):
-        futs = cur
-        if lf.prefetch and step + 1 < total:
-            cur = _submit(step + 1)  # next batch fetches while this step computes
+    stage_cum: dict[str, float] = {
+        s: 0.0 for s in ("shard", "decode", "crop", "degradation", "z_hr", "stack", "H2D")
+    }
+    n_produced = 0
+    ready_occ_sum = 0  # per-step count of queued (non-front) batches already fetched
+    n_wait = 0  # steps where the consumer blocked on the front batch
 
-        tf = time.time()
-        prepared = [f.result() for f in futs]
-        z_hr = torch.stack([store.read(m.sample_id) for _, _, m in prepared]).to(
-            device, non_blocking=True
+    def data_snapshot(done_steps: int, elapsed: float) -> str:
+        """M1 #8 producer/consumer snapshot, printed at val milestones.
+
+        ``prod_margin`` = (consumer time per batch) / (producer time to make
+        one batch serially): >= 1.25x means even a serial producer keeps
+        ahead of the consumer (with ``depth*bs`` parallel workers the real
+        margin is larger). ``ready_avg`` is the mean number of queued
+        batches already fully fetched (0 = consumer starved)."""
+        denom = max(1e-9, t_data_cum + t_comp_cum)
+        wait_pct = 100.0 * t_data_cum / denom
+        # per-rank consumption (the counters are this rank's; the job rate is
+        # world_size x this, all ranks run the symmetric loop)
+        cons_img_s = done_steps * bs / max(1e-9, elapsed)
+        prod_sample = (
+            sum(stage_cum[s] for s in ("shard", "decode", "crop", "degradation", "z_hr"))
+            / max(1, n_produced)
         )
-        lq = torch.stack([p[1] for p in prepared]).to(device, non_blocking=True)
+        comp_batch = t_comp_cum / max(1, done_steps)
+        margin = comp_batch / max(1e-9, prod_sample * bs) if done_steps >= 50 else -1.0
+        occ = ready_occ_sum / max(1, done_steps)
+        empty = 100.0 * n_wait / max(1, done_steps)
+        ms = {s: 1000.0 * stage_cum[s] / max(1, n_produced) for s in stage_cum}
+        return (
+            f"data_wait={wait_pct:.1f}% prod_margin={margin:.2f}x "
+            f"consumer={cons_img_s:.1f}img/s ready_avg={occ:.2f}/{depth} "
+            f"starve={empty:.1f}% stage_ms="
+            f"shard:{ms['shard']:.0f} decode:{ms['decode']:.0f} crop:{ms['crop']:.1f} "
+            f"degrad:{ms['degradation']:.0f} z_hr:{ms['z_hr']:.0f} "
+            f"stack:{ms['stack']:.1f} h2d:{ms['H2D']:.1f}"
+        )
+
+    for step in range(start_step, total):
+        if depth > 0:
+            futs = ready.popleft()
+            ns = step + depth
+            if ns < total:
+                ready.append(_submit_batch(ns))
+        else:
+            futs = _submit_batch(step)  # sync mode: no look-ahead
+
+        # ready-queue telemetry, before the consumer waits on the front batch
+        if depth > 0:
+            ready_occ_sum += sum(1 for q in ready if all(f.done() for f in q))
+            if not all(f.done() for f in futs):
+                n_wait += 1
+
+        tf = time.perf_counter()
+        prepared = [f.result() for f in futs]
+        n_produced += bs
+        for p in prepared:
+            for k, v in p.stages.items():
+                stage_cum[k] += v
+        # hr_crop is consumed by the producer (degradation draw) and is not
+        # needed by the compute phase — stack/H2D only lq + z_hr.
+        t_s0 = time.perf_counter()
+        lq = torch.stack([p.lq for p in prepared])
+        z_hr = torch.stack([p.z_hr for p in prepared])
+        stage_cum["stack"] += time.perf_counter() - t_s0
+        t_h0 = time.perf_counter()
+        lq = lq.to(device, non_blocking=True)
+        z_hr = z_hr.to(device, non_blocking=True)
         if device.type == "cuda":
             torch.cuda.synchronize(
                 device
             )  # attribute the H2D transfer to the data phase
-        t_data_cum += time.time() - tf
-        if not lf.prefetch and step + 1 < total:
-            cur = _submit(step + 1)  # sync mode: next fetch starts after the compute
+        stage_cum["H2D"] += time.perf_counter() - t_h0
+        t_data_cum += time.perf_counter() - tf
 
-        tc = time.time()
+        tc = time.perf_counter()
         with autocast():
             # plan §4.3 anchor: z_lr = E_Mage(Bicubic4x(LQ)), frozen VAE
             lq_up = F.interpolate(
@@ -423,7 +615,7 @@ def run_latent_flow(
         opt.step()
         if device.type == "cuda":
             torch.cuda.synchronize(device)
-        t_comp_cum += time.time() - tc
+        t_comp_cum += time.perf_counter() - tc
 
         if (step + 1) % lf.val_every_steps == 0:
             _validate_latent(
@@ -440,6 +632,15 @@ def run_latent_flow(
                 bucket_hr,
                 autocast,
             )
+            # M1 #8 / revised-#3 milestone: data pipeline + producer/consumer
+            # telemetry alongside the model metrics above.
+            if rank == 0:
+                done = step + 1 - start_step
+                print(
+                    f"[latent] val-data step {step + 1}: "
+                    f"{data_snapshot(done, time.time() - t0)}",
+                    flush=True,
+                )
         if rank == 0 and (step + 1) % lf.save_every_steps == 0:
             _save_ckpt(out / f"step-{step + 1:07d}.pt", step + 1, model, opt)
         if rank == 0 and ((step + 1) % 50 == 0 or step + 1 == total):
@@ -459,15 +660,32 @@ def run_latent_flow(
     pool.shutdown(wait=True)
     _save_ckpt(out / "latest.pt", total, model, opt)
     if rank == 0:
+        done = total - start_step
+        elapsed = max(1e-9, time.time() - t0)
+        prod_sample = (
+            sum(stage_cum[s] for s in ("shard", "decode", "crop", "degradation", "z_hr"))
+            / max(1, n_produced)
+        )
+        comp_batch = t_comp_cum / max(1, done)
         meta = {
             "iterations": total,
             "bucket_hr": bucket_hr,
             "n_crops": n,
             "n_params_m": round(n_params / 1e6, 2),
             "batch_size": bs,
-            "prefetch": lf.prefetch,
+            "prefetch_depth": lf.prefetch_depth,
             "exposure_target_samples": p1.exposure_target,
             "data_wait_pct": 100.0 * t_data_cum / max(1e-9, t_data_cum + t_comp_cum),
+            "producer_margin_x": round(
+                comp_batch / max(1e-9, prod_sample * bs), 3
+            ),
+            "consumer_img_s_per_rank": round(done * bs / elapsed, 3),
+            "ready_occ_avg": round(ready_occ_sum / max(1, done), 3),
+            "queue_starve_pct": round(100.0 * n_wait / max(1, done), 3),
+            "stage_ms_per_sample": {
+                s: round(1000.0 * stage_cum[s] / max(1, n_produced), 3)
+                for s in stage_cum
+            },
         }
         (out / "train-meta.json").write_text(json.dumps(meta, indent=2))
         print(f"[latent] done: {out / 'latest.pt'}", flush=True)

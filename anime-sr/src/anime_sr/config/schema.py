@@ -425,9 +425,10 @@ class LatentFlowSpec(_Frozen):
     save_every_steps: int = 1_000
     val_every_steps: int = 5_000
     val_samples: int = 8
-    # double-buffered CPU prefetch: the next step's decode+crop+degrade batch
-    # is fetched while the current step computes (M1 #8: data-wait gate)
-    prefetch: bool = True
+    # CPU prefetch depth: how many step-batches the producer keeps ready ahead
+    # of the consumer (2 = double-buffered, the M3 default; 4 = quad buffer,
+    # the M1 #8 data-wait fix for Phase I). 0 = fully synchronous.
+    prefetch_depth: int = 2
     out_dir: str = "output_model/latent-flow"
 
 
