@@ -7,11 +7,12 @@
 # gradient reaches the trunk; no window seams. If M3 fails, no formal training.
 
 [model.uflow]
-# dims [192, 256, 384], depths [2, 2, 4, 2, 2] (plan §13 M3)
+# dims [192, 256, 384], depths [2, 2, 4, 2, 2] (plan §13 M3).
+# Dynamic U-Flow (option A): stride is relative to the INPUT latent grid.
 head_dim = 64
 
 [[model.uflow.stages]]
-grid = 64
+stride = 1
 dim = 192
 depth = 2
 q_heads = 3
@@ -20,7 +21,7 @@ ffn = 576
 attention = "window-8"
 
 [[model.uflow.stages]]
-grid = 32
+stride = 2
 dim = 256
 depth = 2
 q_heads = 4
@@ -29,7 +30,7 @@ ffn = 768
 attention = "window-8"
 
 [[model.uflow.stages]]
-grid = 16
+stride = 4
 dim = 384
 depth = 4
 q_heads = 6
@@ -38,7 +39,7 @@ ffn = 1152
 attention = "global"
 
 [[model.uflow.stages]]
-grid = 32
+stride = 2
 dim = 256
 depth = 2
 q_heads = 4
@@ -47,7 +48,7 @@ ffn = 768
 attention = "window-8"
 
 [[model.uflow.stages]]
-grid = 64
+stride = 1
 dim = 192
 depth = 2
 q_heads = 3
@@ -69,3 +70,8 @@ zero_init_out = true
 exposure_target = 200000
 exposure_min = 100000
 exposure_max = 200000
+
+[latent_flow]
+# smoke keeps the end-of-run held-out val light (full 128 is the
+# canary/formal default)
+val_heldout_samples = 8

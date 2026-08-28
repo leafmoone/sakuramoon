@@ -12,13 +12,20 @@ Built from the frozen config specs (anime_sr.config.schema):
             ├── GlobalConditioner (5 stage FiLMs)      §7.6
             └── OutputHead (zero-init exit)            §7.7
 
-Inputs (plan §7.5), all at 64x64 latent resolution:
+Dynamic U-Flow (option A). The input latent grid (H, W) is chosen by the
+caller per bucket (512/768/1024 HR -> 32/48/64, plus non-square crops); the
+five stage grids follow as H/2, W/2 (enc32), H/4, W/4 (bottleneck), then the
+decoder mirrors. Windows that do not tile an 8-multiple stage grid are
+zero-padded to the next 8-multiple with a key-validity mask (clipped
+neighbourhood, no wrap); exact-tile grids run the un-padded path unchanged.
 
-    h64 = P_r(r_t) + P_z(z_lr) + g64 * P_p64(p64)
+Inputs (plan §7.5), at the caller's input latent grid (H, W):
 
-* r_t  : residual path at time t, (B, 128, 64, 64) (plan §5)
-* z_lr : LQ latent anchor E_Mage(Bicubic4x(LQ)), (B, 128, 64, 64) (§4.3)
-* p64/p32/p16 + gap16 : PixelConditionEncoder outputs (§6.2, §6.3)
+    h_in = P_r(r_t) + P_z(z_lr) + g64 * P_p64(p64)
+
+* r_t  : residual path at time t, (B, 128, H, W) (plan §5)
+* z_lr : LQ latent anchor E_Mage(Bicubic4x(LQ)), (B, 128, H, W) (§4.3)
+* p64/p32/p16 + gap16 : PixelConditionEncoder outputs at H, H/2, H/4 (§6.2, §6.3)
 * t, sigma : per-sample scalar conditions (§5.6 sigma mix)
 
 Pixel projections are small-init (normal(0, 0.01)); P_z is NOT zero-init
@@ -26,8 +33,8 @@ Pixel projections are small-init (normal(0, 0.01)); P_z is NOT zero-init
 (param init 0 -> sigmoid(0) = 0.5).
 
 Tiled inference (§17.2, InferenceSpec.rope_absolute_coordinates):
-``offset`` is the tile origin in input-grid (64x64 latent) units, propagated
-to deeper stages by integer stride division.
+``offset`` is the tile origin in input-grid units, propagated to deeper
+stages by integer stride division.
 """
 
 from __future__ import annotations
@@ -49,6 +56,7 @@ from anime_sr.model.restoration_block import RestorationBlock
 __all__ = [
     "AnimeSRModel",
     "UFlowSR",
+    "apply_pixel_zero_init",
     "count_parameters",
 ]
 
@@ -63,6 +71,55 @@ def _small_init(conv: nn.Conv2d) -> None:
         nn.init.normal_(conv.weight, 0.0, 0.01)
         if conv.bias is not None:
             nn.init.zeros_(conv.bias)
+
+
+#: The four pixel-path weights that the Phase I-P transition zeroes (weights
+#: only — trained biases and learned gates are kept). See
+#: :func:`apply_pixel_zero_init` for why this is bit-identical to the
+#: trunk-only model.
+_PIXEL_ZERO_INIT_PARAMS = (
+    "proj_p64.weight",
+    "proj_p32.weight",
+    "proj_p16.weight",
+    "conditioner.gap_proj.weight",
+)
+
+
+def apply_pixel_zero_init(trunk: UFlowSR) -> list[str]:
+    """Zero the pixel-path weights of a trunk (Phase I-P transition).
+
+    A trunk-only (M4-L0) checkpoint never receives pixel gradients: the
+    pixel projections were fed zeros, so their *weights* stay at
+    small-init while their *biases* train. Zeroing exactly the four
+    weights in :data:`_PIXEL_ZERO_INIT_PARAMS` (keeping the loaded biases
+    and the learned gates) makes every pixel term input-independent:
+
+    * ``proj_p*(p') = 0 * p' + b_old`` and ``sigmoid(gate) * b_old`` are
+      identical for any pixel features (IEEE-exact: ``0 * finite == 0``),
+      the same terms the old model produced feeding zero features;
+    * ``gap_proj(gap') = 0 * gap' + b_gap_old`` — the old model fed
+      ``gap16 = 0``, so its term was the same constant ``b_gap_old``.
+
+    The result: a full AnimeSRModel with a loaded trunk-only checkpoint +
+    this zero-init is bit-identical to the checkpoint's behavior at step 0,
+    and the pixel encoder can then train from exactly that state.
+
+    Returns the parameter names zeroed (always ``_PIXEL_ZERO_INIT_PARAMS``;
+    a mismatch means the trunk structure changed and the zero-init set must
+    be re-derived). Idempotent.
+    """
+    zeroed: list[str] = []
+    for name, param in trunk.named_parameters():
+        if name in _PIXEL_ZERO_INIT_PARAMS:
+            with torch.no_grad():
+                param.zero_()
+            zeroed.append(name)
+    if set(zeroed) != set(_PIXEL_ZERO_INIT_PARAMS):
+        raise RuntimeError(
+            f"pixel zero-init mismatch: found {sorted(zeroed)}, "
+            f"expected {sorted(_PIXEL_ZERO_INIT_PARAMS)}"
+        )
+    return zeroed
 
 
 def _window_pattern(depth: int) -> list[bool]:
@@ -84,22 +141,20 @@ class UFlowSR(nn.Module):
         spec.validate_stage_geometry()
         stages = spec.stages
         d = [s.dim for s in stages]
-        grids = [s.grid for s in stages]
-        g0 = grids[0]
-        if any(g0 % g for g in grids):
-            raise ValueError(f"input grid {g0} must be a multiple of every stage grid {grids}")
-        for s in stages:
-            if s.grid % 8:
-                raise ValueError(f"stage grid {s.grid} must be divisible by the 8x8 window")
+        # Dynamic U-Flow (option A): stage grids are derived from the INPUT
+        # latent grid at forward time (stride 1/2/4/2/1), so one trunk serves
+        # 512/768/1024 (latent 32/48/64) and non-square buckets. Stage windows
+        # are padded to an 8-multiple at runtime when a stage grid is not
+        # 8-divisible (e.g. 768 HR -> 48/24/12: bottleneck 12x12 is global).
+        self.strides = [s.stride for s in stages]  # [1, 2, 4, 2, 1]
 
         self.stage_names = ("enc64", "enc32", "bottleneck16", "dec32", "dec64")
-        self.grids = grids
-        self.stage_grids: dict[str, int] = dict(zip(self.stage_names, grids))
-        self.strides = [g0 // g for g in grids]
+        self.stage_strides: dict[str, int] = dict(zip(self.stage_names, self.strides))
         self.head_dim = spec.head_dim
 
         # ---- input projection (§7.5): 128 -> d[0] at the input grid ----
         latent_ch = head_spec.dim_out  # velocity channels == latent channels (128)
+        self.latent_ch = latent_ch
         self.proj_r = nn.Conv2d(latent_ch, d[0], 1)
         self.proj_z = nn.Conv2d(latent_ch, d[0], 1)  # z_lr path: NOT zero-init
         self.proj_p64 = nn.Conv2d(128, d[0], 1)
@@ -179,20 +234,22 @@ class UFlowSR(nn.Module):
         films: StageFilms,
         offset: tuple[int, int],
     ) -> torch.Tensor:
-        """Run one stage's blocks over (B, C, H, W) features (row-major tokens)."""
-        H = W = self.stage_grids[stage]
-        Bx, C, Hx, Wx = h.shape
-        if (Hx, Wx) != (H, W):
-            raise ValueError(f"{stage} expects grid {H}x{W}, got {Hx}x{Wx}")
-        tokens = h.reshape(Bx, C, Hx * Wx).permute(0, 2, 1)  # (B, N, C)
-        s = self.strides[self.stage_names.index(stage)]
+        """Run one stage's blocks over (B, C, H, W) features (row-major tokens).
+
+        The stage grid is read from the incoming feature map (dynamic U-Flow):
+        each stage's (H, W) is whatever the down/up connectors produced, so
+        non-square and 768-class grids flow through unchanged.
+        """
+        Bx, C, H, W = h.shape
+        tokens = h.reshape(Bx, C, H * W).permute(0, 2, 1)  # (B, N, C)
+        s = self.stage_strides[stage]
         ox, oy = offset
         o = (ox // s, oy // s)  # tile origin in this stage's token units
         for blk, shift in zip(cast(nn.ModuleList, self.stages[stage]), self.stage_shifts[stage]):
             tokens = blk(
                 tokens, H, W, stage, films, self.conditioner, shift=shift, offset=o
             )
-        return tokens.permute(0, 2, 1).reshape(Bx, C, Hx, Wx)
+        return tokens.permute(0, 2, 1).reshape(Bx, C, H, W)
 
     def forward(
         self,
@@ -206,37 +263,52 @@ class UFlowSR(nn.Module):
         gap16: torch.Tensor | None = None,
         offset: tuple[int, int] = (0, 0),
     ) -> torch.Tensor:
-        """Predict residual velocity v-hat, (B, 128, grid0, grid0) (plan §5.4).
+        """Predict residual velocity v-hat, (B, 128, H, W) (plan §5.4).
 
-        r_t / z_lr: (B, 128, 64, 64); t / sigma: (B,); pixel features may be
-        None (zero conditioning, e.g. smoke tests without the pixel encoder).
+        r_t / z_lr: (B, 128, H, W) with H, W >= 8 and 4-divisible (the stage
+        strides 1/2/4 must divide the input grid); t / sigma: (B,); pixel
+        features may be None (zero conditioning, e.g. smoke tests without the
+        pixel encoder). H != W (non-square buckets) is supported.
         """
-        B = r_t.shape[0]
+        B, C, H, W = r_t.shape
+        if C != self.latent_ch:
+            raise ValueError(f"r_t must have {self.latent_ch} channels, got {C}")
+        if z_lr.shape != r_t.shape:
+            raise ValueError(f"z_lr shape {tuple(z_lr.shape)} must equal r_t shape {r_t.shape}")
+        if H < 8 or W < 8:
+            raise ValueError(f"input latent grid {H}x{W} must be at least 8x8")
+        if H % 4 or W % 4:
+            raise ValueError(
+                f"input latent grid {H}x{W} must be 4-divisible (stage strides 1/2/4)"
+            )
         device, dtype = r_t.device, r_t.dtype
 
         def zeros(ch: int, h: int, w: int) -> torch.Tensor:
             return torch.zeros((B, ch, h, w), device=device, dtype=dtype)
 
-        g0 = self.grids[0]
-        g1 = self.grids[1]
-        g2 = self.grids[2]
-        p64 = p64 if p64 is not None else zeros(128, g0, g0)
-        p32 = p32 if p32 is not None else zeros(192, g1, g1)
-        p16 = p16 if p16 is not None else zeros(256, g2, g2)
+        p64 = p64 if p64 is not None else zeros(128, H, W)
+        p32 = p32 if p32 is not None else zeros(192, H // 2, W // 2)
+        p16 = p16 if p16 is not None else zeros(256, H // 4, W // 4)
         gap16 = gap16 if gap16 is not None else torch.zeros((B, 256), device=device, dtype=dtype)
+        if p64.shape != (B, 128, H, W):
+            raise ValueError(f"p64 shape {tuple(p64.shape)} must be ({B}, 128, {H}, {W})")
+        if p32.shape != (B, 192, H // 2, W // 2):
+            raise ValueError(f"p32 shape {tuple(p32.shape)} must be ({B}, 192, {H // 2}, {W // 2})")
+        if p16.shape != (B, 256, H // 4, W // 4):
+            raise ValueError(f"p16 shape {tuple(p16.shape)} must be ({B}, 256, {H // 4}, {W // 4})")
 
         films = self.conditioner(t, sigma, gap16)
 
         # ---- input fusion (§7.5) ----
-        h64 = (
+        h_in = (
             self.proj_r(r_t)
             + self.proj_z(z_lr)
             + torch.sigmoid(self.gate_64) * self.proj_p64(p64)
         )
-        h64 = self._run_stage(h64, "enc64", films, offset)
+        h_in = self._run_stage(h_in, "enc64", films, offset)
 
         # ---- encoder path ----
-        h32 = self.down[0](h64)
+        h32 = self.down[0](h_in)
         h32 = h32 + torch.sigmoid(self.gate_32) * self.proj_p32(p32)
         h32 = self._run_stage(h32, "enc32", films, offset)
         skip_32 = h32
@@ -249,10 +321,10 @@ class UFlowSR(nn.Module):
         h = self.skip[0](torch.cat([self.up[0](h16), skip_32], dim=1))
         h = self._run_stage(h, "dec32", films, offset)
 
-        h = self.skip[1](torch.cat([self.up[1](h), h64], dim=1))
+        h = self.skip[1](torch.cat([self.up[1](h), h_in], dim=1))
         h = self._run_stage(h, "dec64", films, offset)
 
-        return self.head(h)  # (B, 128, g0, g0)
+        return self.head(h)  # (B, 128, H, W)
 
 
 class AnimeSRModel(nn.Module):
@@ -263,13 +335,19 @@ class AnimeSRModel(nn.Module):
     (anime_sr.flow) to get z-hr = z_lr + delta-hat.
     """
 
-    def __init__(self, model_spec: ModelSpec | None = None) -> None:
+    def __init__(
+        self,
+        model_spec: ModelSpec | None = None,
+        zero_init_pixel: bool = False,
+    ) -> None:
         super().__init__()
         spec = model_spec if model_spec is not None else ModelSpec()
         spec.validate_structure()
         self.model_spec = spec
         self.pixel_encoder = PixelConditionEncoder(in_channels=spec.pixel_encoder.in_channels)
         self.trunk = UFlowSR(spec.uflow, spec.output_head)
+        if zero_init_pixel:
+            apply_pixel_zero_init(self.trunk)
 
     def forward(
         self,
@@ -280,7 +358,7 @@ class AnimeSRModel(nn.Module):
         sigma: torch.Tensor,
         offset: tuple[int, int] = (0, 0),
     ) -> torch.Tensor:
-        """r_t/z_lr: (B,128,64,64); lq_rgb: (B,3,256,256) -> v-hat (B,128,64,64)."""
+        """r_t/z_lr: (B,128,H,W); lq_rgb: (B,3,4H,4W) -> v-hat (B,128,H,W)."""
         pc: PixelConditionOutputs = self.pixel_encoder(lq_rgb)
         p64, p32, p16, gap16 = pc.v1_subset()
         return self.trunk(r_t, z_lr, t, sigma, p64, p32, p16, gap16, offset=offset)

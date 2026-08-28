@@ -18,6 +18,10 @@
 
 - **模糊**：isotropic / anisotropic（方向采样）、motion、sinc（带通）；
   σ 范围（/px）：mild 0.1–0.6，normal 0.2–1.2，severe 0.5–2.0。
+  P1 ⑤（producer 提速）：iso/sinc 走 separable 两个 1D 卷积（outer-product
+  2D 卷积的精确等价，O(L²)→2·O(L)）；所有卷积边界由零填充改为
+  **reflect 填充**（模糊/锐化不再在 crop 边缘产生暗晕）——LQ 数值与
+  零填充版有 ULP/边界级差异，属 P1 计划内变更（canary 旧树不受影响）。
 - **下采样滤波器**：area / bicubic / bilinear / nearest 随机选一；
   抗混叠（anti-alias）开关独立采样。
 - **噪声**：gaussian / poisson / chroma；σ（/255 基准）：mild 0–2，

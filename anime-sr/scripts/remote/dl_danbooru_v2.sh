@@ -31,6 +31,11 @@ PAR="${PAR:-4}"
 [ -f /root/anime-sr-env ] && . /root/anime-sr-env
 : "${MODELSCOPE_API_TOKEN:?need MODELSCOPE_API_TOKEN (source /root/anime-sr-env)}"
 
+# Some distro curl builds ignore the http_proxy env var for HTTPS CONNECT;
+# pass the proxy explicitly (empty when unset -> direct connection).
+PROXY_X=""
+[ -n "${http_proxy:-}" ] && PROXY_X="-x ${http_proxy}"
+
 LOG="$DATA_DIR/download.log"
 mkdir -p "$DATA_DIR/data/1_2024"
 
@@ -48,10 +53,10 @@ blob_url() {
 # ignores Range answers 200 + Content-Length = total.
 query_total() {
   local url=$1 hdr cr cl
-  hdr=$(curl -sS -L --max-time 60 -r 0-0 -o /dev/null -D - \
+  hdr=$(curl $PROXY_X -sS -L --max-time 90 -r 0-0 -o /dev/null -D - \
     -H "Authorization: Bearer $MODELSCOPE_API_TOKEN" \
     -H "Cookie: m_session_id=$MODELSCOPE_API_TOKEN" \
-    "$url" 2>/dev/null | tr -d '\r')
+    "$url" 2>>"$LOG" | tr -d '\r') || return 1
   cr=$(printf '%s\n' "$hdr" | grep -i '^content-range:' | sed 's/.*\///')
   cl=$(printf '%s\n' "$hdr" | grep -i '^content-length:' | awk '{print $2}')
   printf '%s' "${cr:-$cl}"
@@ -81,7 +86,7 @@ dl_one() {
   log "start $z (total $total B)"
   for attempt in 1 2 3; do
     rc=0
-    curl -fsSL --max-time 900 \
+    curl $PROXY_X -fsSL --max-time 900 \
       -H "Authorization: Bearer $MODELSCOPE_API_TOKEN" \
       -H "Cookie: m_session_id=$MODELSCOPE_API_TOKEN" \
       -C - -o "$part" "$url" >>"$LOG" 2>&1 || rc=$?

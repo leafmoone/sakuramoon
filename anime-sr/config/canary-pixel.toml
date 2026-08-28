@@ -1,0 +1,46 @@
+# Phase I-P transition canary (full 122.67M U-Flow trunk + 2.18M
+# PixelConditionEncoder), run on sakrua10 after the sakrua2 migration.
+#
+#   base.toml + data.toml + canary-pixel.toml -> pixel-transition canary
+#
+# Loads the trunk-only M4-L0 checkpoint (step-0005000.pt) with the pixel
+# path zero-init (ModelSpec.zero_init_pixel): step 0 of the canary is
+# bit-identical to the checkpoint's behavior (see uflow
+# apply_pixel_zero_init + test_pixel_zero_init_identity), so the 50k-
+# exposure transition measures whether the fresh PixelConditionEncoder
+# degrades/repairs the M4-L0 field while the trunk keeps flowing.
+#
+# User-decidable: the canary window is 50k exposures (the 50k-vs-100k
+# decision; this overlay pins 50k — change exposure_target/_min for a
+# 100k canary). The fresh optimizer keeps the Phase I [optimizer] default
+# (lr 1.5e-4); override here if the transition needs a gentler pixel LR.
+#
+# Launch (2 HCU, from /root/anime-sr on sakrua10):
+#
+#   torchrun --nproc_per_node=2 -m anime_sr.cli.train_latent_flow \
+#       --config config/base.toml config/data.toml config/canary-pixel.toml \
+#       --index-dir /root/private_data/anime-sr/data/index \
+#       --webp-dir /root/private_data/anime-sr/data/webp \
+#       --latent-dir /root/private_data/anime-sr/data/latents \
+#       --vae /root/private_data/anime-sr/model/vae/mage-vae.safetensors \
+#       --out-dir /root/private_data/anime-sr/output_model/latent-flow-canary-pixel \
+#       --resume /root/private_data/anime-sr/checkpoints/latent-flow-phase1-small/step-0005000.pt
+#
+# (3125 steps/rank at bs=8 x world=2; gates: latent L1 + edge probe +
+# color + p64/p32/p16 gate motion + pixel-encoder gradients, plus the
+# M3 checklist metrics logged by the val probe.)
+
+[model]
+zero_init_pixel = true
+
+[latent_flow]
+pixel_features = true
+prefetch_depth = 4
+val_every_steps = 500
+val_samples = 128
+out_dir = "output_model/latent-flow-canary-pixel"
+
+[phase1]
+exposure_target = 50000
+exposure_min = 50000
+exposure_max = 100000

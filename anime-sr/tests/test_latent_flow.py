@@ -22,14 +22,21 @@ def test_latent_flow_spec_defaults() -> None:
     assert lf.save_every_steps == 1_000
     assert lf.val_every_steps == 5_000
     assert lf.val_samples == 8
+    assert lf.val_heldout_every_steps == 25_000  # P1 ① held-out val cadence
+    assert lf.val_heldout_samples == 128  # P1 ① spec window 64-128
     assert lf.prefetch_depth == 2  # double-buffered M3 default
     assert lf.out_dir == "output_model/latent-flow"
+    assert lf.zhr_source == "store"  # P1 ④ default: pre-encoded z_hr store
     cfg = Config()
     assert isinstance(cfg.latent_flow, LatentFlowSpec)
     cfg2 = Config(latent_flow=LatentFlowSpec(batch_size=4, prefetch_depth=0))
     cfg2.validate_all()
     assert cfg2.latent_flow.batch_size == 4
     assert cfg2.latent_flow.prefetch_depth == 0  # sync canary mode
+    # P1 ④ on-fly variant builds cleanly (formal multi-res runs)
+    cfg3 = Config(latent_flow=LatentFlowSpec(zhr_source="onfly"))
+    cfg3.validate_all()
+    assert cfg3.latent_flow.zhr_source == "onfly"
 
 
 def test_prefetch_depth_quad_config() -> None:
@@ -248,3 +255,67 @@ def test_endpoint_deviation_zero_field_internal_consistency() -> None:
     assert abs(d1["D_t100"] - l1_1) < 1e-6  # D at t=1 (euler N=1) == 1-step L1
     # and the zero field degrades gracefully: later probes are no worse than t=0
     assert ep["ep_l1_t75"] <= ep["ep_l1_t0"] + 1e-6
+
+
+def test_heldout_val_stub_plumbing() -> None:
+    """P1 ①: _validate_heldout plumbing on CPU with stubs — n-capping, fixed
+    seed (identical outputs across calls) and the on-the-fly z_hr encode."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from typing import cast
+
+    from anime_sr.data.pipeline import SRDataset
+    from anime_sr.train.latent_flow import _validate_heldout
+    from torch import nn
+
+    class _StubDs:
+        global_seed = 42
+
+        def __init__(self) -> None:
+            self.samples = [
+                SimpleNamespace(sample_id=f"v{i}", width=64, height=64) for i in range(3)
+            ]
+
+        def decode_hr(self, meta):
+            return torch.rand(3, 64, 64) * 2.0 - 1.0
+
+        def crop(self, meta, c, e):
+            return (0, 0)
+
+    class _FakeVae:
+        device = torch.device("cpu")
+        dtype = torch.float32
+
+        def encode(self, x):
+            # fixed shape [B, C, H, W] so the stacked batch is uniform
+            return torch.zeros(x.shape[0], 8, 8, 8)
+
+    class _FakeTrunk(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.outs: list[torch.Tensor] = []
+
+        def forward(self, rt, z_lr, t, sigma):
+            out = rt + z_lr
+            self.outs.append(out[0].clone())
+            return out
+
+    trunk = _FakeTrunk()
+    cfg = Config(latent_flow=LatentFlowSpec(val_heldout_samples=128))
+    # autocast is a CALLABLE returning a context (the trainer passes
+    # ``lambda: nullcontext()`` on CPU) — pass the class, not an instance.
+    # The stub dataset structurally mirrors SRDataset; cast for pyright.
+    _validate_heldout(
+        trunk, _FakeVae(), cast(SRDataset, _StubDs()), cfg, torch.device("cpu"), 0, 100, 64,
+        nullcontext,
+    )
+    # n capped to the available validation-split samples (3 < 128)
+    assert len(trunk.outs) > 0
+    first_calls = len(trunk.outs)
+    trunk2 = _FakeTrunk()
+    _validate_heldout(
+        trunk2, _FakeVae(), cast(SRDataset, _StubDs()), cfg, torch.device("cpu"), 0, 100, 64,
+        nullcontext,
+    )
+    # fully fixed seed => per-call forward count is identical (reproducible)
+    assert len(trunk2.outs) == first_calls

@@ -197,14 +197,18 @@ def _gaussian_kernel_1d(sigma: float, length: int | None = None) -> torch.Tensor
     return (k / k.sum()).view(1, 1, length, 1)
 
 
-def _blur_kernel(p: DegradationParams) -> torch.Tensor | None:
-    """2D blur kernel [1,1,k,k] (or None)."""
+def _blur_plan(p: DegradationParams) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Blur plan: ``(kernel_2d, kernel_1d)`` — exactly one non-None.
+
+    aniso/motion are inherently non-separable (2D kernel [1,1,k,k]);
+    iso/sinc run the separable 1D form (P1 ⑤: two 1D passes of
+    [1,1,L,1] instead of one 2D conv of the L×L outer product —
+    ~L× cheaper, exact up to fp32 summation order)."""
     if p.blur_kind == "none" or p.blur_sigma <= 0:
-        return None
+        return None, None
     sigma = p.blur_sigma
     if p.blur_kind == "iso":
-        k1 = _gaussian_kernel_1d(sigma)
-        return k1 @ k1.transpose(-1, -2)
+        return None, _gaussian_kernel_1d(sigma)
     if p.blur_kind == "aniso":
         # rotated 1D gaussian sampled on a square grid (deterministic)
         k1 = _gaussian_kernel_1d(sigma * 2.0)
@@ -217,7 +221,7 @@ def _blur_kernel(p: DegradationParams) -> torch.Tensor | None:
         y = -(i - half) * sa + (j - half) * ca
         r2 = x.square() + y.square()
         k2 = torch.exp(-r2 / (2.0 * max(sigma, 1e-3) ** 2))
-        return (k2 / k2.sum()).view(1, 1, length, length)
+        return (k2 / k2.sum()).view(1, 1, length, length), None
     if p.blur_kind == "motion":
         # line kernel: projection on the motion direction (Gaussian across)
         length = max(3, round(p.motion_len) | 1)
@@ -229,7 +233,7 @@ def _blur_kernel(p: DegradationParams) -> torch.Tensor | None:
         cross = (j - half) * ca - (i - half) * sa
         width = max(1.0, length * 0.15)
         k2 = torch.exp(-cross.square() / (2.0 * width**2)) * (proj.abs() <= length / 2)
-        return (k2 / k2.sum()).view(1, 1, length, length)
+        return (k2 / k2.sum()).view(1, 1, length, length), None
     if p.blur_kind == "sinc":
         # truncated-sinc low-pass (ring artifacts); cutoff ≈ 1/(2σ) cycles/px
         f = 1.0 / (2.0 * max(sigma, 0.15))
@@ -239,16 +243,38 @@ def _blur_kernel(p: DegradationParams) -> torch.Tensor | None:
         k1 = torch.where(x.abs() < 1e-6, 1.0 / (2.0 * f), torch.sin(math.pi * x / f) / (math.pi * x))
         k1 = torch.where(k1.abs() > 1e-4, k1, torch.zeros_like(k1))
         k1 = k1 / k1.sum()
-        return k1.view(1, 1, length, 1) @ k1.view(1, 1, length, 1).transpose(-1, -2)
+        return None, k1.view(1, 1, length, 1)
     raise ValueError(f"unknown blur kind {p.blur_kind}")
 
 
 def _conv2d_sym(x: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-    """Same-boundary per-channel conv (blur / unsharp). ``kernel`` is
-    [1,1,k,k]; with groups=C each channel is convolved independently."""
+    """Same-boundary per-channel conv (2D blur / unsharp). ``kernel`` is
+    [1,1,k,k]; with groups=C each channel is convolved independently.
+    P1 ⑤: REFLECT boundaries — zero padding darkened the crop edges
+    (a Gaussian blur of a flat region must stay flat)."""
     pad = kernel.size(-1) // 2
+    if pad:
+        x = F.pad(x, (pad,) * 4, mode="reflect")
     k = kernel.expand(x.size(1), 1, kernel.size(-2), kernel.size(-1))
-    return F.conv2d(x, k.to(x.device, x.dtype), padding=pad, groups=x.size(1))
+    return F.conv2d(x, k.to(x.device, x.dtype), padding=0, groups=x.size(1))
+
+
+def _conv2d_separable(x: torch.Tensor, k1: torch.Tensor) -> torch.Tensor:
+    """Separable blur: H-pass then W-pass of the 1D kernel ``k1``
+    ([1,1,L,1]), reflect boundaries. Exact equivalent of the 2D
+    conv with the outer-product kernel (P1 ⑤ speedup: O(L²) → 2·O(L)
+    per pixel); differs from the 2D form only in fp32 summation order."""
+    length = k1.size(-2)
+    pad = length // 2
+    ch = x.size(1)
+    kh = k1.expand(ch, 1, length, 1).to(x.device, x.dtype)
+    if pad:
+        x = F.pad(x, (0, 0, pad, pad), mode="reflect")  # H dim only
+    y = F.conv2d(x, kh, padding=0, groups=ch)
+    kw = k1.squeeze(-1).unsqueeze(2).expand(ch, 1, 1, length).to(x.device, x.dtype)
+    if pad:
+        y = F.pad(y, (pad, pad, 0, 0), mode="reflect")  # W dim only
+    return F.conv2d(y, kw, padding=0, groups=ch)
 
 
 def _noise_like(x: torch.Tensor, kind: str, sigma_255: float, rng: torch.Generator) -> torch.Tensor:
@@ -263,10 +289,17 @@ def _noise_like(x: torch.Tensor, kind: str, sigma_255: float, rng: torch.Generat
         mu = (x.clamp_min(0.0) + 0.5).cpu()  # shift out of [-1,0]
         n = torch.randn(x.shape, generator=rng, dtype=torch.float32) * scale * mu.sqrt()
         return n.to(x.device)
-    if kind == "chroma":  # noise on Cb/Cr only (luma channel stays clean)
-        n = torch.randn(x.shape, generator=rng, dtype=torch.float32) * scale
-        n[:, 0] = 0.0  # suppress the luma channel
-        return n.to(x.device)
+    if kind == "chroma":  # noise on Cb/Cr only (luma stays clean), in YCbCr space
+        _, cb, cr = _yuv(x)
+        cb_n = (torch.randn(cb.shape, generator=rng, dtype=torch.float32) * scale).to(
+            cb.device, cb.dtype
+        )
+        cr_n = (torch.randn(cr.shape, generator=rng, dtype=torch.float32) * scale).to(
+            cr.device, cr.dtype
+        )
+        # RGB-space noise term (zero luma by construction; _uv_y is linear in
+        # (cb, cr)) — the caller adds it to the image, like the other kinds.
+        return _uv_y(torch.zeros_like(cb), cb_n, cr_n)
     raise ValueError(f"unknown noise kind {kind}")
 
 
@@ -279,7 +312,12 @@ def _yuv(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
 
 def _uv_y(y: torch.Tensor, cb: torch.Tensor, cr: torch.Tensor) -> torch.Tensor:
-    return torch.cat([cb * 0.701 + y, y, cr * 0.886 + y], dim=1)
+    """YCbCr -> RGB inverse of ``_yuv``. R and B recover exactly; G is
+    reconstructed from luma minus the R/B contributions (BT.601 weights)."""
+    r = y + 0.701 * cb
+    b = y + 0.886 * cr
+    g = (y - 0.299 * r - 0.114 * b) / 0.587
+    return torch.cat([r, g, b], dim=1)
 
 
 def _jpeg_approx(x: torch.Tensor, quality: float, block_quantize: bool, chroma_sub: bool) -> torch.Tensor:
@@ -304,7 +342,11 @@ def _jpeg_approx(x: torch.Tensor, quality: float, block_quantize: bool, chroma_s
             y = torch.cat([core_q.view(y.shape[0], 1, h8, w8), y[..., h8:, :].clone()], dim=-2)
             y = torch.cat([y[..., :w8], y[..., w8:].clone()], dim=-1)
     if quality < 60:  # mild smearing on low quality
-        y = F.conv2d(y, torch.ones(1, 1, 3, 3, device=x.device, dtype=x.dtype) / 9.0, padding=1)
+        y = F.conv2d(
+            F.pad(y, (1,) * 4, mode="reflect"),  # P1 ⑤: reflect boundary
+            torch.ones(1, 1, 3, 3, device=x.device, dtype=x.dtype) / 9.0,
+            padding=0,
+        )
     return _uv_y(y, cb, cr)
 
 
@@ -347,10 +389,12 @@ def apply_degradation(
     # contract stays per-image [3, H, W] → work on a batch dim of 1.
     x = hr.unsqueeze(0)
 
-    # 1) blur at HR resolution
-    kernel = _blur_kernel(p)
+    # 1) blur at HR resolution (P1 ⑤: iso/sinc via separable 1D passes)
+    kernel, k1 = _blur_plan(p)
     if kernel is not None:
         x = _conv2d_sym(x, kernel)
+    elif k1 is not None:
+        x = _conv2d_separable(x, k1)
 
     # 2) downsample exactly 4x (area is low-pass by construction; torch only
     #    honours the antialias flag for bilinear/bicubic)
@@ -378,9 +422,18 @@ def apply_degradation(
     if abs(p.gamma - 1.0) > 1e-3:
         lq = _gamma(lq, p.gamma)
     if p.unsharp_amount > 0:
-        k = torch.tensor([[-0.2, -0.4, -0.2], [-0.4, 3.6, -0.4], [-0.2, -0.4, -0.2]], device=lq.device, dtype=torch.float32)
+        k = torch.tensor(
+            [[-0.2, -0.4, -0.2], [-0.4, 3.6, -0.4], [-0.2, -0.4, -0.2]],
+            device=lq.device,
+            dtype=torch.float32,
+        )
         k = k.view(1, 1, 3, 3) * p.unsharp_amount
-        lq = lq + F.conv2d(lq, k.expand(lq.size(1), 1, 3, 3), padding=1, groups=lq.size(1))
+        lq = lq + F.conv2d(
+            F.pad(lq, (1,) * 4, mode="reflect"),  # P1 ⑤: reflect boundary
+            k.expand(lq.size(1), 1, 3, 3),
+            padding=0,
+            groups=lq.size(1),
+        )
 
     # NaN/Inf guard + clamp (degradation-v1 §4)
     lq = torch.where(torch.isfinite(lq), lq, torch.zeros_like(lq))

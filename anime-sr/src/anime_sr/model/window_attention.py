@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections import OrderedDict
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 __all__ = [
@@ -138,6 +139,7 @@ class WindowAttention(nn.Module):
         self.k_norm = RMSNorm2d(head_dim) if qk_norm else nn.Identity()
         self.rope = RoPE2D(head_dim)
         self._coord_cache: OrderedDict[tuple[int, int, int, int], torch.Tensor] = OrderedDict()
+        self._mask_cache: OrderedDict[tuple[int, int], torch.Tensor] = OrderedDict()
 
     # ------------------------------------------------------------------
     def _coords(self, H: int, W: int, offset: tuple[int, int], device: torch.device) -> torch.Tensor:
@@ -156,6 +158,42 @@ class WindowAttention(nn.Module):
             self._coord_cache.popitem(last=False)
         return coords
 
+    def _shift_mask(self, H: int, W: int, device: torch.device) -> torch.Tensor:
+        """Boundary mask for shifted (rolled) windows, (gh*gw, w*w, w*w) bool.
+
+        The roll-based shift (Swin-V1 cyclic shift) makes the first/last
+        8x8 blocks wrap at the image border, so a token at the top edge
+        attends to bottom-edge tokens. The intended semantics (plan §7.2,
+        P1 boundary fix) is the *clipped* neighbourhood: a token attends
+        to the 8x8 square centred on itself, cut off at the border. Within
+        a rolled window, pair (i, j) is therefore allowed iff the
+        pre-roll (original) coordinates are < w apart in row and column.
+        Cached per (H, W); ~1 MB of bools at 128x128.
+        """
+        key = (H, W)
+        cached = self._mask_cache.get(key)
+        if cached is not None:
+            self._mask_cache.move_to_end(key)
+            return cached.to(device)
+        w = self.window_size
+        s = w // 2
+        gh, gw = H // w, W // w
+        # original coordinate of each rolled slot: roll was (-s, -s), so a
+        # slot at rolled position p holds the token from (p + s) % H/W.
+        y_orig = (torch.arange(H, dtype=torch.int64) + s) % H
+        x_orig = (torch.arange(W, dtype=torch.int64) + s) % W
+        yw = y_orig.view(gh, w)  # (gh, w): original rows of the w rolled rows
+        xw = x_orig.view(gw, w)  # (gw, w): original cols of the w rolled cols
+        ok_y = (yw[:, :, None] - yw[:, None, :]).abs() < w  # (gh, w, w)
+        ok_x = (xw[:, :, None] - xw[:, None, :]).abs() < w  # (gw, w, w)
+        # (wy, wx, i, j, i', j'): pair (i*w+j, i'*w+j') allowed iff both axes ok
+        mask = ok_y.view(gh, 1, w, 1, w, 1) & ok_x.view(1, gw, 1, w, 1, w)
+        mask = mask.reshape(gh * gw, w * w, w * w)
+        self._mask_cache[key] = mask
+        while len(self._mask_cache) > 8:
+            self._mask_cache.popitem(last=False)
+        return mask.to(device)
+
     def _windowed_attention(
         self,
         q: torch.Tensor,
@@ -165,13 +203,37 @@ class WindowAttention(nn.Module):
         W: int,
         shift: bool,
     ) -> torch.Tensor:
-        """q/k/v: (B, Hn | kv_h, N, head_dim) -> (B, N, kv_dim); 8x8 windows."""
+        """q/k/v: (B, Hn | kv_h, N, head_dim) -> (B, N, kv_dim); 8x8 windows.
+
+        Exact-tile grids (H, W multiples of the window) run the un-padded
+        path bit-identically to the original implementation; grids that do
+        not tile (dynamic U-Flow, e.g. 768 HR -> 12x12 stage grids) are
+        zero-padded to the next 8-multiple with a key-validity mask.
+        """
+        w = self.window_size
+        Hp = ((H + w - 1) // w) * w
+        Wp = ((W + w - 1) // w) * w
+        k = k.repeat_interleave(self.gqa_rep, dim=1)
+        v = v.repeat_interleave(self.gqa_rep, dim=1)
+        if Hp != H or Wp != W:
+            return self._padded_windowed(q, k, v, H, W, Hp, Wp, shift)
+        return self._exact_windowed(q, k, v, H, W, shift)
+
+    def _exact_windowed(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        H: int,
+        W: int,
+        shift: bool,
+    ) -> torch.Tensor:
+        """Un-padded path (H, W tile exactly): the original implementation,
+        kept bit-identical so frozen 64x64 checkpoints run unchanged."""
         B, Hn, N, D = q.shape
         w = self.window_size
         s = w // 2
         gh, gw = H // w, W // w
-        k = k.repeat_interleave(self.gqa_rep, dim=1)  # (B, Hn, N, D)
-        v = v.repeat_interleave(self.gqa_rep, dim=1)
 
         if shift:
             q = torch.roll(q.view(B, Hn, H, W, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hn, N, D)
@@ -187,12 +249,115 @@ class WindowAttention(nn.Module):
         qw, kw, vw = partition(q), partition(k), partition(v)
         scale = D**-0.5
         logits = torch.matmul(qw, kw.transpose(-1, -2)) * scale
-        attn = logits.float().softmax(dim=-1)
+        if shift:
+            # P1 boundary fix: block the cross-border pairs the cyclic roll
+            # introduces, restoring clipped-neighbourhood semantics. Every
+            # query keeps at least its own token (|0| < w), so no row is
+            # fully masked and the softmax is NaN-safe.
+            mask = self._shift_mask(H, W, q.device)  # (gh*gw, w*w, w*w)
+            m = ~mask.repeat(B, 1, 1).unsqueeze(1)  # (B*gh*gw, 1, w*w, w*w)
+            logits = logits.float().masked_fill(m, float("-inf"))
+            attn = logits.softmax(dim=-1)
+        else:
+            attn = logits.float().softmax(dim=-1)
         out = torch.matmul(attn.to(v.dtype), vw)  # (B*gh*gw, Hn, w*w, D)
         out = out.view(B, gh, gw, Hn, w, w, D)
         out = out.permute(0, 3, 1, 4, 2, 5, 6).reshape(B, Hn, N, D)
         if shift:
             out = torch.roll(out.view(B, Hn, H, W, D), shifts=(s, s), dims=(2, 3)).view(B, Hn, N, D)
+        return out.transpose(1, 2).reshape(B, N, Hn * D)
+
+    def _padded_windowed(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        H: int,
+        W: int,
+        Hp: int,
+        Wp: int,
+        shift: bool,
+    ) -> torch.Tensor:
+        """Padded path (dynamic U-Flow): zero-pad the (H, W) token grid to the
+        next 8-multiple (Hp, Wp) and run the same window partition, masking
+        padded keys so queries see only REAL tokens in their (clipped)
+        neighbourhood.
+
+        Mask semantics (per window, True = attend):
+          * unshifted: keys of the 8x8 block whose PRE-ROLL cell is real;
+          * shifted:   the exact-path boundary mask (cyclic 8x8 clipped
+            neighbourhood) AND key validity of the pre-roll coordinates;
+          * diagonal exemption: every query keeps its own token, so no
+            window row is fully masked -> softmax stays finite for the fake
+            (padded) queries whose outputs are discarded, and their 0-rows do
+            not feed 0*NaN into the q/k/v projection gradients.
+
+        Real queries are unaffected by the pad: a padded key is never seen by
+        a real query (masked), and RoPE coordinates of real cells equal the
+        un-padded ones, so outputs on real tokens match the exact semantics.
+        """
+        B, Hn, N, D = q.shape  # N == H*W
+        w = self.window_size
+        s = w // 2
+        gh, gw = Hp // w, Wp // w
+
+        def pad(t: torch.Tensor) -> torch.Tensor:
+            # (B, Hn, H*W, D) -> (B, Hn, Hp*Wp, D): zero bottom/right strips
+            g = t.view(B, Hn, H, W, D)
+            g = F.pad(g, (0, 0, 0, Wp - W, 0, Hp - H))
+            return g.view(B, Hn, Hp * Wp, D)
+
+        q, k, v = pad(q), pad(k), pad(v)
+        dev = q.device
+
+        # -- key validity on the PADDED grid (pre-roll coordinates) --
+        # (gh, gw, w, w) layout: the C-order (gh*gw, w*w) flatten must match
+        # the partition's window order (G = gh_i*gw + gw_j, ww = w_i*w + w_j),
+        # exactly like _shift_mask's (gh, gw, ...) broadcast.
+        if shift:
+            y_pre = (torch.arange(Hp, device=dev) + s) % Hp
+            x_pre = (torch.arange(Wp, device=dev) + s) % Wp
+            key_ok = (y_pre.view(gh, 1, w, 1) < H) & (x_pre.view(1, gw, 1, w) < W)
+        else:
+            rows = torch.arange(Hp, device=dev)
+            cols = torch.arange(Wp, device=dev)
+            key_ok = (rows.view(gh, 1, w, 1) < H) & (cols.view(1, gw, 1, w) < W)
+        key_ok_g = key_ok.reshape(gh * gw, w * w)  # (G, w*w) True = real key
+
+        if shift:
+            # roll first, then combine with the cyclic boundary mask: a real
+            # query's window keeps exactly its clipped (no-wrap) real
+            # neighbourhood, e.g. a (7,7) spike never reaches query (0,0).
+            q = torch.roll(q.view(B, Hn, Hp, Wp, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hn, Hp * Wp, D)
+            k = torch.roll(k.view(B, Hn, Hp, Wp, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hn, Hp * Wp, D)
+            v = torch.roll(v.view(B, Hn, Hp, Wp, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hn, Hp * Wp, D)
+            boundary = self._shift_mask(Hp, Wp, dev)  # (G, w*w, w*w)
+            attend = key_ok_g.view(gh * gw, 1, w * w) & boundary  # (G, w*w, w*w)
+        else:
+            attend = key_ok_g.view(gh * gw, 1, w * w)  # (G, 1, w*w)
+        # diagonal exemption (self-token always kept; fake rows stay finite)
+        attend = attend | torch.eye(w * w, dtype=torch.bool, device=dev).view(1, w * w, w * w)
+        attend = attend.view(gh * gw, w * w, w * w)
+
+        def partition(t: torch.Tensor) -> torch.Tensor:
+            x = t.view(B, Hn, gh, w, gw, w, D)
+            x = x.permute(0, 2, 4, 1, 3, 5, 6)
+            return x.reshape(B * gh * gw, Hn, w * w, D)
+
+        qw, kw, vw = partition(q), partition(k), partition(v)
+        scale = D**-0.5
+        logits = torch.matmul(qw, kw.transpose(-1, -2)) * scale
+        m = ~attend.repeat(B, 1, 1).unsqueeze(1)  # (B*G, 1, w*w, w*w)
+        logits = logits.float().masked_fill(m, float("-inf"))
+        attn = logits.softmax(dim=-1)
+        out = torch.matmul(attn.to(v.dtype), vw)  # (B*G, Hn, w*w, D)
+        out = out.view(B, gh, gw, Hn, w, w, D)
+        out = out.permute(0, 3, 1, 4, 2, 5, 6).reshape(B, Hn, Hp * Wp, D)
+        if shift:
+            out = torch.roll(out.view(B, Hn, Hp, Wp, D), shifts=(s, s), dims=(2, 3)).view(B, Hn, Hp * Wp, D)
+        # crop back to the real grid (roll BEFORE crop: real tokens near the
+        # top/left edge may have wrapped into the pad strips after the roll)
+        out = out.view(B, Hn, Hp, Wp, D)[:, :, :H, :W, :].reshape(B, Hn, N, D)
         return out.transpose(1, 2).reshape(B, N, Hn * D)
 
     def forward(

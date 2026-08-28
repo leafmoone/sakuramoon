@@ -22,6 +22,7 @@ import hashlib
 import json
 import tarfile
 import time
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,11 @@ class MetaRecord:
     year: int
     quality: str  # "priority" | "aux" | "regular" (filter pools, §10.4)
     tags_general: tuple[str, ...] = field(default_factory=tuple)
+    # danbooru-v2 meta fields (schema_version 1, plan §10.3 rows):
+    quality_tier: str = ""  # "masterpiece".."worst" ("" when absent)
+    anime_completeness: str = ""  # "polished" | "rough" | "monochrome"
+    anime_classification: str = ""  # "illustration" | "comic" | "bangumi" | "3d" | "not_painting"
+    ai_corrupted: bool = False  # the ai_image_corrupted meta key is present
 
     @property
     def sample_hash10k(self) -> int:
@@ -106,6 +112,11 @@ def _parse_meta(raw: bytes) -> MetaRecord | None:
         year = int(release.split("_", 1)[1])
     tags = m.get("tags") or {}
     general = tuple(tags.get("general") or ())
+    # danbooru-v2 meta fields (§10.3): absent in old records → "" defaults;
+    # ai_image_corrupted is present only when flagged (value "corrupted").
+    tier = m.get("quality")
+    comp = m.get("anime_completeness")
+    cls = m.get("anime_classification")
     return MetaRecord(
         sample_id=str(m["id"]),
         shard="",  # filled by the caller
@@ -116,6 +127,10 @@ def _parse_meta(raw: bytes) -> MetaRecord | None:
         year=year,
         quality="",  # filled by the caller (needs filter config)
         tags_general=general,
+        quality_tier=tier if isinstance(tier, str) else "",
+        anime_completeness=comp if isinstance(comp, str) else "",
+        anime_classification=cls if isinstance(cls, str) else "",
+        ai_corrupted="ai_image_corrupted" in m,
     )
 
 
@@ -160,11 +175,24 @@ def scan_shard(shard_path: str | Path, progress: bool = True) -> tuple[list[Meta
 
 
 def classify_quality(rec: MetaRecord, cfg: Config) -> MetaRecord:
-    """§10.4 pools: priority (quality tags) / aux (monochrome/rough/3d) / regular."""
-    tagset = set(rec.tags_general)
-    if tagset & set(cfg.filter.aux_tags):
+    """§10.4 pools from the danbooru meta fields (not tag heuristics):
+
+    - aux:      completeness in ``aux_completeness`` (monochrome/rough)
+                 or classification in ``aux_classification`` (3d)
+    - priority: completeness in ``priority_completeness`` (polished) AND
+                 classification in ``priority_classification``
+                 (illustration/bangumi/comic) AND danbooru quality tier in
+                 ``priority_quality`` (masterpiece/best/great)
+    - regular:  everything else
+    """
+    f = cfg.filter
+    if rec.anime_completeness in f.aux_completeness or rec.anime_classification in f.aux_classification:
         quality = "aux"
-    elif tagset & set(cfg.filter.priority_quality):
+    elif (
+        rec.anime_completeness in f.priority_completeness
+        and rec.anime_classification in f.priority_classification
+        and rec.quality_tier in f.priority_quality
+    ):
         quality = "priority"
     else:
         quality = "regular"
@@ -257,6 +285,10 @@ def evaluate_eligibility(rec: MetaRecord, cfg: Config) -> Eligibility:
     hit = sorted(set(rec.tags_general) & hard_tags)
     if hit:
         reasons.append("hard-tag:" + ",".join(hit))
+    if rec.ai_corrupted:
+        reasons.append("ai_image_corrupted")
+    if rec.anime_classification in cfg.filter.hard_classifications:
+        reasons.append("hard-class:" + rec.anime_classification)
     buckets = eligible_buckets(rec, cfg)
     if not buckets:
         reasons.append("size:small")
@@ -296,7 +328,14 @@ def _record_row(rec: MetaRecord, elig: Eligibility, cfg: Config) -> dict:
         "height": rec.height,
         "nsfw": rec.nsfw,
         "year": rec.year,
-        "quality": rec.quality,
+        # §10.3 row fields: danbooru quality tier + filter pool + anime fields
+        "quality": rec.quality_tier,
+        "sampling_pool": rec.quality,
+        "anime_completeness": rec.anime_completeness,
+        "anime_classification": rec.anime_classification,
+        "ai_corrupted": rec.ai_corrupted,
+        # §10.3: clean-score column, lazy stage (P1 ③) → null until computed
+        "clean_score": None,
         "eligible_train": elig.eligible_train,
         "eligible_buckets": list(elig.eligible_buckets),
         "reasons": list(elig.reasons),
@@ -397,6 +436,9 @@ def build_index(
     # deterministic first-N by sorted id, no interactive step (report only).
     excluded_ids = sorted(r.sample_id for r, e in zip(classified, elig) if not e.eligible_train)
     n_review = round(len(excluded_ids) * cfg.filter.human_review_fraction)
+    reason_counts: Counter[str] = Counter()
+    for e in elig:
+        reason_counts.update(e.reasons)
     report = {
         "version": 1,
         "n_shards": len(summaries),
@@ -407,6 +449,7 @@ def build_index(
         "n_sfw": n_sfw,
         "n_eligible_train": n_eligible,
         "n_by_quality": n_by_quality,
+        "n_by_reason": dict(reason_counts),
         "aux_fraction": (n_by_quality["aux"] / n_total) if n_total else 0.0,
         "aux_cap": cfg.filter.aux_max_fraction,
         "aux_capped": (n_by_quality["aux"] / n_total) > cfg.filter.aux_max_fraction if n_total else False,

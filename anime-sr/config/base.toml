@@ -29,7 +29,10 @@ stage_depths = [2, 2, 3, 3, 4]
 param_budget_m = [9.0, 12.0]
 
 [model.uflow]
-# plan §7.2 frozen stage table (enc 64/32 -> bot 16 -> dec 32/64)
+# plan §7.2 frozen stage table (enc 64/32 -> bot 16 -> dec 32/64 at 1024 HR).
+# Dynamic U-Flow (option A): `stride` is relative to the INPUT latent grid, so
+# the same table gives 64/32/16/32/64 at 1024, 48/24/12/24/48 at 768,
+# 32/16/8/16/32 at 512 (stages not 8-divisible are window-padded at runtime).
 head_dim = 64
 qk_norm = true
 norm = "rms"
@@ -43,7 +46,7 @@ upsample = "1x1-pixelshuffle2"
 skip_fusion = "concat-1x1"
 
 [[model.uflow.stages]]
-grid = 64
+stride = 1
 dim = 384
 depth = 4
 q_heads = 6
@@ -52,7 +55,7 @@ ffn = 1152
 attention = "window-8"
 
 [[model.uflow.stages]]
-grid = 32
+stride = 2
 dim = 512
 depth = 6
 q_heads = 8
@@ -61,7 +64,7 @@ ffn = 1536
 attention = "window-8"
 
 [[model.uflow.stages]]
-grid = 16
+stride = 4
 dim = 768
 depth = 8
 q_heads = 12
@@ -70,7 +73,7 @@ ffn = 2304
 attention = "global"
 
 [[model.uflow.stages]]
-grid = 32
+stride = 2
 dim = 512
 depth = 6
 q_heads = 8
@@ -79,7 +82,7 @@ ffn = 1536
 attention = "window-8"
 
 [[model.uflow.stages]]
-grid = 64
+stride = 1
 dim = 384
 depth = 4
 q_heads = 6

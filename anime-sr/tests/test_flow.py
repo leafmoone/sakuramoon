@@ -133,6 +133,27 @@ def test_sample_source_noise_unit_scale() -> None:
     assert torch.abs(r0.mean()) < 0.1
 
 
+def test_sample_source_noise_per_sample_epsilon() -> None:
+    """P0: epsilon is drawn per sample (full-batch randn), not broadcast.
+
+    With the old spatial-only draw + expand, r0[0] == r0[1] exactly; the
+    per-sample draw makes distinct batch elements (and per-sigma scaling)
+    independent."""
+    sigma = torch.tensor([0.05, 0.1])
+    r0 = sample_source_noise(sigma, SHAPE, generator=torch.Generator().manual_seed(11))
+    assert r0.shape == SHAPE
+    assert not torch.equal(r0[0], r0[1])
+    # per-sample scaling: r0 / sigma is the unit epsilon field (std ~ 1)
+    eps = r0 / sigma.view(2, 1, 1, 1)
+    assert abs(eps.std().item() - 1.0) < 0.2
+    assert abs(eps.mean().item()) < 0.2
+    # deterministic per seed (resume/test reproducibility)
+    again = sample_source_noise(
+        sigma, SHAPE, generator=torch.Generator().manual_seed(11)
+    )
+    assert torch.equal(r0, again)
+
+
 def test_euler_trajectory_n1_equals_one_step() -> None:
     """N=1 Euler trajectory is one_step minus the z_lr offset (plan §5.4)."""
     r0 = torch.randn(SHAPE)

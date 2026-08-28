@@ -32,7 +32,13 @@ class ProjectSpec(_Frozen):
 
 
 class PixelEncoderSpec(_Frozen):
-    """Native LQ pixel condition encoder (plan §6): 9-12M params."""
+    """Native LQ pixel condition encoder (plan §6): 9-12M params.
+
+    Dynamic (option A): the encoder is fully convolutional and serves any LQ
+    edge S = 4x the input latent grid (128/192/256 for HR 512/768/1024);
+    ``input_scales`` below is the REFERENCE (1024-HR) scale list, not a
+    runtime constraint.
+    """
 
     in_channels: int = 3
     input_scales: list[int] = Field(default_factory=lambda: [256, 128, 64, 32, 16])
@@ -43,7 +49,11 @@ class PixelEncoderSpec(_Frozen):
 
 
 class UFlowStageSpec(_Frozen):
-    grid: int
+    #: Stage spatial scale relative to the INPUT latent grid (dynamic U-Flow,
+    #: option A): 1 = input, 2 = input/2, 4 = input/4. For a 64x64 input the
+    #: frozen table below gives the plan's 64/32/16/32/64 grids; the same
+    #: spec at a 32x32 input gives 32/16/8/16/32 (512-pixel HR).
+    stride: int
     dim: int
     depth: int
     q_heads: int
@@ -53,18 +63,24 @@ class UFlowStageSpec(_Frozen):
 
 
 def _default_uflow_stages() -> list[UFlowStageSpec]:
-    """Plan §7.2 frozen table: enc 64/32 -> bot 16 -> dec 32/64."""
+    """Plan §7.2 frozen table: enc 1/2 -> bot 1/4 -> dec 2/1 (relative to input)."""
     return [
-        UFlowStageSpec(grid=64, dim=384, depth=4, q_heads=6, kv_heads=2, ffn=1152, attention="window-8"),
-        UFlowStageSpec(grid=32, dim=512, depth=6, q_heads=8, kv_heads=2, ffn=1536, attention="window-8"),
-        UFlowStageSpec(grid=16, dim=768, depth=8, q_heads=12, kv_heads=4, ffn=2304, attention="global"),
-        UFlowStageSpec(grid=32, dim=512, depth=6, q_heads=8, kv_heads=2, ffn=1536, attention="window-8"),
-        UFlowStageSpec(grid=64, dim=384, depth=4, q_heads=6, kv_heads=2, ffn=1152, attention="window-8"),
+        UFlowStageSpec(stride=1, dim=384, depth=4, q_heads=6, kv_heads=2, ffn=1152, attention="window-8"),
+        UFlowStageSpec(stride=2, dim=512, depth=6, q_heads=8, kv_heads=2, ffn=1536, attention="window-8"),
+        UFlowStageSpec(stride=4, dim=768, depth=8, q_heads=12, kv_heads=4, ffn=2304, attention="global"),
+        UFlowStageSpec(stride=2, dim=512, depth=6, q_heads=8, kv_heads=2, ffn=1536, attention="window-8"),
+        UFlowStageSpec(stride=1, dim=384, depth=4, q_heads=6, kv_heads=2, ffn=1152, attention="window-8"),
     ]
 
 
 class UFlowSpec(_Frozen):
-    """Multi-scale U-Flow Transformer (plan §7), core 121-128M params."""
+    """Multi-scale U-Flow Transformer (plan §7), core 121-128M params.
+
+    Dynamic (option A): stage grids are derived from the input latent grid at
+    forward time (stride 1/2/4/2/1), so one trunk serves 512/768/1024 (latent
+    32/48/64) and non-square buckets. Stage windows are padded to an 8-multiple
+    when a stage grid is not 8-divisible (e.g. 768 -> bottleneck 12x12).
+    """
 
     stages: list[UFlowStageSpec] = Field(default_factory=_default_uflow_stages)
     head_dim: int = 64
@@ -81,9 +97,11 @@ class UFlowSpec(_Frozen):
 
     def validate_stage_geometry(self) -> None:
         """Structural sanity checks (called by ModelSpec)."""
-        grids = [s.grid for s in self.stages]
-        if len(self.stages) != 5 or grids != [64, 32, 16, 32, 64]:
-            raise ValueError(f"U-Flow stages must be 5 with grids 64/32/16/32/64, got {grids}")
+        strides = [s.stride for s in self.stages]
+        if len(self.stages) != 5 or strides != [1, 2, 4, 2, 1]:
+            raise ValueError(f"U-Flow stages must be 5 with strides 1/2/4/2/1, got {strides}")
+        if any(s.stride < 1 for s in self.stages):
+            raise ValueError(f"stage stride must be >= 1, got {strides}")
         for s in self.stages:
             if s.dim % s.q_heads or s.dim % s.kv_heads:
                 raise ValueError(f"dim {s.dim} not divisible by q_heads {s.q_heads} / kv_heads {s.kv_heads}")
@@ -111,6 +129,11 @@ class ModelSpec(_Frozen):
     pixel_encoder: PixelEncoderSpec = Field(default_factory=PixelEncoderSpec)
     uflow: UFlowSpec = Field(default_factory=UFlowSpec)
     output_head: OutputHeadSpec = Field(default_factory=OutputHeadSpec)
+    # Phase I-P transition: zero the pixel-path *weights* (trunk
+    # proj_p64/p32/p16 + conditioner.gap_proj, see uflow.apply_pixel_zero_init)
+    # while keeping their trained biases / gates, so a trunk-only checkpoint
+    # starts from a state whose output is bit-identical to the old model.
+    zero_init_pixel: bool = False
 
     def validate_structure(self) -> None:
         self.uflow.validate_stage_geometry()
@@ -318,7 +341,13 @@ class DataSpec(_Frozen):
 
 class FilterSpec(_Frozen):
     """§10.4 filter funnel. Hard excludes are quality-gated: a fraction of
-    hard-excluded samples is sampled for human review before final drop."""
+    hard-excluded samples is sampled for human review before final drop.
+
+    Pool gating uses the danbooru-v2 meta fields (``quality`` tier,
+    ``anime_completeness``, ``anime_classification``), not tag heuristics;
+    ``ai_image_corrupted`` records and ``hard_classifications`` (plan §10.4:
+    not_painting) are hard-rejected.
+    """
 
     hard_exclude: list[str] = Field(
         default_factory=lambda: [
@@ -326,9 +355,18 @@ class FilterSpec(_Frozen):
         ]
     )
     human_review_fraction: float = 0.35
-    priority_quality: list[str] = Field(default_factory=lambda: ["masterpiece", "best", "great", "good"])
-    aux_tags: list[str] = Field(default_factory=lambda: ["monochrome", "rough", "3d"])
+    # danbooru quality tiers that qualify for the priority pool (top 3 of
+    # masterpiece/best/great/good/normal/low/worst; "good" is a normal tier)
+    priority_quality: list[str] = Field(default_factory=lambda: ["masterpiece", "best", "great"])
+    # priority pool also requires these danbooru field values
+    priority_completeness: list[str] = Field(default_factory=lambda: ["polished"])
+    priority_classification: list[str] = Field(default_factory=lambda: ["illustration", "bangumi", "comic"])
+    # aux pool: danbooru completeness / classification fields (was tag heuristic)
+    aux_completeness: list[str] = Field(default_factory=lambda: ["monochrome", "rough"])
+    aux_classification: list[str] = Field(default_factory=lambda: ["3d"])
     aux_max_fraction: float = 0.20
+    # classifications hard-rejected outright (plan §10.4: not_painting)
+    hard_classifications: list[str] = Field(default_factory=lambda: ["not_painting"])
     crop_retention_min: float = 0.80
     clean_score_stage: Literal["lazy"] = "lazy"
     clean_score_cache: bool = True
@@ -414,22 +452,41 @@ class PixelBaselineSpec(_Frozen):
 # M3/M4 latent flow run (plan §5, §13, §14; §4.3 pre-encode design)
 # ---------------------------------------------------------------------------
 class LatentFlowSpec(_Frozen):
-    """Latent flow-matching loop over a pre-encoded z_hr store.
+    """Latent flow-matching loop over z_hr (store or on-the-fly encode).
 
-    z_hr is read from the LatentStore (fp16, crop pinned at box (0,0));
-    z_lr = E_Mage(Bicubic4x(LQ)) is computed on the fly by the frozen VAE
-    (plan §4.3). The exposure budget comes from [phase1] (the smoke overlay
-    shrinks it to the M3 100k-200k window); the loop mechanics live here."""
+    z_hr comes from the LatentStore (fp16, crop pinned at box (0,0)) when
+    ``zhr_source="store"`` (the default, 1024-only canary runs) or is
+    encoded on the fly by the frozen VAE in the consumer when
+    ``zhr_source="onfly"`` (P1 ④, formal multi-resolution Phase I-P);
+    z_lr = E_Mage(Bicubic4x(LQ)) is always computed on the fly by the
+    frozen VAE (plan §4.3). The exposure budget comes from [phase1] (the
+    smoke overlay shrinks it to the M3 100k-200k window); the loop
+    mechanics live here."""
 
     batch_size: int = 8
     save_every_steps: int = 1_000
     val_every_steps: int = 5_000
     val_samples: int = 8
+    # P1 ① held-out validation: validation split (not the train stream),
+    # z_hr encoded on the fly by the frozen VAE (no store row for val
+    # samples), fully fixed seed → reproducible run-to-run. Fires on the
+    # cadence below AND at the end of the run (deduplicated). 0 disables.
+    val_heldout_every_steps: int = 25_000
+    val_heldout_samples: int = 128  # spec window 64-128; min(128, available)
     # CPU prefetch depth: how many step-batches the producer keeps ready ahead
     # of the consumer (2 = double-buffered, the M3 default; 4 = quad buffer,
     # the M1 #8 data-wait fix for Phase I). 0 = fully synchronous.
     prefetch_depth: int = 2
     out_dir: str = "output_model/latent-flow"
+    # Phase I-P: train the full AnimeSRModel (PixelConditionEncoder + U-Flow
+    # trunk) with the degraded LQ RGB feeding the pixel path, instead of the
+    # trunk-only UFlowSR used by the M3/M4-L0 latent runs.
+    pixel_features: bool = False
+    # P1 ④: source of z_hr. "store" = pre-encoded LatentStore (the 1024-only
+    # canary runs); "onfly" = encode the HR crop with the frozen VAE in the
+    # consumer (formal multi-resolution Phase I-P — no store required, any
+    # bucket size; the producer then only prepares hr + lq).
+    zhr_source: Literal["store", "onfly"] = "store"
 
 
 # ---------------------------------------------------------------------------

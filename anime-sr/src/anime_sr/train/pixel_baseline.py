@@ -127,8 +127,21 @@ def run_pixel_baseline(
 
         bank = CodecBank(cfg.data.bank_dir)
 
-    ds = SRDataset(index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train", bank=bank)
-    val_ds = SRDataset(index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="validation", bank=bank)
+    # P1 ③ §10.5: lazy clean-score cache (compute on first read, then cached)
+    clean_cache = None
+    if cfg.filter.clean_score_stage == "lazy" and cfg.filter.clean_score_cache:
+        from anime_sr.data.clean_score import CleanScoreCache
+
+        clean_cache = CleanScoreCache(index_dir)
+
+    ds = SRDataset(
+        index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train",
+        bank=bank, clean_score_cache=clean_cache,
+    )
+    val_ds = SRDataset(
+        index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="validation",
+        bank=bank, clean_score_cache=clean_cache,
+    )
     val_loader = make_loader(_ValView(val_ds), batch_size=pb.batch_size, shuffle=False) if pb.val_every_steps > 0 else None
 
     model = PixelBaseline(pb.base_channels, pb.depth).to(device)

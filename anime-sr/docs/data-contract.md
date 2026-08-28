@@ -38,11 +38,25 @@ exposure_index)），无静默跳样本，worker 错误必须能终止训练，d
 
 ## 4. 过滤规则（§10.4，`config/data.toml [filter]`）
 
+池归属用 danbooru-v2 meta 字段（不再用 tag 启发式）：
+
 - 硬排除：nsfw / gore / blood / logo / watermark / signature / text-heavy-ui；
   其中 35% 抽样人审后再丢弃（quality-gated）。
-- 优先级池：quality ∈ {masterpiece, best, great, good}。
-- 辅助池（monochrome / rough / 3d）上限 20%。
-- crop 保留率 ≥ 80% 主体才保留；clean-score 惰性计算 + 缓存。
+- 硬拒：`ai_image_corrupted` 标记（meta 键存在即拒）；
+  `anime_classification` ∈ hard_classifications（not_painting，~3.7%）。
+- 优先级池：quality ∈ {masterpiece, best, great}（danbooru 7 档顶层 3 档，
+  "good" 为普通档）且 anime_completeness = polished 且
+  anime_classification ∈ {illustration, bangumi, comic}。
+- 辅助池（anime_completeness ∈ monochrome/rough 或 3d 分类）上限 20%。
+- crop 保留率 ≥ 80% 主体才保留；clean-score 惰性计算 + 缓存（P1 ③，§10.5）：
+  行内 `clean_score` 列在 index 时恒为 null；`clean_score_stage="lazy"` 时
+  数据管线首次读取每张 HR（train/validation 解码路径）计算 6 项分量
+  （blockiness / ringing / blur / flat-region noise / upscale suspicion /
+  edge overshoot，纯张量启发式、无随机、确定性）并取均值写入
+  `data/index/clean-score-v1.jsonl`（`{"sample_id","score"}`，O_APPEND，
+  DDP 双 rank 共享；进程内读穿缓存保证每样本每进程只算一次）。
+  Phase I 仅作遥测；阈值/权重校准留 Phase II。`clean_score_cache=false`
+  或 stage 非 lazy 时管线不挂钩。
 
 ## 5. 验证集（§16.1）
 

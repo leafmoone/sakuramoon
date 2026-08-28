@@ -9,8 +9,9 @@ Usage (single HCU / multi-HCU DDP via torchrun):
         --vae .../mage-vae.safetensors --out-dir .../output_model/latent-flow-smoke
     torchrun --nproc_per_node=2 -m anime_sr.cli.train_latent_flow ...
 
-Trains the latent-only UFlowSR on the pre-encoded z_hr store: z_lr is
-computed on the fly as E_Mage(Bicubic4x(LQ)) (plan §4.3). See
+Trains the latent-only UFlowSR over z_hr (pre-encoded store, or P1 ④
+on-the-fly VAE encode via ``[latent_flow].zhr_source = "onfly"``); z_lr
+is always computed on the fly as E_Mage(Bicubic4x(LQ)) (plan §4.3). See
 ``train/latent_flow.py`` for the M3 checklist mapping.
 """
 
@@ -32,7 +33,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--index-dir", required=True)
     ap.add_argument("--webp-dir", required=True)
     ap.add_argument(
-        "--latent-dir", required=True, help="LatentStore root (index-v1.json + z/)"
+        "--latent-dir",
+        default=None,
+        help="LatentStore root (index-v1.json + z/); required unless "
+        "[latent_flow].zhr_source = \"onfly\" (P1 ④ on-the-fly z_hr)",
     )
     ap.add_argument(
         "--vae", default=None, help="Mage-VAE weights (default: [vae].path)"
@@ -58,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg.latent_flow.prefetch_depth = 0
     elif args.prefetch_depth is not None:
         cfg.latent_flow.prefetch_depth = args.prefetch_depth
+    if cfg.latent_flow.zhr_source == "store" and args.latent_dir is None:
+        raise SystemExit("--latent-dir is required for zhr_source=\"store\"")
     out_dir = args.out_dir or cfg.latent_flow.out_dir
 
     rank = int(os.environ.get("RANK", "0"))

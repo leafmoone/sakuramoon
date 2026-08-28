@@ -1,7 +1,9 @@
 """Pixel Condition Encoder (plan §6.2, §6.3, §7.5).
 
-Encodes the 256x256 LQ image into per-scale conditioning features for the
-U-Flow trunk:
+Encodes the LQ image into per-scale conditioning features for the U-Flow
+trunk. The stack is fully convolutional and serves any LQ edge S = 4x the
+input latent grid (dynamic U-Flow, option A): S = 128/192/256 for HR
+512/768/1024, square or non-square. Reference (1024 HR) scale ladder:
 
     RGB 256x256
       Stem 3x3 Conv (3 -> 48) + 2 blocks (48ch)
@@ -108,10 +110,14 @@ class PixelConditionEncoder(nn.Module):
         self.blocks_s16 = nn.Sequential(*(PixelConditionBlock(256) for _ in range(4)))
 
     def forward(self, x: torch.Tensor) -> PixelConditionOutputs:
-        """x: (B, 3, 256, 256) -> PixelConditionOutputs."""
+        """x: (B, 3, S, S') with S, S' divisible by 16 (S = 4x the input
+        latent grid edge; 128/192/256 for HR 512/768/1024) -> outputs."""
         _, C, H, W = x.shape
-        if (C, H, W) != (3, 256, 256):
-            raise ValueError(f"expected (B, 3, 256, 256), got {tuple(x.shape)}")
+        if C != 3 or H % 16 or W % 16:
+            raise ValueError(
+                f"expected (B, 3, S, S') with S, S' divisible by 16 "
+                f"(LQ = 4x the input latent grid), got {tuple(x.shape)}"
+            )
         h = self.blocks_s256(self.stem(x))
         p256 = h
         h = self.blocks_s128(self.down_256(h))

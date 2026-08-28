@@ -65,8 +65,11 @@ def sample_source_noise(
     device: torch.device | str | None = None,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """r0 = sigma * epsilon, epsilon ~ N(0, I) (plan §5.2).
+    """r0 = sigma * epsilon, epsilon ~ N(0, I) per sample (plan §5.2).
 
-    sigma: (B,) -> r0: (B, *rest) where rest = shape[1:]."""
-    eps = torch.randn(shape[1:], device=device, dtype=dtype, generator=generator).expand(shape)
+    sigma: (B,) -> r0: (B, *rest) where rest = shape[1:]. The epsilon draw
+    covers the full batch (explicit-shape randn; ``randn_like`` does not
+    accept ``generator=`` on the DTK build), so every sample gets its own
+    noise field rather than a shared one."""
+    eps = torch.randn(shape, device=device, dtype=dtype, generator=generator)
     return sigma.view(-1, *([1] * (len(shape) - 1))) * eps

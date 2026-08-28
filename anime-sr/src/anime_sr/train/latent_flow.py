@@ -71,6 +71,7 @@ from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from anime_sr.config.schema import Config
+from anime_sr.data.clean_score import CleanScoreCache
 from anime_sr.data.degradation import degrade_hr
 from anime_sr.data.latent_store import LatentStore, read_index
 from anime_sr.data.pipeline import _EXPOSURE_PER_CYCLE, SampleMeta, SRDataset
@@ -82,7 +83,12 @@ from anime_sr.flow.path import (
 )
 from anime_sr.flow.sampling import FlowSampler
 from anime_sr.flow.solver import euler_trajectory, heun_trajectory
-from anime_sr.model.uflow import UFlowSR, count_parameters
+from anime_sr.model.uflow import (
+    AnimeSRModel,
+    UFlowSR,
+    apply_pixel_zero_init,
+    count_parameters,
+)
 from anime_sr.train.pixel_baseline import (
     _cosine_lr,
     _load_ckpt,
@@ -115,6 +121,26 @@ class _LatentVelocity(nn.Module):
     ) -> torch.Tensor:
         z_lr = cond
         return self.trunk(rt, z_lr, t, sigma)
+
+
+class _PixelVelocity(nn.Module):
+    """Adapts ``AnimeSRModel`` to the FlowSampler ``VelocityModel`` protocol
+    ``v = model(rt, t, sigma, cond)`` with ``cond = (z_lr, lq_rgb)`` — the
+    Phase I-P pixel path is active (plan §8 transition)."""
+
+    def __init__(self, model: AnimeSRModel) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(
+        self,
+        rt: torch.Tensor,
+        t: torch.Tensor,
+        sigma: torch.Tensor,
+        cond: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        z_lr, lq = cond
+        return self.model(rt, z_lr, lq, t, sigma)
 
 
 def latent_sample_index(
@@ -208,6 +234,7 @@ def endpoint_consistency(
     z_lr: torch.Tensor,
     autocast: Callable[[], Any],
     device: torch.device,
+    lq: torch.Tensor | None = None,
 ) -> dict[str, float]:
     """Endpoint consistency of the learned field (revised plan §13 #3).
 
@@ -216,6 +243,11 @@ def endpoint_consistency(
     the endpoint L1 ``|delta_hat_t - delta|`` is reported at t in
     {0, .25, .5, .75} (at t=0 it equals the 1-step L1; for an exact field
     it goes to 0 as t -> 1). Deterministic: fixed t grid, sigma=0.
+
+    ``lq`` (Phase I-P pixel model): when given, ``mod`` is the full
+    AnimeSRModel and the velocity call feeds the pixel path
+    (``mod(r_t, z_lr, lq, t_vec, sigma)``); trunk-only models leave it
+    None.
     """
     b = z_hr.shape[0]
     delta = z_hr - z_lr
@@ -225,7 +257,7 @@ def endpoint_consistency(
         for t in _ENDPOINT_TS:
             r_t = t * delta
             t_vec = torch.full((b,), t, device=device, dtype=torch.float32)
-            v_t = mod(r_t, z_lr, t_vec, sigma)
+            v_t = mod(r_t, z_lr, lq, t_vec, sigma) if lq is not None else mod(r_t, z_lr, t_vec, sigma)
             delta_hat = r_t + (1.0 - t) * v_t
             out[f"ep_l1_{_ENDPOINT_LABELS[t]}"] = (
                 (delta_hat - delta).abs().float().mean().item()
@@ -242,6 +274,7 @@ def trajectory_deviation(
     n_steps: int,
     autocast: Callable[[], Any],
     device: torch.device,
+    lq: torch.Tensor | None = None,
 ) -> dict[str, float]:
     """D_t = mean|r_hat(t_k) - r_true(t_k)| for a val sample with GT
     (revised plan §13 #3). With r0 = 0 the true path is r_true(t) = t*delta.
@@ -257,6 +290,8 @@ def trajectory_deviation(
 
     def v_fn(r: torch.Tensor, t: float) -> torch.Tensor:
         t_vec = torch.full((b,), t, device=device, dtype=torch.float32)
+        if lq is not None:
+            return mod(r, z_lr, lq, t_vec, sigma)
         return mod(r, z_lr, t_vec, sigma)
 
     out: dict[str, float] = {}
@@ -281,7 +316,7 @@ def _validate_latent(
     ds: SRDataset,
     order: list[int],
     n: int,
-    store: LatentStore,
+    store: LatentStore | None,
     cfg: Config,
     device: torch.device,
     rank: int,
@@ -289,19 +324,28 @@ def _validate_latent(
     bucket_hr: int,
     autocast: Callable[[], Any],
 ) -> None:
-    """Quantitative M3 checklist subset on a fixed val slice (rank 0 only)."""
+    """Quantitative M3 checklist subset on a fixed val slice (rank 0 only).
+
+    ``store=None`` (P1 ④ ``zhr_source="onfly"``): the val slice is built
+    from the train index, so the samples have no pre-encoded rows — z_hr is
+    encoded on the fly with the frozen VAE, like the held-out val path."""
     if rank != 0:
         return
     lf = cfg.latent_flow
     mod = _unwrap(model)
     was_training = mod.training
     mod.eval()
-    sampler = FlowSampler(_LatentVelocity(cast(UFlowSR, mod)))
+    pixel = lf.pixel_features
+    if pixel:
+        sampler = FlowSampler(_PixelVelocity(cast(AnimeSRModel, mod)))
+    else:
+        sampler = FlowSampler(_LatentVelocity(cast(UFlowSR, mod)))
     g = torch.Generator(device=str(device)).manual_seed(0x5EED ^ (step % (2**31)))
     n_val = min(lf.val_samples, n)
     js = [order[k % n] for k in range(n_val)]
     z_hrs: list[torch.Tensor] = []
     z_lrs: list[torch.Tensor] = []
+    lqs: list[torch.Tensor] = []
     with torch.no_grad():
         for j in js:
             meta = ds.samples[j]
@@ -324,17 +368,32 @@ def _validate_latent(
                 lq.unsqueeze(0), size=(bucket_hr, bucket_hr), mode="bicubic"
             ).squeeze(0)
             z_lr = vae.encode(lq_up.unsqueeze(0).to(vae.device, vae.dtype)).squeeze(0)
-            z_hr = store.read(meta.sample_id).to(vae.dtype)
+            if store is not None:
+                z_hr = store.read(meta.sample_id).to(vae.dtype)
+            else:
+                # P1 ④ on-fly: no store — encode the HR crop (frozen VAE, §4.3)
+                z_hr = vae.encode(
+                    hr_crop.unsqueeze(0).to(vae.device, vae.dtype)
+                ).squeeze(0)
             z_hrs.append(z_hr)
             z_lrs.append(z_lr)
+            if pixel:
+                lqs.append(lq)  # (3, h, w) fp32 at LQ resolution
         z_hr_b = torch.stack(z_hrs).to(device)
         z_lr_b = torch.stack(z_lrs).to(device)
+        lq_b: torch.Tensor | None = (
+            torch.stack(lqs).to(device) if pixel else None
+        )
         # Run the model forwards under the same autocast as the train loop:
         # build_flow_targets emits fp32 ``t``/``rt`` (the §5.3 uniform-t draw
         # is fp32) which would otherwise hit the bf16 trunk weights raw.
         with autocast():
-            z1 = sampler.one_step(z_lr_b, z_lr_b, sigma=0.0, generator=g)
-            z4 = sampler.four_step(z_lr_b, z_lr_b, sigma=0.0, generator=g)
+            if pixel:
+                z1 = sampler.one_step(z_lr_b, (z_lr_b, lq_b), sigma=0.0, generator=g)
+                z4 = sampler.four_step(z_lr_b, (z_lr_b, lq_b), sigma=0.0, generator=g)
+            else:
+                z1 = sampler.one_step(z_lr_b, z_lr_b, sigma=0.0, generator=g)
+                z4 = sampler.four_step(z_lr_b, z_lr_b, sigma=0.0, generator=g)
         m1 = latent_val_metrics(z_hr_b, z_lr_b, z1)
         m4 = latent_val_metrics(z_hr_b, z_lr_b, z4)
         # flow-direction probe at a random t (reproducible per step)
@@ -342,14 +401,23 @@ def _validate_latent(
             rt, v_star, sigma, t = build_flow_targets(
                 z_hr_b, z_lr_b, cfg, generator=g, device=device
             )
-            v_hat = mod(rt, z_lr_b, t, sigma)
+            v_hat = (
+                mod(rt, z_lr_b, lq_b, t, sigma) if pixel else mod(rt, z_lr_b, t, sigma)
+            )
         cos_v = velocity_cosine(v_hat, v_star)
         # Revised M3 #3: 4-step stability is judged by ratio + trajectory
         # behavior (all deterministic: fixed val slice, sigma=0, fixed t grid;
         # the per-step seeded draw above only feeds the cos_v probe).
-        ep = endpoint_consistency(mod, z_hr_b, z_lr_b, autocast, device)
+        ep = endpoint_consistency(mod, z_hr_b, z_lr_b, autocast, device, lq=lq_b)
         d4 = trajectory_deviation(
-            mod, z_hr_b, z_lr_b, solver="heun", n_steps=4, autocast=autocast, device=device
+            mod,
+            z_hr_b,
+            z_lr_b,
+            solver="heun",
+            n_steps=4,
+            autocast=autocast,
+            device=device,
+            lq=lq_b,
         )
         ratio_41 = m4["l1"] / m1["l1"] if m1["l1"] > 1e-8 else float("inf")
     if was_training:
@@ -370,12 +438,131 @@ def _validate_latent(
     )
 
 
+def _validate_heldout(
+    model: nn.Module,
+    vae,
+    val_ds: SRDataset,
+    cfg: Config,
+    device: torch.device,
+    rank: int,
+    step: int,
+    bucket_hr: int,
+    autocast: Callable[[], Any],
+) -> None:
+    """P1 ① held-out validation (rank 0 only).
+
+    Sampled from the VALIDATION split (never the train stream) with a fully
+    fixed seed, so the numbers are reproducible run-to-run and comparable
+    across runs. Held-out samples have no pre-encoded store row (the
+    LatentStore covers train crops only), so z_hr is encoded on the fly by
+    the frozen VAE — the same path the P1 ④ on-the-fly design generalizes.
+    """
+    if rank != 0:
+        return
+    lf = cfg.latent_flow
+    n = min(lf.val_heldout_samples, len(val_ds.samples))
+    if n <= 0:
+        return
+    mod = _unwrap(model)
+    was_training = mod.training
+    mod.eval()
+    pixel = lf.pixel_features
+    if pixel:
+        sampler = FlowSampler(_PixelVelocity(cast(AnimeSRModel, mod)))
+    else:
+        sampler = FlowSampler(_LatentVelocity(cast(UFlowSR, mod)))
+    # Fixed seed (no step mix): the held-out slice must be reproducible.
+    g = torch.Generator(device=str(device)).manual_seed(0x5EED)
+    z_hrs: list[torch.Tensor] = []
+    z_lrs: list[torch.Tensor] = []
+    lqs: list[torch.Tensor] = []
+    with torch.no_grad():
+        for k in range(n):
+            # validation split order = index order (deterministic artifact)
+            meta = val_ds.samples[k]
+            hr_full = val_ds.decode_hr(meta)
+            x, y = val_ds.crop(meta, _VAL_CYCLE, _VAL_EXPOSURE)
+            hr_crop = hr_full[..., y : y + bucket_hr, x : x + bucket_hr].contiguous()
+            lq, _ = degrade_hr(
+                hr_crop,
+                cfg,
+                global_seed=val_ds.global_seed,
+                sample_id=meta.sample_id,
+                data_cycle=_VAL_CYCLE,
+                exposure_index=_VAL_EXPOSURE,
+            )
+            lq_up = F.interpolate(
+                lq.unsqueeze(0), size=(bucket_hr, bucket_hr), mode="bicubic"
+            ).squeeze(0)
+            z_lr = vae.encode(lq_up.unsqueeze(0).to(vae.device, vae.dtype)).squeeze(0)
+            # held-out samples have no store row: encode the HR crop with the
+            # frozen VAE (mirrors the train-path z_hr construction, §4.3)
+            z_hr = vae.encode(
+                hr_crop.unsqueeze(0).to(vae.device, vae.dtype)
+            ).squeeze(0)
+            z_hrs.append(z_hr)
+            z_lrs.append(z_lr)
+            if pixel:
+                lqs.append(lq)
+        z_hr_b = torch.stack(z_hrs).to(device)
+        z_lr_b = torch.stack(z_lrs).to(device)
+        lq_b: torch.Tensor | None = (
+            torch.stack(lqs).to(device) if pixel else None
+        )
+        with autocast():
+            if pixel:
+                z1 = sampler.one_step(z_lr_b, (z_lr_b, lq_b), sigma=0.0, generator=g)
+                z4 = sampler.four_step(z_lr_b, (z_lr_b, lq_b), sigma=0.0, generator=g)
+            else:
+                z1 = sampler.one_step(z_lr_b, z_lr_b, sigma=0.0, generator=g)
+                z4 = sampler.four_step(z_lr_b, z_lr_b, sigma=0.0, generator=g)
+        m1 = latent_val_metrics(z_hr_b, z_lr_b, z1)
+        m4 = latent_val_metrics(z_hr_b, z_lr_b, z4)
+        with autocast():
+            rt, v_star, sigma, t = build_flow_targets(
+                z_hr_b, z_lr_b, cfg, generator=g, device=device
+            )
+            v_hat = (
+                mod(rt, z_lr_b, lq_b, t, sigma) if pixel else mod(rt, z_lr_b, t, sigma)
+            )
+        cos_v = velocity_cosine(v_hat, v_star)
+        ep = endpoint_consistency(mod, z_hr_b, z_lr_b, autocast, device, lq=lq_b)
+        d4 = trajectory_deviation(
+            mod,
+            z_hr_b,
+            z_lr_b,
+            solver="heun",
+            n_steps=4,
+            autocast=autocast,
+            device=device,
+            lq=lq_b,
+        )
+        ratio_41 = m4["l1"] / m1["l1"] if m1["l1"] > 1e-8 else float("inf")
+    if was_training:
+        mod.train()
+    print(
+        f"[latent] heldout-val step {step}: l1_1={m1['l1']:.4f} "
+        f"l1_4={m4['l1']:.4f} ratio_4_1={ratio_41:.4f} "
+        f"l1_anchor={m1['l1_anchor']:.4f} toward_1={m1['toward_frac']:.2f} "
+        f"toward_4={m4['toward_frac']:.2f} cos_v={cos_v:.3f} "
+        f"(n={n}, validation split)",
+        flush=True,
+    )
+    print(
+        f"[latent] heldout-val step {step}: endpoint_l1 "
+        + " ".join(f"{k.replace('ep_l1_', '')}={v:.4f}" for k, v in ep.items())
+        + " | D4(heun) "
+        + " ".join(f"{k}={v:.4f}" for k, v in d4.items()),
+        flush=True,
+    )
+
+
 def run_latent_flow(
     cfg: Config,
     *,
     index_dir: str | Path,
     webp_dir: str | Path,
-    latent_dir: str | Path,
+    latent_dir: str | Path | None,
     out_dir: str | Path,
     vae_path: str | None = None,
     bucket_hr: int = 1024,
@@ -384,7 +571,10 @@ def run_latent_flow(
     start_step: int = 0,
     resume: str | Path | None = None,
 ) -> int:
-    """Train (or resume) the M3/M4 latent flow model; returns the final step."""
+    """Train (or resume) the M3/M4 latent flow model; returns the final step.
+
+    ``latent_dir`` may be ``None`` for P1 ④ ``zhr_source="onfly"`` (no
+    pre-encoded store; z_hr is encoded in the consumer)."""
     lf = cfg.latent_flow
     p1 = cfg.phase1
     # plan §15.1: the exposure budget is a SAMPLE budget (hardware-invariant);
@@ -409,28 +599,130 @@ def run_latent_flow(
     )
 
     # data: pre-encoded z_hr store (index order = deterministic stream order)
-    store = LatentStore(latent_dir, bucket_hr)
-    doc = read_index(latent_dir)
-    sids = sorted(doc["samples"].keys())
-    ds = SRDataset(index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train")
-    sid_to_idx = {m.sample_id: i for i, m in enumerate(ds.samples)}
-    missing = [s for s in sids if s not in sid_to_idx]
-    if missing:
-        raise RuntimeError(
-            f"{len(missing)} latent sample ids missing from the train index "
-            f"(e.g. {missing[:3]}); rebuild the latent store from this index"
-        )
-    order = [sid_to_idx[s] for s in sids]
-    n = len(order)
+    # — or P1 ④ on-fly mode: no store, z_hr encoded in the consumer.
+    onfly = lf.zhr_source == "onfly"
+    store: LatentStore | None = None
+    sids: list[str] = []
+    if not onfly:
+        if latent_dir is None:
+            raise ValueError("zhr_source='store' requires latent_dir")
+        store = LatentStore(latent_dir, bucket_hr)
+        doc = read_index(latent_dir)
+        sids = sorted(doc["samples"].keys())
+
+    # P1 ⑤: pin torch CPU intra-op threads. The thread-pool producer runs
+    # many workers IN THIS process, each issuing small CPU torch ops
+    # (degrade / stack); if every worker inherited the default intra-op
+    # pool the cores oversubscribe (workers × N threads) and steal cycles
+    # from the HCU. Parallelism comes from the worker count, not from
+    # intra-op threads.
+    if torch.get_num_threads() > 1:
+        torch.set_num_threads(1)
+
+    # P1 ③ §10.5: lazy clean-score cache (compute on first read, then cached)
+    clean_cache: CleanScoreCache | None = None
+    if cfg.filter.clean_score_stage == "lazy" and cfg.filter.clean_score_cache:
+        clean_cache = CleanScoreCache(index_dir)
+        if rank == 0:
+            print(
+                f"[latent] clean-score: lazy stage enabled, "
+                f"{len(clean_cache)} already cached @ {clean_cache.path}",
+                flush=True,
+            )
+
+    ds = SRDataset(
+        index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train",
+        clean_score_cache=clean_cache,
+    )
+    if onfly:
+        # P1 ④: no store — the stream is the train-index order (deterministic)
+        order = list(range(len(ds.samples)))
+        n = len(order)
+        if rank == 0:
+            print(
+                f"[latent] zhr_source=onfly: {n} train crops (bucket {bucket_hr}), "
+                f"z_hr encoded on the fly by the frozen VAE (no store)",
+                flush=True,
+            )
+    else:
+        sid_to_idx = {m.sample_id: i for i, m in enumerate(ds.samples)}
+        missing = [s for s in sids if s not in sid_to_idx]
+        if missing:
+            raise RuntimeError(
+                f"{len(missing)} latent sample ids missing from the train index "
+                f"(e.g. {missing[:3]}); rebuild the latent store from this index"
+            )
+        order = [sid_to_idx[s] for s in sids]
+        n = len(order)
+
+    # P1 ①: held-out validation split. Val samples have no LatentStore rows
+    # (the store covers train crops), so _validate_heldout encodes z_hr on
+    # the fly with the frozen VAE. 0 disables the held-out probe entirely;
+    # a missing/empty validation split soft-disables it (logged, not fatal).
+    val_ds: SRDataset | None = None
+    if lf.val_heldout_samples > 0:
+        try:
+            val_ds = SRDataset(
+                index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="validation",
+                clean_score_cache=clean_cache,
+            )
+        except (RuntimeError, ValueError):
+            val_ds = None
+        if val_ds is not None and rank == 0:
+            print(
+                f"[latent] held-out val: {len(val_ds.samples)} validation-split "
+                f"samples for bucket {bucket_hr} "
+                f"(n={min(lf.val_heldout_samples, len(val_ds.samples))} per probe)",
+                flush=True,
+            )
+        elif val_ds is None and lf.val_heldout_samples > 0 and rank == 0:
+            print(
+                "[latent] held-out val disabled: no validation-split samples "
+                "eligible for this bucket",
+                flush=True,
+            )
 
     vae = load_frozen_vae(vae_path or cfg.vae.path, device, dtype=dtype)
-    model = UFlowSR(cfg.model.uflow, cfg.model.output_head).to(device, dtype=dtype)
+    if lf.pixel_features:
+        model = AnimeSRModel(
+            cfg.model, zero_init_pixel=cfg.model.zero_init_pixel
+        ).to(device, dtype=dtype)
+    else:
+        model = UFlowSR(cfg.model.uflow, cfg.model.output_head).to(device, dtype=dtype)
     n_params = count_parameters(model)
     opt = _optimizer_for(cfg, model)
     if resume is not None:
-        start_step = _load_ckpt(Path(resume), model, opt, device)
-        if rank == 0:
-            print(f"[latent] resumed at step {start_step} from {resume}")
+        if lf.pixel_features:
+            # Phase I-P transition: a trunk-only (M4-L0) checkpoint carries no
+            # pixel_encoder.* keys and its optimizer state is trunk-only. Load
+            # the weights non-strict (missing keys must be pixel_encoder.*
+            # only), keep a fresh optimizer, and re-apply the zero-init —
+            # load_state_dict overwrote the pixel weights.
+            payload = torch.load(Path(resume), map_location=device)
+            res = model.load_state_dict(payload["model"], strict=False)
+            bad_missing = [
+                k for k in res.missing_keys if not k.startswith("pixel_encoder.")
+            ]
+            if bad_missing or res.unexpected_keys:
+                raise RuntimeError(
+                    f"trunk-only resume mismatch: missing {bad_missing[:8]}, "
+                    f"unexpected {res.unexpected_keys[:8]}"
+                )
+            start_step = int(payload["step"])
+            if cfg.model.zero_init_pixel:
+                zeroed = apply_pixel_zero_init(cast(AnimeSRModel, model).trunk)
+                if rank == 0:
+                    print(f"[latent] pixel zero-init re-applied after resume: {zeroed}")
+            if rank == 0:
+                print(
+                    f"[latent] resumed trunk weights at step {start_step} from "
+                    f"{resume} (fresh optimizer; {len(res.missing_keys)} "
+                    f"pixel_encoder keys absent by design)"
+                )
+        else:
+            start_step = _load_ckpt(Path(resume), model, opt, device)
+            if rank == 0:
+                print(f"[latent] resumed at step {start_step} from {resume}")
     if world_size > 1 and dist.is_available() and dist.is_initialized():
         model = DDP(
             model,
@@ -449,7 +741,7 @@ def run_latent_flow(
         print(
             f"[latent] {n_params / 1e6:.2f}M params, {n} crops (bucket {bucket_hr}), "
             f"bs={bs} x world={world_size}, steps {start_step}..{total} "
-            f"({p1.exposure_target} samples), "
+            f"({p1.exposure_target} samples), zhr={lf.zhr_source}, "
             f"prefetch_depth={lf.prefetch_depth}, device={device}, dtype={dtype}"
         )
 
@@ -466,7 +758,7 @@ def run_latent_flow(
     class _Prepared:
         hr: torch.Tensor
         lq: torch.Tensor
-        z_hr: torch.Tensor
+        z_hr: torch.Tensor | None  # None in P1 ④ on-fly mode (consumer encodes)
         meta: SampleMeta
         stages: dict[str, float]
 
@@ -492,7 +784,10 @@ def run_latent_flow(
         )
         st["degradation"] = time.perf_counter() - t_d0
         t_z0 = time.perf_counter()
-        z_hr_s = store.read(meta.sample_id)  # fp16 CPU; read is thread-safe
+        if store is not None:
+            z_hr_s = store.read(meta.sample_id)  # fp16 CPU; read is thread-safe
+        else:
+            z_hr_s = None  # P1 ④ on-fly: the consumer encodes z_hr
         st["z_hr"] = time.perf_counter() - t_z0
         return _Prepared(hr=hr_crop, lq=lq, z_hr=z_hr_s, meta=meta, stages=st)
 
@@ -520,7 +815,8 @@ def run_latent_flow(
     t_data_cum = 0.0  # M1 #8 telemetry: data-wait fraction of step time
     t_comp_cum = 0.0
     stage_cum: dict[str, float] = {
-        s: 0.0 for s in ("shard", "decode", "crop", "degradation", "z_hr", "stack", "H2D")
+        s: 0.0
+        for s in ("shard", "decode", "crop", "degradation", "z_hr", "zhr_enc", "stack", "H2D")
     }
     n_produced = 0
     ready_occ_sum = 0  # per-step count of queued (non-front) batches already fetched
@@ -554,6 +850,7 @@ def run_latent_flow(
             f"starve={empty:.1f}% stage_ms="
             f"shard:{ms['shard']:.0f} decode:{ms['decode']:.0f} crop:{ms['crop']:.1f} "
             f"degrad:{ms['degradation']:.0f} z_hr:{ms['z_hr']:.0f} "
+            f"zhr_enc:{ms['zhr_enc']:.1f} "
             f"stack:{ms['stack']:.1f} h2d:{ms['H2D']:.1f}"
         )
 
@@ -578,15 +875,25 @@ def run_latent_flow(
         for p in prepared:
             for k, v in p.stages.items():
                 stage_cum[k] += v
-        # hr_crop is consumed by the producer (degradation draw) and is not
-        # needed by the compute phase — stack/H2D only lq + z_hr.
+        # store mode: hr_crop is consumed by the producer (degradation draw)
+        # and is not needed by the compute phase — stack/H2D only lq + z_hr.
+        # P1 ④ on-fly: the hr crop feeds the consumer-side VAE encode.
         t_s0 = time.perf_counter()
         lq = torch.stack([p.lq for p in prepared])
-        z_hr = torch.stack([p.z_hr for p in prepared])
+        if store is not None:
+            z_hr = torch.stack([p.z_hr for p in prepared])
+        else:
+            z_hr = None
+        hr_b = (
+            None if store is not None else torch.stack([p.hr for p in prepared])
+        )
         stage_cum["stack"] += time.perf_counter() - t_s0
         t_h0 = time.perf_counter()
         lq = lq.to(device, non_blocking=True)
-        z_hr = z_hr.to(device, non_blocking=True)
+        if z_hr is not None:
+            z_hr = z_hr.to(device, non_blocking=True)
+        if hr_b is not None:
+            hr_b = hr_b.to(device, non_blocking=True)
         if device.type == "cuda":
             torch.cuda.synchronize(
                 device
@@ -601,9 +908,22 @@ def run_latent_flow(
                 lq.float(), size=(bucket_hr, bucket_hr), mode="bicubic"
             )
             z_lr = vae.encode(lq_up.to(dtype))
-            z_hr = z_hr.to(dtype)
+            if z_hr is not None:
+                z_hr = z_hr.to(dtype)
+            else:
+                # P1 ④: on-fly z_hr — frozen VAE encodes the HR crop here
+                # (inputs are requires_grad-free leaves; §4.3).
+                assert hr_b is not None  # set in the stack block above
+                t_e0 = time.perf_counter()
+                z_hr = vae.encode(hr_b.to(dtype))
+                stage_cum["zhr_enc"] += time.perf_counter() - t_e0
             rt, v_star, sigma, _t = build_flow_targets(z_hr, z_lr, cfg, device=device)
-            v_hat = model(rt, z_lr, _t, sigma)  # DDP syncs gradients on the backward
+            if lf.pixel_features:
+                # Phase I-P: the pixel path consumes the degraded LQ directly
+                # (the full model computes the encoder features internally).
+                v_hat = model(rt, z_lr, lq, _t, sigma)  # DDP syncs gradients on the backward
+            else:
+                v_hat = model(rt, z_lr, _t, sigma)  # DDP syncs gradients on the backward
             loss = F.mse_loss(v_hat.float(), v_star.float())
         opt.zero_grad()
         loss.backward()
@@ -641,6 +961,22 @@ def run_latent_flow(
                     f"{data_snapshot(done, time.time() - t0)}",
                     flush=True,
                 )
+        # P1 ①: held-out val on its own cadence AND at run end (dedup)
+        if val_ds is not None and (
+            (step + 1 == total)
+            or ((step + 1) % lf.val_heldout_every_steps == 0 and step + 1 < total)
+        ):
+            _validate_heldout(
+                model,
+                vae,
+                val_ds,
+                cfg,
+                device,
+                rank,
+                step + 1,
+                bucket_hr,
+                autocast,
+            )
         if rank == 0 and (step + 1) % lf.save_every_steps == 0:
             _save_ckpt(out / f"step-{step + 1:07d}.pt", step + 1, model, opt)
         if rank == 0 and ((step + 1) % 50 == 0 or step + 1 == total):
@@ -658,8 +994,10 @@ def run_latent_flow(
             )
 
     pool.shutdown(wait=True)
-    _save_ckpt(out / "latest.pt", total, model, opt)
+    if world_size > 1 and dist.is_available() and dist.is_initialized():
+        dist.barrier()
     if rank == 0:
+        _save_ckpt(out / "latest.pt", total, model, opt)
         done = total - start_step
         elapsed = max(1e-9, time.time() - t0)
         prod_sample = (
@@ -675,6 +1013,7 @@ def run_latent_flow(
             "batch_size": bs,
             "prefetch_depth": lf.prefetch_depth,
             "exposure_target_samples": p1.exposure_target,
+            "zhr_source": lf.zhr_source,
             "data_wait_pct": 100.0 * t_data_cum / max(1e-9, t_data_cum + t_comp_cum),
             "producer_margin_x": round(
                 comp_batch / max(1e-9, prod_sample * bs), 3

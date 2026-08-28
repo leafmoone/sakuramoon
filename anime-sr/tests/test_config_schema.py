@@ -18,8 +18,8 @@ def test_base_loads_with_frozen_values() -> None:
     assert cfg.project.scale == 4
     assert cfg.model.latent_channels == 128
     assert cfg.model.latent_downsample == 16
-    grids = [s.grid for s in cfg.model.uflow.stages]
-    assert grids == [64, 32, 16, 32, 64]
+    strides = [s.stride for s in cfg.model.uflow.stages]
+    assert strides == [1, 2, 4, 2, 1]  # dynamic U-Flow: relative to input latent grid
     assert cfg.model.uflow.stages[2].attention == "global"
     assert cfg.flow.pred == "v"
     assert cfg.flow.solver_4step == "heun"

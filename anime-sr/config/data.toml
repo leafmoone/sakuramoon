@@ -16,10 +16,20 @@ outputs = [
 # (quality-gated) before they are dropped.
 hard_exclude = ["nsfw", "gore", "blood", "logo", "watermark", "signature", "text-heavy-ui"]
 human_review_fraction = 0.35
-priority_quality = ["masterpiece", "best", "great", "good"]
-# aux pool: monochrome / rough / 3d tags — capped at 20% of the dataset
-aux_tags = ["monochrome", "rough", "3d"]
+# danbooru quality tiers for the priority pool (top 3 of 7; "good" is normal):
+# masterpiece / best / great
+priority_quality = ["masterpiece", "best", "great"]
+# priority pool also requires these danbooru meta field values (plan §10.4:
+# polished / illustration / bangumi / comic)
+priority_completeness = ["polished"]
+priority_classification = ["illustration", "bangumi", "comic"]
+# aux pool: danbooru completeness / classification fields (was tag heuristic)
+aux_completeness = ["monochrome", "rough"]
+aux_classification = ["3d"]
+# aux pool capped at 20% of the dataset
 aux_max_fraction = 0.20
+# classifications hard-rejected (plan §10.4: not_painting)
+hard_classifications = ["not_painting"]
 # crops must retain >= 80% of a subject to be kept
 crop_retention_min = 0.80
 # clean-score: computed lazily, cached

@@ -24,35 +24,55 @@ from anime_sr.data.index import (
 CFG = Config()
 
 
-def _meta(id_: int, w: int | None, h: int | None, nsfw: str = "sfw", general: list[str] | None = None) -> str:
-    return json.dumps(
-        {
-            "schema_version": 1,
-            "id": id_,
-            "source": {"dataset": "danbooru", "release": "1_2024", "original_path": f"1_2024/{id_}.webp"},
-            "image": {"format": "webp", "width": w, "height": h},
-            "nsfw": nsfw,
-            "tags": {"general": general or ["anime", "solo_female"]},
-        }
-    )
+def _meta(
+    id_: int,
+    w: int | None,
+    h: int | None,
+    nsfw: str = "sfw",
+    general: list[str] | None = None,
+    tier: str = "",
+    completeness: str = "",
+    classification: str = "",
+    ai_corrupted: bool = False,
+) -> str:
+    doc = {
+        "schema_version": 1,
+        "id": id_,
+        "source": {"dataset": "danbooru", "release": "1_2024", "original_path": f"1_2024/{id_}.webp"},
+        "image": {"format": "webp", "width": w, "height": h},
+        "nsfw": nsfw,
+        "tags": {"general": general or ["anime", "solo_female"]},
+    }
+    if tier:
+        doc["quality"] = tier
+    if completeness:
+        doc["anime_completeness"] = completeness
+    if classification:
+        doc["anime_classification"] = classification
+    if ai_corrupted:
+        doc["ai_image_corrupted"] = "corrupted"
+    return json.dumps(doc)
 
 
 def _make_shard(tmp_path: Path, name: str = "shard-000000.tar") -> Path:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tf:
-        cases: list[tuple[int, int | None, int | None, str, list[str] | None]] = [
-            (1001, 2000, 1500, "sfw", ["masterpiece", "illustration"]),  # priority, all buckets
-            (1002, 900, 800, "sfw", None),  # regular, 512/768 only
-            (1003, 400, 300, "sfw", None),  # too small for any bucket
-            (1004, 1600, 1200, "nsfw", None),  # nsfw hard exclude
-            (1005, 1600, 1200, "sfw", ["watermark"]),  # hard-tag exclude
-            (1006, 3000, 2000, "sfw", ["monochrome"]),  # aux pool
-            (1007, None, None, "sfw", None),  # unresolved dims (JSON null) → dropped
+        cases = [
+            # (id, w, h, nsfw, general, tier, completeness, classification, ai)
+            (1001, 2000, 1500, "sfw", ["anime"], "masterpiece", "polished", "illustration", False),  # priority, all buckets
+            (1002, 900, 800, "sfw", None, "normal", "polished", "illustration", False),  # regular tier, 512/768 only
+            (1003, 400, 300, "sfw", None, "normal", "polished", "illustration", False),  # too small
+            (1004, 1600, 1200, "nsfw", None, "normal", "polished", "illustration", False),  # nsfw hard exclude
+            (1005, 1600, 1200, "sfw", ["watermark"], "normal", "polished", "illustration", False),  # hard-tag
+            (1006, 3000, 2000, "sfw", None, "good", "monochrome", "illustration", False),  # aux pool (completeness)
+            (1007, None, None, "sfw", None, "normal", "polished", "illustration", False),  # unresolved dims
+            (1008, 1600, 1200, "sfw", None, "masterpiece", "polished", "illustration", True),  # ai-corrupted hard reject
+            (1009, 1600, 1200, "sfw", None, "masterpiece", "polished", "not_painting", False),  # not_painting hard reject
         ]
-        for cid, w, h, nsfw, general in cases:
+        for cid, w, h, nsfw, general, tier, completeness, classification, ai in cases:
             stem = f"danbooru/5.9/1_2024/{cid}"
             webp_bytes = b"webp-bytes"
-            json_bytes = _meta(cid, w, h, nsfw, general).encode()
+            json_bytes = _meta(cid, w, h, nsfw, general, tier, completeness, classification, ai).encode()
             t_webp = tarfile.TarInfo(f"{stem}.webp")
             t_webp.size = len(webp_bytes)  # addfile only writes content when size > 0
             tf.addfile(t_webp, io.BytesIO(webp_bytes))
@@ -67,8 +87,8 @@ def _make_shard(tmp_path: Path, name: str = "shard-000000.tar") -> Path:
 def test_scan_shard(tmp_path: Path) -> None:
     p = _make_shard(tmp_path)
     records, summary = scan_shard(p, progress=False)
-    assert len(records) == 6  # 1007 (null dims) is dropped as unresolved
-    assert summary.n_images == 6 and summary.n_sfw == 5
+    assert len(records) == 8  # 1007 (null dims) is dropped as unresolved
+    assert summary.n_images == 8 and summary.n_sfw == 7
     assert summary.n_unresolved == 1
     r1 = next(r for r in records if r.sample_id == "1001")
     assert r1.rel_path == "danbooru/5.9/1_2024/1001.webp"
@@ -90,25 +110,44 @@ def test_eligibility_funnel(tmp_path: Path) -> None:
     assert not e4.eligible_train and any(r.startswith("nsfw:") for r in e4.reasons)
     e5 = evaluate_eligibility(by_id["1005"], CFG)
     assert not e5.eligible_train and any(r.startswith("hard-tag:") for r in e5.reasons)
-    assert by_id["1001"].quality == "priority"
-    assert by_id["1006"].quality == "aux"
+    # danbooru-field hard rejects (P1 ②)
+    e8 = evaluate_eligibility(by_id["1008"], CFG)
+    assert not e8.eligible_train and "ai_image_corrupted" in e8.reasons
+    e9 = evaluate_eligibility(by_id["1009"], CFG)
+    assert not e9.eligible_train and any(r.startswith("hard-class:not_painting") for r in e9.reasons)
+    # pools from danbooru fields, not tag heuristics
+    assert by_id["1001"].quality == "priority"  # masterpiece + polished + illustration
+    assert by_id["1002"].quality == "regular"  # "normal" tier is not a priority tier
+    assert by_id["1006"].quality == "aux"  # monochrome completeness
 
 
 def test_build_index_artifacts(tmp_path: Path) -> None:
     shard = _make_shard(tmp_path)
     out = tmp_path / "index"
     report = build_index([str(shard)], CFG, out)
-    assert report["n_images"] == 6
+    assert report["n_images"] == 8
     assert report["n_unresolved"] == 1
-    assert report["n_eligible_train"] == 3  # 1001, 1002, 1006
+    assert report["n_eligible_train"] == 3  # 1001, 1002, 1006 (1008/1009 hard-rejected)
+    # reason codes recorded per image (P1 ②)
+    assert report["n_by_reason"]["ai_image_corrupted"] == 1
+    assert report["n_by_reason"]["hard-class:not_painting"] == 1
     # eligibility table readable back (parquet or jsonl)
     rows = list(iter_index(report["paths"]["eligibility"]))
-    assert len(rows) == 6
+    assert len(rows) == 8
+    by_id = {r["sample_id"]: r for r in rows}
+    # §10.3 row fields: danbooru tier + pool + anime fields + lazy clean-score
+    assert by_id["1001"]["quality"] == "masterpiece"
+    assert by_id["1001"]["sampling_pool"] == "priority"
+    assert by_id["1001"]["anime_completeness"] == "polished"
+    assert by_id["1001"]["anime_classification"] == "illustration"
+    assert by_id["1008"]["ai_corrupted"] is True
+    assert by_id["1002"]["ai_corrupted"] is False
+    assert by_id["1001"]["clean_score"] is None
     ids = {r["sample_id"] for r in rows if r["is_validation"]}
     # validation doc: structural zero overlap
     val_doc = json.loads((out / "sr-validation-v1.json").read_text())
     assert val_doc["zero_overlap"] is True
-    assert val_doc["n_train"] + val_doc["n_validation"] == 6
+    assert val_doc["n_train"] + val_doc["n_validation"] == 8
     # split determinism
     records, _ = scan_shard(shard, progress=False)
     assert all(is_validation(r, CFG) == (r.sample_id in val_doc["validation_ids"]) for r in records)
@@ -155,7 +194,7 @@ def test_build_index_size_overrides(tmp_path: Path) -> None:
     overrides = {"1001": (700, 600), "1003": (512, 512), "9999": (9, 9)}  # 9999 not indexed
     report = build_index([str(shard)], CFG, out, size_overrides=overrides)
     assert report["n_size_corrected"] == 2
-    assert report["n_size_missing"] == 4  # 6 indexed, 2 overridden
+    assert report["n_size_missing"] == 6  # 8 indexed, 2 overridden
     rows = {r["sample_id"]: r for r in iter_index(report["paths"]["eligibility"])}
     # 1001: 2000x1500 meta -> 700x600 actual: min 600 → 512 bucket only
     assert (rows["1001"]["width"], rows["1001"]["height"]) == (700, 600)
@@ -168,6 +207,6 @@ def test_build_index_size_overrides(tmp_path: Path) -> None:
     assert rows["1002"]["eligible_buckets"] == [512, 768]
     # funnel: 1001, 1002, 1003 (newly eligible), 1006 → 4
     assert report["n_eligible_train"] == 4
-    # validation split unaffected (id-based)
+    # validation split unaffected by size overrides (id-based)
     val_doc = json.loads((out / "sr-validation-v1.json").read_text())
-    assert val_doc["n_train"] + val_doc["n_validation"] == 6
+    assert val_doc["n_train"] + val_doc["n_validation"] == 8
