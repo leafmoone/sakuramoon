@@ -47,6 +47,14 @@ _WORKER_CONTEXT = mp.get_context("spawn")
 _MAX_TORCH_SEED = 2**64 - 1
 _LEASE_RETRY_SECONDS = 0.25
 
+# Backstop for a genuinely wedged data supply: if the queue stays empty (no
+# in-flight shard and no grantable lease) longer than this, fail loudly
+# instead of spinning silently.  The service resolves an epoch boundary on
+# its own (force rollover in service.py, sub-second), so this limit only
+# fires when the supply is broken beyond the service's own recovery — and
+# should stay below the NCCL watchdog so the data layer names the cause.
+_DRAIN_STALL_LIMIT_SECONDS = 240.0
+
 
 class CollateError(ValueError):
     """Samples cannot form one homogeneous training batch."""
@@ -872,15 +880,27 @@ def iter_service_batches(
         submit_available()
 
     def drain() -> Iterator[TrainingBatch]:
+        stall_since: float | None = None
         try:
             submit_available()
             while True:
                 if not queued:
                     if client.health():
                         return
+                    now = time.monotonic()
+                    if stall_since is None:
+                        stall_since = now
+                    elif now - stall_since > _DRAIN_STALL_LIMIT_SECONDS:
+                        raise CollateError(
+                            "data supply stalled: no in-flight shards and no "
+                            f"lease available for {now - stall_since:.0f}s "
+                            "(queue exhausted; check the data service state "
+                            "for pending/active rows and epoch rollover)"
+                        )
                     time.sleep(_LEASE_RETRY_SECONDS)
                     submit_available()
                     continue
+                stall_since = None
                 item = next(iterator)
                 if isinstance(item, _WorkerBatch):
                     descriptor = queued.get(item.shard_path)

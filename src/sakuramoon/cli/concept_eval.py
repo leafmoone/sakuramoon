@@ -250,14 +250,13 @@ def load_reference_images(
     import torch
     from PIL import Image
     from torch.nn import functional
-    from torchvision.transforms.functional import pil_to_tensor
 
     images: list[torch.Tensor] = []
     for paths in ref_paths:
         for path in paths:
             try:
                 with Image.open(path) as image:
-                    tensor = pil_to_tensor(image.convert("RGB"))
+                    tensor = functional.pil_to_tensor(image.convert("RGB"))
             except (OSError, ValueError) as error:
                 raise RuntimeError(
                     f"reference image cannot be decoded: {path}"

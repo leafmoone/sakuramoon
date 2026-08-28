@@ -12,6 +12,7 @@ import socket
 import stat
 import threading
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
@@ -43,6 +44,11 @@ _CLIENT_DISCONNECTED_ERRNOS = frozenset(
         errno.ETIMEDOUT,
     }
 )
+
+# Leases retired by an epoch rollover are kept (bounded) so that the ranks'
+# late ACKs — their workers may still be streaming the retired shards behind
+# a full prefetch queue — are accepted idempotently instead of raising.
+_RETIRED_LEASE_CAP = 16384
 
 
 class DataServiceError(RuntimeError):
@@ -88,6 +94,16 @@ class DataServiceStats:
 class _Row:
     path: str
     status: Literal["pending", "active", "completed"]
+
+
+@dataclass(frozen=True, slots=True)
+class _RetiredLease:
+    """A lease retired by an epoch-boundary force rollover, still awaiting
+    the rank's late ACK so it can be accepted idempotently."""
+
+    path: str
+    state_revision: int
+    worker_id: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +290,7 @@ class DataSupplyService:
         self._ready: dict[str, CachedShard] = {}
         self._outstanding: dict[str, ShardLeaseDescriptor] = {}
         self._worker_leases: dict[int, str] = {}
+        self._retired_leases: OrderedDict[str, _RetiredLease] = OrderedDict()
         self._revision = 0
         self._started = False
         self._closed = False
@@ -465,6 +482,11 @@ class DataSupplyService:
     def wait_until_ready(self) -> bool:
         with self._lock:
             self._require_running()
+            if not self._pending_paths():
+                # A process starting exactly at an epoch boundary must not
+                # fail fast while un-ACKed leases block the rollover; give
+                # the boundary one force-rollover chance, same as lease().
+                self._force_roll_over_if_wedge()
             pending_count = len(self._pending_paths())
             if pending_count <= 0:
                 raise DataServiceError("data service has no remaining training shard")
@@ -522,6 +544,8 @@ class DataSupplyService:
             if len(self._outstanding) >= self.limits.lease_channel_capacity:
                 raise DataServiceError("lease capacity is exhausted")
             if not self._pending_paths():
+                self._force_roll_over_if_wedge()
+            if not self._pending_paths():
                 return None
             path, cached = self._take_ready()
             self._replace_status(path, "active")
@@ -546,36 +570,108 @@ class DataSupplyService:
         with self._lock:
             self._require_running()
             descriptor = self._outstanding.get(lease_id)
+            if descriptor is None:
+                retired = self._retired_leases.get(lease_id)
+                if (
+                    retired is not None
+                    and retired.state_revision == state_revision
+                    and retired.worker_id == worker_id
+                ):
+                    # The epoch-boundary force rollover already completed this
+                    # lease; the rank's late ACK is safe to swallow.
+                    _log(
+                        f"worker={worker_id} 完成分片(幂等): {retired.path} "
+                        f"(租约已在 epoch 边界 rollover 中退休，重复 ACK 忽略)"
+                    )
+                    return
+                raise DataServiceError("ACK does not match an active lease")
             if (
-                descriptor is None
-                or descriptor.worker_id != worker_id
+                descriptor.worker_id != worker_id
                 or descriptor.state_revision != state_revision
                 or self._worker_leases.get(worker_id) != lease_id
             ):
                 raise DataServiceError("ACK does not match an active lease")
-            completed_state = self._state_with_status(
-                descriptor.record.path, "completed"
+            self._complete_lease(descriptor)
+
+    def _complete_lease(self, descriptor: ShardLeaseDescriptor) -> None:
+        """Mark a lease's shard completed (rollover-aware). Caller holds _lock."""
+        completed_state = self._state_with_status(
+            descriptor.record.path, "completed"
+        )
+        completed_epoch: int | None = None
+        if all(row.status == "completed" for row in completed_state.rows):
+            completed_epoch = completed_state.current_epoch
+            next_state = self.store.new(completed_state.cycle + 1)
+            if next_state.completed_epochs != completed_epoch:
+                raise DataServiceError("data epoch rollover identity is invalid")
+            self._commit_state(next_state)
+        else:
+            self._commit_state(completed_state)
+        del self._outstanding[descriptor.lease_id]
+        del self._worker_leases[descriptor.worker_id]
+        _log(f"worker={descriptor.worker_id} 完成分片: {descriptor.record.path}")
+        if completed_epoch is not None:
+            _log(
+                f"数据 epoch 完成: epoch={completed_epoch}, "
+                f"completed_epochs={self.state.completed_epochs}, "
+                f"shards={len(self.state.rows)}; "
+                f"已重建 epoch={self.state.current_epoch} 队列"
             )
-            completed_epoch: int | None = None
-            if all(row.status == "completed" for row in completed_state.rows):
-                completed_epoch = completed_state.current_epoch
-                next_state = self.store.new(completed_state.cycle + 1)
-                if next_state.completed_epochs != completed_epoch:
-                    raise DataServiceError("data epoch rollover identity is invalid")
-                self._commit_state(next_state)
-            else:
-                self._commit_state(completed_state)
-            del self._outstanding[lease_id]
-            del self._worker_leases[worker_id]
-            _log(f"worker={worker_id} 完成分片: {descriptor.record.path}")
-            if completed_epoch is not None:
-                _log(
-                    f"数据 epoch 完成: epoch={completed_epoch}, "
-                    f"completed_epochs={self.state.completed_epochs}, "
-                    f"shards={len(self.state.rows)}; "
-                    f"已重建 epoch={self.state.current_epoch} 队列"
-                )
-            self._schedule_lookahead()
+        self._schedule_lookahead()
+
+    def _force_roll_over_if_wedge(self) -> None:
+        """Force-complete the epoch when the queue has drained but leases are
+        still outstanding.
+
+        At an epoch boundary the ranks can otherwise wait circularly: the rank
+        whose shards are all done starves in its drain loop waiting for the
+        rollover, while the rank holding the last un-ACKed leases sits in the
+        cross-rank allreduce and can no longer process the completions (and
+        therefore ACK the leases) that would trigger the rollover.  Completing
+        the epoch here — retiring the still-outstanding leases so their late
+        ACKs become no-ops — is lossless for a cyclic dataset: the shard data
+        already buffered inside a rank is still consumed in order, and those
+        shards are re-served (and fully consumed) in the next cycle.  This
+        must stay a lease-time check rather than a time threshold: a healthy
+        lease outlives the NCCL watchdog by an order of magnitude
+        (~26 min per shard vs 300 s), so no timeout value could both avoid
+        force-completing healthy leases and fire before the watchdog.
+        Caller holds _lock.
+        """
+        if not self._outstanding:
+            return
+        completed_epoch = self.state.current_epoch
+        retired = 0
+        for descriptor in list(self._outstanding.values()):
+            self._retire_lease(descriptor)
+            retired += 1
+        next_state = self.store.new(self.state.cycle + 1)
+        if next_state.completed_epochs != completed_epoch:
+            raise DataServiceError("data epoch rollover identity is invalid")
+        self._commit_state(next_state)
+        _log(
+            f"epoch 边界强制完成: epoch={completed_epoch}, "
+            f"退休未完成租约={retired}, "
+            f"completed_epochs={self.state.completed_epochs}, "
+            f"shards={len(self.state.rows)}; "
+            f"已重建 epoch={self.state.current_epoch} 队列"
+        )
+        self._schedule_lookahead()
+
+    def _retire_lease(self, descriptor: ShardLeaseDescriptor) -> None:
+        """Move an outstanding lease to the retired set so the rank's late
+        ACK (its worker may still be streaming the shard behind a full
+        prefetch queue) is accepted as an idempotent no-op. Caller holds
+        _lock."""
+        self._retired_leases[descriptor.lease_id] = _RetiredLease(
+            path=descriptor.record.path,
+            state_revision=descriptor.state_revision,
+            worker_id=descriptor.worker_id,
+        )
+        while len(self._retired_leases) > _RETIRED_LEASE_CAP:
+            self._retired_leases.popitem(last=False)
+        del self._outstanding[descriptor.lease_id]
+        del self._worker_leases[descriptor.worker_id]
 
     @property
     def done(self) -> bool:

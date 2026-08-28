@@ -177,6 +177,83 @@ def test_service_batches_wait_for_a_transient_epoch_tail(
         stream.close()
 
 
+def test_service_batches_fail_loudly_when_supply_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sakuramoon.data.collate as collate_module
+
+    class StalledClient:
+        identity = SimpleNamespace(worker_count=1)
+
+        def __init__(self) -> None:
+            self.lease_calls = 0
+
+        def health(self) -> bool:
+            return False
+
+        def lease(self, _worker_id: int):
+            self.lease_calls += 1
+
+        def acknowledge(self, _descriptor) -> None:
+            raise AssertionError("stalled supply must not produce a shard")
+
+    class FakeDataset:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.command = None
+
+        def submit(self, _worker_id: int, _command) -> None:
+            pass
+
+        def stop(self, _worker_id: int, _record) -> None:
+            pass
+
+    class FakeLoader:
+        def __init__(self, dataset: FakeDataset) -> None:
+            del dataset
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise AssertionError("stalled supply must not reach the loader")
+
+    client = StalledClient()
+    monkeypatch.setattr(collate_module, "_PersistentShardDataset", FakeDataset)
+    monkeypatch.setattr(
+        collate_module,
+        "_build_batch_loader",
+        lambda dataset, **_kwargs: FakeLoader(dataset),
+    )
+    monkeypatch.setattr(
+        collate_module,
+        "_shutdown_loader",
+        lambda _loader, **_kwargs: None,
+    )
+    monkeypatch.setattr(collate_module.time, "sleep", lambda _seconds: None)
+    clock = {"now": 0.0}
+
+    def advancing_clock() -> float:
+        clock["now"] += 1.0
+        return clock["now"]
+
+    monkeypatch.setattr(collate_module.time, "monotonic", advancing_clock)
+    monkeypatch.setattr(collate_module, "_DRAIN_STALL_LIMIT_SECONDS", 5.0)
+
+    stream = collate_module.iter_service_batches(
+        cast(Any, SimpleNamespace(base_seed=1)),
+        cast(Any, client),
+        batch_size=1,
+        worker_count=1,
+        ready_batches=1,
+        pin_memory=False,
+        drop_last=True,
+    )
+    with pytest.raises(CollateError, match="data supply stalled"):
+        next(stream)
+    assert client.lease_calls > 1
+    stream.close()
+
+
 def test_collate_pads_eot_and_preserves_structured_metadata() -> None:
     batch = collate_samples((_sample(1), _sample(2)))
 
