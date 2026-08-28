@@ -34,6 +34,7 @@ from sakuramoon.checkpoint.schema import (
     raw_state_to_dict,
 )
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
+from sakuramoon.optim.cmuon import HybridCMuon
 
 _SAFETENSORS_HEADER_RESERVE_BYTES = 1024 * 1024
 
@@ -156,7 +157,8 @@ def _write_model(
     _fsync_directory(model_dir)
 
 
-def _optimizer_schema(optimizer: IsolatedAdamW8bit) -> dict[str, object]:
+def _optimizer_group_list(optimizer: IsolatedAdamW8bit) -> list[dict[str, object]]:
+    """The canonical (group_name, param_names) list for an AdamW8bit optimizer."""
     groups: list[dict[str, object]] = []
     for group in optimizer.optimizer.param_groups:
         group_name = group.get("group_name")
@@ -166,24 +168,58 @@ def _optimizer_schema(optimizer: IsolatedAdamW8bit) -> dict[str, object]:
         ):
             raise CheckpointError("optimizer parameter groups lack canonical names")
         groups.append({"group_name": group_name, "param_names": param_names})
+    return groups
+
+
+def _optimizer_schema(optimizer: IsolatedAdamW8bit) -> dict[str, object]:
     return {
-        "groups": groups,
+        "groups": _optimizer_group_list(optimizer),
         "schema_version": 1,
+    }
+
+
+def _hybrid_optimizer_schema(optimizer: HybridCMuon) -> dict[str, object]:
+    """Schema version 2: the inner AdamW8bit groups + the CMuon algorithm
+    contract (canonical per-role NS map + locked scalars)."""
+    cfg = optimizer.cfg
+    return {
+        "schema_version": 2,
+        "groups": _optimizer_group_list(optimizer.adamw),
+        "hybrid_cmuon": {
+            "momentum": cfg.momentum,
+            "nesterov": cfg.nesterov,
+            "eps": cfg.eps,
+            "momentum_dtype": cfg.momentum_dtype,
+            "chunk_rescale_sqrt_n": cfg.chunk_rescale_sqrt_n,
+            "qkv_group_rescale": cfg.qkv_group_rescale,
+            "ns_steps": cfg.canonical_ns_map(),
+        },
     }
 
 
 def _write_raw_sidecars(
     temporary: Path,
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
     state: RawCheckpointState,
     resolved_config: bytes,
 ) -> None:
     _write_bytes(temporary / "resolved_config.toml", resolved_config)
     train_state = temporary / "train_state"
     train_state.mkdir()
-    torch.save(optimizer.optimizer.state_dict(), train_state / "optimizer.pt")
-    _fsync_file(train_state / "optimizer.pt")
-    _write_json(train_state / "optimizer_schema.json", _optimizer_schema(optimizer))
+    if isinstance(optimizer, HybridCMuon):
+        # Hybrid checkpoint: the OUTER state dict (inner AdamW8bit state +
+        # SR RNG + CMuon momenta + routing + transition record). The loader
+        # distinguishes it from a pure-AdamW (schema v1) checkpoint by the
+        # optimizer_schema version, which enables the AdamW -> Hybrid fork.
+        torch.save(optimizer.state_dict(), train_state / "optimizer.pt")
+        _fsync_file(train_state / "optimizer.pt")
+        _write_json(
+            train_state / "optimizer_schema.json", _hybrid_optimizer_schema(optimizer)
+        )
+    else:
+        torch.save(optimizer.optimizer.state_dict(), train_state / "optimizer.pt")
+        _fsync_file(train_state / "optimizer.pt")
+        _write_json(train_state / "optimizer_schema.json", _optimizer_schema(optimizer))
     trainer, growth = raw_state_to_dict(state)
     _write_json(train_state / "trainer_state.json", trainer)
     _write_json(train_state / "growth_state.json", growth)
@@ -225,7 +261,7 @@ def _save(
     kind: CheckpointKind,
     module: nn.Module,
     *,
-    optimizer: IsolatedAdamW8bit | None,
+    optimizer: IsolatedAdamW8bit | HybridCMuon | None,
     state: RawCheckpointState | None,
     resolved_config: bytes | None,
     max_shard_bytes: int,
@@ -298,7 +334,7 @@ def save_raw_checkpoint(
     destination_root: Path,
     identity: CheckpointIdentity,
     module: nn.Module,
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
     state: RawCheckpointState,
     *,
     resolved_config: bytes,

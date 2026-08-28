@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
-from typing import NoReturn, Self, cast
+from typing import TYPE_CHECKING, NoReturn, Self, cast
 
 import torch
 from accelerate import Accelerator
@@ -53,6 +53,9 @@ from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
 from sakuramoon.model.growth import active_slot_ids, growth_ramp_updates
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
 from sakuramoon.optim.dtk import configure_tunableop
+
+if TYPE_CHECKING:
+    from sakuramoon.optim.cmuon import HybridCMuon
 from sakuramoon.storage import repository_directory
 from sakuramoon.telemetry.observer import UpdateMetricContext
 from sakuramoon.telemetry.timers import PhaseTimer
@@ -248,9 +251,7 @@ def _publish_resolved_config(loaded: LoadedConfig, repository_root: Path) -> Pat
         if previous != loaded.resolved_toml:
             changed = diff_resolved_toml_paths(previous, loaded.resolved_toml)
             record_data_policy_transition(
-                repository_directory(
-                    repository_root, loaded.config.paths.artifact_dir
-                )
+                repository_directory(repository_root, loaded.config.paths.artifact_dir)
                 / "data_policy_transition.json",
                 {
                     "kind": "resolved-config-diff",
@@ -261,6 +262,49 @@ def _publish_resolved_config(loaded: LoadedConfig, repository_root: Path) -> Pat
             )
     write_resolved_config(loaded.config, destination)
     return destination.resolve(strict=True)
+
+
+def _record_optimizer_transition(
+    loaded: LoadedConfig,
+    repository_root: Path,
+    resume: Path,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
+    source_update: int,
+) -> None:
+    """Record the AdamW8bit -> Hybrid CMuon transition manifest (main rank).
+
+    Written when the restored optimizer actually performed the AdamW8bit ->
+    Hybrid transition (a pure-AdamW source checkpoint loaded into a hybrid
+    optimizer). It records exactly what was preserved, what was dropped, and
+    the canonical per-role NS map, so a fork point is auditable from the
+    artifact alone. A native hybrid -> hybrid resume records nothing (there
+    is no optimizer-semantics change).
+    """
+    if not isinstance(optimizer, _hybrid_cmuon_class()):
+        return
+    if not optimizer.transition_from_adamw8bit:
+        return
+    record_data_policy_transition(
+        repository_directory(repository_root, loaded.config.paths.artifact_dir)
+        / "optimizer_transition.json",
+        {
+            "kind": "optimizer-adamw8bit-to-hybrid-cmuon",
+            "policy_class": "optimizer",
+            "source_optimizer": "torchao_adamw8bit",
+            "source_checkpoint": str(resume),
+            "source_update": source_update,
+            "fresh_cmuon_momentum": True,
+            "preserved_adamw_fallback_params": (
+                optimizer.transition_preserved_adamw_params
+            ),
+            "dropped_adamw_state_cmuon_params": (
+                optimizer.transition_dropped_cmuon_params
+            ),
+            "canonical_ns_map": optimizer.cfg.canonical_ns_map(),
+            "recorded_at_unix_ns": time.time_ns(),
+        },
+        skip_if_duplicate_of_last=("kind", "source_checkpoint", "source_update"),
+    )
 
 
 def _record_data_policy_resume_transition(
@@ -321,24 +365,58 @@ def _record_data_policy_resume_transition(
 
 
 def _build_optimizer(
-    config: RuntimeConfig, module: TrainableComposite
-) -> IsolatedAdamW8bit:
+    config: RuntimeConfig,
+    module: TrainableComposite,
+    *,
+    telemetry_logger: Callable[[str], None] | None = None,
+) -> IsolatedAdamW8bit | HybridCMuon:
     optimizer = config.optimizer
-    return build_adamw8bit(
-        module,
-        lr=config.scaled_learning_rate(),
-        betas=optimizer.betas,
-        eps=optimizer.eps,
-        block_size=optimizer.block_size,
-        bf16_stochastic_round=optimizer.bf16_stochastic_round,
-        matrix_weight_decay=optimizer.matrix_weight_decay,
-        sensitive_weight_decay=optimizer.sensitive_weight_decay,
-        sr_seed=config.run.seed,
-    )
+    common = {
+        "lr": config.scaled_learning_rate(),
+        "betas": optimizer.betas,
+        "eps": optimizer.eps,
+        "block_size": optimizer.block_size,
+        "bf16_stochastic_round": optimizer.bf16_stochastic_round,
+        "matrix_weight_decay": optimizer.matrix_weight_decay,
+        "sensitive_weight_decay": optimizer.sensitive_weight_decay,
+        "sr_seed": config.run.seed,
+    }
+    if optimizer.name == "hybrid_cmuon":
+        from sakuramoon.optim.cmuon import build_hybrid_cmuon
+
+        telemetry = optimizer.cmuon_ns_telemetry
+        telemetry_kwargs = {
+            "ns_telemetry_enabled": bool(telemetry.enabled) if telemetry else False,
+            "ns_telemetry_log_every_n": telemetry.log_every_n if telemetry else 100,
+            "ns_telemetry_logger": telemetry_logger,
+            "ns_telemetry_update_offset": 0,
+        }
+        if telemetry is not None and telemetry.roles:
+            telemetry_kwargs["ns_telemetry_roles"] = tuple(telemetry.roles)
+        if optimizer.cmuon_ns is not None:
+            # Per-role (per-spec) NS depth: canonical role->depth map.
+            return build_hybrid_cmuon(
+                module,
+                ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
+                momentum_dtype=optimizer.cmuon_momentum_dtype,
+                chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
+                **telemetry_kwargs,
+                **common,
+            )
+        # Legacy scalar NS depth (every role identical).
+        return build_hybrid_cmuon(
+            module,
+            ns_steps=optimizer.cmuon_ns_steps,
+            momentum_dtype=optimizer.cmuon_momentum_dtype,
+            chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
+            **telemetry_kwargs,
+            **common,
+        )
+    return build_adamw8bit(module, **common)
 
 
 def _optimizer_learning_rate_scalars(
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
 ) -> tuple[float | torch.Tensor, ...]:
     groups = optimizer.optimizer.param_groups
     if not groups:
@@ -374,7 +452,7 @@ def _optimizer_learning_rate_scalars(
 
 
 def _optimizer_learning_rate_matches(
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
     expected: float,
 ) -> bool:
     if type(expected) is not float or not math.isfinite(expected) or expected < 0.0:
@@ -397,7 +475,7 @@ def _optimizer_learning_rate_matches(
 
 
 def _set_optimizer_learning_rate(
-    optimizer: IsolatedAdamW8bit, learning_rate: float
+    optimizer: IsolatedAdamW8bit | HybridCMuon, learning_rate: float
 ) -> None:
     if (
         type(learning_rate) is not float
@@ -445,7 +523,7 @@ class _SuccessfulUpdateLrScheduler:
     def __init__(
         self,
         config: RuntimeConfig,
-        optimizer: IsolatedAdamW8bit,
+        optimizer: IsolatedAdamW8bit | HybridCMuon,
         learning_rate_for_update: LearningRateForUpdate,
         *,
         restored_successful_update: int,
@@ -615,7 +693,7 @@ def _restore_checkpoint(
     *,
     checkpoint: Path,
     module: TrainableComposite,
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
     learning_rate_for_update: LearningRateForUpdate,
 ) -> RestoredSingleGpuCheckpoint:
     manifest, state = read_raw_checkpoint_state(checkpoint)
@@ -638,7 +716,22 @@ def _restore_checkpoint(
     _set_optimizer_learning_rate(optimizer, expected_rate)
     restored = restore_single_gpu_checkpoint(checkpoint, module, optimizer, identity)
     resumed_state = _resume_state_for_config(loaded.config, restored.state)
+    # Keep the opt-in NS safety telemetry reporting absolute update numbers
+    # across a resume (it was constructed with offset 0).
+    if (
+        isinstance(optimizer, _hybrid_cmuon_class())
+        and optimizer.ns_telemetry is not None
+    ):
+        optimizer.ns_telemetry.update_offset = restored.state.trainer.successful_updates
     return replace(restored, state=resumed_state)
+
+
+def _hybrid_cmuon_class() -> type:
+    """Runtime access to HybridCMuon (imported lazily; the default path,
+    torchao_adamw8bit, never pays for the experimental module)."""
+    from sakuramoon.optim.cmuon import HybridCMuon
+
+    return HybridCMuon
 
 
 def _runtime(
@@ -753,18 +846,13 @@ class _AccelerateCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
         reason: CheckpointReason,
         cadence: CheckpointCadence,
     ) -> Path:
-        stage = (
-            f"checkpoint/update-{state.successful_updates}/"
-            f"publish-{reason.value}"
-        )
+        stage = f"checkpoint/update-{state.successful_updates}/publish-{reason.value}"
         published = self._progress.run_on_rank(
             stage,
             0,
             lambda: self._delegate.publish_update(state, reason, cadence),
         )
-        value = [
-            str(published) if self._accelerator.is_main_process else ""
-        ]
+        value = [str(published) if self._accelerator.is_main_process else ""]
         torch.distributed.broadcast_object_list(value, src=0)
         if not value[0]:
             raise RuntimeError("rank zero did not publish a checkpoint path")
@@ -896,7 +984,13 @@ def _run_accepted_lifecycle(
     _log(f"构建 {config.stage.depth} 层 DiT")
     module = build_trainable_composite_from_config(config, device=device)
     _log("构建优化器")
-    optimizer = _build_optimizer(config, module)
+    optimizer = _build_optimizer(
+        config,
+        module,
+        # Telemetry log lines only on the main rank (every rank sees the same
+        # all-reduced gradients, so the samples would be duplicates).
+        telemetry_logger=_log if is_main_process else None,
+    )
     if resume is None:
         _log("创建全新训练状态")
         scheduler = _SuccessfulUpdateLrScheduler(
@@ -937,6 +1031,13 @@ def _run_accepted_lifecycle(
     )
     if is_main_process and resume is not None:
         _record_data_policy_resume_transition(loaded, repository_root, resume)
+        _record_optimizer_transition(
+            loaded,
+            repository_root,
+            resume,
+            optimizer,
+            restored.state.trainer.successful_updates,
+        )
     if accelerator is not None and rank > 0:
         resumed_seed = (
             config.run.seed
@@ -1217,9 +1318,7 @@ def _run_accepted_lifecycle(
                                     },
                                     successful_update=update,
                                 )
-                    progress.synchronize(
-                        f"observer/update-{update}/complete"
-                    )
+                    progress.synchronize(f"observer/update-{update}/complete")
 
                 with telemetry:
                     _log(
@@ -1458,9 +1557,7 @@ def run_production_evaluation(
         growth_alpha=state.growth.alpha,
         accelerator=accelerator,
     )
-    result = _evaluate_and_release_process_group(
-        evaluator, update, accelerator
-    )
+    result = _evaluate_and_release_process_group(evaluator, update, accelerator)
     if accelerator is None and result is None:
         raise RuntimeError("native evaluation returned no result")
     return result

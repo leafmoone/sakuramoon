@@ -1,0 +1,63 @@
+{
+ "config": {
+  "lr": 0.00015625,
+  "depth": 20,
+  "global_batch": 800,
+  "ns": 4,
+  "n_warmup": 6,
+  "n_iters": 28,
+  "eager": true
+ },
+ "topology": {
+  "cmuon_params": 141,
+  "chunks": 166,
+  "adamw_params": 148,
+  "ns_matmul_per_step_approx": 1992
+ },
+ "results": {
+  "adamw8bit": {
+   "name": "adamw8bit",
+   "avg_step_s": 2.3796,
+   "min_step_s": 2.37,
+   "max_step_s": 2.4561,
+   "state_gb": 3.192,
+   "peak_alloc_gb": 11.641,
+   "peak_res_gb": 12.109
+  },
+  "cmuon_bf16_ns4": {
+   "name": "cmuon_bf16_ns4",
+   "avg_step_s": 0.6734,
+   "min_step_s": 0.6661,
+   "max_step_s": 0.7828,
+   "state_gb": 3.349,
+   "peak_alloc_gb": 9.893,
+   "peak_res_gb": 10.234
+  }
+ },
+ "phase_breakdown": {
+  "cmuon_momentum_s": 0.0148,
+  "cmuon_ns_s": 0.4377,
+  "cmuon_param_update_s": 0.0077,
+  "cmuon_total_s": 0.4601,
+  "adamw_fallback_s": 2.3796,
+  "note": "phase repro is one-shot (fresh momentum); adamw_fallback = baseline full-step"
+ },
+ "update_rms_per_group": {
+  "adamw_fallback": 0.00016267,
+  "adaln": 3.492e-05,
+  "attention": 3.169e-05,
+  "ffn": 3.186e-05
+ },
+ "update_rms_vs_target": {
+  "adamw_fallback": 5.206,
+  "adaln": 1.118,
+  "attention": 1.014,
+  "ffn": 1.019
+ },
+ "projected_training_speed": {
+  "optimizer_adamw8bit_s": 2.3796,
+  "optimizer_ns4_s": 0.6734,
+  "optimizer_speedup_x": 3.534,
+  "optimizer_saved_s_per_update": 1.7062
+ }
+}

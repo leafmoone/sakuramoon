@@ -675,8 +675,75 @@ class CfgConfig(StrictModel):
     conversion_order: Literal["each_x_to_v_then_cfg"]
 
 
+class CMuonNSConfig(StrictModel):
+    """Per-role Newton-Schulz depth for the hybrid CMuon optimizer.
+
+    ``default`` applies to every semantic role; the optional per-role fields
+    override it. ``canonical_map()`` resolves the full role -> depth map (one
+    key per CMuon semantic role). Only used when optimizer.name ==
+    "hybrid_cmuon"; ignored for the default torchao_adamw8bit path.
+
+    The role field names mirror sakuramoon.optim.cmuon.CMUON_ROLES exactly.
+    """
+
+    default: Literal[2, 3, 4, 5, 6] = 5
+    attention_q: Literal[2, 3, 4, 5, 6] | None = None
+    attention_k: Literal[2, 3, 4, 5, 6] | None = None
+    attention_v: Literal[2, 3, 4, 5, 6] | None = None
+    attention_content_gate: Literal[2, 3, 4, 5, 6] | None = None
+    attention_out: Literal[2, 3, 4, 5, 6] | None = None
+    ffn_in: Literal[2, 3, 4, 5, 6] | None = None
+    ffn_down: Literal[2, 3, 4, 5, 6] | None = None
+    adaln_shared: Literal[2, 3, 4, 5, 6] | None = None
+
+    def canonical_map(self) -> dict[str, int]:
+        data = self.model_dump()
+        base = data.pop("default")
+        return {
+            role: (value if value is not None else base) for role, value in data.items()
+        }
+
+
+# Mirrors sakuramoon.optim.cmuon.CMUON_ROLES (the canonical semantic-role
+# vocabulary for the hybrid CMuon optimizer).
+_CMUON_TELEMETRY_ROLES = (
+    "attention_q",
+    "attention_k",
+    "attention_v",
+    "attention_content_gate",
+    "attention_out",
+    "ffn_in",
+    "ffn_down",
+    "adaln_shared",
+)
+
+
+class CMuonNSTelemetryConfig(StrictModel):
+    """Opt-in NS safety telemetry for the hybrid CMuon optimizer.
+
+    Samples one representative parameter per semantic role and accumulates
+    NS-output / applied-delta statistics on-device; the CPU sync happens once
+    every ``log_every_n`` successful updates. Disabled by default so the
+    default AdamW8bit path (and uninstrumented hybrid runs) stay unchanged.
+    Only used when optimizer.name == "hybrid_cmuon".
+    """
+
+    enabled: bool = False
+    log_every_n: PositiveInt = 100
+    roles: Annotated[tuple[str, ...], BeforeValidator(_toml_array_to_tuple)] = ()
+
+    @model_validator(mode="after")
+    def validate_roles(self) -> CMuonNSTelemetryConfig:
+        unknown = set(self.roles) - set(_CMUON_TELEMETRY_ROLES)
+        if unknown:
+            raise ValueError(f"unknown cmuon telemetry roles: {sorted(unknown)}")
+        if len(set(self.roles)) != len(self.roles):
+            raise ValueError("cmuon telemetry roles must be unique")
+        return self
+
+
 class OptimizerConfig(StrictModel):
-    name: Literal["torchao_adamw8bit"]
+    name: Literal["torchao_adamw8bit", "hybrid_cmuon"]
     base_lr: PositiveFloat
     reference_batch: PositiveInt
     lr_scaling: Literal["linear_global_batch"]
@@ -688,6 +755,20 @@ class OptimizerConfig(StrictModel):
     bf16_stochastic_round: Literal[True]
     matrix_weight_decay: WeightDecay
     sensitive_weight_decay: WeightDecay
+    # --- Hybrid CMuon (experimental; used only when name="hybrid_cmuon") ---------
+    # Defaults keep the field set valid for existing configs; the values are
+    # ignored when name="torchao_adamw8bit" (the default, bit-compatible path).
+    # Legacy scalar NS depth (every role == this). Kept for back-compat with
+    # existing configs; when cmuon_ns is present it takes precedence.
+    cmuon_ns_steps: Literal[5, 6] = 5
+    # Per-role (per-spec) Newton-Schulz depth. When set, it overrides
+    # cmuon_ns_steps and yields a canonical role->depth map. See CMuonNSConfig.
+    cmuon_ns: CMuonNSConfig | None = None
+    cmuon_momentum_dtype: Literal["bfloat16", "float32"] = "bfloat16"
+    cmuon_chunk_rescale_sqrt_n: bool = False
+    # Opt-in NS safety telemetry (see CMuonNSTelemetryConfig). Absent/None
+    # disables it; the default optimizer never instantiates telemetry.
+    cmuon_ns_telemetry: CMuonNSTelemetryConfig | None = None
 
     @model_validator(mode="after")
     def validate_betas(self) -> OptimizerConfig:
@@ -853,7 +934,9 @@ class EvaluationEnabledConfig(StrictModel):
     concept_suite_manifest: Annotated[str, StringConstraints(min_length=1)] = (
         "data/concept-benchmarks/concept-120-v1/manifest-120-v1-refs341b.json"
     )
-    concept_suite_refs_root: Annotated[str, StringConstraints(min_length=1)] | None = None
+    concept_suite_refs_root: Annotated[str, StringConstraints(min_length=1)] | None = (
+        None
+    )
 
     @model_validator(mode="before")
     @classmethod

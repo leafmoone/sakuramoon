@@ -1,0 +1,73 @@
+# EXPERIMENTAL — Hybrid CMuon config C (core, per-spec NS, global ns4).
+#
+# DO NOT DEPLOY. This is the FIRST OFFICIAL Hybrid CMuon A/B candidate. It is
+# the experimental optimizer-backend variant of the G1 transparent-white-crop
+# run and differs from
+# train_g1_transparent_white_crop_800_s0.toml ONLY in the [optimizer] section:
+#   - name = "hybrid_cmuon" (vs "torchao_adamw8bit")
+#   - [optimizer.cmuon_ns] default = 4  (per-spec NS; every role = 4 here)
+#   - cmuon_momentum_dtype = "bfloat16" (recommended: least memory, ~4.5% faster than fp32)
+#   - cmuon_chunk_rescale_sqrt_n = false (core: Moonlight without per-chunk sqrt(N))
+#
+# WHY ns4 (not the old ns5):
+#   The UPDATE-RMS correctness audit (reports/cmuon-design-audit.md §7.5) found
+#   that the quintic Newton-Schulz has a SHAPE-DEPENDENT stable iteration window:
+#     - q/ffn (short edge >= 2560) converge at iter 5;
+#     - k/v [640,2560] and AdaLN [2560,1024] (small short edge) LEAVE the
+#       convergence window at iter 5 -> ns5 amplifies their delta RMS 46x-1000x.
+#   ns4 is verified finite and delta-RMS-correct (≈ 0.2*lr) on ALL production
+#   shapes. See reports/cmuon-ns-depth-audit.md for the ns2/3/4 minimum-sufficient
+#   sweep. The previous global ns5 candidate (train_g1_hybrid_cmuon_core.toml)
+#   is RETIRED as a production candidate (kept only as the ns5 reference).
+#
+# The per-role NS map is canonical ([optimizer.cmuon_ns] default + optional
+# role overrides). This candidate sets default = 4 and no overrides, so every
+# role uses 4. A future minimum-sufficient mixed candidate may override
+# individual roles (e.g. ffn_in = 3) once the sweep evidence justifies it.
+#
+# Unchanged from the base run (inherited): same global batch 800, same
+# S0 base_lr 5e-5 (JLT -> 1.5625e-4), same model/depth/spatial/data policies,
+# same betas/eps/block_size/stochastic-round/weight-decay.
+#
+# The CMuon routing is fixed by the code allowlist (141 matrix params -> CMuon,
+# 148 -> AdamW8bit). Unit tests verify bit-alignment with native
+# torch.optim.Muon (per-role ns2/3/4); the HCU benchmark
+# (reports/cmuon-ns-depth-benchmark.json) measures the ns4 optimizer step.
+# Generation-quality validation (long-run loss/FID) is REQUIRED before adoption.
+
+extends = ["train_g1_transparent_white_crop_800_s0.toml"]
+
+# The CMuon A/B branch runs under its OWN W&B run (never re-attaches the
+# production g1_256_bs760 run). It forks from the live AdamW checkpoint at
+# update 100000, so the run id records the fork point.
+[run]
+run_id = "g1_cmuon_ns4_from_100000"
+
+[optimizer]
+name = "hybrid_cmuon"
+base_lr = 0.00005
+reference_batch = 256
+lr_scaling = "linear_global_batch"
+betas = [0.9, 0.95]
+eps = 0.00000001
+block_size = 256
+bf16_stochastic_round = true
+matrix_weight_decay = 0.0
+sensitive_weight_decay = 0.0
+# --- Hybrid CMuon (config C: core, per-spec NS, global ns4) ---
+cmuon_momentum_dtype = "bfloat16"
+cmuon_chunk_rescale_sqrt_n = false
+
+# Canonical per-role Newton-Schulz depth. `default` applies to every role;
+# the optional per-role keys override it. All roles = 4 for this candidate.
+[optimizer.cmuon_ns]
+default = 4
+
+# Opt-in NS safety telemetry for the +1000 safety gate: one representative
+# parameter per canonical role, device-side accumulation, one batched CPU
+# sync every 100 successful updates (ns_rms / delta_rms / nonfinite per role).
+# Logged on the main rank only. Empty roles = every canonical role.
+[optimizer.cmuon_ns_telemetry]
+enabled = true
+log_every_n = 100
+roles = []
