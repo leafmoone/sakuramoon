@@ -9,12 +9,27 @@
 
 ## 1. 结论摘要
 
-1. **根因机制（已实证）**：候选的 NS 路径对**近零梯度**参数存在灾难性放大。
-   `cmuon_zeroth_power` 的输入归一化 `ortho = grad / grad.norm().clamp(min=1e-7)`
-   在 Frobenius 范数仅略高于 eps 时（实测 ~1.5e-7），把 **bf16 表示噪声**放大
-   ×~66,000 到 O(1)；随后 4 轮五次 Newton-Schulz 迭代在**纯噪声**上运行，输出
-   尺度取决于噪声实现（混沌放大），两 rank 各自得到**互不相关的垃圾更新**
-   （单元素 delta 达 0.44–1.02，对 ~0.02 量级权重 = 一步 2000–5000% 扰动）。
+1. **根因机制（已实证，单位已于 08-31 从存档张量重算修正）**：候选的 NS 路径对
+   **近零信号**参数存在灾难性放大。`cmuon_zeroth_power` 的输入归一化
+   `ortho = nesterov / nesterov.norm().clamp(min=1e-7)`（输入是 **Nesterov 矩阵**
+   u=(1-μ)g+μm，不是 raw grad）。F1 事件张量（slot_08.q_proj, 2560×2560,
+   numel 6,553,600）实测：nesterov element_rms=1.8821e-9、**Frobenius
+   norm=4.8155e-6**（= 78× eps，**未触发 clamp**，归一化分母=真范数
+   4.8280e-6（bf16 归约））。归一化按设计抹掉幅度（×2.0766e5）——对健康
+   梯度这是无害的方向归一化；但近零信号的归一化矩阵（top-1 奇异值占能量
+   88.9%、细长尾到 7e-12）落在 **NS4 五次迭代的收敛边界**：前 3 轮迭代
+   fro 1.0→1.37→3.78→8.80（CPU 确定性复现），**第 4 轮对 Gram 矩阵的
+   bf16 比特敏感（混沌分岔）**——同一输入比特在 3 个 GEMM 实现下分岔为
+   ×1.95（fro 17.2，CPU）/×1.98（fro 17.6，HCU rank1）/×57.9（fro
+   510.4，HCU rank0），由 HCU bf16 GEMM 5–8% 非确定性噪声决定 → 两 rank
+   得到 29× 不相关的更新（delta_rms 3.15e-4=10× Moonlight target vs
+   1.09e-5；单元素 delta 0.4395=1395× delta_rms，对 ~0.02 量级权重为
+   一步数千% 扰动）。**修正旧表述**：原报告「Frobenius≈1.5e-7 仅略高于
+   eps」「放大 ×~66,000」两处量纲错误——真实分母是 4.8e-6（无 clamp），
+   放大链为 ×2.0766e5（归一化）× ×510.1（NS4 坏分支）× 1.5811e-3
+   （alpha）= nesterov→delta 总 ×1.675e5；灾难性放大来自 **NS4 边界
+   混沌分支**，不是 eps 地板、也不是输入侧 bf16 表示噪声（输入比特跨
+   rank 逐位相同；nesterov 元素中位数离零 ~400 ulp，是有结构的弱信号）。
 2. **硬件放大器**：DTK/HCU 的 bf16 GEMM **非确定**（实测：同设备、同输入、
    硬同步重复 2560×2560 matmul，rel_rms 5–8%，~2.4% 元素不同；norm 归约确定）。
    候选按设计在每个 rank 独立跑 NS 且**更新后无跨 rank 同步** → DDP「两 rank
@@ -125,10 +140,10 @@
 
 | 列 | rank0 | rank1 | 说明 |
 |----|-------|-------|------|
-| g_rms / g_max | 1.93e-8 / 1.26e-5 | 同左（逐位） | 梯度**近零**（该 batch 该 slot 几乎未激活） |
-| n_rms | 1.88e-9 | 同左 | nesterov ≈ 0.05×grad；Frobenius ≈ 1.5e-7，仅略高于 eps=1e-7 |
-| ns_rms / ns_max | **0.199 / 278** | 6.9e-3 / 0.676 | NS 输出尺度差 28×：噪声实现选中的轨迹不同 |
-| d_rms / d_max | **3.15e-4（超 ceiling 0.9%）/ 0.439** | 1.09e-5 / 1.07e-3 | rank0 对 ~0.02 权重写入单元素 0.44 的更新（2200%） |
+| g_rms / g_max | 1.9294e-8 / 1.2577e-5 | 同左（逐位） | 梯度**近零**（该 batch 该 slot 几乎未激活）；fp32 SVD：top-1 σ² 占能量 88.9%，长尾到 7e-12 |
+| n_rms / n_fro | 1.8821e-9 / **4.8155e-6** | 同左（逐位） | nesterov=(1-μ)g+μm（μ=0.95，fresh momentum 时 =0.0975g）；Frobenius=78×eps，**未触发 clamp** |
+| ns_rms / ns_max | **0.1994 / 278** | 6.9e-3 / 0.676 | NS4 收敛边界混沌分岔：fro 510.4 vs 17.6（×29.0）；CPU 确定性复现=fro 17.2（与 rank1 同支） |
+| d_rms / d_max | **3.1518e-4（超 ceiling 0.9%）/ 0.4395** | 1.09e-5 / 1.07e-3 | rank0 单元素 delta=1395× delta_rms，对 ~0.02 量级权重为一步数千% 扰动 |
 
 **F2b @ 97101（安全路由）**：**双 rank** 本地 ceiling 违规，同一 spec
 `slot_08.attention.q_proj`（数据队首同一 batch）：
@@ -143,20 +158,63 @@
 跨 rank 相对差 14.3%（超旧版全列严格/统一容差）→ 属 sum 列病态（见 §3 校准），
 非候选故障 —— 该事件用于校准比对规则，不作为候选证据。
 
-**机制链条**：
-1. DiT 稀疏激活：部分 slot 的 q/k/v 投影在多数 batch 接收**近零梯度**
-   （g_rms ~1e-8 量级，为正常 spec 的 ~1e-7 倍）；momentum（μ=0.05 lerp）
-   的 EMA 对这类参数同样衰减至 ≈0 → **病态贯穿整个 run，非 fork 伪影**。
-2. NS 输入归一化的 `clamp(min=1e-7)` 地板对 6.5M 元素矩阵**过低**：近零
-   梯度的 Frobenius 范数（~1.5e-7）仍越过地板 → `grad/norm` 把 bf16 网格上
-   的表示噪声（all-reduce 后残留 ~1e-8）放大到 O(1) —— 输入变成**无信息纯噪声**。
-3. 五次 NS 迭代为归一化矩阵设计；对纯噪声输入，其输出尺度随噪声实现混沌
-   变化（实测 28× 的 rank 间差异，且同设备重复执行 rel_rms 7.5%）。
-4. `delta = -alpha·NS`（alpha=lr·0.2·√max_dim）→ 垃圾 delta 幅度 1.2–2.1×
-   正常上限、单元素可达 O(1)；原候选**静默写入**并继续（无守卫、无跨 rank
-   校验）→ 参数漂移积累 → 最终非finite 梯度范数 / loss 突变（3 次崩溃形态）。
-5. rank 特定性与非确定性由「噪声实现 × HCU 非确定 kernel」共同给出
-   （崩溃多在 rank1；97131 两次独立通过）。
+### 单位审计（08-31，自存档张量 `cmuon-forensic-crash-97101-...-q_proj.pt` 重算）
+
+| 量 | grad | momentum | nesterov | ns_output | delta |
+|----|------|----------|----------|-----------|-------|
+| shape / numel | 2560×2560 / 6,553,600 | 同左 | 同左 | 同左 | 同左 |
+| element_rms | 1.9294e-08 | 9.6489e-10 | 1.8821e-09 | 1.9937e-01 | 3.1518e-04 |
+| fro_norm | 4.9365e-05 | 2.4687e-06 | 4.8155e-06 | 5.1026e+02 | 8.0672e-01 |
+| max_abs | 1.2577e-05 | 6.2957e-07 | 1.2293e-06 | 2.78e+02 | 4.3945e-01 |
+| zero_frac / subnormal | 0.00091 / 0 | 同左 | 同左 | 0 / 0 | 0 / 0 |
+| exp_median / ulp@median / ulpcount_median | -29 / 7.28e-12 / 256 | -34 / 2.27e-13 / 410 | -33 / 4.55e-13 / 400 | -7 / 3.05e-05 / 266 | -17 / 2.98e-08 / 430 |
+
+- 恒等式验证：nesterov = (1-μ)g+μm（μ=0.95，max_abs_diff 2.4e-9=bf16 舍入）；
+  delta = -alpha·ns（alpha=1.5811e-3，repro 3.1523e-4 vs 存档 3.1518e-4，
+  0.02% 吻合）。
+- **normalization_denominator = 4.8280e-06**（bf16 `.norm()` 真范数；
+  fp32 参考 4.8155e-06，bf16 归约误差 +0.26%；eps=1e-7 **未 clamp**）。
+- 放大链：×2.0766e5（=1/denom，归一化）→ ×510.1（NS4，rank0 坏分支；
+  逐轮 fro 1.0→1.43→3.92→9.43→**510.4**，CPU 确定性复现
+  1.0→1.37→3.78→8.80→**17.2**）→ ×1.5811e-3（alpha）
+  = nesterov_rms→delta_rms 总 ×1.675e5。
+- 谱结构（fp32 SVD）：grad/nesterov top-1 σ² 占能量 88.9%、top-10 94.7%，
+  σ_top 4.66e-05/4.54e-06，σ[-1] 7.0e-12/3.2e-13（~1e7 倍跨度）。
+- **旧报告错误修正**：「Frobenius≈1.5e-7 仅略高于 eps=1e-7」→ 实为
+  4.82e-6（78×eps，无 clamp）；「×~66,000 放大 bf16 表示噪声」→ 实为
+  方向归一化 ×2.0766e5（设计行为）+ **NS4 收敛边界第 4 轮混沌分岔
+  ×510**（灾难源，由 HCU GEMM 5–8% 噪声实现决定）；输入侧并非「纯噪声」
+  （nesterov 元素中位数离零 ~400 ulp，秩-1 弱信号有结构）。
+- **HCU 混沌分支按需复现**（08-31，salt1，F2b 事件同 spec 张量，nesterov
+  fro=6.35e-6，DTK bf16 `.norm()` 精确且确定：err -0.06%、无 clamp）：
+  5 次独立 HCU 实现（cuda:0 ×3 + cuda:1 ×2）→ fro
+  {**125235**, 16.3, 15.9, 15.9, 15.9}：1/5 落灾难分支（比 F1 事件的 510
+  高 245×），4/5 落小分支（≈16，与 CPU 确定性 17.2、F1 rank1 17.6 同支）。
+  分支概率 ~20%（该矩阵）；事件幅度多模态（小~16 / 中~10²–10³ / 大~10⁵）。
+
+**机制链条**（08-31 单位审计后修正版，全部数值来自存档张量重算）：
+1. DiT 稀疏激活：部分 slot 的 q/k/v 投影在多数 batch 接收**近零信号**
+   （g_rms ~1e-8 量级，为正常 spec 的 1/30–1/150；141-spec 单步横截面
+   显示清晰的 active(≥1.7e-6)/near-zero(≤6.5e-8) 两簇与 ~1e-7–2e-7 山谷）；
+   fresh momentum 下 nesterov=0.0975g → 同样近零 → **病态贯穿整个 run，
+   非 fork 伪影**。
+2. Frobenius 归一化（`nesterov / nesterov.norm().clamp(min=1e-7)`）按设计
+   **抹掉信号幅度**（分母=真范数 4.8155e-6，放大 ×2.0766e5，**未触发
+   eps 地板**）。对健康梯度这是无害的方向化；但近零信号的归一化矩阵
+   （top-1 σ² 占 88.9% 的秩-1 主导 + 量化网格薄尾）落在 NS4 五次迭代的
+   **收敛边界**。
+3. **NS4 边界混沌分岔**（本机制的核心，CPU 确定性复现实证）：同一输入
+   比特、同一算法，前 3 轮 fro 1.0→1.37→3.78→8.80，**第 4 轮**的 Gram
+   矩阵乘法结果相差 4–7%（bf16 GEMM 非确定性）即分岔为 ×1.95（fro 17.2，
+   CPU）/×1.98（fro 17.6，HCU rank1）/×57.9（fro 510.4，HCU rank0）——
+   输出尺度由 GEMM 噪声实现决定，rank 间 ×29 不相关。
+4. `delta = -alpha·NS`（alpha=lr·0.2·√max_dim=1.5811e-3）→ 坏分支 delta
+   rms=10× Moonlight target（3.15e-4）、单元素 0.44；原候选**静默写入**并
+   继续（无守卫、无跨 rank 校验）；即使两 rank 同落小分支，NS 输出仍有
+   5–8% rank 差 → 参数漂移积累 → 最终非finite 梯度范数 / loss 突变
+   （3 次崩溃形态）。
+5. rank 特定性与非确定性由「同一输入比特 × 非确定 GEMM kernel」给出
+   （崩溃多在 rank1；97131 两次独立通过 = 分掷硬币）。
 
 ### 为什么原始 run「活过」97101 而在 97131/97147/97178 崩溃
 
@@ -246,17 +304,31 @@ Crash history: 3 crashes / ~165 updates (~1.8%), MTT ~55u, same site
 variant). CONTROL (AdamW8bit, same data region): 0 crashes / 17,143+ updates.
 
 ROOT CAUSE (forensic, fail-closed instrumentation, first update after the 97100
-fork): DiT sparse activation gives some slot q/k/v projections a NEAR-ZERO
-gradient (measured g_rms 1.9e-8, max 1.3e-5 on a 2560x2560 weight; momentum EMA
-decays to ~0 the same way, so the pathology persists all run, not a fork artifact).
-The NS input normalization ortho = grad / grad.norm().clamp(min=1e-7) has a
-Frobenius floor far below the actual near-zero norm (~1.5e-7), so the division
-amplifies bf16 representation noise by x~66,000 to O(1): the NS iterations then
-orthogonalize PURE NOISE, whose output scale depends chaotically on the noise
-realization. Measured: rank0 NS output ns_rms 0.199 / ns_max 278 vs rank1
-0.0069 / 0.676 (28x) from bit-identical inputs; applied delta up to 0.44-1.02 per
-ELEMENT on ~0.02-magnitude weights (2000-5000% one-step perturbation),
-1.2-2.1x above the 10x-normal safety ceiling on BOTH ranks in one event. The
+fork; units re-audited 08-31 from the saved offending tensors, correcting two
+dimensional errors in the first draft): DiT sparse activation gives some slot
+q/k/v projections a NEAR-ZERO signal (F1 event, slot_08.q_proj 2560x2560,
+numel 6,553,600: grad element_rms 1.9294e-8, fro 4.9365e-5; nesterov
+element_rms 1.8821e-9, fro 4.8155e-6 = 78x eps, so the clamp(min=1e-7) floor
+DID NOT engage - the normalization denominator was the TRUE norm 4.8280e-6,
+bf16 reduction). The Frobenius normalization (design behavior) erases the
+magnitude (x2.0766e5), and the normalized weak-signal matrix (rank-1
+dominated: top-1 sigma^2 = 88.9% of energy, thin tail to 7e-12) sits on the
+CONVERGENCE BOUNDARY of the 4-iteration quintic Newton-Schulz: iterations 1-3
+track 1.0->1.37->3.78->8.80 (fro, CPU-deterministic repro) but the 4th
+iteration is chaotic in the Gram-matrix bits - the SAME input bits give
+x1.95 (fro 17.2, CPU) / x1.98 (fro 17.6, HCU rank1) / x57.9 (fro 510.4, HCU
+rank0) depending on the 5-8% bf16 GEMM nondeterminism. Measured: rank0 NS
+output ns_rms 0.199 / ns_max 278 vs rank1 0.0069 / 0.676 (29x) from
+bit-identical inputs; applied delta up to 0.44-1.02 per
+ELEMENT (1395x the delta rms) on ~0.02-magnitude weights,
+1.2-2.1x above the 10x-normal safety ceiling on BOTH ranks in one event.
+Amplification chain (exact): nesterov_rms 1.8821e-9 x 2.0766e5 (normalize)
+x 510.1 (NS4 bad branch) x 1.5811e-3 (alpha) = delta_rms 3.1518e-4, total
+x1.675e5. The OLD draft's "~1.5e-7 Frobenius just above eps" and "x~66,000
+noise amplification" statements are both corrected by the audit above: the
+catastrophe is the NS4 boundary chaos, not an eps floor and not input-side
+representation noise (input bits are rank-identical; nesterov elements sit
+~400 ulp above zero at the median). The
 uninstrumented candidate writes these silently; rank-specific drift (plus the
 platform's bf16 GEMM nondeterminism below) accumulates over ~31-78 updates until
 global gradient norm goes nonfinite or loss jumps 4.5x (the observed crashes).

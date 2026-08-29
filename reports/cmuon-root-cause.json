@@ -17,8 +17,33 @@
     "case_f_nonreproducing": false
   },
   "root_cause": {
-    "summary": "NS input normalization grad/norm().clamp(min=1e-7) amplifies bf16 representation noise to O(1) for near-zero-gradient specs (Frobenius norm ~1.5e-7 just above the eps floor); Newton-Schulz then orthogonalizes pure noise, output scale chaotic per noise realization -> per-rank uncorrelated garbage updates (delta up to O(1) per element on ~0.02 weights); the uninstrumented candidate writes them silently; drift accumulates to nonfinite global gradient norm / loss divergence within ~31-78 updates",
-    "measured_nearzero_gradient": {"spec": "dit.blocks.slot_08.attention.q_proj.weight", "g_rms": 1.93e-08, "g_max": 1.26e-05, "frobenius_vs_eps": "1.5e-7 vs 1e-7"},
+    "summary": "Frobenius normalization (nesterov / nesterov.norm().clamp(min=1e-7)) erases the small magnitude of near-zero-signal specs (denominator = TRUE norm 4.828e-6, 78x eps, clamp NOT engaged); the resulting normalized rank-1-dominated matrix (top-1 sigma^2 = 88.9%) sits on the CONVERGENCE BOUNDARY of the 4-iteration quintic NS: iterations 1-3 stable (fro 1.0->1.37->3.78->8.80 CPU-deterministic), the 4th iteration is chaotic in the Gram bits - same input bits, 5-8% HCU bf16 GEMM noise picks the branch: x1.95 (fro 17.2, CPU) / x1.98 (fro 17.6, HCU rank1) / x57.9 (fro 510.4, HCU rank0) -> 29x rank-uncorrelated NS outputs; delta up to 1395x its own rms on one rank, 10x the Moonlight target; the uninstrumented candidate writes them silently; drift accumulates to nonfinite global gradient norm / loss divergence within ~31-78 updates. Correction of the first draft: the '~1.5e-7 Frobenius just above eps' and 'x~66,000 noise amplification' statements were dimensionally wrong; exact chain = x2.0766e5 (normalize) x x510.1 (NS4 bad branch) x 1.5811e-3 (alpha) = x1.675e5 nesterov->delta",
+    "unit_audit_2026_08_31": {
+      "source": "cmuon-forensic-crash-97101-dit_blocks_slot_08_attention_q_proj_weight.pt (F1 rank0 dump)",
+      "shape": [2560, 2560], "numel": 6553600,
+      "grad": {"element_rms": 1.9294e-08, "fro_norm": 4.9365e-05, "max_abs": 1.2577e-05, "zero_frac": 0.00091, "subnormal": 0},
+      "momentum": {"element_rms": 9.6489e-10, "fro_norm": 2.4687e-06, "max_abs": 6.2957e-07, "zero_frac": 0.00091, "subnormal": 0},
+      "nesterov": {"element_rms": 1.8821e-09, "fro_norm": 4.8155e-06, "max_abs": 1.2293e-06, "zero_frac": 0.00091, "subnormal": 0, "exp_median": -33, "ulp_at_median": 4.55e-13, "ulp_count_median": 400},
+      "ns_output": {"element_rms": 1.9937e-01, "fro_norm": 5.1026e+02, "max_abs": 2.78e+02},
+      "delta": {"element_rms": 3.1518e-04, "fro_norm": 8.0672e-01, "max_abs": 4.3945e-01},
+      "normalization_denominator": 4.8280e-06,
+      "denominator_is_eps_clamp": false,
+      "eps": 1e-07,
+      "amplification_chain": {"normalize": 2.0766e+05, "ns4_rank0_branch": 510.1, "alpha": 1.5811e-03, "total_nesterov_to_delta": 1.675e+05},
+      "ns_trace_fro_rank0_hcu": [1.4267, 3.9221, 9.4299, 510.3766],
+      "ns_trace_fro_cpu_deterministic": [1.3688, 3.7800, 8.8048, 17.2235],
+      "ns_trace_fro_rank1_hcu_final": 17.64,
+      "spectrum": {"top1_sigma2_frac": 0.8889, "top10_sigma2_frac": 0.9473, "sigma_top": 4.5427e-06, "sigma_last": 3.227e-13},
+      "identity_checks": {"nesterov_equals_0.05g_plus_0.95m": true, "delta_equals_alpha_x_ns": true},
+      "hcu_branch_repro_2026_08_31": {
+        "tensors": "F2b event same spec (nesterov fro 6.35e-6); DTK bf16 .norm() exact & deterministic (err -0.06%), no clamp",
+        "realizations_final_fro": [125234.92, 16.29, 15.92, 15.92, 15.88],
+        "devices": ["cuda:0", "cuda:0", "cuda:0", "cuda:1", "cuda:1"],
+        "branch_probability_catastrophic": 0.2,
+        "small_branch_matches": "CPU deterministic 17.22 and F1 rank1 17.64",
+        "amplitude_modalities": "small ~16 / medium ~1e2-1e3 / large ~1e5"
+      }
+    },
     "role_dependence": "role-independent (Q role proven by F2b; K/V/adaln excluded in F2 did not prevent the trip)",
     "fork_artifact": false,
     "momentum_ema_persists": true
