@@ -29,7 +29,6 @@ from anime_sr.data.clean_score import (
     _component_scores,
     build_clean_score_report,
     clean_score_gate_retained,
-    compute_clean_score,
     score_percentiles,
 )
 

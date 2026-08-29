@@ -136,7 +136,18 @@ class UFlowSR(nn.Module):
     (plan §15.1) — only config-driven specs select it.
     """
 
-    def __init__(self, spec: UFlowSpec, head_spec: OutputHeadSpec) -> None:
+    def __init__(
+        self,
+        spec: UFlowSpec,
+        head_spec: OutputHeadSpec,
+        attention_backend: str = "correctness",
+    ) -> None:
+        """``attention_backend`` (U233 P2-2): the hardware attention core
+        for every RestorationBlock — ``correctness`` (default, the frozen
+        verified manual core; ``manual`` / ``sdpa-correctness`` are
+        aliases), ``sdpa-repeat``, or ``sdpa-native-gqa``. SDPA variants
+        are benchmark-ready and only become the default after an explicit
+        parity/benchmark decision — never by construction."""
         super().__init__()
         spec.validate_stage_geometry()
         stages = spec.stages
@@ -151,6 +162,7 @@ class UFlowSR(nn.Module):
         self.stage_names = ("enc64", "enc32", "bottleneck16", "dec32", "dec64")
         self.stage_strides: dict[str, int] = dict(zip(self.stage_names, self.strides))
         self.head_dim = spec.head_dim
+        self.attention_backend = str(attention_backend).strip().lower()
 
         # ---- input projection (§7.5): 128 -> d[0] at the input grid ----
         latent_ch = head_spec.dim_out  # velocity channels == latent channels (128)
@@ -200,6 +212,7 @@ class UFlowSR(nn.Module):
                             head_dim=spec.head_dim,
                             layerscale_init=spec.layerscale_init,
                             qk_norm=spec.qk_norm,
+                            attention_backend=self.attention_backend,
                         )
                         for _ in range(s.depth)
                     ]
@@ -339,13 +352,17 @@ class AnimeSRModel(nn.Module):
         self,
         model_spec: ModelSpec | None = None,
         zero_init_pixel: bool = False,
+        attention_backend: str = "correctness",
     ) -> None:
+        """``attention_backend`` is threaded to the trunk's RestorationBlocks
+        (U233 P2-2); see :class:`UFlowSR` for the accepted values and the
+        default-correctness rule."""
         super().__init__()
         spec = model_spec if model_spec is not None else ModelSpec()
         spec.validate_structure()
         self.model_spec = spec
         self.pixel_encoder = PixelConditionEncoder(in_channels=spec.pixel_encoder.in_channels)
-        self.trunk = UFlowSR(spec.uflow, spec.output_head)
+        self.trunk = UFlowSR(spec.uflow, spec.output_head, attention_backend=attention_backend)
         if zero_init_pixel:
             apply_pixel_zero_init(self.trunk)
 

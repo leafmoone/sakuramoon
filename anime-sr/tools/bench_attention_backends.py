@@ -1,29 +1,45 @@
-"""P2-prep: throughput benchmark, WindowAttention (explicit core) vs
-WindowAttentionSDPA (fused SDPA core).
+"""P2-2 benchmark-ready: the THREE attention backends side by side.
 
-Measures on the local accelerator (HCU on the remote DTK box, CUDA locally):
+Backends (U233 P2-2 item 5):
+  * explicit   — WindowAttention, the frozen verified manual core
+                 (hardware.attention_backend = correctness/manual/sdpa-correctness)
+  * sdpa_rep   — WindowAttentionSDPA(gqa_native=False), repeat_interleave GQA
+  * sdpa_nat   — WindowAttentionSDPA(gqa_native=True), native GQA (enable_gqa)
+
+Measures on the local accelerator (HCU on the remote DTK box, CUDA/CPU locally):
   * full-step (fwd + bwd) throughput, it/s and peak memory
   * per-phase breakdown: pre (proj + qk norms + RoPE) / core / output
     projection, each timed over its own loop
   * the GQA A/B: repeat_interleave (default) vs native q/kv head counts
+  * NUMERICAL DIFF: each variant's forward output vs the explicit core
+    (rel-L2 + max abs) on shared weights and input — the parity number the
+    benchmark report must carry alongside the timing
+  * device utilization: best-effort sampling of ``hy-smi`` (DTK/HCU) or
+    ``nvidia-smi`` (NVIDIA) in a background thread over the run window
+    (null when neither tool exists)
 
-Usage (remote DTK env, after the branch exists):
+Usage (remote DTK env):
 
     source /opt/dtk-26.04/env.sh && export LD_LIBRARY_PATH=/opt/dtk-26.04/lib:/opt/dtk-26.04/hip/lib:/opt/hyhal/lib
     /usr/local/bin/python3.11 tools/bench_attention_backends.py \
         --H 128 --W 128 --dim 384 --heads 6 --kv 3 --dtype bf16 \
         --iters 60 --out bench-sdpa.json
-    # watch utilization in parallel:  hy-smi
 
-Prints a JSON summary to stdout (and ``--out`` when given). HCU utilization
-(``hy-smi``) is captured externally: keep a log of the run's wall-clock
-window and attach it to the summary.
+NOTE (2026-08-30): on a bad-state HCU host (DTK/HSA driver leak triggered
+by bf16/conv allocation patterns — see the anime-sr root-cause note),
+bf16 runs are dangerous; the numeric-diff + fp32 paths are safe, bf16
+timing/utilization runs belong on a healthy host.
+
+Prints a JSON summary to stdout (and ``--out`` when given).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -31,6 +47,63 @@ import torch
 import torch.nn.functional as F
 from anime_sr.model.window_attention import WindowAttention
 from anime_sr.model.window_attention_sdpa import WindowAttentionSDPA, sdpa_variant
+
+
+class _UtilSampler(threading.Thread):
+    """Best-effort device utilization sampler (hy-smi / nvidia-smi)."""
+
+    def __init__(self, interval: float = 2.0) -> None:
+        super().__init__(daemon=True)
+        self.interval = interval
+        self.samples: list[int] = []
+        self.tool: str | None = None
+        self._stop = threading.Event()
+
+    def _probe(self) -> tuple[str, re.Pattern[str]] | None:
+        for cmd, pat in (
+            (["hy-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+             re.compile(r"^\s*(\d{1,3})\s*$")),
+            (["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+             re.compile(r"^\s*(\d{1,3})\s*$")),
+        ):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+                if r.returncode == 0 and pat.match(r.stdout.strip().splitlines()[0] if r.stdout.strip() else ""):
+                    return cmd, pat
+            except (OSError, subprocess.SubprocessError, IndexError):
+                continue
+        return None
+
+    def run(self) -> None:
+        found = self._probe()
+        if found is None:
+            return
+        self.tool = found[0][0]
+        cmd, pat = found
+        while not self._stop.wait(self.interval):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+                if r.returncode != 0:
+                    continue
+                for line in r.stdout.strip().splitlines():
+                    m = pat.match(line)
+                    if m:
+                        self.samples.append(int(m.group(1)))
+            except (OSError, subprocess.SubprocessError):
+                continue
+
+    def stop(self) -> dict:
+        self._stop.set()
+        if not self.tool:
+            return {"tool": None, "samples": []}
+        s = self.samples
+        return {
+            "tool": self.tool,
+            "n_samples": len(s),
+            "mean_pct": round(sum(s) / len(s), 1) if s else None,
+            "max_pct": max(s) if s else None,
+            "min_pct": min(s) if s else None,
+        }
 
 
 def _sync(device: torch.device) -> None:
@@ -88,6 +161,33 @@ def bench_step(mod: WindowAttention, x: torch.Tensor, H: int, W: int, shift: boo
     return {"ms_per_step": ms, "it_per_s": 1000.0 / ms if ms > 0 else float("inf"), "peak_mb": peak}
 
 
+def _rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
+    num = (a - b).norm().item()
+    den = a.norm().item() or 1.0
+    return num / den
+
+
+def numeric_diff(ref: WindowAttention, mod: WindowAttention, x: torch.Tensor,
+                 H: int, W: int, shift: bool) -> dict:
+    """Forward output of ``mod`` vs the explicit-core ``ref`` (shared
+    weights/input): rel-L2 + max abs. Attempt-and-report: backends that
+    reject the native-GQA head-count mismatch yield a ``rejected`` record
+    (that rejection IS the finding, per the P2-2 parity gate)."""
+    try:
+        with torch.no_grad():
+            a = ref(x, H, W, shift=shift).float()
+            b = mod(x, H, W, shift=shift).float()
+    except RuntimeError as exc:
+        return {"rejected": True, "error": str(exc)[:300]}
+    if not torch.isfinite(b).all():
+        return {"rejected": True, "error": "non-finite output"}
+    return {
+        "rejected": False,
+        "rel_l2": round(_rel_l2(a, b), 8),
+        "max_abs_diff": round((a - b).abs().max().item(), 8),
+    }
+
+
 def bench_phases(mod: WindowAttention, x: torch.Tensor, H: int, W: int, shift: bool,
                  iters: int, warmup: int, device: torch.device) -> dict:
     q, k, v = _front_half(mod, x, H, W)
@@ -120,6 +220,8 @@ def main() -> None:
     ap.add_argument("--dtype", choices=["fp32", "bf16"], default="bf16")
     ap.add_argument("--iters", type=int, default=60)
     ap.add_argument("--warmup", type=int, default=10)
+    ap.add_argument("--util-interval", type=float, default=2.0,
+                    help="hy-smi/nvidia-smi sampling interval seconds (0 = off)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -141,8 +243,15 @@ def main() -> None:
         "device": str(device), "dtype": args.dtype, "grid": f"{args.H}x{args.W}",
         "dim": args.dim, "heads": args.heads, "kv": args.kv, "window": args.window,
         "iters": args.iters, "torch": torch.__version__,
-        "hy_smi": "capture utilization in a parallel shell over the run window",
     }
+    sampler = (
+        _UtilSampler(interval=args.util_interval)
+        if (args.util_interval > 0 and device.type == "cuda")
+        else None
+    )
+    if sampler is not None:
+        sampler.start()
+
     for shift in (False, True):
         block: dict = {}
         for label, mod in (("explicit", parent), ("sdpa_rep", sdpa_rep), ("sdpa_native", sdpa_native)):
@@ -150,8 +259,19 @@ def main() -> None:
             res = bench_step(mod, xs, args.H, args.W, shift, args.iters, args.warmup, device)
             res["phases_ms"] = bench_phases(mod, x, args.H, args.W, shift,
                                             max(args.warmup, 5), max(args.warmup, 5), device)
+            # numeric diff vs the explicit core (the P2-2 report must carry
+            # the number alongside the timing; attempt-and-report for the
+            # native-GQA variant when the backend rejects the head counts)
+            res["numeric_vs_explicit"] = (
+                None
+                if label == "explicit"
+                else numeric_diff(parent, mod, x, args.H, args.W, shift)
+            )
             block[label] = res
         report[f"shift{int(shift)}"] = block
+
+    if sampler is not None:
+        report["utilization"] = sampler.stop()
 
     if args.out:
         out_path = Path(args.out)

@@ -17,9 +17,17 @@ so parity with the frozen parent is the acceptance gate (see
 GQA handling: ``gqa_native=False`` (default) repeats k/v heads with
 ``repeat_interleave`` exactly like the parent -- bit-safest across every
 SDPA backend. ``gqa_native=True`` passes q (Hq heads) and k/v (Hkv
-heads) directly and relies on the backend's native GQA (Hq % Hkv == 0);
-math fallbacks that cannot broadcast will reject it, so the benchmark
-tries the native variant explicitly and reports.
+heads) directly AND sets ``enable_gqa=True`` on the SDPA call — without
+the flag, Hq != Hkv is not a true native GQA on backends that honor it;
+backends that cannot do native GQA reject the head-count mismatch, so
+the parity gate and benchmark try the native variant explicitly and
+report.
+
+dtype flow (P2-2, 2026-08-30): the RoPE trig tables are computed in fp32
+(kept — that is the stable choice), but the rotation OUTPUT is cast back
+to the incoming q/k dtype, so a bf16 production path keeps q/k/v in bf16
+all the way through the SDPA core (no silent fp32 fallback of the
+attention core). Softmax numerical stability is the SDPA backend's job.
 
 Mask convention: the parent's masks are bool with True = "attend"
 (``_shift_mask``, padded-path ``attend`` incl. the diagonal exemption);
@@ -51,30 +59,50 @@ class WindowAttentionSDPA(WindowAttention):
     # ------------------------------------------------------------------
     def _sdpa_core(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     attn_mask: torch.Tensor | None) -> torch.Tensor:
-        """Fused core with the parent's dtype flow.
+        """Fused core with a clean dtype flow (P2-2).
 
-        The parent's RoPE (fp32 cos/sin tables) upcasts q/k to fp32 even for
-        bf16 modules, while v keeps the module dtype; the parent computes
-        logits/softmax in fp32 then casts back before the final V matmul
-        (``attn.to(v.dtype) @ v``).  We mirror that: SDPA runs in q's dtype
-        (v cast up), and the output is cast back to v's dtype so ``o_proj``
-        sees the same dtype the parent produces.
+        Production (bf16) path: q/k are already cast back to the module
+        dtype by :meth:`_qkv_rope`, so q/k/v enter SDPA in bf16 and stay
+        bf16 — no fp32 fallback of the attention core. For a genuinely
+        mixed-dtype call (e.g. fp32 q/k with a bf16 v), SDPA runs in q's
+        dtype (v cast up) and the output is cast back to v's dtype so
+        ``o_proj`` sees the same dtype the parent produces.
+
+        Native GQA: ``enable_gqa=True`` is passed EXPLICITLY when
+        ``gqa_native`` and Hq != Hkv (U233 P2-2 item 1) — otherwise the
+        call is not a true native GQA on backends that honor the flag.
+        Backends without native-GQA support reject the head-count
+        mismatch; the parity gate / benchmark report that.
         """
         out_dtype = v.dtype
         if v.dtype != q.dtype:
             v = v.to(q.dtype)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        enable_gqa = self.gqa_native and q.shape[1] != k.shape[1]
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa
+        )
         return out.to(out_dtype) if out.dtype != out_dtype else out
 
     def _qkv_rope(self, x: torch.Tensor, H: int, W: int, offset: tuple[int, int]):
-        """Front half of the parent forward: projections + qk RMSNorm + 2D RoPE."""
+        """Front half of the parent forward: projections + qk RMSNorm + 2D RoPE.
+
+        dtype flow (P2-2): RoPE computes the trig tables in fp32 (stable),
+        which promotes q/k to fp32 during the rotation; the rotation
+        OUTPUT is cast back to the incoming q/k dtype (the module dtype:
+        bf16 in production), so the SDPA core below sees same-dtype
+        q/k/v and the attention core never silently falls back to fp32.
+        """
         B, N, _ = x.shape
         q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
         q, k = self.q_norm(q), self.k_norm(k)
+        out_dtype = q.dtype  # module dtype (bf16 production / fp32 tests)
         coords = self._coords(H, W, offset, x.device)
         q, k = self.rope.apply(q, k, coords)
+        if q.dtype != out_dtype:  # the fp32-trig promotion path
+            q = q.to(out_dtype)
+            k = k.to(out_dtype)
         return q, k, v
 
     def forward(
@@ -113,7 +141,13 @@ class WindowAttentionSDPA(WindowAttention):
 
     def _exact_sdpa(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     H: int, W: int, shift: bool) -> torch.Tensor:
-        """Un-padded path: same roll/partition as the parent, SDPA core."""
+        """Un-padded path: same roll/partition as the parent, SDPA core.
+
+        Native-GQA (P2-2): roll/partition are head-count agnostic — each
+        tensor uses its OWN head count (k/v keep Hkv heads; the SDPA core
+        groups q heads over kv heads via ``enable_gqa``). The parent's
+        repeat_interleave produces the identical numbers, so parity holds
+        either way."""
         B, Hn, N, D = q.shape
         w = self.window_size
         s = w // 2
@@ -121,13 +155,15 @@ class WindowAttentionSDPA(WindowAttention):
 
         if shift:
             q = torch.roll(q.view(B, Hn, H, W, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hn, N, D)
-            k = torch.roll(k.view(B, Hn, H, W, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hn, N, D)
-            v = torch.roll(v.view(B, Hn, H, W, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hn, N, D)
+            Hk = k.shape[1]
+            k = torch.roll(k.view(B, Hk, H, W, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hk, N, D)
+            v = torch.roll(v.view(B, Hk, H, W, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hk, N, D)
 
         def partition(t: torch.Tensor) -> torch.Tensor:
-            x = t.view(B, Hn, gh, w, gw, w, D)
+            th = t.shape[1]
+            x = t.view(B, th, gh, w, gw, w, D)
             x = x.permute(0, 2, 4, 1, 3, 5, 6)
-            return x.reshape(B * gh * gw, Hn, w * w, D)
+            return x.reshape(B * gh * gw, th, w * w, D)
 
         qw, kw, vw = partition(q), partition(k), partition(v)
         attn_mask = None
@@ -152,9 +188,10 @@ class WindowAttentionSDPA(WindowAttention):
         gh, gw = Hp // w, Wp // w
 
         def pad(t: torch.Tensor) -> torch.Tensor:
-            g = t.view(B, Hn, H, W, D)
+            th = t.shape[1]
+            g = t.view(B, th, H, W, D)
             g = F.pad(g, (0, 0, 0, Wp - W, 0, Hp - H))
-            return g.view(B, Hn, Hp * Wp, D)
+            return g.view(B, th, Hp * Wp, D)
 
         q, k, v = pad(q), pad(k), pad(v)
         dev = q.device
@@ -170,9 +207,10 @@ class WindowAttentionSDPA(WindowAttention):
         key_ok_g = key_ok.reshape(gh * gw, w * w)  # (G, w*w) True = real key
 
         if shift:
+            Hk = k.shape[1]
             q = torch.roll(q.view(B, Hn, Hp, Wp, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hn, Hp * Wp, D)
-            k = torch.roll(k.view(B, Hn, Hp, Wp, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hn, Hp * Wp, D)
-            v = torch.roll(v.view(B, Hn, Hp, Wp, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hn, Hp * Wp, D)
+            k = torch.roll(k.view(B, Hk, Hp, Wp, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hk, Hp * Wp, D)
+            v = torch.roll(v.view(B, Hk, Hp, Wp, D), shifts=(-s, -s), dims=(2, 3)).view(B, Hk, Hp * Wp, D)
             boundary = self._shift_mask(Hp, Wp, dev)  # (G, w*w, w*w)
             attend = key_ok_g.view(gh * gw, 1, w * w) & boundary  # (G, w*w, w*w)
         else:
@@ -181,9 +219,10 @@ class WindowAttentionSDPA(WindowAttention):
         attend = attend.view(gh * gw, w * w, w * w)
 
         def partition(t: torch.Tensor) -> torch.Tensor:
-            x = t.view(B, Hn, gh, w, gw, w, D)
+            th = t.shape[1]
+            x = t.view(B, th, gh, w, gw, w, D)
             x = x.permute(0, 2, 4, 1, 3, 5, 6)
-            return x.reshape(B * gh * gw, Hn, w * w, D)
+            return x.reshape(B * gh * gw, th, w * w, D)
 
         qw, kw, vw = partition(q), partition(k), partition(v)
         attn_mask = attend.repeat(B, 1, 1).unsqueeze(1)  # (B*G, 1, w*w, w*w)

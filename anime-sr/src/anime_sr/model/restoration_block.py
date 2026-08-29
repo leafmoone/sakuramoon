@@ -28,10 +28,62 @@ from torch import nn
 
 from anime_sr.model.conditioning import GlobalConditioner, StageFilms
 from anime_sr.model.window_attention import RMSNorm2d, WindowAttention
+from anime_sr.model.window_attention_sdpa import WindowAttentionSDPA
 
 __all__ = [
     "RestorationBlock",
+    "build_attention",
 ]
+
+#: ``hardware.attention_backend`` values (U233 P2-2): the default is the
+#: frozen, verified CORRECTNESS (manual) core; the SDPA variants are
+#: benchmark-ready and only become the default after a parity/benchmark
+#: decision — never by construction.
+_CORRECTNESS_BACKENDS = ("correctness", "manual", "sdpa-correctness")
+_SDPA_BACKENDS = ("sdpa-repeat", "sdpa-native-gqa")
+
+
+def build_attention(
+    dim: int,
+    num_heads: int,
+    num_kv_heads: int,
+    *,
+    backend: str,
+    head_dim: int = 64,
+    window_size: int = 8,
+    global_attention: bool = False,
+    qk_norm: bool = True,
+) -> WindowAttention:
+    """Select the attention implementation for ``hardware.attention_backend``.
+
+    * ``correctness`` / ``manual`` / ``sdpa-correctness`` (default): the
+      frozen explicit core — the verified production default;
+    * ``sdpa-repeat``: SDPA core with repeat_interleave GQA (bit-safest
+      SDPA variant);
+    * ``sdpa-native-gqa``: SDPA core with native GQA (``enable_gqa=True``,
+      Hq != Hkv — backend support required).
+
+    All variants share identical weights (state_dict-compatible)."""
+    b = str(backend).strip().lower()
+    common = {
+        "dim": dim,
+        "num_heads": num_heads,
+        "num_kv_heads": num_kv_heads,
+        "head_dim": head_dim,
+        "window_size": window_size,
+        "global_attention": global_attention,
+        "qk_norm": qk_norm,
+    }
+    if b in _CORRECTNESS_BACKENDS:
+        return WindowAttention(**common)
+    if b == "sdpa-repeat":
+        return WindowAttentionSDPA(gqa_native=False, **common)
+    if b == "sdpa-native-gqa":
+        return WindowAttentionSDPA(gqa_native=True, **common)
+    raise ValueError(
+        f"unknown hardware.attention_backend {backend!r}; expected one of "
+        f"{sorted(_CORRECTNESS_BACKENDS + _SDPA_BACKENDS)}"
+    )
 
 
 class RestorationBlock(nn.Module):
@@ -49,6 +101,7 @@ class RestorationBlock(nn.Module):
         window_size: int = 8,
         layerscale_init: float = 1e-3,
         qk_norm: bool = True,
+        attention_backend: str = "correctness",
     ) -> None:
         super().__init__()
         if num_kv_heads < 1 or num_heads % num_kv_heads:
@@ -59,10 +112,12 @@ class RestorationBlock(nn.Module):
         if expanded <= 0 or dim > expanded:
             raise ValueError(f"ffn {expanded} must be a positive int >= dim")
         self.dim = dim
-        self.attn = WindowAttention(
+        self.attention_backend = str(attention_backend).strip().lower()
+        self.attn = build_attention(
             dim,
             num_heads,
             num_kv_heads,
+            backend=self.attention_backend,
             head_dim=head_dim,
             window_size=window_size,
             global_attention=global_attention,

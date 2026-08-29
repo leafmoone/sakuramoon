@@ -288,6 +288,16 @@ class HardwareSpec(_Frozen):
     dtype: Literal["bf16"] = "bf16"
     ddp: bool = True
     fsdp: bool = False
+    # P2-2 (2026-08-30): accepted values —
+    #   "correctness" / "manual" / "sdpa-correctness" (default): the frozen,
+    #   verified EXPLICIT attention core (production default; the SDPA
+    #   variants do NOT become the default just because they run);
+    #   "sdpa-repeat": fused SDPA core, repeat_interleave GQA (bit-safest
+    #   SDPA variant);
+    #   "sdpa-native-gqa": fused SDPA core, native GQA (enable_gqa=True).
+    # The SDPA variants are benchmark-ready (tools/bench_attention_backends
+    # + tests/test_p2_sdpa_parity.py); switching the default requires a
+    # passed parity gate AND a benchmark report (U233 P2-2).
     attention_backend: str = "sdpa-correctness"
     activation_checkpointing: Literal["none", "selective", "full"] = "selective"
     target_latent_tokens_phase1: int = 131_072

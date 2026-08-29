@@ -1345,12 +1345,23 @@ def run_latent_flow(
                 )
 
     vae = load_frozen_vae(vae_path or cfg.vae.path, device, dtype=dtype)
+    # P2-2 (2026-08-30): the attention core is selected by
+    # hardware.attention_backend (default "sdpa-correctness" = the frozen
+    # verified manual core; sdpa-repeat / sdpa-native-gqa only after a
+    # parity/benchmark decision).
+    attn_backend = cfg.hardware.attention_backend
     if lf.pixel_features:
         model = AnimeSRModel(
-            cfg.model, zero_init_pixel=cfg.model.zero_init_pixel
+            cfg.model,
+            zero_init_pixel=cfg.model.zero_init_pixel,
+            attention_backend=attn_backend,
         ).to(device, dtype=dtype)
     else:
-        model = UFlowSR(cfg.model.uflow, cfg.model.output_head).to(device, dtype=dtype)
+        model = UFlowSR(
+            cfg.model.uflow, cfg.model.output_head, attention_backend=attn_backend
+        ).to(device, dtype=dtype)
+    if rank == 0:
+        print(f"[latent] attention_backend={attn_backend}", flush=True)
     n_params = count_parameters(model)
     opt = _optimizer_for(cfg, model)
     # P2-1 (2026-08-30): sample-based EMA wired into the production loop.
