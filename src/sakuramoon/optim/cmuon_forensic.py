@@ -220,7 +220,7 @@ class ForensicMonitor:
         row.zero_()
         has = grad is not None
         row[_N_FP_COLS - 1] = 1.0 if has else 0.0
-        row[_N_FP_COLS - 2] = 0.0  # finite: optimistic until proven
+        row[_N_FP_COLS - 2] = 1.0  # finite: optimistic until proven
         col = 0
         for tensor in (grad, momentum, nesterov, ns, delta):
             if tensor is None:

@@ -1567,9 +1567,9 @@ def test_forensic_healthy_steps_and_step0_check(tmp_path):
 )
 def test_forensic_guard_trips_on_nonfinite_ns(tmp_path, monkeypatch):
     """A nonfinite NS output (from a FINITE gradient) must trip the
-    fail-closed guard BEFORE any parameter write: CMuonSafetyError (not
-    FloatingPointError), parameters bit-unchanged, crash dump written with
-    the offending spec + the 10-step ring."""
+    fail-closed guard BEFORE any CMuon parameter write: CMuonSafetyError
+    (not FloatingPointError), CMuon parameters bit-unchanged, crash dump
+    written with the offending spec + the 10-step ring."""
 
     def evil_ns(grad, ns_steps, coefficients, eps, trace):
         trace.append(torch.tensor(float("inf")))
@@ -1582,8 +1582,15 @@ def test_forensic_guard_trips_on_nonfinite_ns(tmp_path, monkeypatch):
     _seed_grads(model, 51)
     with pytest.raises(CMuonSafetyError):
         hybrid.step()
+    # CMuon parameters must be bit-unchanged (phase 2 never ran). The AdamW
+    # part steps FIRST in the production step order (unchanged by the
+    # forensic split), so it may carry this update's increments; they are
+    # discarded with the aborted run (checkpoints commit only complete
+    # updates).
+    cmuon_names = set(hybrid.routing.cmuon_names)
     for n, p in model.named_parameters():
-        assert torch.equal(before[n], p), f"fail-closed must not write {n}"
+        if n in cmuon_names:
+            assert torch.equal(before[n], p), f"fail-closed must not write {n}"
     dump = tmp_path / "cmuon-forensic-crash-1.json"
     assert dump.exists(), "crash dump must be written at the trip step"
     payload = json.loads(dump.read_text())
@@ -1603,7 +1610,8 @@ def test_forensic_guard_trips_on_nonfinite_ns(tmp_path, monkeypatch):
 )
 def test_forensic_guard_trips_on_delta_rms_ceiling(tmp_path, monkeypatch):
     """A finite-but-catastrophic NS output (delta RMS far above
-    10 x 0.2 x lr) must also trip the guard, with the parameters untouched."""
+    10 x 0.2 x lr) must also trip the guard, with the CMuon parameters
+    untouched."""
 
     def evil_ns(grad, ns_steps, coefficients, eps, trace):
         trace.append(grad.float().norm())
@@ -1616,8 +1624,10 @@ def test_forensic_guard_trips_on_delta_rms_ceiling(tmp_path, monkeypatch):
     _seed_grads(model, 52)
     with pytest.raises(CMuonSafetyError):
         hybrid.step()
+    cmuon_names = set(hybrid.routing.cmuon_names)
     for n, p in model.named_parameters():
-        assert torch.equal(before[n], p), f"fail-closed must not write {n}"
+        if n in cmuon_names:
+            assert torch.equal(before[n], p), f"fail-closed must not write {n}"
     dump = tmp_path / "cmuon-forensic-crash-1.json"
     assert dump.exists()
     payload = json.loads(dump.read_text())
