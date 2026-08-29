@@ -562,15 +562,23 @@ PRODUCTION_SHAPES = {
 TARGET_DELTA = 0.2 * LR
 
 
-def _delta_rms(shape, ns_steps, *, seed=0, dtype=torch.bfloat16):
+def _delta_rms(shape, ns_steps, *, seed=0, dtype=torch.bfloat16, device=None):
     """Applied parameter-delta RMS for one NS depth on an iid gradient.
 
     delta = -alpha * NS(grad); at step 1 the nesterov update is a scalar
     multiple of grad, so NS(grad) == NS(nesterov) (NS is scale-invariant after
     its one-time Frobenius normalization).
+
+    ``device=None`` targets the accelerator when one is present: these
+    bf16 invariants are platform dependent (the ns5 artifact is HCU-specific),
+    and the CPU bf16 matmul path is orders of magnitude slower, so the
+    "_hcu" tests must not silently fall back to CPU. Pass ``device="cpu"``
+    explicitly for the CPU-pinned invariants.
     """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     g = torch.Generator().manual_seed(seed)
-    x = torch.randn(*shape, generator=g, dtype=dtype)
+    x = torch.randn(*shape, generator=g, dtype=dtype).to(device)
     ns = cmuon_zeroth_power(x, ns_steps)
     alpha = cmuon_moonlight_alpha(shape[0], shape[1], LR, 1)
     return ((-alpha) * ns).pow(2).mean().sqrt().item()
@@ -718,7 +726,7 @@ def test_chunk6_per_spec_ns_equals_independent_muon():
 def test_kv_adaln_ns4_finite_and_scaled_cpu():
     """The two small-short-edge production shapes are SAFE at ns4 (~0.2*lr)."""
     for shape in [(640, 2560), (2560, 1024)]:
-        r = _delta_rms(shape, 4)
+        r = _delta_rms(shape, 4, device="cpu")
         assert math.isfinite(r)
         assert r < 5 * TARGET_DELTA, (
             f"ns4 delta_rms for {shape} should be ~0.2*lr, got {r}"
