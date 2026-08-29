@@ -61,6 +61,8 @@ from __future__ import annotations
 
 import json
 import multiprocessing.pool
+import platform
+import subprocess
 import time
 from collections import deque
 from collections.abc import Callable
@@ -78,6 +80,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from anime_sr.config.loader import dump_resolved
 from anime_sr.config.schema import Config
 from anime_sr.data.clean_score import (
     CleanScoreCache,
@@ -102,12 +105,11 @@ from anime_sr.model.uflow import (
     apply_pixel_zero_init,
     count_parameters,
 )
-from anime_sr.train.ckpt_v2 import load_v2
+from anime_sr.train.ckpt_v2 import load_v2, make_provenance, restore_rng, save_v2
 from anime_sr.train.ema_sample import SampleEMA
 from anime_sr.train.pixel_baseline import (
     _cosine_lr,
     _optimizer_for,
-    _save_ckpt,
     _unwrap,
 )
 from anime_sr.vae.mage import load_frozen_vae
@@ -799,6 +801,110 @@ def _ckpt_is_full_pixel(path: str | Path, device: torch.device) -> bool:
     return any(k.startswith(_PIXEL_KEY_PREFIX) for k in payload["model"])
 
 
+def _git_commit() -> str | None:
+    """Plain-identifier provenance: short git HEAD of the tree containing
+    this source file (None outside a checkout / on error). No hashing of
+    config/weights per repo rule."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=Path(__file__).resolve().parent,
+            timeout=10,
+        )
+        return r.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _exposure_cursor(step: int, bs: int, world_size: int, exposure_target: int) -> dict:
+    """Deterministic §11.5 stream cursor at a step boundary (P2-1).
+
+    The train stream is a pure function of ``step`` (slot arithmetic + the
+    (sample_id, cycle, exposure) identity), so ``step`` IS the full cursor;
+    the other fields are audit values a resume cross-checks against its own
+    config (a changed exposure_target only alters the remaining horizon).
+    ``global_exposures`` counts the GLOBAL budget (bs*world_size per step).
+    """
+    return {
+        "step": int(step),
+        "global_exposures": int(step) * int(bs) * int(world_size),
+        "exposure_per_cycle": _EXPOSURE_PER_CYCLE,
+        "exposure_target": int(exposure_target),
+    }
+
+
+def _step_scalars(
+    step: int,
+    loss: torch.Tensor | None,
+    lr: float,
+    loss_window: deque[float],
+    t_data_cum: float,
+    t_comp_cum: float,
+    done_steps: int,
+) -> dict:
+    """Windowed scalars for the v2 checkpoint's ``scalars`` section (P2-1).
+
+    ``loss`` may be None when the save fires on an empty loop (resume at
+    the final step)."""
+    wait_pct = (
+        100.0 * t_data_cum / max(1e-9, t_data_cum + t_comp_cum)
+        if done_steps >= 50
+        else None
+    )
+    return {
+        "step": int(step),
+        "loss": float(loss.item()) if loss is not None else None,
+        "lr": float(lr),
+        "loss_window_mean": (
+            float(sum(loss_window) / len(loss_window)) if loss_window else None
+        ),
+        "loss_window": [float(x) for x in loss_window],
+        "data_wait_pct": wait_pct,
+    }
+
+
+def _run_provenance(
+    cfg: Config,
+    *,
+    source_ckpt: str | None,
+    config_names: list[str] | None,
+) -> dict:
+    """v2 provenance block (P2-1): plain identifiers only — git HEAD,
+    source checkpoint, torch version, platform, timestamp, plus the
+    RESOLVED-CONFIG IDENTIFIER: the source TOML names + the key stream-
+    defining resolved values (no project-level hashing per repo rule; the
+    full resolved config is dumped next to the checkpoints as
+    resolved-config.json by :func:`dump_resolved`)."""
+    lf = cfg.latent_flow
+    prov = make_provenance(
+        git_commit=_git_commit(),
+        config=",".join(config_names) if config_names else None,
+        source_ckpt=source_ckpt,
+        platform=platform.platform(),
+    )
+    prov["resolved"] = {
+        "batch_size": lf.batch_size,
+        "exposure_target": cfg.phase1.exposure_target,
+        "exposure_per_cycle": _EXPOSURE_PER_CYCLE,
+        "zhr_source": lf.zhr_source,
+        "pixel_features": lf.pixel_features,
+        "ema_half_life_samples": cfg.ema.half_life_samples,
+        "sampling": {
+            "enabled": cfg.sampling.enabled,
+            "core_fraction": cfg.sampling.core_fraction,
+            "regular_fraction": cfg.sampling.regular_fraction,
+            "aux_fraction": cfg.sampling.aux_fraction,
+        },
+        "clean_score_min": cfg.filter.clean_score_min,
+        "attention_backend": cfg.hardware.attention_backend,
+        "dtype": cfg.hardware.dtype,
+    }
+    return prov
+
+
 def _apply_init_trunk(
     model: nn.Module,
     path: str | Path,
@@ -999,6 +1105,7 @@ def run_latent_flow(
     start_step: int = 0,
     resume: str | Path | None = None,
     init_trunk: str | Path | None = None,
+    config_names: list[str] | None = None,
 ) -> int:
     """Train (or resume) the M3/M4 latent flow model; returns the final step.
 
@@ -1246,6 +1353,13 @@ def run_latent_flow(
         model = UFlowSR(cfg.model.uflow, cfg.model.output_head).to(device, dtype=dtype)
     n_params = count_parameters(model)
     opt = _optimizer_for(cfg, model)
+    # P2-1 (2026-08-30): sample-based EMA wired into the production loop.
+    # The decay is anchored to GLOBAL exposures: one optimizer step
+    # consumes bs*world_size samples, so update() is fed the GLOBAL batch
+    # (plan §14.3 / U233 P2-1) — half_life_samples is a global-exposure
+    # semantic. decay=0.5 at ref_samples=half_life_samples makes the
+    # retention exactly 1/2 after half_life_samples global samples.
+    ema = SampleEMA(model, decay=0.5, ref_samples=cfg.ema.half_life_samples)
     # P0-2: --init-trunk (stage transition) and --resume (same-stage
     # recovery) are fully separate paths and mutually exclusive.
     if init_trunk is not None and resume is not None:
@@ -1260,12 +1374,39 @@ def run_latent_flow(
                 "requires [latent_flow].pixel_features = true"
             )
         start_step = _apply_init_trunk(model, init_trunk, cfg, device, rank)
+        # the transition changes the live weights (and the parameter key
+        # set grows by pixel_encoder.*): re-seed the shadow from the
+        # post-transition model
+        ema = SampleEMA(model, decay=0.5, ref_samples=cfg.ema.half_life_samples)
     elif resume is not None:
-        # Same-stage full resume. EMA is wired in by the P2 section below;
-        # pass it once created (the trainer keeps ``self.ema`` there).
-        start_step, _v2_meta = _apply_resume(
-            model, opt, None, Path(resume), device, rank, lf.pixel_features
+        # Same-stage full resume: load_v2 overwrites the pre-seeded EMA
+        # shadow when the checkpoint carries an EMA section (v2); a v1
+        # legacy file keeps the fresh shadow (decays in from live weights).
+        start_step, v2_meta = _apply_resume(
+            model, opt, ema, Path(resume), device, rank, lf.pixel_features
         )
+        if v2_meta is not None:
+            # bit-reproducible resume: restore the captured RNG states
+            # (cpu/cuda/numpy) and cross-check the stored exposure cursor
+            # against this run's config
+            restore_rng(v2_meta["rng"])
+            exp = v2_meta["exposure"] or {}
+            stored_target = exp.get("exposure_target")
+            if stored_target is not None and int(stored_target) != int(p1.exposure_target):
+                print(
+                    f"[latent] WARNING: resume checkpoint was written with "
+                    f"exposure_target={stored_target} but this run's config "
+                    f"has {p1.exposure_target} — the per-step stream identity "
+                    f"is unchanged, only the remaining horizon differs",
+                    flush=True,
+                )
+            if rank == 0:
+                print(
+                    f"[latent] resume v2: RNG restored, exposure cursor "
+                    f"step={exp.get('step')} "
+                    f"global_exposures={exp.get('global_exposures')}",
+                    flush=True,
+                )
     if world_size > 1 and dist.is_available() and dist.is_initialized():
         model = DDP(
             model,
@@ -1287,6 +1428,31 @@ def run_latent_flow(
             f"({p1.exposure_target} samples), zhr={lf.zhr_source}, "
             f"producer={lf.producer}, prefetch_depth={lf.prefetch_depth}, "
             f"device={device}, dtype={dtype}"
+        )
+        # P2-1: EMA telemetry + the resolved-config dump (checkpoint
+        # contract §18: the resolved config lives next to the checkpoints
+        # and is referenced by the v2 provenance block).
+        print(
+            f"[latent] EMA: sample-based, half_life="
+            f"{cfg.ema.half_life_samples} GLOBAL exposures "
+            f"(n_samples={ema.n_samples_total} at start; one step feeds "
+            f"{bs * world_size})",
+            flush=True,
+        )
+        dump_resolved(cfg, out / "resolved-config.json")
+
+    def _prov() -> dict:
+        """Fresh v2 provenance per save (per-save timestamp); the source
+        checkpoint is the resume file (same-stage) or the init-trunk file
+        (stage transition)."""
+        return _run_provenance(
+            cfg,
+            source_ckpt=(
+                str(resume)
+                if resume is not None
+                else (str(init_trunk) if init_trunk is not None else None)
+            ),
+            config_names=config_names,
         )
 
     # ------------------------------------------------------------------
@@ -1389,6 +1555,9 @@ def run_latent_flow(
     n_produced = 0
     ready_occ_sum = 0  # per-step count of queued (non-front) batches already fetched
     n_wait = 0  # steps where the consumer blocked on the front batch
+    loss_window: deque[float] = deque(maxlen=100)  # P2-1: scalars section of v2 ckpts
+    loss: torch.Tensor | None = None  # bound in the loop; None on an empty loop
+    lr = 0.0
 
     def data_snapshot(done_steps: int, elapsed: float) -> str:
         """M1 #8 producer/consumer snapshot, printed at val milestones.
@@ -1524,6 +1693,10 @@ def run_latent_flow(
         if cfg.gradient.clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.gradient.clip_norm)
         opt.step()
+        # P2-1: EMA ages by GLOBAL exposures — one step consumes bs x
+        # world_size samples across the DDP group (plan §14.3).
+        ema.update(model, n_samples=bs * world_size)
+        loss_window.append(loss.item())
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         t_comp_cum += time.perf_counter() - tc
@@ -1568,8 +1741,22 @@ def run_latent_flow(
                 bucket_hr,
                 autocast,
             )
+        # P2-1: production saves are ckpt v2 (model/optimizer/EMA/step/
+        # exposure cursor/RNG/scalars/provenance+resolved-config id).
         if rank == 0 and (step + 1) % lf.save_every_steps == 0:
-            _save_ckpt(out / f"step-{step + 1:07d}.pt", step + 1, model, opt)
+            save_v2(
+                out / f"step-{step + 1:07d}.pt",
+                step=step + 1,
+                model=model,
+                opt=opt,
+                ema=ema,
+                scalars=_step_scalars(
+                    step + 1, loss, lr, loss_window, t_data_cum, t_comp_cum,
+                    step + 1 - start_step,
+                ),
+                exposure=_exposure_cursor(step + 1, bs, world_size, p1.exposure_target),
+                provenance=_prov(),
+            )
         if rank == 0 and ((step + 1) % 50 == 0 or step + 1 == total):
             done = step + 1 - start_step
             wait_pct = (
@@ -1594,7 +1781,19 @@ def run_latent_flow(
     if world_size > 1 and dist.is_available() and dist.is_initialized():
         dist.barrier()
     if rank == 0:
-        _save_ckpt(out / "latest.pt", total, model, opt)
+        save_v2(
+            out / "latest.pt",
+            step=total,
+            model=model,
+            opt=opt,
+            ema=ema,
+            scalars=_step_scalars(
+                total, loss, lr, loss_window, t_data_cum, t_comp_cum,
+                total - start_step,
+            ),
+            exposure=_exposure_cursor(total, bs, world_size, p1.exposure_target),
+            provenance=_prov(),
+        )
         done = total - start_step
         elapsed = max(1e-9, time.time() - t0)
         prod_sample = (

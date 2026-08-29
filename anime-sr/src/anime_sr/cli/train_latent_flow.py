@@ -118,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         world_size=world_size,
         resume=args.resume,
         init_trunk=args.init_trunk,
+        config_names=list(args.config),
     )
     if world_size > 1 and dist.is_initialized():
         dist.destroy_process_group()
