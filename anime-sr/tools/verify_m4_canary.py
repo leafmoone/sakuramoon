@@ -1,19 +1,28 @@
-"""M4-1024 production canary verification (8-item checklist).
+"""M4-1024 production canary verification (8-item checklist + gates).
 
 Run this on the remote host AFTER the 10k-exposure production canary
 finished, to verify the launch-readiness checklist from
-``docs/m4-1024-launch-decision.md`` §8 / ``config/m4_1024_canary.toml``:
+``docs/m4-1024-launch-decision.md`` §8 / ``config/m4_1024_canary.toml``
+plus the 2026-08-30 final execution gates:
 
   1. checkpoint transition  — 596/596 expected parameter paths, pixel
      path alive (never re-zeroed), provenance source SHA256 matches the
      real Phase I-P checkpoint, optimizer mode recorded;
   2. EMA                    — section non-empty, decay/ref_samples match
-     the config, n_samples_total == global exposures, shadow finite;
+     the config, n_samples_total == global exposures (final 10,000),
+     shadow finite;
   3. v2 checkpoint          — model/optimizer/EMA/RNG/exposure/
      provenance/scalars sections all actually present;
-  4. same-stage resume      — mid-canary save -> fresh model+opt+EMA ->
-     _apply_resume: step/optimizer/EMA/exposure round-trip, pixel weights
-     preserved (NOT unit tests alone; --check-resume <ckpt>);
+  4. same-stage resume, split into TWO evidence sources:
+     4a. offline checkpoint round-trip — fresh model+opt+EMA ->
+         _apply_resume: step/optimizer/EMA/exposure bit-exact, pixel
+         weights preserved (--check-resume <mid-ckpt>);
+     4b. REAL process-level restart — Leg A log proves the
+         stage-transition ran and reached step 320; Leg B log proves a
+         fresh torchrun resumed at step 320 (same-stage resume, v2 RNG/
+         exposure cursor, EMA n_samples=5120 at start, steps 320..625,
+         NO stage-transition line); the resume gate is PASS only if BOTH
+         4a and 4b PASS (--leg-a-log / --leg-b-log);
   5. process producer       — 0 silent wedge, worker crash telemetry
      normal (0 crashes), data_wait, starve, queue occupancy (from
      train-meta.json + the launch log);
@@ -23,23 +32,35 @@ finished, to verify the launch-readiness checklist from
   7. sampling pool          — short-window pool shares ≈ 80/10/10
      (config targets, aux capped) — needs the data dirs;
   8. numerics               — loss/grad finite, Pixel path active, no
-     NaN/Inf anywhere (log + checkpoints + train-meta.json).
+     NaN/Inf anywhere (log + checkpoints + train-meta.json);
+  9. throughput gate        — S_canary from the stable log intervals
+     (startup / checkpoint-save / val / run-end excluded) vs the hard
+     gate 0.71 step/s (90% of the 0.787 historical anchor); reports
+     ETA_6M = 375000/S_canary;
+  10. Leg B continuity      — LR of every logged Leg B step equals the
+     625-step cosine plan recomputed from config (stateless
+     _cosine_lr), no loss jump at the seam (300->350) beyond Leg A's
+     own 50-step variation, EMA cursor continued from 5120 (final
+     n_samples_total == 5120 + 305*16 == 10000).
 
-Usage (remote DTK env, PYTHONPATH=src):
+Usage (remote DTK env, PYTHONPATH=src of the pinned execution tree):
 
     /usr/local/bin/python3.11 tools/verify_m4_canary.py \
         --out-dir /root/private_data/anime-sr/output_model/latent-flow-m4-1024-canary \
         --config config/base.toml config/data.toml config/m4_1024.toml config/m4_1024_canary.toml \
-        --log /root/private_data/anime-sr/logs/m4-canary.log \
+        --log /root/private_data/anime-sr/logs/m4-canary-legA.log \
         --source-ckpt /root/private_data/anime-sr/output_model/latent-flow-phase1-pi/latest.pt \
         --check-resume /root/private_data/anime-sr/output_model/latent-flow-m4-1024-canary/step-0000320.pt \
-        --index-dir /root/private_data/anime-sr/data/index \
+        --leg-a-log /root/private_data/anime-sr/logs/m4-canary-legA.log \
+        --leg-b-log /root/private_data/anime-sr/logs/m4-canary-legB.log \
+        --index-dir /root/private_data/anime-sr/data/index-p1formal \
         --webp-dir /root/private_data/anime-sr/data/webp \
         --bucket-hr 1024
 
 Prints a JSON report (and ``--out`` when given). Exit code 0 iff every
 item is PASS or SKIP (a SKIP is only allowed for the data-probe items
-6/7 when the data dirs are not supplied).
+6/7 when the data dirs are not supplied, and for 9/10 when the leg
+logs are not supplied).
 """
 
 from __future__ import annotations
@@ -48,6 +69,7 @@ import argparse
 import json
 import math
 import re
+import statistics
 from pathlib import Path
 
 import torch
@@ -64,7 +86,7 @@ from anime_sr.train.latent_flow import (
     _sha256_file,
     _train_crop_box,
 )
-from anime_sr.train.pixel_baseline import _optimizer_for
+from anime_sr.train.pixel_baseline import _cosine_lr, _optimizer_for
 
 #: Work order (2026-08-29): the production model is 596 tensors
 #: (474 trunk + 122 pixel_encoder).
@@ -75,10 +97,84 @@ DATA_WAIT_STOP = 30.0
 STARVE_WARN = 10.0
 STARVE_STOP = 20.0
 POOL_TOLERANCE = 0.05  # shares vs config targets, absolute fraction
+#: Item 9: hard throughput gate = 90% of the Phase I-P anchor (0.787 step/s
+#: at 6.298 img/s/rank); the 6M horizon is 375,000 global steps.
+S_CANARY_GATE = 0.71
+ETA_6M_STEPS = 375_000
+#: Item 10: the logged lr is printed with %.2e (3 significant digits).
+LR_REL_TOL = 1e-2
 
 
 def _finite(t: torch.Tensor) -> bool:
     return bool(torch.isfinite(t).all().item())
+
+
+# ----------------------------------------------------------------------
+# shared log parsing (items 4b / 9 / 10)
+# ----------------------------------------------------------------------
+STEP_LINE = re.compile(
+    r"\[latent\] step (\d+)/(\d+) loss=(-?\d+\.\d+) "
+    r"lr=(-?\d+\.\d+[eE][-+]?\d+) \((\d+\.\d) it/s\)"
+    r"(?: data_wait=(-?\d+\.\d+)%)?",
+)
+PLAN_LINE = re.compile(r"steps (\d+)\.\.(\d+) \((\d+) samples\)")
+
+
+def _read_log(path: str | None) -> str | None:
+    if not path:
+        return None
+    p = Path(path)
+    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else None
+
+
+def _read_logs(paths: list[str]) -> str | None:
+    chunks = [c for c in (_read_log(p) for p in paths) if c is not None]
+    return "\n".join(chunks) if chunks else None
+
+
+def _step_lines(text: str) -> list[dict]:
+    """Per-step progress lines. ``it_s`` is CUMULATIVE from the leg start,
+    so the absolute wall-clock time of a line is ``step / it_s``."""
+    out = []
+    for m in STEP_LINE.finditer(text):
+        n, total, loss, lr, it_s, wait = m.groups()
+        out.append(
+            {
+                "step": int(n),
+                "total": int(total),
+                "loss": float(loss),
+                "lr": float(lr),
+                "it_s": float(it_s),
+                "data_wait": float(wait) if wait is not None else None,
+            }
+        )
+    return out
+
+
+def _interval_rates(lines: list[dict], leg: str, total: int) -> list[dict]:
+    """Local step rates between consecutive logged lines, with the
+    non-steady-state intervals flagged (step-320 mid-ckpt save, step-500
+    in-stream val, final run-end step)."""
+    out = []
+    prev = None
+    for ln in lines:
+        if prev is not None and prev["it_s"] > 0 and ln["it_s"] > 0:
+            t0 = prev["step"] / prev["it_s"]
+            t1 = ln["step"] / ln["it_s"]
+            if t1 > t0:
+                s0, s1 = prev["step"], ln["step"]
+                excluded = None
+                if s0 < 320 <= s1:
+                    excluded = "mid-ckpt save"
+                elif s0 < 500 <= s1:
+                    excluded = "in-stream val"
+                elif s1 == total:
+                    excluded = "run-end"
+                out.append(
+                    {"leg": leg, "from": s0, "to": s1, "rate": (s1 - s0) / (t1 - t0), "excluded": excluded}
+                )
+        prev = ln
+    return out
 
 
 class Report:
@@ -105,7 +201,7 @@ class Report:
 # ----------------------------------------------------------------------
 # item 1: checkpoint transition
 # ----------------------------------------------------------------------
-def check_transition(rep: Report, ckpt: dict, out_dir: Path, source_path: Path | None, log: str | None) -> None:
+def check_transition(rep: Report, ckpt: dict, out_dir: Path, source_path: Path | None, logs: list[str]) -> None:
     detail: dict = {}
     problems: list[str] = []
     model_sd: dict = ckpt["model"]
@@ -155,13 +251,13 @@ def check_transition(rep: Report, ckpt: dict, out_dir: Path, source_path: Path |
             problems.append("resolved-config.json launch_decision missing/stale")
     else:
         problems.append("resolved-config.json missing")
-    # log line
-    if log:
-        txt = Path(log).read_text(encoding="utf-8", errors="replace")
+    # log line (may live in any supplied log — Leg A's in the canary)
+    txt = _read_logs(logs)
+    if txt:
         detail["log_transition_line"] = bool(re.search(r"stage-transition from .*tensors in", txt))
         if not detail["log_transition_line"]:
             problems.append("launch log missing the stage-transition line")
-    rep.add("1_transition", None if source_path is None and log is None else (not problems), detail, "; ".join(problems))
+    rep.add("1_transition", None if source_path is None and not logs else (not problems), detail, "; ".join(problems))
 
 
 # ----------------------------------------------------------------------
@@ -225,11 +321,11 @@ def check_v2_sections(rep: Report, ckpt: dict) -> None:
 
 
 # ----------------------------------------------------------------------
-# item 4: same-stage resume (needs --check-resume)
+# item 4a: offline checkpoint round-trip (needs --check-resume)
 # ----------------------------------------------------------------------
-def check_resume(rep: Report, cfg: Config, ckpt_path: Path | None) -> None:
+def check_resume_offline(rep: Report, cfg: Config, ckpt_path: Path | None) -> None:
     if ckpt_path is None:
-        rep.add("4_resume", None, {}, "--check-resume not supplied")
+        rep.add("4a_offline_resume", False, {}, "--check-resume not supplied (the resume gate requires 4a AND 4b)")
         return
     problems: list[str] = []
     detail: dict = {"ckpt": str(ckpt_path)}
@@ -280,13 +376,13 @@ def check_resume(rep: Report, cfg: Config, ckpt_path: Path | None) -> None:
     if v2_meta is not None and v2_meta.get("exposure"):
         detail["exposure_cursor"] = v2_meta["exposure"].get("step")
         detail["rng_restorable"] = v2_meta.get("rng") is not None
-    rep.add("4_resume", not problems, detail, "; ".join(problems))
+    rep.add("4a_offline_resume", not problems, detail, "; ".join(problems))
 
 
 # ----------------------------------------------------------------------
 # item 5: process producer (train-meta.json + log)
 # ----------------------------------------------------------------------
-def check_producer(rep: Report, out_dir: Path, log: str | None) -> None:
+def check_producer(rep: Report, out_dir: Path, logs: list[str]) -> None:
     meta_path = out_dir / "train-meta.json"
     if not meta_path.exists():
         rep.add("5_producer", False, {}, "train-meta.json missing (canary did not finish?)")
@@ -318,8 +414,8 @@ def check_producer(rep: Report, out_dir: Path, log: str | None) -> None:
         problems.append("ready_occ_avg == 0 (silent wedge: queue never filled)")
     crashes = 0
     wedge = False
-    if log:
-        txt = Path(log).read_text(encoding="utf-8", errors="replace")
+    txt = _read_logs(logs)
+    if txt:
         crashes = len(re.findall(r"worker crash|worker died|SIGSEGV", txt))
         wedge = "crash-loop" in txt or "aborting" in txt.lower()
         detail["log_worker_crashes"] = crashes
@@ -390,7 +486,7 @@ def check_pool(rep: Report, cfg: Config, index_dir: str, webp_dir: str, bucket_h
 # ----------------------------------------------------------------------
 # item 8: numerics
 # ----------------------------------------------------------------------
-def check_numerics(rep: Report, ckpt: dict, out_dir: Path, log: str | None) -> None:
+def check_numerics(rep: Report, ckpt: dict, out_dir: Path, logs: list[str]) -> None:
     detail: dict = {}
     problems: list[str] = []
     detail["model_finite"] = all(_finite(v) for v in ckpt["model"].values())
@@ -398,8 +494,8 @@ def check_numerics(rep: Report, ckpt: dict, out_dir: Path, log: str | None) -> N
         problems.append("non-finite live model weights in latest.pt")
     if (ckpt.get("ema") or {}).get("params"):
         detail["ema_finite"] = all(_finite(v) for v in ckpt["ema"]["params"].values())
-    if log:
-        txt = Path(log).read_text(encoding="utf-8", errors="replace")
+    txt = _read_logs(logs)
+    if txt:
         losses = [float(m) for m in re.findall(r"loss=(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", txt)]
         detail["n_loss_lines"] = len(losses)
         detail["loss_min"] = min(losses) if losses else None
@@ -418,13 +514,184 @@ def check_numerics(rep: Report, ckpt: dict, out_dir: Path, log: str | None) -> N
 
 
 # ----------------------------------------------------------------------
+# item 4b: real process-level restart (Leg A / Leg B logs)
+# ----------------------------------------------------------------------
+def check_real_restart(rep: Report, leg_a_log: str | None, leg_b_log: str | None, out_dir: Path, final_step: int) -> None:
+    name = "4b_real_restart"
+    la, lb = _read_log(leg_a_log), _read_log(leg_b_log)
+    if la is None or lb is None:
+        missing = [flag for flag, t in (("--leg-a-log", la), ("--leg-b-log", lb)) if t is None]
+        rep.add(name, False, {"missing_args": missing}, "4b needs both leg logs (the real torchrun restart evidence)")
+        return
+    detail: dict = {}
+    problems: list[str] = []
+    # Leg A: the stage-transition executed and the leg reached the mid-ckpt
+    ma = re.search(
+        r"stage-transition from \S+: \d+ tensors in \(pixel path retained, never re-zeroed\), optimizer=(\w+)", la
+    )
+    detail["leg_a_transition_line"] = bool(ma)
+    detail["leg_a_optimizer_mode"] = ma.group(1) if ma else None
+    if not ma:
+        problems.append("Leg A: stage-transition line missing")
+    steps_a = [ln["step"] for ln in _step_lines(la)]
+    detail["leg_a_last_step_logged"] = max(steps_a) if steps_a else None
+    if not steps_a or max(steps_a) < 300:
+        problems.append("Leg A: no step line >= 300 (the mid-ckpt at 320 was never reached)")
+    mid = out_dir / "step-0000320.pt"
+    detail["mid_ckpt"] = str(mid)
+    if not mid.exists():
+        problems.append("mid ckpt step-0000320.pt missing")
+    else:
+        try:
+            mid_payload = torch.load(mid, map_location="cpu", weights_only=False)
+            detail["mid_ckpt_step"] = int(mid_payload.get("step", -1))
+            if int(mid_payload.get("step", -1)) != 320:
+                problems.append(f"mid ckpt step {mid_payload.get('step')} != 320")
+        except (OSError, KeyError, RuntimeError, TypeError, ValueError) as e:
+            problems.append(f"step-0000320.pt not torch.load-able: {e}")
+    # Leg B: a fresh torchrun resumed at 320 — same-stage resume, v2 meta
+    for key, pat in (
+        ("resumed_at_320_v2", r"\[latent\] resumed at step 320 from .+ \(v2: RNG/exposure cursor restorable\)"),
+        ("v2_restore_line", r"resume v2: RNG restored, exposure cursor step=320 global_exposures=5120"),
+        ("plan_320_to_625", r"steps 320\.\.625 \(10000 samples\)"),
+        ("bs8_world2", r"bs=8 x world=2"),
+        ("ema_start_5120", r"n_samples=5120 at start"),
+        ("producer_process", r"producer=process"),
+        ("clean_done_line", r"\[latent\] done: .*latest\.pt"),
+    ):
+        hit = bool(re.search(pat, lb))
+        detail[f"leg_b_{key}"] = hit
+        if not hit:
+            problems.append(f"Leg B: {key} evidence missing")
+    detail["leg_b_no_transition_rerun"] = "stage-transition from" not in lb
+    if not detail["leg_b_no_transition_rerun"]:
+        problems.append("Leg B: a stage-transition line was printed (transition re-executed!)")
+    # final checkpoint at the end of the horizon
+    detail["final_ckpt_step"] = final_step
+    if final_step != 625:
+        problems.append(f"latest.pt step {final_step} != 625 (clean run-end not reached)")
+    rep.add(name, not problems, detail, "; ".join(problems))
+
+
+# ----------------------------------------------------------------------
+# item 9: throughput gate (S_canary >= 0.71 step/s)
+# ----------------------------------------------------------------------
+def check_throughput(rep: Report, leg_a_log: str | None, leg_b_log: str | None, out_meta: dict) -> None:
+    name = "9_throughput_gate"
+    la, lb = _read_log(leg_a_log), _read_log(leg_b_log)
+    if la is None or lb is None:
+        rep.add(name, None, {}, "leg logs not supplied (gate skipped; note 4b FAILs without them, so a PASS verdict still requires them)")
+        return
+    lines_a, lines_b = _step_lines(la), _step_lines(lb)
+    plan = PLAN_LINE.search(lb) or PLAN_LINE.search(la)
+    total = int(plan.group(2)) if plan else 625
+    intervals = _interval_rates(lines_a, "A", total) + _interval_rates(lines_b, "B", total)
+    used = [r for r in intervals if r["excluded"] is None]
+    excluded = [
+        {"leg": r["leg"], "from": r["from"], "to": r["to"], "why": r["excluded"]}
+        for r in intervals
+        if r["excluded"] is not None
+    ]
+    if not used:
+        rep.add(name, False, {"intervals": intervals}, "no stable interval parseable from the leg logs")
+        return
+    s_canary = statistics.median([r["rate"] for r in used])
+    eta_h = ETA_6M_STEPS / s_canary / 3600.0
+    detail = {
+        "s_canary_steps_s": round(s_canary, 4),
+        "gate": S_CANARY_GATE,
+        "img_s_global": round(s_canary * 16, 2),
+        "eta_6m_hours": round(eta_h, 1),
+        "eta_6m_days": round(eta_h / 24.0, 2),
+        "intervals_used": [
+            {"leg": r["leg"], "from": r["from"], "to": r["to"], "rate": round(r["rate"], 4)} for r in used
+        ],
+        "intervals_excluded": excluded,
+        "meta_data_wait_pct": out_meta.get("data_wait_pct"),
+        "meta_consumer_img_s_per_rank": out_meta.get("consumer_img_s_per_rank"),
+    }
+    problems: list[str] = []
+    if s_canary < S_CANARY_GATE:
+        problems.append(
+            f"S_canary {s_canary:.3f} step/s < gate {S_CANARY_GATE}: no 6M until attributed "
+            "(host / producer / VAE encode / CPU-IO / HCU kernel)"
+        )
+    rep.add(name, not problems, detail, "; ".join(problems))
+
+
+# ----------------------------------------------------------------------
+# item 10: Leg B continuity (LR plan / loss seam / EMA + exposure cursor)
+# ----------------------------------------------------------------------
+def check_leg_b_continuity(rep: Report, cfg: Config, leg_a_log: str | None, leg_b_log: str | None, ckpt: dict) -> None:
+    name = "10_legB_continuity"
+    la, lb = _read_log(leg_a_log), _read_log(leg_b_log)
+    if la is None or lb is None:
+        rep.add(name, None, {}, "leg logs not supplied (skipped)")
+        return
+    detail: dict = {}
+    problems: list[str] = []
+    lines_a, lines_b = _step_lines(la), _step_lines(lb)
+    plan = PLAN_LINE.search(lb)
+    total = int(plan.group(2)) if plan else 625
+    exp_target = int(plan.group(3)) if plan else total * 16
+    mww = re.search(r"bs=(\d+) x world=(\d+)", lb)
+    bs_world = int(mww.group(1)) * int(mww.group(2)) if mww else 16
+    # (a) LR of every logged Leg B step vs the stateless cosine plan
+    lr_detail: dict[str, dict] = {}
+    lr_bad: list[int] = []
+    for ln in lines_b:
+        ref = _cosine_lr(ln["step"], total, float(cfg.optimizer.lr), cfg)
+        rel = abs(ln["lr"] - ref) / ref if ref else math.inf
+        lr_detail[str(ln["step"])] = {"logged": ln["lr"], "plan": round(ref, 8), "rel_err": round(rel, 6)}
+        if rel > LR_REL_TOL:
+            lr_bad.append(ln["step"])
+    detail["lr_vs_plan"] = lr_detail
+    if lr_bad:
+        problems.append(f"logged LR off the {total}-step plan at steps {lr_bad}")
+    # (b) loss seam 300 (Leg A) -> 350 (Leg B) vs Leg A's own 50-step variation
+    loss_a = {ln["step"]: ln["loss"] for ln in lines_a}
+    loss_b = {ln["step"]: ln["loss"] for ln in lines_b}
+    if 300 in loss_a and 350 in loss_b:
+        sa = sorted(loss_a)
+        deltas = [abs(loss_a[sa[i]] - loss_a[sa[i - 1]]) for i in range(1, len(sa))]
+        seam = abs(loss_b[350] - loss_a[300])
+        base = max(deltas) if deltas else 0.0
+        detail["loss_a_300"] = loss_a[300]
+        detail["loss_b_350"] = loss_b[350]
+        detail["loss_seam_abs"] = round(seam, 6)
+        detail["legA_50step_delta_max"] = round(base, 6)
+        if seam > max(3.0 * base, 0.1):
+            problems.append(f"loss jump at the 300->350 seam ({seam:.4f} vs Leg A max 50-step delta {base:.4f})")
+        elif base > 0 and seam > base:
+            detail["loss_seam_warn"] = True
+    # (c) EMA + exposure cursor continued from the step-320 state
+    m = re.search(r"n_samples=(\d+) at start", lb)
+    detail["ema_n_samples_legB_start"] = int(m.group(1)) if m else None
+    if m is None or int(m.group(1)) != 5120:
+        problems.append("Leg B EMA did not start from n_samples=5120 (the step-320 cursor)")
+    n_final = int((ckpt.get("ema") or {}).get("n_samples_total", -1))
+    expected_final = 5120 + (total - 320) * bs_world
+    detail["ema_n_samples_final"] = n_final
+    detail["ema_n_samples_expected"] = expected_final
+    if n_final != expected_final:
+        problems.append(f"final EMA n_samples_total {n_final} != {expected_final} (5120 + {total - 320} x {bs_world})")
+    exp = ckpt.get("exposure") or {}
+    detail["final_exposure"] = {"step": exp.get("step"), "global_exposures": exp.get("global_exposures")}
+    if exp.get("step") != total or exp.get("global_exposures") != exp_target:
+        problems.append(f"final exposure cursor not at (step={total}, global={exp_target})")
+    rep.add(name, not problems, detail, "; ".join(problems))
+
+
+# ----------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out-dir", required=True, help="canary output dir (latest.pt, train-meta.json, resolved-config.json)")
     ap.add_argument("--config", nargs="+", required=True)
     ap.add_argument("--log", default=None, help="rank-0 launch log of the canary run")
     ap.add_argument("--source-ckpt", default=None, help="Phase I-P latest.pt (SHA256 cross-check)")
-    ap.add_argument("--check-resume", default=None, help="mid-canary step-*.pt for the same-stage resume verification")
+    ap.add_argument("--check-resume", default=None, help="mid-canary step-*.pt for the offline resume round-trip (4a)")
+    ap.add_argument("--leg-a-log", default=None, help="Leg A (stage-transition) rank-0 log; required for 4b/9/10")
+    ap.add_argument("--leg-b-log", default=None, help="Leg B (resume) rank-0 log; required for 4b/9/10")
     ap.add_argument("--index-dir", default=None, help="data index (enables crop/pool probes)")
     ap.add_argument("--webp-dir", default=None, help="webp data root (enables crop/pool probes)")
     ap.add_argument("--bucket-hr", type=int, default=1024)
@@ -439,21 +706,29 @@ def main() -> int:
         return 1
     ckpt = torch.load(latest, map_location="cpu", weights_only=False)
 
+    logs: list[str] = []
+    for p in (args.log, args.leg_a_log, args.leg_b_log):
+        if p and p not in logs:
+            logs.append(p)
+
     rep = Report()
-    check_transition(rep, ckpt, out_dir, Path(args.source_ckpt) if args.source_ckpt else None, args.log)
+    check_transition(rep, ckpt, out_dir, Path(args.source_ckpt) if args.source_ckpt else None, logs)
     meta_path = out_dir / "train-meta.json"
     out_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     check_ema(rep, ckpt, cfg, out_meta)
     check_v2_sections(rep, ckpt)
-    check_resume(rep, cfg, Path(args.check_resume) if args.check_resume else None)
-    check_producer(rep, out_dir, args.log)
+    check_resume_offline(rep, cfg, Path(args.check_resume) if args.check_resume else None)
+    check_real_restart(rep, args.leg_a_log, args.leg_b_log, out_dir, int(ckpt.get("step", -1)))
+    check_producer(rep, out_dir, logs)
     if args.index_dir and args.webp_dir:
         check_crop(rep, cfg, args.index_dir, args.webp_dir, args.bucket_hr)
         check_pool(rep, cfg, args.index_dir, args.webp_dir, args.bucket_hr)
     else:
         rep.add("6_dynamic_crop", None, {}, "data dirs not supplied (probe skipped)")
         rep.add("7_pool_sampler", None, {}, "data dirs not supplied (probe skipped)")
-    check_numerics(rep, ckpt, out_dir, args.log)
+    check_numerics(rep, ckpt, out_dir, logs)
+    check_throughput(rep, args.leg_a_log, args.leg_b_log, out_meta)
+    check_leg_b_continuity(rep, cfg, args.leg_a_log, args.leg_b_log, ckpt)
 
     summary = rep.summary()
     text = json.dumps(summary, indent=2, ensure_ascii=False)
