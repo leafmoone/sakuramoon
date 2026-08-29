@@ -1,0 +1,76 @@
+{
+ "config": {
+  "lr": 5e-05,
+  "grad_rms": 0.001,
+  "n_warmup": 6,
+  "n_iters": 28,
+  "device": "BW",
+  "note": "synthetic grads at 1e-3 rms => all 166 NS inputs active (NS worst case, zero skips); real-data skip behavior is measured in S1; 2-rank broadcast cost is NOT in the single-rank arms (see P5 2-rank steady-state step times)"
+ },
+ "topology": {
+  "cmuon_specs": 141,
+  "ns_inputs": 166,
+  "adamw_specs": 148,
+  "staged_delta_bytes_all_active": 3072327680
+ },
+ "guard_config": {
+  "guard_ratio": 0.1,
+  "min_reference": 3.096e-08,
+  "numerical_floor": 6.575e-07,
+  "reference_decay": 0.999,
+  "n_references": 166
+ },
+ "results": {
+  "adamw8bit": {
+   "name": "adamw8bit",
+   "n_warmup": 6,
+   "n_iters": 28,
+   "avg_step_s": 0.2006,
+   "min_step_s": 0.1999,
+   "max_step_s": 0.203,
+   "state_bytes": 3191808660,
+   "peak_allocated_bytes": 9821369856,
+   "peak_reserved_bytes": 10250878976
+  },
+  "cmuon_unguarded_ns4": {
+   "name": "cmuon_unguarded_ns4",
+   "n_warmup": 6,
+   "n_iters": 28,
+   "avg_step_s": 0.5768,
+   "min_step_s": 0.5755,
+   "max_step_s": 0.5786,
+   "state_bytes": 3348994512,
+   "peak_allocated_bytes": 9889008640,
+   "peak_reserved_bytes": 10313793536
+  },
+  "cmuon_guarded_canonical": {
+   "name": "cmuon_guarded_canonical",
+   "n_warmup": 6,
+   "n_iters": 28,
+   "avg_step_s": 0.7095,
+   "min_step_s": 0.7065,
+   "max_step_s": 0.7192,
+   "state_bytes": 3348994512,
+   "peak_allocated_bytes": 16045320192,
+   "peak_reserved_bytes": 16609443840
+  }
+ },
+ "phase_breakdown_guarded": {
+  "cmuon_momentum_s": 0.015,
+  "guard_s": 0.0431,
+  "ns_s": 0.4626,
+  "ns_calls": 166,
+  "staging_commit_s": 0.0077,
+  "adamw_part_s": 0.2006,
+  "note": "reproduced phases (one sync each); adamw_part = full adamw8bit baseline step (production runs the AdamW part inside the guarded step under the isolated SR RNG); ws=1 so no broadcast; the 2-rank broadcast/collective overhead is in the p5 2-rank step times (steady-state 0.57-1.02s)"
+ },
+ "p5_2rank_reference": {
+  "note": "P5 2-rank NEVER_SKIP run (same candidate, all active)",
+  "steady_state_step_s": [
+   0.5726,
+   1.0221
+  ],
+  "peak_allocated_bytes": 28349164032,
+  "peak_reserved_bytes": 28955377664
+ }
+}
