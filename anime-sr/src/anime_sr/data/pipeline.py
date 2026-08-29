@@ -25,7 +25,6 @@ from torch.utils.data import Dataset
 from anime_sr.config.schema import Config
 from anime_sr.data import index as index_mod
 from anime_sr.data.buckets import check_buckets, crop_box
-from anime_sr.data.clean_score import CleanScoreCache
 from anime_sr.data.codec_bank import CodecBank
 from anime_sr.data.degradation import degrade_hr, exposure_seed
 
@@ -77,7 +76,6 @@ class SRDataset(Dataset):
         split: str = "train",
         global_seed: int = 42,
         bank: CodecBank | None = None,
-        clean_score_cache: CleanScoreCache | None = None,
     ) -> None:
         if split not in ("train", "validation"):
             raise ValueError(f"split must be train|validation, got {split}")
@@ -96,9 +94,9 @@ class SRDataset(Dataset):
         self.split = split
         self.global_seed = global_seed
         self.bank = bank
-        # §10.5 lazy clean-score cache (P1 ③): compute on first read, then
-        # serve from the read-through dict; None disables the hook entirely.
-        self.clean_score_cache = clean_score_cache
+        # §10.5 clean score is a FROZEN offline sidecar (P1-4, 2026-08-29):
+        # training never computes/appends it at decode time; the trainer
+        # loads the sidecar once at start-up (gate + report).
         self.samples: list[SampleMeta] = []
         for row in index_mod.iter_index(find_eligibility(index_dir)):
             meta = SampleMeta(
@@ -141,9 +139,6 @@ class SRDataset(Dataset):
         arr = np.asarray(img, dtype=np.uint8).copy()
         t = torch.from_numpy(arr).permute(2, 0, 1).float()
         out = t * (2.0 / 255.0) - 1.0
-        # §10.5: lazy clean score on first read (cached per sample_id)
-        if self.clean_score_cache is not None:
-            self.clean_score_cache.get(meta.sample_id, out)
         return out
 
     def decode_hr_timed(self, meta: SampleMeta) -> tuple[torch.Tensor, dict[str, float]]:
@@ -171,10 +166,6 @@ class SRDataset(Dataset):
         t = torch.from_numpy(arr).permute(2, 0, 1).float()
         out = t * (2.0 / 255.0) - 1.0
         t_decode = time.perf_counter() - t_dec0
-        # §10.5: lazy clean score on first read — deliberately OUTSIDE the
-        # M1 #8 decode window (the profiler measures shard open + PIL only)
-        if self.clean_score_cache is not None:
-            self.clean_score_cache.get(meta.sample_id, out)
         return out, {"shard": t_shard, "decode": t_decode}
 
     def crop(self, meta: SampleMeta, data_cycle: int, exposure_index: int) -> tuple[int, int]:

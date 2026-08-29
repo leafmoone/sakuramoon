@@ -15,6 +15,7 @@ CPU-safe: no VAE weights required.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import cast
 
 import torch
@@ -29,6 +30,9 @@ from anime_sr.model.restoration_block import RestorationBlock
 from anime_sr.model.uflow import AnimeSRModel, apply_pixel_zero_init
 from pytest import raises
 from torch import nn
+
+# CWD-independent config dir (matches test_config_schema / test_resume_continuity)
+_CFG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 
 def _base_model() -> AnimeSRModel:
@@ -56,7 +60,7 @@ def test_smoke_spec_build_and_forward() -> None:
     """smoke.toml dims [192, 256, 384] build + forward (M3 canary, plan §13)."""
     from anime_sr.config.loader import load_config
 
-    cfg = load_config("anime-sr/config/base.toml", "anime-sr/config/smoke.toml")
+    cfg = load_config(_CFG_DIR / "base.toml", _CFG_DIR / "smoke.toml")
     model = AnimeSRModel(cfg.model)
     n = model.num_params
     assert n < 35_000_000, f"smoke model too large: {n}"
@@ -334,7 +338,7 @@ def test_smoke_dynamic_grids() -> None:
     (stage grids 40/20/10 are not 8-divisible)."""
     from anime_sr.config.loader import load_config
 
-    cfg = load_config("anime-sr/config/base.toml", "anime-sr/config/smoke.toml")
+    cfg = load_config(_CFG_DIR / "base.toml", _CFG_DIR / "smoke.toml")
     model = AnimeSRModel(cfg.model)
     t = torch.tensor([0.3])
     sigma = torch.zeros(1)

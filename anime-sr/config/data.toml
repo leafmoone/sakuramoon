@@ -32,9 +32,19 @@ aux_max_fraction = 0.20
 hard_classifications = ["not_painting"]
 # crops must retain >= 80% of a subject to be kept
 crop_retention_min = 0.80
-# clean-score: computed lazily, cached
+# clean-score (P1-4, 2026-08-29): FROZEN offline sidecar, precomputed by
+# `python -m anime_sr.cli.clean_score_precompute` (single writer,
+# incremental). Training loads it read-only: distribution report at start-up
+# + optional gate. No compute/append at training time (the legacy lazy
+# multi-rank O_APPEND race is gone).
 clean_score_stage = "lazy"
 clean_score_cache = true
+# training gate: HR with score below this is excluded from the paired set
+# (fail-closed: no sidecar row = excluded). -1.0 = disabled / REPORT-ONLY:
+# read the start-up distribution report first, then pick the threshold.
+clean_score_min = -1.0
+# thresholds the report simulates (kept/excluded counts)
+clean_score_candidates = [0.5, 0.6, 0.7]
 
 [sampling]
 # P1 pool sampler (M4-prep 2026-08-29): per-cycle target shares of the §10.4

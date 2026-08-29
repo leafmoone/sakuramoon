@@ -1,8 +1,18 @@
-"""§10.5 clean score: lazy, cached, deterministic (plan §10.5, P1 ③)."""
+"""§10.5 clean score: deterministic heuristics + frozen read-only sidecar
+(plan §10.5; P1-4 2026-08-29 made the sidecar read-only at training time —
+scores are precomputed offline by cli/clean_score_precompute). The P1-4
+blockiness index fix, horizontal-edge coverage, gate and report are in
+test_clean_score_gate.py."""
+
+import json
 
 import torch
 import torch.nn.functional as F
-from anime_sr.data.clean_score import CleanScoreCache, compute_clean_score
+from anime_sr.data.clean_score import (
+    CLEAN_SCORE_CACHE_NAME,
+    CleanScoreCache,
+    compute_clean_score,
+)
 
 
 def _base(n: int = 64) -> torch.Tensor:
@@ -71,27 +81,25 @@ def test_clean_score_rejects_bad_shape() -> None:
         compute_clean_score(torch.randn(4, 8, 8))
 
 
-def test_clean_score_cache_roundtrip(tmp_path) -> None:
+def test_clean_score_cache_read_only(tmp_path) -> None:
+    """P1-4: the training-time cache is READ-ONLY — it never computes or
+    appends (the offline precompute CLI is the single writer). Lookups hit
+    the sidecar, miss with None, and leave the file byte-identical."""
+    sidecar = tmp_path / CLEAN_SCORE_CACHE_NAME
+    s1 = compute_clean_score(_base())
+    sidecar.write_text(
+        json.dumps({"sample_id": "s1", "score": round(s1, 6)}) + "\n",
+        encoding="utf-8",
+    )
+    before = sidecar.read_bytes()
+
     cache = CleanScoreCache(tmp_path)
-    s1 = cache.get("s1", _base())
+    assert cache.get("s1") == round(s1, 6)  # hit
+    assert cache.get("missing") is None  # miss -> None (not a compute+append)
     assert len(cache) == 1
-    lines = (tmp_path / "clean-score-v1.jsonl").read_text().splitlines()
-    assert len(lines) == 1
 
-    # second read of the same id: served from the read-through dict, no append
-    s2 = cache.get("s1", torch.zeros(3, 4, 4))
-    assert s2 == s1
-    lines = (tmp_path / "clean-score-v1.jsonl").read_text().splitlines()
-    assert len(lines) == 1  # unchanged
-
-    # a fresh process (new instance) loads the cache and hits, not recomputes
+    # a fresh instance (a "new process") reads the same frozen rows
     cache2 = CleanScoreCache(tmp_path)
-    assert cache2.get("s1", torch.zeros(3, 4, 4)) == s1
+    assert cache2.get("s1") == round(s1, 6)
     assert len(cache2) == 1
-
-    # a new id is computed and appended exactly once
-    s3 = cache2.get("s2", _base())
-    assert len(cache2) == 2
-    lines = (tmp_path / "clean-score-v1.jsonl").read_text().splitlines()
-    assert len(lines) == 2
-    assert s3 == s1  # same pixels -> same score
+    assert sidecar.read_bytes() == before, "read-only sidecar was modified"

@@ -79,7 +79,11 @@ from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from anime_sr.config.schema import Config
-from anime_sr.data.clean_score import CleanScoreCache
+from anime_sr.data.clean_score import (
+    CleanScoreCache,
+    build_clean_score_report,
+    clean_score_gate_retained,
+)
 from anime_sr.data.degradation import degrade_hr
 from anime_sr.data.latent_store import LatentStore, read_index
 from anime_sr.data.pipeline import _EXPOSURE_PER_CYCLE, SampleMeta, SRDataset
@@ -928,16 +932,28 @@ def prepare_producer_prefork(
         store = LatentStore(latent_dir, bucket_hr)
         doc = read_index(latent_dir)
         sids = sorted(doc["samples"].keys())
-    clean_cache: CleanScoreCache | None = None
-    if cfg.filter.clean_score_stage == "lazy" and cfg.filter.clean_score_cache:
-        clean_cache = CleanScoreCache(index_dir)
-    ds = SRDataset(
-        index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train",
-        clean_score_cache=clean_cache,
+    ds = SRDataset(index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train")
+    # P1-4 (2026-08-29): the clean-score gate is FROZEN + read-only here —
+    # the sidecar was precomputed offline; the identical filter on every
+    # rank keeps the DDP stream consistent. (The start-up report + rank-0
+    # logging live in run_latent_flow, which owns the sidecar read.)
+    retained = clean_score_gate_retained(
+        [m.sample_id for m in ds.samples], index_dir, cfg.filter.clean_score_min
     )
+    if retained is not None:
+        n_before = len(ds.samples)
+        ds.samples = [m for m in ds.samples if m.sample_id in retained]
+        if not ds.samples:
+            raise RuntimeError(
+                f"clean-score gate (min={cfg.filter.clean_score_min}) removed all "
+                f"{n_before} train samples — check the sidecar coverage and threshold"
+            )
     if onfly:
         order = list(range(len(ds.samples)))
     else:
+        # gate-excluded samples are gone from ds.samples: intersect the
+        # store ids so their latent rows are simply unused
+        sids = [s for s in sids if s in {m.sample_id for m in ds.samples}]
         sid_to_idx = {m.sample_id: i for i, m in enumerate(ds.samples)}
         missing = [s for s in sids if s not in sid_to_idx]
         if missing:
@@ -1032,21 +1048,79 @@ def run_latent_flow(
     if torch.get_num_threads() > 1:
         torch.set_num_threads(1)
 
-    # P1 ③ §10.5: lazy clean-score cache (compute on first read, then cached)
-    clean_cache: CleanScoreCache | None = None
-    if cfg.filter.clean_score_stage == "lazy" and cfg.filter.clean_score_cache:
-        clean_cache = CleanScoreCache(index_dir)
+    # P1-4 (2026-08-29): the clean score is a FROZEN offline sidecar
+    # (cli/clean_score_precompute). Training is READ-ONLY: no compute, no
+    # O_APPEND races. The sidecar feeds (a) the start-up distribution
+    # report (rank 0) and (b) the optional clean_score_min gate, which
+    # filters ds.samples identically on every rank BEFORE the stream is
+    # built. Report-only by default (clean_score_min = -1.0): the user
+    # picks the threshold from the report numbers, never an auto-drop.
+    clean_scores = (
+        CleanScoreCache(index_dir)
+        if cfg.filter.clean_score_stage == "lazy" and cfg.filter.clean_score_cache
+        else None
+    )
+    ds = SRDataset(index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train")
+    train_ids = [m.sample_id for m in ds.samples]
+    if clean_scores is not None and rank == 0:
+        report = build_clean_score_report(
+            index_dir, train_ids, cfg.filter.clean_score_candidates
+        )
+        p = report["percentiles"]
+        thr = report["candidate_thresholds"]
+        thr_txt = " ".join(
+            f"{t}: keep {v['kept']}/excl {v['excluded']}" for t, v in thr.items()
+        )
+        print(
+            f"[latent] clean-score (frozen sidecar, {report['n_covered']}/"
+            f"{report['n_requested']} covered, coverage "
+            f"{report['coverage']:.1%}): "
+            f"p10={p['p10']:.3f} p25={p['p25']:.3f} p50={p['p50']:.3f} "
+            f"p75={p['p75']:.3f} p90={p['p90']:.3f} mean={p['mean']:.3f}",
+            flush=True,
+        )
+        if thr_txt:
+            print(f"[latent] clean-score candidate thresholds -> {thr_txt}", flush=True)
+        if cfg.filter.clean_score_min >= 0:
+            print(
+                f"[latent] clean-score GATE ACTIVE: min={cfg.filter.clean_score_min} "
+                f"(samples below, or without a sidecar row, are excluded)",
+                flush=True,
+            )
+        else:
+            print(
+                "[latent] clean-score gate DISABLED (report-only; set "
+                "[filter] clean_score_min to enable)",
+                flush=True,
+            )
+        report_path = Path(out_dir) / "clean-score-report.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(f"[latent] clean-score report -> {report_path}", flush=True)
+
+    # the gate filter (identical on all ranks: frozen sidecar + config)
+    retained = (
+        clean_score_gate_retained(train_ids, index_dir, cfg.filter.clean_score_min)
+        if clean_scores is not None
+        else None
+    )
+    if retained is not None:
+        n_before = len(ds.samples)
+        ds.samples = [m for m in ds.samples if m.sample_id in retained]
+        if not ds.samples:
+            raise RuntimeError(
+                f"clean-score gate (min={cfg.filter.clean_score_min}) removed all "
+                f"{n_before} train samples — check the sidecar coverage and threshold"
+            )
         if rank == 0:
             print(
-                f"[latent] clean-score: lazy stage enabled, "
-                f"{len(clean_cache)} already cached @ {clean_cache.path}",
+                f"[latent] clean-score gate: {n_before - len(ds.samples)}/{n_before} "
+                f"samples excluded, {len(ds.samples)} remain",
                 flush=True,
             )
 
-    ds = SRDataset(
-        index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train",
-        clean_score_cache=clean_cache,
-    )
     if onfly:
         # P1 ④: no store — the stream is the train-index order (deterministic)
         order = list(range(len(ds.samples)))
@@ -1058,6 +1132,9 @@ def run_latent_flow(
                 flush=True,
             )
     else:
+        # gate-excluded samples are gone from ds.samples: intersect the
+        # store ids so their latent rows are simply unused
+        sids = [s for s in sids if s in {m.sample_id for m in ds.samples}]
         sid_to_idx = {m.sample_id: i for i, m in enumerate(ds.samples)}
         missing = [s for s in sids if s not in sid_to_idx]
         if missing:
@@ -1103,7 +1180,6 @@ def run_latent_flow(
         try:
             val_ds = SRDataset(
                 index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="validation",
-                clean_score_cache=clean_cache,
             )
         except (RuntimeError, ValueError):
             val_ds = None

@@ -368,8 +368,22 @@ class FilterSpec(_Frozen):
     # classifications hard-rejected outright (plan §10.4: not_painting)
     hard_classifications: list[str] = Field(default_factory=lambda: ["not_painting"])
     crop_retention_min: float = 0.80
+    # §10.5 clean score (P1-4, 2026-08-29): a FROZEN offline sidecar
+    # (precomputed by cli/clean_score_precompute). Training loads it
+    # read-only — no compute/append at training time. "lazy" is kept as the
+    # stage name for config compatibility.
     clean_score_stage: Literal["lazy"] = "lazy"
+    # master switch: load the sidecar at start-up (report + gate). False =
+    # ignore the sidecar entirely (no report, no gate).
     clean_score_cache: bool = True
+    # training gate: HR with clean score BELOW this is excluded from the
+    # paired set (fail-closed: a sample with no sidecar row is excluded
+    # when the gate is on). -1.0 = disabled (REPORT-ONLY — the user decides
+    # the threshold from the distribution report before enabling it).
+    clean_score_min: float = -1.0
+    # thresholds the start-up report simulates (kept/excluded counts) so the
+    # user can pick a threshold from the actual distribution.
+    clean_score_candidates: list[float] = Field(default_factory=lambda: [0.5, 0.6, 0.7])
 
 
 class SamplingSpec(_Frozen):
