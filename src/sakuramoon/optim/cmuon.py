@@ -26,7 +26,7 @@ import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import torch
 from torch import nn
@@ -40,6 +40,9 @@ from sakuramoon.optim.groups import (
     audit_trainable_parameters,
 )
 from sakuramoon.optim.stochastic_rounding import StochasticRoundingRNG
+
+if TYPE_CHECKING:
+    from sakuramoon.optim.cmuon_forensic import ForensicConfig, ForensicMonitor
 
 MomentumDtype = Literal["bfloat16", "float32"]
 
@@ -137,6 +140,39 @@ def cmuon_zeroth_power(
         gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
         # ortho = a*ortho + gram_update @ ortho
         ortho = torch.addmm(ortho, gram_update, ortho, beta=a)
+    if transposed:
+        ortho = ortho.T
+    return ortho
+
+
+def cmuon_zeroth_power_traced(
+    grad: torch.Tensor,
+    ns_steps: int,
+    coefficients: tuple[float, float, float],
+    eps: float,
+    trace: list[torch.Tensor],
+) -> torch.Tensor:
+    """Forensic variant of ``cmuon_zeroth_power``: bit-identical arithmetic
+    (same ops in the same order; the trace reads are side-effect-free) that
+    appends the post-iteration fp32 Frobenius norm of the working matrix to
+    ``trace`` after every Newton-Schulz iteration. Used by the fail-closed
+    forensic step to answer "which NS iteration blew up, for which tensor".
+    """
+    if ns_steps <= 0 or ns_steps >= 100:
+        raise ValueError("ns_steps must be in [1, 99]")
+    if grad.ndim != 2:
+        raise ValueError("cmuon input must be a 2D matrix")
+    a, b, c = coefficients
+    ortho = grad.bfloat16()
+    transposed = ortho.size(0) > ortho.size(1)
+    if transposed:
+        ortho = ortho.T
+    ortho = ortho / ortho.norm().clamp(min=eps)
+    for _ in range(ns_steps):
+        gram = ortho @ ortho.T
+        gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
+        ortho = torch.addmm(ortho, gram_update, ortho, beta=a)
+        trace.append(ortho.float().norm())
     if transposed:
         ortho = ortho.T
     return ortho
@@ -461,12 +497,22 @@ def route_cmuon_parameters(
     *,
     matrix_weight_decay: float,
     sensitive_weight_decay: float,
+    exclude_roles: Sequence[str] = (),
 ) -> CMuonRouting:
     """Route the trainable params into the CMuon allowlist and the AdamW8bit rest.
 
     Uses the canonical-FQN allowlist (never an ndim==2 heuristic). Asserts the
     split is disjoint and complete (CMuon + AdamW == all trainable params).
+
+    ``exclude_roles`` (forensic routing ablations only): canonical roles whose
+    allowlisted params are deliberately routed back to the AdamW8bit fallback
+    instead of CMuon (e.g. the safe-routing forensic candidate excludes
+    attention_k / attention_v / adaln_shared). The split stays complete.
     """
+    unknown = set(exclude_roles) - set(CMUON_ROLES)
+    if unknown:
+        raise ValueError(f"unknown cmuon exclude roles: {sorted(unknown)}")
+    excluded = set(exclude_roles)
     full_audit = audit_trainable_parameters(
         module,
         matrix_weight_decay=matrix_weight_decay,
@@ -481,7 +527,7 @@ def route_cmuon_parameters(
             if pattern.match(spec.name):
                 matched = (chunk_count, roles, role)
                 break
-        if matched is None:
+        if matched is None or matched[2] in excluded:
             adamw_specs.append(spec)
             continue
         chunk_count, roles, role = matched
@@ -603,6 +649,84 @@ def _cmuon_update_impl(
     return update_ortho
 
 
+def _cmuon_update_phase1(
+    param: nn.Parameter,
+    grad: torch.Tensor,
+    buf: torch.Tensor,
+    spec: CMuonChunkSpec,
+    cfg: CMuonConfig,
+    *,
+    ns_telemetry: NSSafetyTelemetry | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+    """Forensic phase 1: compute the momentum candidate, Nesterov update,
+    per-chunk NS outputs and the applied delta for one parameter WITHOUT
+    writing the momentum buffer or the parameter.
+
+    Element-wise this is the exact arithmetic of ``_cmuon_update_impl``
+    (same lerp formulas, same NS ops); only the write timing differs.
+    Returns (buf_candidate, nesterov, ns_full, delta, ns_trace) where
+    ns_trace holds the per-NS-iteration fp32 norms (device tensors).
+    """
+    mu = cfg.momentum
+    with torch.no_grad():
+        grad_md = grad.to(buf.dtype)
+        buf_candidate = buf.lerp(grad_md, 1.0 - mu)
+        if cfg.nesterov:
+            nesterov = grad_md.lerp(buf_candidate, mu)
+        else:
+            nesterov = buf_candidate
+        chunk_size = spec.chunk_size()
+        if spec.chunk_count == 1:
+            chunks = (nesterov,)
+        else:
+            chunks = tuple(nesterov.split(chunk_size, dim=spec.chunk_dim))
+        ns_steps = cfg.ns_steps_for_role(spec.role)
+        rescale_sqrt_n = spec.chunk_count if cfg.chunk_rescale_sqrt_n else 1
+        ortho_chunks: list[torch.Tensor] = []
+        ns_chunks: list[torch.Tensor] = []
+        ns_trace: list[torch.Tensor] = []
+        for chunk in chunks:
+            ns = cmuon_zeroth_power_traced(
+                chunk, ns_steps, cfg.ns_coefficients, cfg.eps, ns_trace
+            )
+            rows, cols = chunk.shape
+            alpha = cmuon_moonlight_alpha(rows, cols, cfg.lr, rescale_sqrt_n)
+            ns_chunks.append(ns)
+            ortho_chunks.append((-alpha) * ns)
+        delta = (
+            torch.cat(ortho_chunks, dim=spec.chunk_dim)
+            if len(ortho_chunks) > 1
+            else ortho_chunks[0]
+        )
+        ns_full = (
+            torch.cat(ns_chunks, dim=spec.chunk_dim)
+            if len(ns_chunks) > 1
+            else ns_chunks[0]
+        )
+        if ns_telemetry is not None and ns_telemetry.wants(spec.role):
+            ns_telemetry.record(spec.role, ns_full, delta)
+        del param
+    return buf_candidate, nesterov, ns_full, delta, ns_trace
+
+
+def _cmuon_update_phase2(
+    param: nn.Parameter,
+    buf: torch.Tensor,
+    buf_candidate: torch.Tensor,
+    delta: torch.Tensor,
+    spec: CMuonChunkSpec,
+    cfg: CMuonConfig,
+) -> None:
+    """Forensic phase 2: commit the momentum buffer and apply the (already
+    safety-checked) parameter update. Same order as the original path
+    (weight decay first, then the in-place add)."""
+    with torch.no_grad():
+        buf.copy_(buf_candidate)
+        if spec.weight_decay != 0.0:
+            param.mul_(1.0 - cfg.lr * spec.weight_decay)
+        param.add_(delta)
+
+
 class HybridCMuon:
     """Hybrid optimizer: torchao AdamW8bit for the non-allowlisted params +
     chunked CMuon for the semantic allowlist.
@@ -623,6 +747,7 @@ class HybridCMuon:
         adamw: IsolatedAdamW8bit,
         sr_rng: StochasticRoundingRNG,
         ns_telemetry: NSSafetyTelemetry | None = None,
+        forensic: ForensicMonitor | None = None,
     ) -> None:
         self.routing = routing
         self.cfg = cfg
@@ -632,6 +757,12 @@ class HybridCMuon:
         # Optional low-overhead NS safety telemetry (opt-in; default off keeps
         # the update path bit-identical). See NSSafetyTelemetry.
         self.ns_telemetry = ns_telemetry
+        # Optional fail-closed forensic monitor (root-cause round). When set,
+        # the CMuon part runs the two-phase step: compute+validate all
+        # candidates first, commit only when every spec passes. Arithmetic is
+        # element-wise identical to the single-phase path.
+        self.forensic = forensic
+        self._forensic_step0_checked = False
         # The inner torch optimizer exposed to accelerate.prepare is the
         # AdamW8bit (it owns the AdamW params). The CMuon params are updated
         # in-place here; their gradients are synced by DDP on the model.
@@ -700,11 +831,85 @@ class HybridCMuon:
         # the same torch optimizer, exactly like IsolatedAdamW8bit.
         self.sr_rng.run_step(self.optimizer.step)
         # CMuon part.
-        self._cmuon_step_all()
+        if self.forensic is not None:
+            self._cmuon_step_all_forensic()
+        else:
+            self._cmuon_step_all()
         # Optional telemetry: advance + (every N steps) batched read. No-op
         # (and no sync) when telemetry is disabled or off-cycle.
         if self.ns_telemetry is not None:
             self.ns_telemetry.step()
+
+    def _cmuon_step_all_forensic(self) -> None:
+        """Two-phase fail-closed CMuon step (forensic runs only).
+
+        Phase 1 computes every spec's momentum candidate / Nesterov / NS /
+        applied delta and records full per-spec statistics + rank
+        fingerprints; ``collect_and_compare`` (one batched CPU sync + small
+        all_gathers + one all_reduce) then decides. Phase 2 commits momentum
+        and parameters only when the verdict is clean. If the guard trips,
+        EVERY rank raises CMuonSafetyError at the same step, after the main
+        rank dumps the crash state (the offending spec's phase-1 tensors are
+        stashed for the dump).
+        """
+        mon = self.forensic
+        if mon is None:  # defensive: step() only routes here when set
+            raise RuntimeError("forensic step called without a forensic monitor")
+        if not self._forensic_step0_checked:
+            mon.check_initial_momenta(self._momenta)
+            self._forensic_step0_checked = True
+        stashed: list[tuple[int, dict[str, torch.Tensor]]] = []
+        for i, spec in enumerate(self.routing.cmuon_specs):
+            grad = spec.parameter.grad
+            if grad is None:
+                mon.record_spec(
+                    i, grad=None, momentum=None, nesterov=None, ns=None, delta=None
+                )
+                continue
+            buf = self._momenta[spec.parameter]
+            buf_cand, nesterov, ns_full, delta, ns_trace = _cmuon_update_phase1(
+                spec.parameter,
+                grad,
+                buf,
+                spec,
+                self.cfg,
+                ns_telemetry=self.ns_telemetry,
+            )
+            mon.record_spec(
+                i,
+                grad=grad,
+                momentum=buf_cand,
+                nesterov=nesterov,
+                ns=ns_full,
+                delta=delta,
+                ns_trace=ns_trace,
+            )
+            stashed.append(
+                (
+                    i,
+                    {
+                        "grad": grad.detach(),
+                        "momentum": buf_cand.detach(),
+                        "nesterov": nesterov.detach(),
+                        "ns_output": ns_full.detach(),
+                        "delta": delta.detach(),
+                    },
+                )
+            )
+        mon.collect_and_compare(self.cfg.lr, stashed=stashed)
+        # Phase 2: commit (only reached when the verdict is clean; a trip
+        # raised inside collect_and_compare on every rank).
+        for i, tensors in stashed:
+            spec = self.routing.cmuon_specs[i]
+            _cmuon_update_phase2(
+                spec.parameter,
+                self._momenta[spec.parameter],
+                tensors["momentum"],
+                tensors["delta"],
+                spec,
+                self.cfg,
+            )
+        mon.record_param_after()
 
     def _cmuon_step_all(self) -> None:
         for spec in self.routing.cmuon_specs:
@@ -1017,6 +1222,8 @@ def build_hybrid_cmuon(
     ns_telemetry_update_offset: int = 0,
     ns_telemetry_logger: Callable[[str], None] | None = None,
     ns_telemetry_roles: Sequence[str] | None = None,
+    exclude_roles: Sequence[str] = (),
+    forensic: ForensicConfig | None = None,
 ) -> HybridCMuon:
     """Build the hybrid optimizer (AdamW8bit for the rest + CMuon allowlist).
 
@@ -1040,6 +1247,7 @@ def build_hybrid_cmuon(
         module,
         matrix_weight_decay=matrix_weight_decay,
         sensitive_weight_decay=sensitive_weight_decay,
+        exclude_roles=exclude_roles,
     )
     canonical_ns = resolve_ns_map(ns_steps_by_role, ns_steps)
     cfg = CMuonConfig(
@@ -1071,12 +1279,27 @@ def build_hybrid_cmuon(
             update_offset=ns_telemetry_update_offset,
             roles=ns_telemetry_roles,
         )
+    if forensic is not None:
+        from sakuramoon.optim.cmuon_forensic import ForensicMonitor
+
+        device = routing.cmuon_specs[0].parameter.device
+        forensic_monitor = ForensicMonitor(
+            routing,
+            cfg,
+            forensic,
+            device=device,
+            logger=ns_telemetry_logger,
+            update_offset=ns_telemetry_update_offset,
+        )
+    else:
+        forensic_monitor = None
     return HybridCMuon(
         routing=routing,
         cfg=cfg,
         adamw=adamw,
         sr_rng=adamw.sr_rng,
         ns_telemetry=ns_telemetry,
+        forensic=forensic_monitor,
     )
 
 
@@ -1092,6 +1315,7 @@ __all__ = [
     "build_ns_safety_telemetry",
     "cmuon_moonlight_alpha",
     "cmuon_zeroth_power",
+    "cmuon_zeroth_power_traced",
     "resolve_ns_map",
     "route_cmuon_parameters",
     "select_representative_specs",

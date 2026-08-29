@@ -742,6 +742,26 @@ class CMuonNSTelemetryConfig(StrictModel):
         return self
 
 
+class CMuonForensicConfig(StrictModel):
+    """Fail-closed forensic instrumentation for the hybrid CMuon optimizer
+    (root-cause round). Diagnostics only: full per-spec safety telemetry,
+    cross-rank fingerprint comparison, and a detection->stop->dump guard. It
+    never clamps or continues. Only used when optimizer.name ==
+    "hybrid_cmuon"; absent/None/disabled keeps the uninstrumented path."""
+
+    enabled: bool = False
+    ring_size: PositiveInt = 10
+    # Catastrophic-abnormal ceiling for the applied-delta RMS:
+    # ceiling_multiplier * (0.2 * lr) — a safety threshold, not a clip.
+    ceiling_multiplier: PositiveFloat = 10.0
+    # max_abs alarm: learned from the median of the first
+    # max_abs_learn_steps healthy steps; trips above
+    # max_abs_alarm_mult * baseline.
+    max_abs_learn_steps: PositiveInt = 50
+    max_abs_alarm_mult: PositiveFloat = 20.0
+    dump_dir: str | None = None
+
+
 class OptimizerConfig(StrictModel):
     name: Literal["torchao_adamw8bit", "hybrid_cmuon"]
     base_lr: PositiveFloat
@@ -769,11 +789,29 @@ class OptimizerConfig(StrictModel):
     # Opt-in NS safety telemetry (see CMuonNSTelemetryConfig). Absent/None
     # disables it; the default optimizer never instantiates telemetry.
     cmuon_ns_telemetry: CMuonNSTelemetryConfig | None = None
+    # Fail-closed forensic instrumentation (see CMuonForensicConfig). Absent/
+    # None/disabled keeps the uninstrumented single-phase update path.
+    cmuon_forensic: CMuonForensicConfig | None = None
+    # Forensic routing ablation: canonical CMuon roles routed back to the
+    # AdamW8bit fallback (disjoint+complete split is preserved). Empty = the
+    # full allowlist (the candidate under test).
+    cmuon_routing_exclude: Annotated[
+        tuple[str, ...], BeforeValidator(_toml_array_to_tuple)
+    ] = ()
 
     @model_validator(mode="after")
     def validate_betas(self) -> OptimizerConfig:
         if self.betas != (0.9, 0.95):
             raise ValueError("optimizer betas differ from the approved values")
+        return self
+
+    @model_validator(mode="after")
+    def validate_cmuon_routing_exclude(self) -> OptimizerConfig:
+        unknown = set(self.cmuon_routing_exclude) - set(_CMUON_TELEMETRY_ROLES)
+        if unknown:
+            raise ValueError(f"unknown cmuon routing exclude roles: {sorted(unknown)}")
+        if len(set(self.cmuon_routing_exclude)) != len(self.cmuon_routing_exclude):
+            raise ValueError("cmuon routing exclude roles must be unique")
         return self
 
 

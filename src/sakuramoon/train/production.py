@@ -393,6 +393,22 @@ def _build_optimizer(
         }
         if telemetry is not None and telemetry.roles:
             telemetry_kwargs["ns_telemetry_roles"] = tuple(telemetry.roles)
+        # Forensic routing ablation (empty for the candidate under test): the
+        # excluded roles route to the AdamW8bit fallback, split stays complete.
+        telemetry_kwargs["exclude_roles"] = optimizer.cmuon_routing_exclude
+        if optimizer.cmuon_forensic is not None and optimizer.cmuon_forensic.enabled:
+            from sakuramoon.optim.cmuon_forensic import ForensicConfig
+
+            # Built on EVERY rank (the rank comparison needs all ranks); the
+            # logger is main-rank only so the log lines are not duplicated.
+            telemetry_kwargs["forensic"] = ForensicConfig(
+                enabled=True,
+                ring_size=optimizer.cmuon_forensic.ring_size,
+                ceiling_multiplier=optimizer.cmuon_forensic.ceiling_multiplier,
+                max_abs_learn_steps=optimizer.cmuon_forensic.max_abs_learn_steps,
+                max_abs_alarm_mult=optimizer.cmuon_forensic.max_abs_alarm_mult,
+                dump_dir=optimizer.cmuon_forensic.dump_dir,
+            )
         if optimizer.cmuon_ns is not None:
             # Per-role (per-spec) NS depth: canonical role->depth map.
             return build_hybrid_cmuon(
@@ -1024,6 +1040,17 @@ def _run_accepted_lifecycle(
             fresh=False,
         )
 
+    if isinstance(optimizer, _hybrid_cmuon_class()) and optimizer.forensic is not None:
+        # The forensic run is forked from a live checkpoint: anchor the
+        # monitor's update numbering to the restored trainer count so the
+        # ring buffer / crash dumps carry the real update numbers.
+        optimizer.forensic.update_offset = restored.state.trainer.successful_updates
+        if is_main_process:
+            _log(
+                f"[cmuon-forensic] 监控就绪: update_offset="
+                f"{optimizer.forensic.update_offset} dump_dir="
+                f"{optimizer.cmuon_forensic.dump_dir if optimizer.cmuon_forensic else None}"
+            )
     require_single_gpu_checkpoint_binding(
         config,
         restored.state,

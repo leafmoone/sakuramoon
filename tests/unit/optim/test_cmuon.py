@@ -34,6 +34,7 @@ from sakuramoon.checkpoint.load import (
 )
 from sakuramoon.checkpoint.save import _hybrid_optimizer_schema, _optimizer_schema
 from sakuramoon.checkpoint.schema import CheckpointError
+from sakuramoon.optim import cmuon as cmuon_mod
 from sakuramoon.optim.adamw8bit import build_adamw8bit
 from sakuramoon.optim.cmuon import (
     CMUON_ROLES,
@@ -41,11 +42,18 @@ from sakuramoon.optim.cmuon import (
     CMuonConfig,
     NSSafetyTelemetry,
     _cmuon_update,
+    _cmuon_update_phase1,
+    _cmuon_update_phase2,
     build_hybrid_cmuon,
     cmuon_moonlight_alpha,
     cmuon_zeroth_power,
+    cmuon_zeroth_power_traced,
     resolve_ns_map,
     route_cmuon_parameters,
+)
+from sakuramoon.optim.cmuon_forensic import (
+    CMuonSafetyError,
+    ForensicConfig,
 )
 
 DEVICE = "cpu"
@@ -1420,6 +1428,193 @@ def test_hybrid_telemetry_wired_into_step():
     )
     # step 5 is off-cycle: no extra log lines.
     assert len(logs) == 2 * len(CMUON_ROLES)
+
+
+# ---------------------------------------------------------------------------
+# L. Forensic instrumentation (fail-closed guard + two-phase equivalence)
+# ---------------------------------------------------------------------------
+
+
+def test_traced_ns_matches_plain_ns():
+    """The traced NS (forensic) is bit-identical to the plain NS; the trace
+    holds one finite fp32 norm per iteration."""
+    g = torch.Generator().manual_seed(3)
+    coeffs = (3.4445, -4.7750, 2.0315)
+    for shape in [(48, 24), (24, 48), (32, 32)]:
+        x = torch.randn(*shape, generator=g, dtype=torch.bfloat16)
+        plain = cmuon_zeroth_power(x, NS_STEPS, coeffs, 1e-7)
+        trace: list[torch.Tensor] = []
+        traced = cmuon_zeroth_power_traced(x, NS_STEPS, coeffs, 1e-7, trace)
+        assert torch.equal(plain, traced), f"traced NS diverged from plain NS at {shape}"
+        assert len(trace) == NS_STEPS, "one trace entry per NS iteration"
+        assert all(bool(torch.isfinite(t).all()) for t in trace), "trace norms finite"
+
+
+def test_two_phase_matches_original_update():
+    """Phase1+phase2 (forensic) must reproduce the original single-phase
+    update bit-exactly: same momentum buffer, same parameter, for both
+    nesterov modes and with/without weight decay."""
+    g = torch.Generator().manual_seed(4)
+    for shape in [(64, 128), (128, 64)]:
+        for wd in (0.0, 0.01):
+            for nesterov in (True, False):
+                p_orig = nn.Parameter(
+                    torch.randn(*shape, generator=g, dtype=torch.bfloat16)
+                )
+                p_two = nn.Parameter(p_orig.detach().clone())
+                grad = torch.randn(*shape, generator=g, dtype=torch.bfloat16)
+                spec_o = CMuonChunkSpec(
+                    name="orig", parameter=p_orig, weight_decay=wd,
+                    chunk_count=1, chunk_dim=0, roles=("attention_q",), role="attention_q",
+                )
+                spec_t = CMuonChunkSpec(
+                    name="two", parameter=p_two, weight_decay=wd,
+                    chunk_count=1, chunk_dim=0, roles=("attention_q",), role="attention_q",
+                )
+                cfg = _cfg(ns_steps=4, nesterov=nesterov)
+                buf_o = torch.zeros_like(p_orig, dtype=torch.bfloat16)
+                buf_t = torch.zeros_like(p_two, dtype=torch.bfloat16)
+                _cmuon_update(p_orig, grad.clone(), buf_o, spec_o, cfg)
+                buf_cand, _nesterov_t, _ns_full, delta, trace = _cmuon_update_phase1(
+                    p_two, grad.clone(), buf_t, spec_t, cfg
+                )
+                _cmuon_update_phase2(p_two, buf_t, buf_cand, delta, spec_t, cfg)
+                assert torch.equal(buf_o, buf_t), (
+                    f"momentum mismatch {shape} wd={wd} nesterov={nesterov}"
+                )
+                assert torch.equal(p_orig, p_two), (
+                    f"parameter mismatch {shape} wd={wd} nesterov={nesterov}"
+                )
+                # sanity: phase1 outputs are consistent with the applied delta
+                assert delta.dtype == torch.bfloat16
+                assert len(trace) == 4
+
+
+def test_routing_exclude_roles():
+    """cmuon_routing_exclude moves the excluded roles to the AdamW fallback;
+    the partition stays disjoint + complete; unknown roles are rejected."""
+    model = _MockComposite(_MockDiT(256, 512, 3))
+    common = {"matrix_weight_decay": 0.0, "sensitive_weight_decay": 0.0}
+    full = route_cmuon_parameters(model, **common)
+    assert len(full.cmuon_specs) == 3 * 7 + 1
+    excl = route_cmuon_parameters(
+        model, exclude_roles=("attention_k", "attention_v", "adaln_shared"), **common
+    )
+    # 3 blocks: 3 k_proj + 3 v_proj + 1 shared AdaLN moved to AdamW
+    assert len(excl.cmuon_specs) == len(full.cmuon_specs) - 7
+    assert len(excl.adamw_specs) == len(full.adamw_specs) + 7
+    names = {s.name for s in excl.cmuon_specs}
+    assert not any("k_proj" in n or "v_proj" in n for n in names)
+    assert not any("shared_block_projection" in n for n in names)
+    with pytest.raises(ValueError, match="unknown cmuon exclude roles"):
+        route_cmuon_parameters(model, exclude_roles=("bogus",), **common)
+
+
+def _build_forensic_hybrid(tmp_path, *, logs, **overrides):
+    model = _MockComposite(_MockDiT(256, 512, 3)).to(torch.device("cuda:0"))
+    hybrid = build_hybrid_cmuon(
+        model,
+        ns_steps_by_role=resolve_ns_map(None, 4),
+        momentum_dtype="bfloat16",
+        chunk_rescale_sqrt_n=False,
+        ns_telemetry_logger=logs.append,
+        forensic=ForensicConfig(enabled=True, ring_size=10, dump_dir=str(tmp_path)),
+        **overrides,
+        **_OPT_COMMON,
+    )
+    assert hybrid.forensic is not None
+    return model, hybrid
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="build_hybrid_cmuon requires CUDA/HCU"
+)
+def test_forensic_healthy_steps_and_step0_check(tmp_path):
+    """Healthy grads run through the two-phase step without tripping: the
+    step-0 momentum check logs ZERO-OK, the ring accumulates one entry per
+    step, and the applied-delta RMS stays in Moonlight order."""
+    logs: list[str] = []
+    model, hybrid = _build_forensic_hybrid(tmp_path, logs=logs)
+    mon = hybrid.forensic
+    for seed in (51, 52, 53, 54):
+        _seed_grads(model, seed)
+        hybrid.step()
+        hybrid.zero_grad(set_to_none=True)
+    step0_lines = [l for l in logs if "step0 momentum check" in l]
+    assert len(step0_lines) == 1, f"step0 check must log exactly once: {step0_lines}"
+    assert "ZERO-OK" in step0_lines[0]
+    assert len(mon._ring) == 4, "one ring entry per successful step"
+    for entry in mon._ring:
+        for i in range(mon.n_specs):
+            row = entry["fp"][i]
+            delta_rms = row[12]
+            assert 0.0 < delta_rms < 5e-3, f"delta_rms off Moonlight order: {delta_rms}"
+    assert not (tmp_path / "cmuon-forensic-crash-1.json").exists(), (
+        "no dump on a healthy run"
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="build_hybrid_cmuon requires CUDA/HCU"
+)
+def test_forensic_guard_trips_on_nonfinite_ns(tmp_path, monkeypatch):
+    """A nonfinite NS output (from a FINITE gradient) must trip the
+    fail-closed guard BEFORE any parameter write: CMuonSafetyError (not
+    FloatingPointError), parameters bit-unchanged, crash dump written with
+    the offending spec + the 10-step ring."""
+
+    def evil_ns(grad, ns_steps, coefficients, eps, trace):
+        trace.append(torch.tensor(float("inf")))
+        return torch.full_like(grad, float("inf"))
+
+    monkeypatch.setattr(cmuon_mod, "cmuon_zeroth_power_traced", evil_ns)
+    logs: list[str] = []
+    model, hybrid = _build_forensic_hybrid(tmp_path, logs=logs)
+    before = {n: p.detach().clone() for n, p in model.named_parameters()}
+    _seed_grads(model, 51)
+    with pytest.raises(CMuonSafetyError):
+        hybrid.step()
+    for n, p in model.named_parameters():
+        assert torch.equal(before[n], p), f"fail-closed must not write {n}"
+    dump = tmp_path / "cmuon-forensic-crash-1.json"
+    assert dump.exists(), "crash dump must be written at the trip step"
+    payload = json.loads(dump.read_text())
+    assert payload["first_local_failure"]["kind"] == "nonfinite"
+    assert payload["update"] == 1
+    assert len(payload["ring"]) >= 1
+    # the offending spec's phase-1 tensors are saved alongside the JSON
+    tensor_files = [p for p in tmp_path.iterdir() if p.suffix == ".pt"]
+    assert len(tensor_files) == 1
+    blob = torch.load(tensor_files[0], weights_only=False)
+    assert blob["ns_output"].shape == model.dit.blocks["slot_00"].attention.q_proj.weight.shape
+    assert not torch.isfinite(blob["ns_output"].float()).all()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="build_hybrid_cmuon requires CUDA/HCU"
+)
+def test_forensic_guard_trips_on_delta_rms_ceiling(tmp_path, monkeypatch):
+    """A finite-but-catastrophic NS output (delta RMS far above
+    10 x 0.2 x lr) must also trip the guard, with the parameters untouched."""
+
+    def evil_ns(grad, ns_steps, coefficients, eps, trace):
+        trace.append(grad.float().norm())
+        return (grad.float() * 1e9).to(torch.bfloat16)
+
+    monkeypatch.setattr(cmuon_mod, "cmuon_zeroth_power_traced", evil_ns)
+    logs: list[str] = []
+    model, hybrid = _build_forensic_hybrid(tmp_path, logs=logs)
+    before = {n: p.detach().clone() for n, p in model.named_parameters()}
+    _seed_grads(model, 52)
+    with pytest.raises(CMuonSafetyError):
+        hybrid.step()
+    for n, p in model.named_parameters():
+        assert torch.equal(before[n], p), f"fail-closed must not write {n}"
+    dump = tmp_path / "cmuon-forensic-crash-1.json"
+    assert dump.exists()
+    payload = json.loads(dump.read_text())
+    assert payload["first_local_failure"]["kind"] == "delta_rms_ceiling"
+    assert payload["first_local_failure"]["delta_rms"] > payload["first_local_failure"]["ceiling"]
 
 
 if __name__ == "__main__":

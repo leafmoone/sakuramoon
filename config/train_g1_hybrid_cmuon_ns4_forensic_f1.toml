@@ -1,0 +1,34 @@
+# FORENSIC F1 — original candidate + full fail-closed forensic instrumentation.
+#
+# DO NOT DEPLOY. Root-cause localization run only. The optimizer semantics are
+# IDENTICAL to train_g1_hybrid_cmuon_ns4_core.toml (the candidate under test:
+# full 141-spec allowlist, global NS4, BF16 momentum, no sqrt(N)); the only
+# addition is the diagnosis layer:
+#   * two-phase CMuon step (compute all candidates -> validate -> commit),
+#     element-wise the same arithmetic, so a nonfinite/oversized delta is
+#     caught BEFORE any parameter write;
+#   * full 141-spec per-step safety telemetry (grad/momentum/nesterov/NS/
+#     delta rms/sum/max + finite flag, device-side, one batched CPU sync);
+#   * per-NS-iteration output-norm trace (which iteration, which tensor);
+#   * cross-rank fingerprint comparison (first divergence = update/stage/
+#     tensor) + fixed-seed probe dot-products for K/V/shared-AdaLN/Q/FFN-in;
+#   * crash-before ring buffer (last 10 updates) + auto dump on guard trip.
+# Detection -> stop -> dump only: never clamps, never continues.
+#
+# run_id: the forensic run forks from the live checkpoint (97100) under its
+# OWN W&B run, like the A/B branch.
+
+extends = ["train_g1_hybrid_cmuon_ns4_core.toml"]
+
+[run]
+run_id = "g1_cmuon_ns4_forensic_f1"
+
+[optimizer.cmuon_forensic]
+enabled = true
+ring_size = 10
+# Catastrophic-abnormal ceiling: applied delta RMS > 10 x (0.2 * lr).
+ceiling_multiplier = 10.0
+# max_abs alarm: median of the first 50 healthy steps x 20.
+max_abs_learn_steps = 50
+max_abs_alarm_mult = 20.0
+dump_dir = "/sakuramoon-runtime/artifacts/g1/forensic"

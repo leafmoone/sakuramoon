@@ -1,0 +1,14 @@
+# FORENSIC F3-KV — K/V split-off (localization only, run only if F2 stable).
+#
+# DO NOT DEPLOY. F1 instrumentation + original F1 routing with ONLY
+# adaln_shared excluded: the safe-routing set PLUS K/V back under CMuon,
+# shared AdaLN stays on the AdamW8bit fallback. Answers: "K/V risky under
+# CMuon, AdaLN not?" (if this crashes where F2 was stable).
+
+extends = ["train_g1_hybrid_cmuon_ns4_forensic_f1.toml"]
+
+[run]
+run_id = "g1_cmuon_forensic_f3_kv"
+
+[optimizer]
+cmuon_routing_exclude = ["adaln_shared"]
