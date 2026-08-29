@@ -22,10 +22,15 @@ degradation draws; the stochastic flow noise is outside the §11.5
 contract, as in M2).
 
 Prefetch: ``[latent_flow].prefetch_depth`` sets how many step-batches the
-CPU thread-pool producer keeps ready ahead of the accelerator consumer
-(2 = double-buffered, the M3 default; 4 = quad buffer, the M1 #8
-data-wait fix for Phase I; 0 = synchronous, M2-style canary). Every fetch
-is a pure function of ``(step, slot)``, so the §11.5 stream stays
+CPU producer keeps ready ahead of the accelerator consumer (2 =
+double-buffered, the M3 default; 4 = quad buffer, the M1 #8 data-wait fix
+for Phase I; 0 = synchronous, M2-style canary). ``[latent_flow].producer``
+selects the backend: ``"thread"`` (default; a thread pool in this
+process, GIL-bound) or ``"process"`` (a forked process pool created BEFORE
+any HCU context exists; the dataset/store context is inherited
+copy-on-write and each worker re-tunes its own torch intra-op pool from
+OMP_NUM_THREADS, so the pool is not GIL-bound). Every fetch is a pure
+function of ``(step, slot)`` in either backend, so the §11.5 stream stays
 bit-exact. The producer records per-stage wall-times (shard/decode/crop/
 degradation/z_hr) and the loop exposes producer/consumer throughput plus
 ready-queue occupancy (M1 #8 gate: data-wait fraction, producer >= 1.25x
@@ -55,12 +60,15 @@ M3 checklist mapping (plan §13, "M3 未通过，不启动正式模型"):
 from __future__ import annotations
 
 import json
+import multiprocessing.pool
 import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
+from multiprocessing.pool import AsyncResult as _MPAsyncResult
+from multiprocessing.pool import Pool as _MPPool
 from pathlib import Path
 from typing import Any, cast
 
@@ -557,6 +565,89 @@ def _validate_heldout(
     )
 
 
+# ---------------------------------------------------------------------------
+# Process-pool producer (producer="process"): the worker body is a
+# MODULE-LEVEL function so the pickled task payload is just (slot, step);
+# the heavy dataset/store/cfg context is inherited copy-on-write through
+# the fork and lives in _PRODUCER_CTX. The body is line-for-line the same
+# per-stage work as the in-loop _fetch closure -> the §11.5 stream is
+# unchanged (only the transport differs).
+# ---------------------------------------------------------------------------
+_PRODUCER_CTX: dict[str, Any] | None = None
+
+
+def _pp_worker_init() -> None:
+    """Pool initializer (fork start method, runs once per worker).
+
+    The producer context is inherited COW — nothing is pickled. The parent
+    pinned torch intra-op threads to 1 (P1 ⑤); a worker that re-runs small
+    CPU torch ops (degrade convs) with a single intra-op thread leaves its
+    cores idle, so re-tune from OMP_NUM_THREADS (the launch env, inherited
+    through the fork)."""
+    import os
+
+    try:
+        n = int(os.environ.get("OMP_NUM_THREADS", "1"))
+    except ValueError:
+        n = 1
+    if n > 1 and torch.get_num_threads() != n:
+        torch.set_num_threads(n)
+
+
+def _pp_fetch(args: tuple[int, int]) -> tuple:
+    """Process-worker body: returns (hr | None, lq, z_hr | None, meta, st).
+
+    ``hr`` is None in store mode (the consumer never consumes it there;
+    skipping it halves the pipe payload)."""
+    ctx = _PRODUCER_CTX
+    assert ctx is not None, "producer context unset (pool must fork before use)"
+    slot, step = args
+    ds: SRDataset = ctx["ds"]
+    cfg: Config = ctx["cfg"]
+    store: LatentStore | None = ctx["store"]
+    j = ctx["order"][slot % ctx["n"]]
+    meta = ds.samples[j]
+    st: dict[str, float] = {}
+    hr_full, dec = ds.decode_hr_timed(meta)  # shard/decode stage split
+    st["shard"] = dec["shard"]
+    st["decode"] = dec["decode"]
+    t_c0 = time.perf_counter()
+    x, y = ds.crop(meta, 0, 0)  # pinned (0,0) box — matches the pre-encoded z_hr
+    bucket_hr = int(ctx["bucket_hr"])
+    hr_crop = hr_full[..., y : y + bucket_hr, x : x + bucket_hr].contiguous()
+    st["crop"] = time.perf_counter() - t_c0
+    t_d0 = time.perf_counter()
+    lq, _ = degrade_hr(
+        hr_crop,
+        cfg,
+        global_seed=ctx["global_seed"],
+        sample_id=meta.sample_id,
+        data_cycle=step // int(ctx["exposure_per_cycle"]),
+        exposure_index=step % int(ctx["exposure_per_cycle"]),
+    )
+    st["degradation"] = time.perf_counter() - t_d0
+    t_z0 = time.perf_counter()
+    z_hr_s = store.read(meta.sample_id) if store is not None else None
+    st["z_hr"] = time.perf_counter() - t_z0
+    return (None if store is not None else hr_crop, lq, z_hr_s, meta, st)
+
+
+def _make_process_pool(n_workers: int) -> _MPPool:
+    """Fork n_workers producer workers (Linux start method only)."""
+    ctx = multiprocessing.get_context("fork")
+    return ctx.Pool(processes=n_workers, initializer=_pp_worker_init)
+
+
+def _fut_done(f: Future | _MPAsyncResult) -> bool:
+    """Done-check across both producer backends (duck-identical APIs)."""
+    return cast("Future", f).done()
+
+
+def _fut_result(f: Future | _MPAsyncResult, timeout: float | None = None) -> Any:
+    """Blocking collect across both producer backends."""
+    return cast("Future", f).result(timeout)
+
+
 def run_latent_flow(
     cfg: Config,
     *,
@@ -682,6 +773,33 @@ def run_latent_flow(
                 flush=True,
             )
 
+    # P1: the process-pool producer must fork BEFORE any HCU context exists
+    # (the workers are CPU-only and never touch the HCU; forking after the
+    # device init would inherit the accelerator runtime state). Thread mode
+    # creates its pool at the classic spot below, after the model is on
+    # device — threads inheriting the HCU context is harmless.
+    pool: ThreadPoolExecutor | _MPPool | None = None
+    if lf.producer == "process":
+        global _PRODUCER_CTX
+        _PRODUCER_CTX = {
+            "ds": ds,
+            "order": order,
+            "n": n,
+            "cfg": cfg,
+            "store": store,
+            "global_seed": ds.global_seed,
+            "bucket_hr": bucket_hr,
+            "exposure_per_cycle": _EXPOSURE_PER_CYCLE,
+        }
+        n_pp = max(1, (lf.prefetch_depth or 1) * lf.batch_size)
+        pool = _make_process_pool(n_pp)
+        if rank == 0:
+            print(
+                f"[latent] producer=process: {n_pp} forked workers "
+                f"(intra-op re-tuned from OMP_NUM_THREADS)",
+                flush=True,
+            )
+
     vae = load_frozen_vae(vae_path or cfg.vae.path, device, dtype=dtype)
     if lf.pixel_features:
         model = AnimeSRModel(
@@ -742,21 +860,24 @@ def run_latent_flow(
             f"[latent] {n_params / 1e6:.2f}M params, {n} crops (bucket {bucket_hr}), "
             f"bs={bs} x world={world_size}, steps {start_step}..{total} "
             f"({p1.exposure_target} samples), zhr={lf.zhr_source}, "
-            f"prefetch_depth={lf.prefetch_depth}, device={device}, dtype={dtype}"
+            f"producer={lf.producer}, prefetch_depth={lf.prefetch_depth}, "
+            f"device={device}, dtype={dtype}"
         )
 
     # ------------------------------------------------------------------
     # CPU producer / accelerator consumer (M1 #8 data-wait gate): a
-    # thread-pool producer keeps ``prefetch_depth`` step-batches ready ahead
+    # producer (thread pool by default, or a forked process pool when
+    # producer="process") keeps ``prefetch_depth`` step-batches ready ahead
     # of the consumer (2 = double-buffered M3 default, 4 = quad buffer).
     # Every fetch is a pure function of (step, slot) -> bit-exact §11.5
-    # stream; the producer records per-stage wall-times and the loop
-    # exposes producer/consumer throughput + ready-queue occupancy.
+    # stream in either backend; the producer records per-stage wall-times
+    # and the loop exposes producer/consumer throughput + ready-queue
+    # occupancy.
     # ------------------------------------------------------------------
 
     @dataclass
     class _Prepared:
-        hr: torch.Tensor
+        hr: torch.Tensor | None  # None: store mode w/ process pool (consumer never reads it)
         lq: torch.Tensor
         z_hr: torch.Tensor | None  # None in P1 ④ on-fly mode (consumer encodes)
         meta: SampleMeta
@@ -792,21 +913,28 @@ def run_latent_flow(
         return _Prepared(hr=hr_crop, lq=lq, z_hr=z_hr_s, meta=meta, stages=st)
 
     depth = max(0, lf.prefetch_depth)
-    pool = ThreadPoolExecutor(
-        max_workers=max(1, (depth or 1) * bs), thread_name_prefix="lfetch"
-    )
+    if lf.producer == "thread":
+        pool = ThreadPoolExecutor(
+            max_workers=max(1, (depth or 1) * bs), thread_name_prefix="lfetch"
+        )
+    assert pool is not None, "producer pool must be created (thread here, process above)"
 
-    def _submit_batch(step: int) -> list[Future]:
-        return [
-            pool.submit(
-                _fetch, latent_sample_index(step, rank, i, bs, world_size, n), step
-            )
+    _is_proc = lf.producer == "process"
+
+    def _submit_batch(step: int) -> list[Future | _MPAsyncResult]:
+        pairs = [
+            (latent_sample_index(step, rank, i, bs, world_size, n), step)
             for i in range(bs)
         ]
+        if _is_proc:
+            ppool = cast("_MPPool", pool)
+            return [ppool.apply_async(_pp_fetch, (slot, st)) for slot, st in pairs]
+        tpool = cast("ThreadPoolExecutor", pool)
+        return [tpool.submit(_fetch, slot, st) for slot, st in pairs]
 
     # ready queue: the producer keeps `depth` step-batches queued ahead of
     # the consumer (prefilled at start; refilled as each batch is consumed).
-    ready: deque[list[Future]] = deque()
+    ready: deque[list[Future | _MPAsyncResult]] = deque()
     for k in range(depth):
         if start_step + k < total:
             ready.append(_submit_batch(start_step + k))
@@ -865,12 +993,20 @@ def run_latent_flow(
 
         # ready-queue telemetry, before the consumer waits on the front batch
         if depth > 0:
-            ready_occ_sum += sum(1 for q in ready if all(f.done() for f in q))
-            if not all(f.done() for f in futs):
+            ready_occ_sum += sum(1 for q in ready if all(_fut_done(f) for f in q))
+            if not all(_fut_done(f) for f in futs):
                 n_wait += 1
 
         tf = time.perf_counter()
-        prepared = [f.result() for f in futs]
+        if _is_proc:
+            # process pool hands back the (hr, lq, z_hr, meta, stages) tuple;
+            # rewrap into _Prepared (hr may be None in store mode)
+            prepared = [
+                _Prepared(hr=r[0], lq=r[1], z_hr=r[2], meta=r[3], stages=r[4])
+                for r in (_fut_result(f) for f in futs)
+            ]
+        else:
+            prepared = [_fut_result(f) for f in futs]
         n_produced += bs
         for p in prepared:
             for k, v in p.stages.items():
@@ -993,7 +1129,13 @@ def run_latent_flow(
                 flush=True,
             )
 
-    pool.shutdown(wait=True)
+    if _is_proc:
+        ppool = cast("_MPPool", pool)
+        ppool.close()
+        ppool.join()  # mirrors pool.shutdown(wait=True): wait for the drain
+    else:
+        tpool = cast("ThreadPoolExecutor", pool)
+        tpool.shutdown(wait=True)
     if world_size > 1 and dist.is_available() and dist.is_initialized():
         dist.barrier()
     if rank == 0:
@@ -1011,6 +1153,7 @@ def run_latent_flow(
             "n_crops": n,
             "n_params_m": round(n_params / 1e6, 2),
             "batch_size": bs,
+            "producer": lf.producer,
             "prefetch_depth": lf.prefetch_depth,
             "exposure_target_samples": p1.exposure_target,
             "zhr_source": lf.zhr_source,

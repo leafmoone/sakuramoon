@@ -487,6 +487,14 @@ class LatentFlowSpec(_Frozen):
     # consumer (formal multi-resolution Phase I-P — no store required, any
     # bucket size; the producer then only prepares hr + lq).
     zhr_source: Literal["store", "onfly"] = "store"
+    # CPU prefetch producer backend. "thread" (default) runs depth*bs worker
+    # threads in this process (GIL-bound). "process" forks depth*bs worker
+    # PROCESSES before any HCU context exists: the dataset/store context is
+    # inherited copy-on-write, each worker re-tunes its own torch intra-op
+    # pool from OMP_NUM_THREADS, and the per-sample fetch stays a pure
+    # function of (step, slot) — the bit-exact §11.5 stream is unchanged,
+    # only the transport differs (fork start method required, i.e. Linux).
+    producer: Literal["thread", "process"] = "thread"
 
 
 # ---------------------------------------------------------------------------

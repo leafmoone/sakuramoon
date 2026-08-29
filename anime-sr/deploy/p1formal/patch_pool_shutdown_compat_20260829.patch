@@ -1,0 +1,19 @@
+diff --git a/src/anime_sr/train/latent_flow.py b/src/anime_sr/train/latent_flow.py
+index b80f416..e4e6b76 100644
+--- a/src/anime_sr/train/latent_flow.py
++++ b/src/anime_sr/train/latent_flow.py
+@@ -1303,7 +1303,13 @@ def run_latent_flow(
+                 flush=True,
+             )
+ 
+-    pool.shutdown(wait=True)
++    if hasattr(pool, 'shutdown'):
++        pool.shutdown(wait=True)
++    else:
++        # This platform's Pool build (DTK/HIP python) lacks shutdown():
++        # drain gracefully with close()+join() (= shutdown(wait=True) semantics).
++        pool.close()
++        pool.join()
+     if world_size > 1 and dist.is_available() and dist.is_initialized():
+         dist.barrier()
+     if rank == 0:
