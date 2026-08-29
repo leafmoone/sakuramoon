@@ -597,6 +597,15 @@ def _validate_hybrid_optimizer_schema(
             "guarded canonical optimizer requires a guarded checkpoint "
             "(unguarded CMuon checkpoints cannot resume directly)"
         )
+    if not isinstance(optimizer, HybridCMuonGuardedCanonical) and (
+        "guarded_canonical" in document
+    ):
+        # A guarded checkpoint cannot be downgraded into the unguarded
+        # candidate via the schema sidecar either.
+        raise CheckpointError(
+            "guarded canonical checkpoint cannot resume into the unguarded "
+            "hybrid CMuon (no silent downgrade)"
+        )
     if isinstance(optimizer, HybridCMuonGuardedCanonical):
         block = _mapping(
             document["guarded_canonical"], "guarded_canonical schema block"

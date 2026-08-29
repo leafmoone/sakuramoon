@@ -370,20 +370,26 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
 
         # Broadcast: every ACTIVE, non-failed chunk is sent owner -> all
         # ranks (v1 is spec-by-spec, correctness first, no overlap).
+        # world_size == 1: the owner is always this rank; no collective.
         failed = {idx for idx, flag in enumerate(fail_flags.tolist()) if flag > 0}
-        for idx, (a, owner) in enumerate(zip(is_active, owners)):
-            if not a or idx in failed:
-                staged[idx] = None  # zero delta on every rank (consensus)
-                continue
-            shape = self._chunk_shape(idx)
-            if owner == self.rank:
-                tensor = staged[idx]
-                assert tensor is not None
-                dist.broadcast(tensor, src=owner)
-            else:
-                buf = torch.empty(shape, dtype=torch.bfloat16, device=device)
-                dist.broadcast(buf, src=owner)
-                staged[idx] = buf
+        if self.world_size > 1:
+            for idx, (a, owner) in enumerate(zip(is_active, owners)):
+                if not a or idx in failed:
+                    staged[idx] = None  # zero delta on every rank (consensus)
+                    continue
+                shape = self._chunk_shape(idx)
+                if owner == self.rank:
+                    tensor = staged[idx]
+                    assert tensor is not None
+                    dist.broadcast(tensor, src=owner)
+                else:
+                    buf = torch.empty(shape, dtype=torch.bfloat16, device=device)
+                    dist.broadcast(buf, src=owner)
+                    staged[idx] = buf
+        else:
+            for idx, a in enumerate(is_active):
+                if not a or idx in failed:
+                    staged[idx] = None
 
         # Cross-rank delta fingerprint (exact equality is expected: the
         # broadcast delivers identical bits and the fp32 reductions are
@@ -603,7 +609,12 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                     "guard config mismatch: saved "
                     f"{guard.get('config')} vs current {self._guard_state()['config']}"
                 )
-        super().load_state_dict(state_dict)
+        # Delegate the base hybrid state to the parent; the guard section is
+        # this subclass's own state and must not reach the unguarded parent
+        # (which rejects it by contract).
+        base_state = {k: v for k, v in state_dict.items() if k != "guard"}
+        base_state.pop("guarded_canonical_schema_version", None)
+        super().load_state_dict(base_state)
         if has_guard:
             guard = _as_dict(state_dict["guard"], "guard state")
             refs = _as_dict(guard.get("references"), "guard references")
