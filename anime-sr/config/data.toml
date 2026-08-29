@@ -50,6 +50,9 @@ zero_overlap = true
 profiles = { P0_clean = 0.10, P1_mild_web = 0.25, P2_normal_web = 0.35, P3_anime_codec = 0.20, P4_severe = 0.10 }
 # §11.2 initial ranges (mild / normal / severe)
 blur_sigma = { mild = [0.1, 0.6], normal = [0.2, 1.2], severe = [0.5, 2.0] }
+# sinc low-pass cutoff fc (cycles/px, Nyquist=0.5); lower = stronger blur.
+# Independent of blur_sigma (P1-fix 2026-08-29, M4-prep work order).
+sinc_fc = { mild = [0.10, 0.30], normal = [0.08, 0.25], severe = [0.05, 0.20] }
 gaussian_noise = { mild = [0.0, 2.0], normal = [0.0, 5.0], severe = [2.0, 10.0] }
 jpeg_quality = { mild = [80, 98], normal = [55, 90], severe = [30, 70] }
 # §11.3 offline codec bank: 50k-100k HR crops, 1-2 codec versions per crop,

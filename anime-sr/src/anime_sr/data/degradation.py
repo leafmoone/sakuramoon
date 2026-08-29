@@ -64,6 +64,7 @@ class DegradationParams:
     profile: str
     blur_kind: str  # none|iso|aniso|motion|sinc
     blur_sigma: float  # HR pixels
+    sinc_fc: float  # sinc low-pass cutoff, cycles/px in (0, 0.5]; 0.0 = not sinc
     blur_angle_deg: float  # aniso/motion
     motion_len: float  # motion blur length (px)
     downsample_filter: str  # area|bicubic|bilinear|nearest
@@ -116,6 +117,7 @@ def sample_params(seed: int, cfg: Config) -> DegradationParams:
     if blur_level in (None, "none"):
         blur_kind = "none"
         blur_sigma = 0.0
+        sinc_fc = 0.0
         angle = 0.0
         motion = 0.0
     else:
@@ -125,6 +127,14 @@ def sample_params(seed: int, cfg: Config) -> DegradationParams:
         blur_sigma = _u(rng, lo, hi)
         angle = _u(rng, 0.0, 180.0)
         motion = _u(rng, 5.0, 12.0)
+        # sinc cutoff (P1-fix 2026-08-29): independent of Gaussian sigma,
+        # legal range (0, 0.5] cycles/px. Drawn ONLY for sinc exposures so
+        # non-sinc exposures keep the exact legacy RNG stream.
+        if blur_kind == "sinc":
+            lo, hi = _range(cfg.degradation.sinc_fc, blur_level)
+            sinc_fc = min(max(_u(rng, lo, hi), 1e-3), 0.5)
+        else:
+            sinc_fc = 0.0
 
     # 3) downsample
     downsample_filter = _pick(rng, ["area", "bicubic", "bilinear", "nearest"])
@@ -167,6 +177,7 @@ def sample_params(seed: int, cfg: Config) -> DegradationParams:
         profile=profile,
         blur_kind=blur_kind,
         blur_sigma=round(blur_sigma, 4),
+        sinc_fc=round(sinc_fc, 4),
         blur_angle_deg=round(angle, 2),
         motion_len=round(motion, 2),
         downsample_filter=downsample_filter,
@@ -197,6 +208,35 @@ def _gaussian_kernel_1d(sigma: float, length: int | None = None) -> torch.Tensor
     return (k / k.sum()).view(1, 1, length, 1)
 
 
+def _sinc_kernel_1d(fc: float, n_zeros: int = 4) -> torch.Tensor:
+    """Windowed ideal low-pass 1D kernel (P1-fix 2026-08-29).
+
+    Standard form (NOT the legacy sin(pi*x/f)/(pi*x) with center 1/(2f),
+    which halved the center tap and derived fc from Gaussian sigma so fc
+    could exceed Nyquist):
+
+        h[n] = sin(2*pi*fc*n) / (pi*n),   h[0] = 2*fc
+
+    with cutoff fc in (0, 0.5] cycles/px (clamped), truncated at ~n_zeros
+    zero crossings each side, Hann-windowed (stable truncation, kills the
+    un-windowed Gibbs ringing), then DC-gain normalized (sum = 1) so a
+    flat crop stays flat. Separable: applied as two 1D passes.
+    """
+    fc = min(max(fc, 1e-3), 0.5)
+    half = max(1, math.ceil(n_zeros / (2.0 * fc)))  # ~n_zeros zeros each side
+    n = torch.arange(2 * half + 1, dtype=torch.float32) - half
+    k = torch.where(
+        n.abs() < 1e-9,
+        torch.tensor(2.0 * fc, dtype=torch.float32),
+        torch.sin(2.0 * math.pi * fc * n) / (math.pi * n),
+    )
+    # symmetric Hann window, 1.0 at n=0 and 0.0 at n=±half
+    w = 0.5 * (1.0 + torch.cos(math.pi * n / half))
+    k = k * w
+    k = k / k.sum()  # DC gain = 1
+    return k.view(1, 1, 2 * half + 1, 1)
+
+
 def _blur_plan(p: DegradationParams) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Blur plan: ``(kernel_2d, kernel_1d)`` — exactly one non-None.
 
@@ -204,7 +244,9 @@ def _blur_plan(p: DegradationParams) -> tuple[torch.Tensor | None, torch.Tensor 
     iso/sinc run the separable 1D form (P1 ⑤: two 1D passes of
     [1,1,L,1] instead of one 2D conv of the L×L outer product —
     ~L× cheaper, exact up to fp32 summation order)."""
-    if p.blur_kind == "none" or p.blur_sigma <= 0:
+    # sinc runs its own independent cutoff (p.sinc_fc) and never touches
+    # the Gaussian sigma; the sigma<=0 guard applies to the other kinds.
+    if p.blur_kind == "none" or (p.blur_sigma <= 0 and p.blur_kind != "sinc"):
         return None, None
     sigma = p.blur_sigma
     if p.blur_kind == "iso":
@@ -235,15 +277,10 @@ def _blur_plan(p: DegradationParams) -> tuple[torch.Tensor | None, torch.Tensor 
         k2 = torch.exp(-cross.square() / (2.0 * width**2)) * (proj.abs() <= length / 2)
         return (k2 / k2.sum()).view(1, 1, length, length), None
     if p.blur_kind == "sinc":
-        # truncated-sinc low-pass (ring artifacts); cutoff ≈ 1/(2σ) cycles/px
-        f = 1.0 / (2.0 * max(sigma, 0.15))
-        length = 2 * max(1, math.ceil(4.0 / f)) * 2 + 1
-        half = length // 2
-        x = torch.arange(length, dtype=torch.float32) - half
-        k1 = torch.where(x.abs() < 1e-6, 1.0 / (2.0 * f), torch.sin(math.pi * x / f) / (math.pi * x))
-        k1 = torch.where(k1.abs() > 1e-4, k1, torch.zeros_like(k1))
-        k1 = k1 / k1.sum()
-        return None, k1.view(1, 1, length, 1)
+        # windowed ideal low-pass (P1-fix 2026-08-29): independent cutoff
+        # p.sinc_fc in (0, 0.5] cycles/px; see _sinc_kernel_1d for the
+        # standard form + Hann window + DC normalization.
+        return None, _sinc_kernel_1d(p.sinc_fc)
     raise ValueError(f"unknown blur kind {p.blur_kind}")
 
 

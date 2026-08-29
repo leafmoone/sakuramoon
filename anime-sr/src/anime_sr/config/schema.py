@@ -404,6 +404,17 @@ class DegradationSpec(_Frozen):
             "severe": [0.5, 2.0],
         }
     )
+    # sinc low-pass cutoff fc (cycles/px, Nyquist = 0.5), sampled per
+    # exposure when blur_kind == "sinc". Independent of Gaussian blur_sigma
+    # (P1-fix 2026-08-29: the legacy formula derived fc from sigma and
+    # halved the center tap). Lower fc = stronger low-pass.
+    sinc_fc: dict[str, list[float]] = Field(
+        default_factory=lambda: {
+            "mild": [0.10, 0.30],
+            "normal": [0.08, 0.25],
+            "severe": [0.05, 0.20],
+        }
+    )
     gaussian_noise: dict[str, list[float]] = Field(
         default_factory=lambda: {
             "mild": [0.0, 2.0],
