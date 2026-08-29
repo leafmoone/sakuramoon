@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -53,6 +54,11 @@ from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
 from sakuramoon.model.growth import active_slot_ids, growth_ramp_updates
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
 from sakuramoon.optim.dtk import configure_tunableop
+from sakuramoon.optim.guard_calibration import (
+    GuardCalibration,
+    GuardCalibrationComplete,
+    install_guard_calibration,
+)
 
 if TYPE_CHECKING:
     from sakuramoon.optim.cmuon import HybridCMuon
@@ -892,6 +898,40 @@ class _AccelerateCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
         )
 
 
+class _GuardCalibrationCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
+    """Fail-closed publisher for guard shadow calibration runs.
+
+    Calibration must never write a checkpoint (no optimizer transition
+    state, no guard reference state exists yet). If the cadence ever fires
+    inside the calibration window, fail loudly instead of saving.
+    """
+
+    def __init__(self) -> None:
+        # Intentionally skips the base binding: nothing may be published.
+        self._published = False
+
+    def publish_update(
+        self,
+        state: SingleGpuUpdateState,
+        reason: CheckpointReason,
+        cadence: CheckpointCadence,
+    ) -> Path:
+        raise RuntimeError(
+            "guard shadow calibration must not publish checkpoints "
+            f"(cadence fired at update {state.successful_updates}, "
+            f"reason {reason.value}); shrink the calibration window or move "
+            "the cadence point"
+        )
+
+    def apply_verified_retention(
+        self,
+        checkpoint: Path,
+        manifest: object,
+        state: RawCheckpointState,
+    ) -> None:
+        raise RuntimeError("guard shadow calibration must not apply retention")
+
+
 def _reject_sample(_reason: str) -> None:
     # D025 owns rejection policy; the training process does not mutate service state.
     return None
@@ -1041,6 +1081,33 @@ def _run_accepted_lifecycle(
             fresh=False,
         )
 
+    # Guard shadow calibration (Guarded Canonical candidate development):
+    # SAKURAMOON_GUARD_CALIBRATION_STEPS>0 swaps the optimizer step for a
+    # gradient/momentum shadow observation (no parameter update, no NS, no
+    # AdamW step) and neutralizes W&B / checkpoint / sampling side effects.
+    # Fail-closed: calibration is only legal on the hybrid CMuon optimizer.
+    calibration: GuardCalibration | None = None
+    calibration_steps = int(os.environ.get("SAKURAMOON_GUARD_CALIBRATION_STEPS", "0") or 0)
+    if calibration_steps > 0:
+        if not isinstance(optimizer, _hybrid_cmuon_class()):
+            raise ValueError(
+                "SAKURAMOON_GUARD_CALIBRATION_STEPS requires the hybrid CMuon "
+                f"optimizer, got {type(optimizer)!r}"
+            )
+        calibration = install_guard_calibration(
+            optimizer,
+            steps=calibration_steps,
+            output_path=artifact_root / "guard-calibration-rank0.jsonl",
+            rank=rank,
+            world_size=world_size,
+            update_offset=restored.state.trainer.successful_updates,
+        )
+        if is_main_process:
+            _log(
+                f"[guard-calibration] shadow step 已安装: "
+                f"steps={calibration_steps} out={calibration.output_path}"
+            )
+
     if isinstance(optimizer, _hybrid_cmuon_class()) and optimizer.forensic is not None:
         # The forensic run is forked from a live checkpoint: anchor the
         # monitor's update numbering to the restored trainer count so the
@@ -1152,24 +1219,29 @@ def _run_accepted_lifecycle(
             restored=restored,
             device=device,
         )
-        base_publisher = ProductionSingleGpuCheckpointPublisher(
-            checkpoint_root=checkpoint_root,
-            resolved_config=loaded.resolved_toml.encode("utf-8"),
-            module=module,
-            optimizer=optimizer,
-            restored_checkpoint=restored,
-            accepted_checkpoint_ids=frozenset(),
-            retention_slots=config.checkpoint.slots,
-        )
-        publisher = (
-            base_publisher
-            if accelerator is None
-            else _AccelerateCheckpointPublisher(
-                base_publisher,
-                accelerator,
-                progress,
+        if calibration is not None:
+            publisher: (
+                ProductionSingleGpuCheckpointPublisher
+            ) = _GuardCalibrationCheckpointPublisher()
+        else:
+            base_publisher = ProductionSingleGpuCheckpointPublisher(
+                checkpoint_root=checkpoint_root,
+                resolved_config=loaded.resolved_toml.encode("utf-8"),
+                module=module,
+                optimizer=optimizer,
+                restored_checkpoint=restored,
+                accepted_checkpoint_ids=frozenset(),
+                retention_slots=config.checkpoint.slots,
             )
-        )
+            publisher = (
+                base_publisher
+                if accelerator is None
+                else _AccelerateCheckpointPublisher(
+                    base_publisher,
+                    accelerator,
+                    progress,
+                )
+            )
         plan = build_single_gpu_preflight_checks(
             loaded,
             repository_root=repository_root,
@@ -1211,7 +1283,10 @@ def _run_accepted_lifecycle(
                     transparent_rejection_totals=batches.transparent_rejection_totals,
                 )
                 telemetry = (
-                    build_training_telemetry_from_config(
+                    # Calibration: no W&B run at all (design constraint).
+                    _NoopTelemetry(device)
+                    if calibration is not None
+                    else build_training_telemetry_from_config(
                         config,
                         repository_root=repository_root,
                         device=device,
@@ -1348,6 +1423,14 @@ def _run_accepted_lifecycle(
                                 )
                     progress.synchronize(f"observer/update-{update}/complete")
 
+                # Calibration: the per-update observer (sampling / W&B /
+                # evaluation / named barrier) is fully bypassed; both ranks
+                # skip it, so no barrier is lost.
+                calibration_observer = (
+                    (lambda observation: None)
+                    if calibration is not None
+                    else observe_successful_update
+                )
                 with telemetry:
                     _log(
                         f"开始训练: update {initial_update + 1} -> "
@@ -1370,7 +1453,7 @@ def _run_accepted_lifecycle(
                         ),
                         restored_checkpoint=restored,
                         phase_timer=telemetry.phase_timer,
-                        successful_update_observer=observe_successful_update,
+                        successful_update_observer=calibration_observer,
                         forced_checkpoint=(
                             lambda update: _forced_production_checkpoint_reason(
                                 restored.state,
@@ -1389,22 +1472,37 @@ def _run_accepted_lifecycle(
                         ),
                         log_updates=is_main_process,
                     )
-                if not verified_checkpoints:
+                if not verified_checkpoints and calibration is None:
                     raise RuntimeError(
                         "production training completed without a durable checkpoint"
+                    )
+                result = ProductionTrainingResult(
+                    resolved_config_path,
+                    preflight_report.resolve(strict=True),
+                    verified_checkpoints[-1],
+                    initial_update,
+                    loop_result.state.successful_updates,
+                    False,
+                )
+            except GuardCalibrationComplete as done:
+                # Clean calibration stop (no failure, no checkpoint).
+                result = ProductionTrainingResult(
+                    resolved_config_path,
+                    preflight_report.resolve(strict=True),
+                    resume if resume is not None else checkpoint_root,
+                    initial_update,
+                    initial_update + done.observations,
+                    False,
+                )
+                if is_main_process:
+                    _log(
+                        f"[guard-calibration] 完成: {done.observations} 次观察, "
+                        f"记录={calibration.output_path if calibration else '-'}"
                     )
             except Exception as error:
                 raise ProductionTrainingError(
                     "accepted production training failed"
                 ) from error
-            result = ProductionTrainingResult(
-                resolved_config_path,
-                preflight_report.resolve(strict=True),
-                verified_checkpoints[-1],
-                initial_update,
-                loop_result.state.successful_updates,
-                False,
-            )
     except BaseException as error:  # noqa: BLE001 - preserve cleanup failures
         primary = error
     cleanup: BaseException | None = None
