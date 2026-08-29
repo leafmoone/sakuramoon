@@ -39,9 +39,10 @@ extends = ["train_g1_transparent_white_crop_800_s0.toml"]
 
 # The CMuon A/B branch runs under its OWN W&B run (never re-attaches the
 # production g1_256_bs760 run). It forks from the live AdamW checkpoint at
-# update 100000, so the run id records the fork point.
+# update 97100 (user-directed early fork, 08-29), so the run id records the
+# fork point.
 [run]
-run_id = "g1_cmuon_ns4_from_100000"
+run_id = "g1_cmuon_ns4_from_97100"
 
 [optimizer]
 name = "hybrid_cmuon"
