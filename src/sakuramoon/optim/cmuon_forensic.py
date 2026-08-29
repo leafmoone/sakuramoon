@@ -87,6 +87,16 @@ class ForensicConfig:
     max_abs_alarm_mult: float = 20.0
     dump_dir: str | None = None
     probe_seed: int = 20260829
+    # Cross-rank divergence tolerance (relative). The DTK/HCU stack's bf16
+    # GEMM is NONDETERMINISTIC (measured on salt1, 2560x2560: ~5-8% rel_rms
+    # between identical repeated calls, hard-synced, even on one device), so
+    # the two ranks' NS outputs legitimately differ at that level every step.
+    # The tolerance must sit above that hardware floor: a true candidate
+    # defect (a rank's NS exploding, a param running away) shows up as a
+    # >=100x difference and trips with wide margin. Per-step drift at or
+    # below the tolerance is still RECORDED (ring field rank_drift) so the
+    # run-level rank inconsistency can be quantified.
+    divergence_rel_tol: float = 1e-1
 
 
 def _dist() -> tuple[int, int]:
@@ -172,6 +182,9 @@ class ForensicMonitor:
                 device
             )
             self._probes[i].div_(self._probes[i].norm().clamp(min=1e-30))
+        # per-step cross-rank rows captured at collect time (dump material)
+        self._last_gathered: list[torch.Tensor] = []
+        self._last_probe_gathered: list[torch.Tensor] = []
         self._probe_fp = torch.zeros(
             max(1, len(self._probe_specs)),
             len(_PROBE_STAGES),
@@ -296,13 +309,16 @@ class ForensicMonitor:
         # backend), so the gather must stay on HCU.
         gathered = _all_gather_last_dim(cols)
         if self._world > 1:
+            tol = self.fcfg.divergence_rel_tol
             worst: dict[str, object] | None = None
             worst_rel = -1.0
+            param_drift_max = 0.0
             for a in range(self._world):
                 for b in range(a + 1, self._world):
                     diff = (gathered[a] - gathered[b]).abs()
                     rel = diff / gathered[a].abs().clamp(min=1e-30)
-                    bad = (rel > 0.0).nonzero().flatten().tolist()
+                    param_drift_max = max(param_drift_max, float(rel.max().item()))
+                    bad = (rel > tol).nonzero().flatten().tolist()
                     if bad:
                         i = int(bad[0])
                         stage_col = int(diff[i].argmax())
@@ -321,6 +337,9 @@ class ForensicMonitor:
                             worst_rel = rel_diff
             if worst is not None and self.first_rank_divergence is None:
                 self._record_divergence(worst, rel_diff=worst_rel)
+            # attach the param drift to the ring entry of this step
+            if self._ring:
+                self._ring[-1]["param_drift_max"] = param_drift_max
         self._param_fp = cols
 
     # -- collect / compare / guard ----------------------------------------
@@ -410,21 +429,32 @@ class ForensicMonitor:
         # backend), so the gathers must stay on HCU.
         gathered = _all_gather_last_dim(self._fp)
         probe_gathered = _all_gather_last_dim(self._probe_fp)
+        self._last_gathered = [g.cpu() for g in gathered]
+        self._last_probe_gathered = [p.cpu() for p in probe_gathered]
+        tol = self.fcfg.divergence_rel_tol
+        rank_drift: float | None = None
         if self._world > 1:
             value_cols = list(range(15))  # 5 stages x (rms, sum, max)
             flag_cols = [_N_FP_COLS - 2, _N_FP_COLS - 1]  # finite, has-grad
+            drift_max = 0.0
             for a in range(self._world):
                 for b in range(a + 1, self._world):
                     d = (gathered[a] - gathered[b]).abs()
                     rel = d / gathered[a].abs().clamp(min=1e-30)
-                    # value columns: any relative diff; the flag columns are
-                    # exact integers: any absolute diff = divergence
+                    # value columns: flag only above the hardware
+                    # nondeterminism floor (tol); the flag columns are exact
+                    # integers: any absolute diff = divergence
                     mask = torch.cat(
                         [
-                            rel[:, value_cols] > 0.0,
+                            rel[:, value_cols] > tol,
                             d[:, flag_cols] > 0.0,
                         ],
                         dim=1,
+                    )
+                    # per-step cross-rank drift (recorded even below tol)
+                    drift_max = max(
+                        drift_max,
+                        float(rel.max().item()),
                     )
                     bad = mask.nonzero()
                     if bad.numel() > 0:
@@ -444,12 +474,15 @@ class ForensicMonitor:
                         break
                 if divergence:
                     break
-            # probe comparison (exact fp32 dots; any diff = divergence)
+            # probe comparison (the dots run through the same nondeterministic
+            # reductions, so the relative tolerance applies too)
             if divergence is None:
                 for a in range(self._world):
                     for b in range(a + 1, self._world):
                         pd = (probe_gathered[a] - probe_gathered[b]).abs()
-                        bad = (pd > 0.0).nonzero()
+                        proll = pd / probe_gathered[a].abs().clamp(min=1e-30)
+                        drift_max = max(drift_max, float(proll.max().item()))
+                        bad = (proll > tol).nonzero()
                         if bad.numel() > 0:
                             p, s = int(bad[0, 0]), int(bad[0, 1])
                             divergence = {
@@ -468,6 +501,7 @@ class ForensicMonitor:
                             break
                     if divergence:
                         break
+            rank_drift = drift_max
         if divergence is not None and self.first_rank_divergence is None:
             rel_v = divergence.get("rel_diff")
             self._record_divergence(
@@ -486,6 +520,12 @@ class ForensicMonitor:
                 "max_abs_baseline": self._max_abs_baseline,
                 "local_failure": failure,
                 "divergence": self.first_rank_divergence,
+                # measured max cross-rank relative diff this step (all
+                # fp + probe columns; None for world=1). Recorded even when
+                # below the divergence tolerance: this is the run-level
+                # rank-inconsistency trace on this nondeterministic HCU.
+                "rank_drift": rank_drift,
+                "divergence_rel_tol": self.fcfg.divergence_rel_tol,
             }
         )
         # -- fail-closed decision (all ranks see the same verdict) --
@@ -497,6 +537,7 @@ class ForensicMonitor:
                 f"[cmuon-forensic] FAIL-CLOSED abort at update="
                 f"{self._steps + self.update_offset} rank={self._rank} "
                 f"local_failure={failure} first_divergence={self.first_rank_divergence}"
+                f" rank_drift={rank_drift}"
             )
             self._logger(msg)
             raise CMuonSafetyError(msg)
@@ -538,15 +579,22 @@ class ForensicMonitor:
         out = Path(self.fcfg.dump_dir)
         out.mkdir(parents=True, exist_ok=True)
         update = self._steps + self.update_offset
-        payload = {
+        payload: dict[str, object] = {
             "update": update,
             "run_step": self._steps,
             "update_offset": self.update_offset,
             "lr": self._lr,
             "delta_ceiling": self._ceiling,
             "max_abs_baseline": self._max_abs_baseline,
+            "divergence_rel_tol": self.fcfg.divergence_rel_tol,
             "first_local_failure": failure,
             "first_rank_divergence": self.first_rank_divergence,
+            # full cross-rank fingerprint rows for the tripping step
+            # (rank0 view of the all_gather; world=1 -> single row)
+            "rank_fp": [r.tolist() for r in getattr(self, "_last_gathered", [])],
+            "rank_probe_fp": [
+                r.tolist() for r in getattr(self, "_last_probe_gathered", [])
+            ],
             "ring": list(self._ring),
         }
         path = out / f"cmuon-forensic-crash-{update}.json"

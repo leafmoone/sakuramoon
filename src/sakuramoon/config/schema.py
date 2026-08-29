@@ -760,6 +760,12 @@ class CMuonForensicConfig(StrictModel):
     max_abs_learn_steps: PositiveInt = 50
     max_abs_alarm_mult: PositiveFloat = 20.0
     dump_dir: str | None = None
+    # Cross-rank divergence tolerance (relative). The DTK/HCU bf16 GEMM is
+    # nondeterministic (measured ~5-8% rel_rms between identical repeated
+    # calls on one device), so the ranks' NS outputs legitimately differ at
+    # that floor; a true defect (a rank's NS/param exploding) is >=100x and
+    # trips with margin. Drift below tol is recorded, not tripped.
+    divergence_rel_tol: PositiveFloat = 1e-1
 
 
 class OptimizerConfig(StrictModel):

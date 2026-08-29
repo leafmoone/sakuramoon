@@ -408,6 +408,7 @@ def _build_optimizer(
                 max_abs_learn_steps=optimizer.cmuon_forensic.max_abs_learn_steps,
                 max_abs_alarm_mult=optimizer.cmuon_forensic.max_abs_alarm_mult,
                 dump_dir=optimizer.cmuon_forensic.dump_dir,
+                divergence_rel_tol=optimizer.cmuon_forensic.divergence_rel_tol,
             )
         if optimizer.cmuon_ns is not None:
             # Per-role (per-spec) NS depth: canonical role->depth map.
