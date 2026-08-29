@@ -768,8 +768,31 @@ class CMuonForensicConfig(StrictModel):
     divergence_rel_tol: PositiveFloat = 1e-1
 
 
+class CMuonGuardConfig(StrictModel):
+    """Pre-NS low-signal guard for the guarded canonical CMuon candidate.
+
+    Only used when optimizer.name == "hybrid_cmuon_guarded_canonical".
+    All values are calibration-derived (there are NO preset defaults): see
+    reports/cmuon-guarded-canonical-design.md §5.4 and the P3 shadow-
+    gradient calibration artifact. ``references`` holds the per-NS-input
+    (FQN#chunk, with an optional FQN-level fallback) calibration bootstrap
+    values for the signal reference.
+    """
+
+    enabled: bool = True
+    guard_ratio: PositiveFloat
+    reference_decay: Annotated[ExactFloat, Field(gt=0.0, le=1.0)]
+    min_reference: PositiveFloat
+    numerical_floor: PositiveFloat
+    warmup_observations: NonNegativeInt
+    # Per-step cross-rank parameter fingerprint invariant (on for S1/S2).
+    invariant_check: bool = True
+    # Calibration bootstrap references, keyed "fqn#chunk<i>" (or bare fqn).
+    references: dict[str, float] = {}
+
+
 class OptimizerConfig(StrictModel):
-    name: Literal["torchao_adamw8bit", "hybrid_cmuon"]
+    name: Literal["torchao_adamw8bit", "hybrid_cmuon", "hybrid_cmuon_guarded_canonical"]
     base_lr: PositiveFloat
     reference_batch: PositiveInt
     lr_scaling: Literal["linear_global_batch"]
@@ -804,11 +827,35 @@ class OptimizerConfig(StrictModel):
     cmuon_routing_exclude: Annotated[
         tuple[str, ...], BeforeValidator(_toml_array_to_tuple)
     ] = ()
+    # Pre-NS low-signal guard (see CMuonGuardConfig). Required when
+    # name="hybrid_cmuon_guarded_canonical"; must be absent for the other
+    # optimizer names.
+    cmuon_guard: CMuonGuardConfig | None = None
 
     @model_validator(mode="after")
     def validate_betas(self) -> OptimizerConfig:
         if self.betas != (0.9, 0.95):
             raise ValueError("optimizer betas differ from the approved values")
+        return self
+
+    @model_validator(mode="after")
+    def validate_cmuon_guard(self) -> OptimizerConfig:
+        if self.name == "hybrid_cmuon_guarded_canonical":
+            if self.cmuon_guard is None or not self.cmuon_guard.enabled:
+                raise ValueError(
+                    "hybrid_cmuon_guarded_canonical requires an enabled "
+                    "[optimizer.cmuon_guard] section"
+                )
+            if not self.cmuon_guard.references:
+                raise ValueError(
+                    "[optimizer.cmuon_guard] references must hold the "
+                    "calibration bootstrap table (P3 artifact)"
+                )
+        elif self.cmuon_guard is not None:
+            raise ValueError(
+                "[optimizer.cmuon_guard] is only valid for optimizer.name = "
+                '"hybrid_cmuon_guarded_canonical"'
+            )
         return self
 
     @model_validator(mode="after")

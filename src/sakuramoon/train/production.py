@@ -375,6 +375,8 @@ def _build_optimizer(
     module: TrainableComposite,
     *,
     telemetry_logger: Callable[[str], None] | None = None,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> IsolatedAdamW8bit | HybridCMuon:
     optimizer = config.optimizer
     common = {
@@ -433,6 +435,50 @@ def _build_optimizer(
             momentum_dtype=optimizer.cmuon_momentum_dtype,
             chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
             **telemetry_kwargs,
+            **common,
+        )
+    if optimizer.name == "hybrid_cmuon_guarded_canonical":
+        from sakuramoon.optim.guarded_canonical import (
+            GuardedCanonicalGuardConfig,
+            build_guarded_canonical,
+        )
+
+        guard = optimizer.cmuon_guard
+        assert guard is not None and guard.enabled  # enforced by the schema
+        if optimizer.cmuon_forensic is not None and optimizer.cmuon_forensic.enabled:
+            raise ValueError(
+                "the guarded canonical candidate is two-phase fail-closed by "
+                "construction; [optimizer.cmuon_forensic] is for the retired "
+                "original candidate and must stay disabled"
+            )
+        if optimizer.cmuon_ns_telemetry is not None and optimizer.cmuon_ns_telemetry.enabled:
+            raise ValueError(
+                "the guarded canonical candidate has its own per-step safety "
+                "checks; [optimizer.cmuon_ns_telemetry] must stay disabled"
+            )
+        if optimizer.cmuon_ns is None:
+            raise ValueError(
+                "hybrid_cmuon_guarded_canonical requires an explicit "
+                "[optimizer.cmuon_ns] per-role NS map (no legacy scalar fallback)"
+            )
+        stats_logger = telemetry_logger if rank == 0 else None
+        return build_guarded_canonical(
+            module,
+            ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
+            guard_cfg=GuardedCanonicalGuardConfig(
+                guard_ratio=guard.guard_ratio,
+                reference_decay=guard.reference_decay,
+                min_reference=guard.min_reference,
+                numerical_floor=guard.numerical_floor,
+                warmup_observations=guard.warmup_observations,
+                invariant_check=guard.invariant_check,
+            ),
+            guard_bootstrap_refs=dict(guard.references),
+            rank=rank,
+            world_size=world_size,
+            momentum_dtype=optimizer.cmuon_momentum_dtype,
+            chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
+            stats_logger=stats_logger,
             **common,
         )
     return build_adamw8bit(module, **common)
@@ -1047,6 +1093,8 @@ def _run_accepted_lifecycle(
         # Telemetry log lines only on the main rank (every rank sees the same
         # all-reduced gradients, so the samples would be duplicates).
         telemetry_logger=_log if is_main_process else None,
+        rank=rank,
+        world_size=world_size,
     )
     if resume is None:
         _log("创建全新训练状态")

@@ -573,14 +573,59 @@ def _validate_hybrid_optimizer_schema(
     value: object, optimizer: HybridCMuon
 ) -> None:
     """Schema v2: inner AdamW groups + the CMuon algorithm contract."""
+    from sakuramoon.optim.guarded_canonical import (
+        GUARD_SCHEMA_VERSION,
+        OWNER_MAPPING_VERSION,
+        HybridCMuonGuardedCanonical,
+    )
+
     document = _mapping(value, "optimizer schema")
     if type(document.get("schema_version")) is not int or document["schema_version"] != 2:
         raise CheckpointError("hybrid optimizer schema version is invalid")
-    _exact_keys(
-        document,
-        {"schema_version", "groups", "hybrid_cmuon"},
-        "hybrid optimizer schema",
-    )
+    keys = {"schema_version", "groups", "hybrid_cmuon"}
+    if "guarded_canonical" in document:
+        keys.add("guarded_canonical")
+    _exact_keys(document, keys, "hybrid optimizer schema")
+    if (
+        isinstance(optimizer, HybridCMuonGuardedCanonical)
+        and "guarded_canonical" not in document
+    ):
+        # The guarded candidate only resumes from guarded checkpoints
+        # (state-exact); the unguarded block is rejected by its own
+        # load_state_dict contract.
+        raise CheckpointError(
+            "guarded canonical optimizer requires a guarded checkpoint "
+            "(unguarded CMuon checkpoints cannot resume directly)"
+        )
+    if isinstance(optimizer, HybridCMuonGuardedCanonical):
+        block = _mapping(
+            document["guarded_canonical"], "guarded_canonical schema block"
+        )
+        _exact_keys(
+            block,
+            {
+                "schema_version",
+                "config",
+                "owner_mapping_version",
+                "world_size",
+                "ns_mode",
+                "ns_steps",
+            },
+            "guarded_canonical schema block",
+        )
+        if block["schema_version"] != GUARD_SCHEMA_VERSION:
+            raise CheckpointError("guarded canonical schema version is invalid")
+        if block["owner_mapping_version"] != OWNER_MAPPING_VERSION:
+            raise CheckpointError("guarded canonical owner mapping version differs")
+        if block["world_size"] != optimizer.world_size:
+            raise CheckpointError(
+                "guarded canonical world_size differs (owner mapping changed)"
+            )
+        if block["ns_mode"] != "canonical_owner_rank":
+            raise CheckpointError("guarded canonical NS mode differs")
+        saved_ns = _hybrid_ns_map(block["ns_steps"])
+        if saved_ns is None or saved_ns != optimizer.cfg.canonical_ns_map():
+            raise CheckpointError("guarded canonical per-role ns_steps map differs")
     groups = document["groups"]
     if not isinstance(groups, list):
         raise CheckpointError("hybrid optimizer groups must be an array")
@@ -644,23 +689,32 @@ def _load_hybrid_optimizer_state(path: Path) -> dict[str, object]:
     if not isinstance(value, dict):
         raise CheckpointError("hybrid optimizer state has invalid top-level fields")
     document = cast(dict[str, object], value)
-    _exact_keys(
-        document,
-        {
-            "optimizer",
-            "sr_rng",
-            "cmuon",
-            "routing",
-            "transition",
-            "hybrid_cmuon_schema_version",
-        },
-        "hybrid optimizer state",
-    )
+    keys = {
+        "optimizer",
+        "sr_rng",
+        "cmuon",
+        "routing",
+        "transition",
+        "hybrid_cmuon_schema_version",
+    }
+    # Guarded canonical candidate (schema v1 guard block) adds two optional
+    # keys; unguarded checkpoints carry neither.
+    if "guard" in document:
+        keys |= {"guard", "guarded_canonical_schema_version"}
+    _exact_keys(document, keys, "hybrid optimizer state")
     if (
         type(document["hybrid_cmuon_schema_version"]) is not int
         or document["hybrid_cmuon_schema_version"] != 1
     ):
         raise CheckpointError("hybrid optimizer state schema version is invalid")
+    if (
+        "guard" in document
+        and (
+            type(document.get("guarded_canonical_schema_version")) is not int
+            or document["guarded_canonical_schema_version"] != 1
+        )
+    ):
+        raise CheckpointError("guarded canonical schema version is invalid")
     return document
 
 
@@ -1086,8 +1140,15 @@ def _load_hybrid_state_exact(
     successful_updates: int,
 ) -> None:
     """Hybrid -> hybrid resume: outer state dict, state-exact on both parts."""
+    from sakuramoon.optim.guarded_canonical import HybridCMuonGuardedCanonical
+
     _validate_hybrid_optimizer_schema(schema, optimizer)
     outer = _load_hybrid_optimizer_state(train_state / "optimizer.pt")
+    if "guard" in outer and not isinstance(optimizer, HybridCMuonGuardedCanonical):
+        raise CheckpointError(
+            "guarded optimizer state cannot be loaded into the unguarded "
+            "hybrid optimizer (silent downgrade refused)"
+        )
     _validate_hybrid_cmuon_state(outer["cmuon"], optimizer)
     if outer["routing"] != optimizer.routing.routing_manifest():
         raise CheckpointError("hybrid CMuon routing manifest differs")

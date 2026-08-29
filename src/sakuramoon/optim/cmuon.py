@@ -970,6 +970,14 @@ class HybridCMuon:
     def load_state_dict(self, state_dict: dict[str, object]) -> None:
         if not isinstance(state_dict, dict):
             raise TypeError("hybrid optimizer state must be a mapping")
+        if "guard" in state_dict:
+            # A guarded canonical checkpoint must not be silently downgraded
+            # into the (retired) unguarded candidate.
+            raise ValueError(
+                "optimizer state carries a guard section: it belongs to the "
+                "guarded canonical candidate and cannot be loaded into the "
+                "unguarded hybrid CMuon"
+            )
         if "cmuon" in state_dict:
             # Hybrid -> Hybrid: state-exact (AdamW state + CMuon momentum).
             self.adamw.load_state_dict(

@@ -180,9 +180,17 @@ def _optimizer_schema(optimizer: IsolatedAdamW8bit) -> dict[str, object]:
 
 def _hybrid_optimizer_schema(optimizer: HybridCMuon) -> dict[str, object]:
     """Schema version 2: the inner AdamW8bit groups + the CMuon algorithm
-    contract (canonical per-role NS map + locked scalars)."""
+    contract (canonical per-role NS map + locked scalars). The guarded
+    canonical candidate adds a ``guarded_canonical`` block (guard config +
+    owner mapping contract)."""
+    from sakuramoon.optim.guarded_canonical import (
+        GUARD_SCHEMA_VERSION,
+        OWNER_MAPPING_VERSION,
+        HybridCMuonGuardedCanonical,
+    )
+
     cfg = optimizer.cfg
-    return {
+    document: dict[str, object] = {
         "schema_version": 2,
         "groups": _optimizer_group_list(optimizer.adamw),
         "hybrid_cmuon": {
@@ -195,6 +203,23 @@ def _hybrid_optimizer_schema(optimizer: HybridCMuon) -> dict[str, object]:
             "ns_steps": cfg.canonical_ns_map(),
         },
     }
+    if isinstance(optimizer, HybridCMuonGuardedCanonical):
+        document["guarded_canonical"] = {
+            "schema_version": GUARD_SCHEMA_VERSION,
+            "config": {
+                "guard_ratio": optimizer.guard_cfg.guard_ratio,
+                "reference_decay": optimizer.guard_cfg.reference_decay,
+                "min_reference": optimizer.guard_cfg.min_reference,
+                "numerical_floor": optimizer.guard_cfg.numerical_floor,
+                "warmup_observations": optimizer.guard_cfg.warmup_observations,
+                "invariant_check": optimizer.guard_cfg.invariant_check,
+            },
+            "owner_mapping_version": OWNER_MAPPING_VERSION,
+            "world_size": optimizer.world_size,
+            "ns_mode": "canonical_owner_rank",
+            "ns_steps": cfg.canonical_ns_map(),
+        }
+    return document
 
 
 def _write_raw_sidecars(
