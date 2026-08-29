@@ -1049,7 +1049,7 @@ def _run_accepted_lifecycle(
             _log(
                 f"[cmuon-forensic] 监控就绪: update_offset="
                 f"{optimizer.forensic.update_offset} dump_dir="
-                f"{optimizer.cmuon_forensic.dump_dir if optimizer.cmuon_forensic else None}"
+                f"{optimizer.forensic.fcfg.dump_dir}"
             )
     require_single_gpu_checkpoint_binding(
         config,
