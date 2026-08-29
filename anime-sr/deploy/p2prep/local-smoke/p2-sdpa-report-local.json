@@ -1,0 +1,114 @@
+[
+  {
+    "case": "fp32-exact-16x16-shift0-cpu",
+    "dtype": "fp32",
+    "device": "cpu",
+    "max_abs_diff": 1.4901161193847656e-07,
+    "rel_l2": 3.3017836366175667e-07,
+    "hard_gate": true
+  },
+  {
+    "case": "fp32-exact-16x16-shift1-cpu",
+    "dtype": "fp32",
+    "device": "cpu",
+    "max_abs_diff": 1.7881393432617188e-07,
+    "rel_l2": 2.7955807079011147e-07,
+    "hard_gate": true
+  },
+  {
+    "case": "fp32-padded-14x10-shift0-cpu",
+    "dtype": "fp32",
+    "device": "cpu",
+    "max_abs_diff": 1.341104507446289e-07,
+    "rel_l2": 2.840008123707858e-07,
+    "hard_gate": true
+  },
+  {
+    "case": "fp32-padded-14x10-shift1-cpu",
+    "dtype": "fp32",
+    "device": "cpu",
+    "max_abs_diff": 1.6391277313232422e-07,
+    "rel_l2": 2.608759536464731e-07,
+    "hard_gate": true
+  },
+  {
+    "case": "fp32-global-16x16-native0-cpu",
+    "dtype": "fp32",
+    "device": "cpu",
+    "max_abs_diff": 1.2665987014770508e-07,
+    "rel_l2": 4.6745344452946136e-07,
+    "hard_gate": true
+  },
+  {
+    "case": "fp32-global-16x16-native0-cuda",
+    "dtype": "fp32",
+    "device": "cuda",
+    "max_abs_diff": 1.7881393432617188e-07,
+    "rel_l2": 7.377505475423962e-07,
+    "hard_gate": true
+  },
+  {
+    "case": "fp32-global-16x16-native1-cuda",
+    "dtype": "fp32",
+    "device": "cuda",
+    "max_abs_diff": NaN,
+    "rel_l2": NaN,
+    "hard_gate": false
+  },
+  {
+    "case": "bf16-global-16x16-native1-cuda",
+    "dtype": "bf16",
+    "device": "cuda",
+    "max_abs_diff": NaN,
+    "rel_l2": NaN,
+    "hard_gate": false
+  },
+  {
+    "case": "fp32-exact-16x16-shift0-cuda",
+    "dtype": "fp32",
+    "device": "cuda",
+    "max_abs_diff": 2.980232238769531e-07,
+    "rel_l2": 6.944890688646461e-07,
+    "hard_gate": true
+  },
+  {
+    "case": "fp32-exact-16x16-shift1-cuda",
+    "dtype": "fp32",
+    "device": "cuda",
+    "max_abs_diff": 2.8312206268310547e-07,
+    "rel_l2": 5.801522633392785e-07,
+    "hard_gate": true
+  },
+  {
+    "case": "fp32-bwd-grads-cpu",
+    "dtype": "fp32",
+    "device": "cpu",
+    "max_abs_diff": 5.960464477539062e-07,
+    "rel_l2": 1.991487480669618e-07,
+    "hard_gate": true
+  },
+  {
+    "case": "fp32-20step-trajectory-cpu",
+    "dtype": "fp32",
+    "device": "cpu",
+    "max_abs_diff": 0.0,
+    "rel_l2": 0.0,
+    "hard_gate": true
+  },
+  {
+    "case": "bf16-exact-16x16-shift-cuda",
+    "dtype": "bf16",
+    "device": "cuda",
+    "max_abs_diff": 0.00390625,
+    "rel_l2": 0.003396588767256914,
+    "hard_gate": false
+  },
+  {
+    "case": "bf16-padded-14x10-cuda",
+    "dtype": "bf16",
+    "device": "cuda",
+    "max_abs_diff": 0.001953125,
+    "rel_l2": 0.0032846889267308587,
+    "hard_gate": false
+  }
+]

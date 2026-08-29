@@ -1,0 +1,76 @@
+{
+  "device": "cuda",
+  "dtype": "bf16",
+  "grid": "64x64",
+  "dim": 192,
+  "heads": 3,
+  "kv": 3,
+  "window": 8,
+  "iters": 30,
+  "torch": "2.11.0+cu128",
+  "hy_smi": "capture utilization in a parallel shell over the run window",
+  "shift0": {
+    "explicit": {
+      "ms_per_step": 4.187899999669753,
+      "it_per_s": 238.78316103031528,
+      "peak_mb": 62.346752,
+      "phases_ms": {
+        "pre_proj_norm_rope_ms": 0.7310600019991398,
+        "core_ms": 0.5290600005537271,
+        "out_proj_ms": 0.03628000267781317
+      }
+    },
+    "sdpa_rep": {
+      "ms_per_step": 4.2387033337339135,
+      "it_per_s": 235.92120544069562,
+      "peak_mb": 63.872512,
+      "phases_ms": {
+        "pre_proj_norm_rope_ms": 1.3688199978787452,
+        "core_ms": 0.36218000459484756,
+        "out_proj_ms": 0.030700000934302807
+      }
+    },
+    "sdpa_native": {
+      "ms_per_step": 4.447746666846797,
+      "it_per_s": 224.83294910969917,
+      "peak_mb": 64.201216,
+      "phases_ms": {
+        "pre_proj_norm_rope_ms": 0.7371200015768409,
+        "core_ms": 0.16281999996863306,
+        "out_proj_ms": 0.029200001154094934
+      }
+    }
+  },
+  "shift1": {
+    "explicit": {
+      "ms_per_step": 5.87949666660279,
+      "it_per_s": 170.0825864364009,
+      "peak_mb": 72.965632,
+      "phases_ms": {
+        "pre_proj_norm_rope_ms": 1.0758400021586567,
+        "core_ms": 0.5524800042621791,
+        "out_proj_ms": 0.04731999943032861
+      }
+    },
+    "sdpa_rep": {
+      "ms_per_step": 5.335606666631065,
+      "it_per_s": 187.420112178435,
+      "peak_mb": 72.490496,
+      "phases_ms": {
+        "pre_proj_norm_rope_ms": 1.5434200002346188,
+        "core_ms": 0.9265400003641844,
+        "out_proj_ms": 0.078959995880723
+      }
+    },
+    "sdpa_native": {
+      "ms_per_step": 5.878323334036395,
+      "it_per_s": 170.11653547702053,
+      "peak_mb": 67.771904,
+      "phases_ms": {
+        "pre_proj_norm_rope_ms": 1.6320599999744445,
+        "core_ms": 0.700799998594448,
+        "out_proj_ms": 0.05163999740034342
+      }
+    }
+  }
+}
