@@ -37,15 +37,12 @@ import hashlib
 import json
 import math
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
-
 from anime_sr.config.loader import load_config
 from anime_sr.data.buckets import crop_box
 from anime_sr.data.degradation import degrade_hr
@@ -54,6 +51,7 @@ from anime_sr.flow.sampling import FlowSampler
 from anime_sr.model.uflow import AnimeSRModel
 from anime_sr.train.latent_flow import _PixelVelocity
 from anime_sr.vae.mage import load_frozen_vae
+from PIL import Image
 
 REPO = Path("/root/anime-sr-p1formal")
 CKPT = "/root/private_data/anime-sr/output_model/latent-flow-phase1-pi/latest.pt"
@@ -346,7 +344,7 @@ def compute_metrics(gt_u8: np.ndarray, methods: dict[str, np.ndarray]) -> dict:
     g = gray01(gt_u8).astype(np.float32)
     gt_e = edge_map(g)
     out = {}
-    flat_frac, flat_hf_gt = flat_hf(g)
+    flat_frac, _flat_hf_gt = flat_hf(g)
     hf = {m: flat_hf(gray01(m).astype(np.float32))[1] for m in methods}
     out["psnr_rgb"] = {m: psnr(a, gt_u8) for m, a in methods.items()}
     out["psnr_y"] = {m: psnr(a, gt_u8, gray=True) for m, a in methods.items()}
@@ -431,6 +429,12 @@ class Evaluator:
                 h.update(chunk)
         return h.hexdigest()
 
+    def _zero_grads(self) -> None:
+        for p in self.model.parameters():
+            p.grad = None
+        for p in self.vae.parameters():
+            p.grad = None
+
     def infer_image(
         self, hr: torch.Tensor, sid: str, profile: str
     ) -> dict[str, torch.Tensor]:
@@ -444,9 +448,24 @@ class Evaluator:
             anchor = self.vae.decode(z_lr)
             cond = (z_lr, lq.to(dev, dt))
             z1 = self.sampler.one_step(z_lr, cond, sigma=0.0)
-            z4 = self.sampler.four_step(z_lr, cond, sigma=0.0)
             o1 = self.vae.decode(z1)
-            o4 = self.vae.decode(z4)
+        # DTK/HCU driver-defect workaround (2026-08-30): sustained
+        # forward-only dispatches balloon host-side driver staging
+        # unbounded on this HCU pool (guard-kills at the 112 GiB cgroup cap,
+        # plus a phantom ~62.8 GiB HBM-accounting OOM), while the identical
+        # workload with a backward on the real graph every step stays flat
+        # (bare5: 20000 iters flat vs bare2: dead in 32 s; a one-time
+        # warmup (bare6) and a tiny dummy backward (bare7) both still die —
+        # the backward must ride the real workload).  Phase I-P training
+        # (same model fwd+bwd) ran clean for days on the same host, so the
+        # four_step graph runs grad-enabled and one dummy backward fires on
+        # the real output per image.  Forward numerics are unchanged —
+        # only an extra backward's memory/time is added.
+        z4 = self.sampler.four_step(z_lr, cond, sigma=0.0)
+        o4 = self.vae.decode_with_grad(z4)
+        o4.sum().backward()
+        self._zero_grads()
+        o4 = o4.detach()
         return {
             "lq": lq.float().cpu(),
             "bicubic4x": bic4.float().cpu(),
@@ -687,7 +706,10 @@ def main() -> None:
     ckpt_sha = ev.sha256_of(CKPT)
     print(f"[rgb-eval] latest.pt sha256={ckpt_sha}", flush=True)
     git_rev = subprocess.run(
-        ["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True
+        ["git", "-C", str(REPO), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
     ).stdout.strip()
     print(f"[rgb-eval] code rev={git_rev}", flush=True)
 
@@ -891,9 +913,14 @@ def main() -> None:
                 anchor = ev.vae.decode(z_lr)
                 cond = (z_lr, lq.to(dev, dt))
                 z1 = ev.sampler.one_step(z_lr, cond, sigma=0.0)
-                z4 = ev.sampler.four_step(z_lr, cond, sigma=0.0)
                 o1 = ev.vae.decode(z1)
-                o4 = ev.vae.decode(z4)
+            # Same forward-only workaround as Evaluator.infer_image (2026-08-30):
+            # grad-enabled four_step + one dummy backward on the real output.
+            z4 = ev.sampler.four_step(z_lr, cond, sigma=0.0)
+            o4 = ev.vae.decode_with_grad(z4)
+            o4.sum().backward()
+            ev._zero_grads()
+            o4 = o4.detach()
             d = base / f"{i:02d}_{c['sid']}"
             save_png(to_u8cpu(lq), d / "lq256.png")
             save_png(to_u8cpu(bic.float().cpu()), d / "bicubic4x.png")
@@ -1024,16 +1051,24 @@ def _write_summary_report(out: Path, ckpt_sha: str, git_rev: str, ev, sheets: li
                               "probe default exposure (anchor l1_1=0.3922 @18750)",
         },
         "disclosures": [
-            "LPIPS/DISTS not used: DTK env has no torchvision/scipy/lpips/dists; "
-            "perceptual axis covered by flat-region HF energy + edge displacement. "
-            "No new dependencies installed (user directive).",
-            "APISR / Real-CUGAN: not present on this machine; skipped per user "
-            "directive (do not block on large new deps).",
-            "Set C source: danbooru-v2 original small-web images (400-1200px, "
-            "real, not synthetic degradation); center-crop -> 256 LQ; human "
-            "evaluation only, no paired metrics (no GT by design).",
-            "4-step marked Experimental; 1-step marked Faithful; 4-step is a "
-            "Quality selling point only if RGB metrics beat 1-step (plan 16.4).",
+            (
+                "LPIPS/DISTS not used: DTK env has no torchvision/scipy/lpips/dists; "
+                "perceptual axis covered by flat-region HF energy + edge displacement. "
+                "No new dependencies installed (user directive)."
+            ),
+            (
+                "APISR / Real-CUGAN: not present on this machine; skipped per user "
+                "directive (do not block on large new deps)."
+            ),
+            (
+                "Set C source: danbooru-v2 original small-web images (400-1200px, "
+                "real, not synthetic degradation); center-crop -> 256 LQ; human "
+                "evaluation only, no paired metrics (no GT by design)."
+            ),
+            (
+                "4-step marked Experimental; 1-step marked Faithful; 4-step is a "
+                "Quality selling point only if RGB metrics beat 1-step (plan 16.4)."
+            ),
         ],
     }
     for s in ("A", "B"):
