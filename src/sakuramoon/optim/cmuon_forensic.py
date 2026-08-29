@@ -99,7 +99,12 @@ def _dist() -> tuple[int, int]:
 
 
 def _all_gather_last_dim(x: torch.Tensor) -> list[torch.Tensor]:
-    """all_gather a small 2D CPU tensor across ranks (identity for world=1)."""
+    """all_gather a small 2D tensor across ranks (identity for world=1).
+
+    ``x`` must live on the collective's device: the production process group
+    is device-only (the DTK stack has no CPU backend registered), so CPU
+    tensors raise 'No backend type associated with device type cpu'.
+    """
     _, world = _dist()
     if world == 1:
         return [x]
@@ -108,11 +113,11 @@ def _all_gather_last_dim(x: torch.Tensor) -> list[torch.Tensor]:
     return outs
 
 
-def _all_reduce_bool(flag: bool) -> bool:
+def _all_reduce_bool(flag: bool, *, device: torch.device) -> bool:
     _, world = _dist()
     if world == 1:
         return flag
-    t = torch.tensor([1 if flag else 0], dtype=torch.int32)
+    t = torch.tensor([1 if flag else 0], dtype=torch.int32, device=device)
     torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MAX)
     return bool(t.item() > 0)
 
@@ -287,7 +292,9 @@ class ForensicMonitor:
         for p, (pi, _fqn) in enumerate(self._probe_specs):
             t = self.specs[pi].parameter.float().flatten()
             self._probe_fp[p, len(_PROBE_STAGES) - 1] = t @ self._probes[pi]
-        gathered = _all_gather_last_dim(cols.cpu())
+        # device tensor: the production process group is device-only (no CPU
+        # backend), so the gather must stay on HCU.
+        gathered = _all_gather_last_dim(cols)
         if self._world > 1:
             worst: dict[str, object] | None = None
             worst_rel = -1.0
@@ -399,20 +406,26 @@ class ForensicMonitor:
         self.first_local_failure = failure
         self._step_failed = failure is not None
         # -- rank comparison (all ranks participate; identical call pattern) --
-        gathered = _all_gather_last_dim(fp_cpu)
-        probe_gathered = _all_gather_last_dim(probe_cpu)
+        # device tensors: the production process group is device-only (no CPU
+        # backend), so the gathers must stay on HCU.
+        gathered = _all_gather_last_dim(self._fp)
+        probe_gathered = _all_gather_last_dim(self._probe_fp)
         if self._world > 1:
+            value_cols = list(range(15))  # 5 stages x (rms, sum, max)
+            flag_cols = [_N_FP_COLS - 2, _N_FP_COLS - 1]  # finite, has-grad
             for a in range(self._world):
                 for b in range(a + 1, self._world):
                     d = (gathered[a] - gathered[b]).abs()
                     rel = d / gathered[a].abs().clamp(min=1e-30)
-                    # has-grad / finite flag columns are exact: any diff = divergence
-                    flag_cols = (_N_FP_COLS - 2, _N_FP_COLS - 1)
-                    mask = torch.zeros(self.n_specs, _N_FP_COLS, dtype=torch.bool)
-                    mask[:, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]] = (
-                        rel[:, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]] > 0.0
+                    # value columns: any relative diff; the flag columns are
+                    # exact integers: any absolute diff = divergence
+                    mask = torch.cat(
+                        [
+                            rel[:, value_cols] > 0.0,
+                            d[:, flag_cols] > 0.0,
+                        ],
+                        dim=1,
                     )
-                    mask[:, flag_cols] = d[:, flag_cols] > 0.0
                     bad = mask.nonzero()
                     if bad.numel() > 0:
                         i, c = int(bad[0, 0]), int(bad[0, 1])
@@ -476,8 +489,8 @@ class ForensicMonitor:
             }
         )
         # -- fail-closed decision (all ranks see the same verdict) --
-        any_failed = _all_reduce_bool(self._step_failed)
-        any_diverged = _all_reduce_bool(divergence is not None)
+        any_failed = _all_reduce_bool(self._step_failed, device=self.device)
+        any_diverged = _all_reduce_bool(divergence is not None, device=self.device)
         if any_failed or any_diverged:
             self._dump(failure, divergence)
             msg = (
@@ -566,7 +579,10 @@ class ForensicMonitor:
             if buf is None:
                 continue
             worst = max(worst, float(buf.abs().max().item()))
-        gathered = _all_gather_last_dim(torch.tensor([worst], dtype=torch.float32))
+        # device tensor (the process group is device-only)
+        gathered = _all_gather_last_dim(
+            torch.tensor([worst], dtype=torch.float32, device=self.device)
+        )
         vals = [float(v.item()) for v in gathered]
         verdict = "ZERO-OK" if all(v == 0.0 for v in vals) else "NOT-ZERO!"
         if self._rank == 0:
