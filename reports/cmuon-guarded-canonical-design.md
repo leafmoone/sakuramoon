@@ -149,13 +149,28 @@ per-(FQN, chunk) FP32 标量，随 checkpoint 保存（§10）；141 spec 合计
 
 ### 5.4 数值（P3 校准后填入）
 
-来源：salt1 校准 JSONL（≤100 update，per-(FQN, chunk) nesterov_rms 时序）：
-- 每 spec 的 inactive/active 双峰分离度（谷底 vs 两簇）；
-- `min_reference` = 全 spec inactive 簇 p99 与 active 簇 p1 之间的谷底
-  附近（取能最大间隔处）；
-- `guard_ratio` = 谷底/该 spec active p10 的比值带内取值（报告选定逻辑）；
-- `reference_decay` / `warmup_observations` = 由 ref 收敛速度定（报告）。
-**若无干净双峰分离 → INCONCLUSIVE，不采用任意阈值，报告说明**。
+来源：salt1 校准 JSONL（≤100 update，per-(FQN, chunk) nesterov_rms 时序）。
+分析规则（analyze_guard_calibration.py 实现，必须与本文一致）：
+
+1. **谷底 T**：对每 spec 的 p50 排序，取相邻 p50 比值最大且 ≥10 的谷
+   （lo, hi）；要求 lo_p50 ≤ 2e-7 且 hi_p50 ≥ 1e-6（对应取证单步截面：
+   近零 ≤6.5e-8 / active ≥1.7e-6 / 谷 1e-7–2e-7）；T = √(lo·hi)。
+   不满足 → INCONCLUSIVE。
+2. **ref_i 语义 = 该输入 ACTIVE 时的典型尺度**（不是自身 pooled p99：
+   稳定近零的输入会自参照近零尺度、永不触发 skip）。
+   `ref_i = median( sig_i,t : sig_i,t ≥ T )`（校准窗内 active 样本的中位数）；
+   窗内无 active 样本 → 回退同 (role, shape) 类的 active 样本中位数
+   （§14 的类回退），再无 → 该 spec 标记需人工复核。
+3. **guard_ratio 选取**：对候选比值 r ∈ {0.01,0.02,0.05,0.1,0.15,0.2,
+   0.3,0.5} 在全窗口 (input, update) 对上实测
+   false_skip = P(skip | active)、elimination = P(skip | near-zero)；
+   取 **false_skip == 0 的最大 r**（若存在），报告该 r 的 elimination。
+   若所有 r 的 false_skip > 0 → INCONCLUSIVE（类在 active 尺度相对意义
+   上重叠）。
+4. `min_reference` = min_i(ref_i)（构造夹底）；
+   `numerical_floor` 候选 = 最小 fro/2（仅数值地板，非主判据）。
+5. `warmup_observations` 候选 = 50（transition bootstrap，非 LR warmup），
+   报告 ref 收敛速度后确认。
 
 ## 6. 写前安全检查（fail closed，无 clamp）
 

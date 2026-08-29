@@ -1,0 +1,57 @@
+# GUARDED CANONICAL CMuon v1 — S1 SAFETY RUN (200 successful updates, 2xHCU).
+#
+# The NEW candidate (hybrid_cmuon_guarded_canonical): canonical owner-rank
+# NS4 + guarded low-signal skip + two-phase atomic commit + per-step
+# cross-rank parameter invariant (invariant_check=true).
+#
+# S1 gate (design Section 12): resume from the pinned healthy
+# ckpt_97100_raw-97100-update-cadence (explicit AdamW->guarded transition:
+# AdamW state kept, CMuon momentum fresh, guard references bootstrapped
+# from the P3 calibration artifact -- the [optimizer.cmuon_guard]
+# references table below is filled from that calibration), run <=200
+# successful updates on 2 ranks with per-step all-rank consistency and
+# per-10-steps guard/NS statistics. ANY safety violation => stop, no
+# restart, no clamp-continue. PASS => READY_FOR_1K_QUALITY_GATE=YES (S2).
+#
+# Identical to the ns4_core protocol EXCEPT:
+#   * [optimizer].name = hybrid_cmuon_guarded_canonical
+#   * [optimizer.cmuon_guard] = calibration values (P3 artifact)
+#   * [optimizer.cmuon_ns_telemetry] disabled (the guarded build rejects
+#     an enabled telemetry/forensic layer; guard stats use the built-in
+#     stats logger instead)
+#
+# Stop mechanism: an external watchdog tails the train log and kills the
+# stack at >=200 successful updates (no max-updates config field exists).
+
+extends = ["train_g1_hybrid_cmuon_ns4_core.toml"]
+
+[run]
+run_id = "g1_cmuon_guarded_canonical_s1"
+
+[optimizer]
+name = "hybrid_cmuon_guarded_canonical"
+
+# Guarded canonical NS telemetry is the built-in stats logger; the
+# retired-candidate telemetry layer is rejected by the guarded build.
+[optimizer.cmuon_ns_telemetry]
+enabled = false
+log_every_n = 100
+roles = []
+
+# P3 shadow-calibration values (fill from guard_calibration_analysis.json).
+# guard_ratio / reference_decay / min_reference / numerical_floor /
+# warmup_observations come from the calibration valley analysis; the
+# references table is the per-(FQN,chunk) bootstrap reference
+# (median of the input's ACTIVE calibration signals, class fallback).
+[optimizer.cmuon_guard]
+enabled = true
+guard_ratio = 0.0            # P3: pending calibration
+reference_decay = 0.999
+min_reference = 1e-20
+numerical_floor = 1e-20
+warmup_observations = 50
+invariant_check = true
+
+# Per-(FQN,chunk) bootstrap references: "fqn#chunk{i}" = value.
+# P3: filled from the calibration artifact (~141*chunk entries).
+[optimizer.cmuon_guard.references]
