@@ -1,0 +1,29 @@
+# Formal Phase I-P (sakrua10, p1formal tree): multi-resolution 512/768/1024
+# (LQ 128/192/256 x 4x, plan §10 buckets), pixel features on, on-fly z_hr
+# (P1 ④: no latent store — the consumer encodes z_hr with the frozen VAE),
+# process-pool producer (canary #6 verified: data_wait ~4%, 12/12 bit-exact,
+# determinism drift 0.0).
+#
+# Stack: base.toml + data.toml + phase1-small.toml + phase1-pi-formal.toml
+#   [phase1] 300k exposure budget (18,750 steps @ bs8 x world2)
+#     -> inherited from phase1-small.toml (NOT redefined here)
+#   this overlay carries only the formal-run deltas.
+#
+# Resume: /root/private_data/anime-sr/checkpoints/latent-flow-phase1-small/
+#   step-0000000-canary-trunked.pt  — trunk-only, step 0. The V2 trunk-only
+#   resume path verifies missing keys are pixel_encoder.* ONLY (no silent
+#   strict=False swallow), re-applies zero-init, and keeps a fresh optimizer:
+#   the formal stage starts at step/exposure 0 with no canary step/LR
+#   inheritance. Provenance is printed to the run log at rank 0.
+
+[model]
+zero_init_pixel = true
+
+[latent_flow]
+producer = "process"
+pixel_features = true
+zhr_source = "onfly"
+prefetch_depth = 4
+val_every_steps = 2500
+val_samples = 128
+out_dir = "output_model/latent-flow-phase1-pi"

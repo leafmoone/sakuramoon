@@ -1,0 +1,257 @@
+[
+ {
+  "sid": "114723",
+  "category": "TEXT",
+  "stress_p4": true
+ },
+ {
+  "sid": "343612",
+  "category": "HAIR",
+  "stress_p4": false
+ },
+ {
+  "sid": "475355",
+  "category": "LASH",
+  "stress_p4": true
+ },
+ {
+  "sid": "1089746",
+  "category": "EYE",
+  "stress_p4": false
+ },
+ {
+  "sid": "1175723",
+  "category": "HAIR",
+  "stress_p4": false
+ },
+ {
+  "sid": "1194746",
+  "category": "FLAT",
+  "stress_p4": false
+ },
+ {
+  "sid": "1201355",
+  "category": "FAINT",
+  "stress_p4": false
+ },
+ {
+  "sid": "1512355",
+  "category": "HALFTONE",
+  "stress_p4": false
+ },
+ {
+  "sid": "1633612",
+  "category": "EYE",
+  "stress_p4": false
+ },
+ {
+  "sid": "1939612",
+  "category": "LASH",
+  "stress_p4": false
+ },
+ {
+  "sid": "1967612",
+  "category": "HAIR",
+  "stress_p4": false
+ },
+ {
+  "sid": "2015746",
+  "category": "HAIR",
+  "stress_p4": false
+ },
+ {
+  "sid": "2067723",
+  "category": "HAIR",
+  "stress_p4": false
+ },
+ {
+  "sid": "2425355",
+  "category": "HALFTONE",
+  "stress_p4": true
+ },
+ {
+  "sid": "2490612",
+  "category": "HAIR",
+  "stress_p4": false
+ },
+ {
+  "sid": "2547746",
+  "category": "TEXT",
+  "stress_p4": false
+ },
+ {
+  "sid": "2568612",
+  "category": "FAINT",
+  "stress_p4": false
+ },
+ {
+  "sid": "2621612",
+  "category": "HAIR",
+  "stress_p4": false
+ },
+ {
+  "sid": "2781723",
+  "category": "HALFTONE",
+  "stress_p4": true
+ },
+ {
+  "sid": "2788746",
+  "category": "EYE",
+  "stress_p4": true
+ },
+ {
+  "sid": "2822723",
+  "category": "FAINT",
+  "stress_p4": false
+ },
+ {
+  "sid": "2951723",
+  "category": "EYE",
+  "stress_p4": false
+ },
+ {
+  "sid": "2986612",
+  "category": "FAINT",
+  "stress_p4": false
+ },
+ {
+  "sid": "2994612",
+  "category": "HALFTONE",
+  "stress_p4": false
+ },
+ {
+  "sid": "3029612",
+  "category": "FAINT",
+  "stress_p4": false
+ },
+ {
+  "sid": "3050355",
+  "category": "EYE",
+  "stress_p4": false
+ },
+ {
+  "sid": "4386612",
+  "category": "TEXT",
+  "stress_p4": false
+ },
+ {
+  "sid": "4613355",
+  "category": "TEXT",
+  "stress_p4": false
+ },
+ {
+  "sid": "4618723",
+  "category": "EYE",
+  "stress_p4": false
+ },
+ {
+  "sid": "4654746",
+  "category": "FLAT",
+  "stress_p4": false
+ },
+ {
+  "sid": "4671355",
+  "category": "HALFTONE",
+  "stress_p4": false
+ },
+ {
+  "sid": "4731746",
+  "category": "FAINT",
+  "stress_p4": false
+ },
+ {
+  "sid": "4745355",
+  "category": "LASH",
+  "stress_p4": false
+ },
+ {
+  "sid": "4805355",
+  "category": "EYE",
+  "stress_p4": false
+ },
+ {
+  "sid": "4894355",
+  "category": "TEXT",
+  "stress_p4": false
+ },
+ {
+  "sid": "4962746",
+  "category": "FAINT",
+  "stress_p4": false
+ },
+ {
+  "sid": "5020612",
+  "category": "LASH",
+  "stress_p4": false
+ },
+ {
+  "sid": "5257355",
+  "category": "HALFTONE",
+  "stress_p4": false
+ },
+ {
+  "sid": "5325723",
+  "category": "TEXT",
+  "stress_p4": false
+ },
+ {
+  "sid": "5346746",
+  "category": "TEXT",
+  "stress_p4": false
+ },
+ {
+  "sid": "5476723",
+  "category": "HALFTONE",
+  "stress_p4": false
+ },
+ {
+  "sid": "6162355",
+  "category": "FLAT",
+  "stress_p4": false
+ },
+ {
+  "sid": "6250355",
+  "category": "FLAT",
+  "stress_p4": false
+ },
+ {
+  "sid": "6633746",
+  "category": "LASH",
+  "stress_p4": true
+ },
+ {
+  "sid": "6688746",
+  "category": "RULE",
+  "stress_p4": true
+ },
+ {
+  "sid": "6714612",
+  "category": "FLAT",
+  "stress_p4": false
+ },
+ {
+  "sid": "7436355",
+  "category": "FLAT",
+  "stress_p4": false
+ },
+ {
+  "sid": "7436612",
+  "category": "LASH",
+  "stress_p4": false
+ },
+ {
+  "sid": "7442355",
+  "category": "FLAT",
+  "stress_p4": false
+ },
+ {
+  "sid": "7758355",
+  "category": "RULE",
+  "stress_p4": false
+ },
+ {
+  "sid": "8112612",
+  "category": "RULE",
+  "stress_p4": false
+ }
+]
