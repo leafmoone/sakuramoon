@@ -9,6 +9,19 @@ final_256_extra_exposures = 500000
 loss = "fm"
 
 # §13 M4 resolution curriculum (fractions of the Phase-I budget)
+# ---------------------------------------------------------------------
+# DEFERRED / INACTIVE for M4-1024 (2026-08-29 M4 resolution revision):
+#   "primary production M4 uses 256→1024 only. Mixed-resolution curriculum
+#   is deferred and is not silently implied by the current run."
+# The production trainer is a single --bucket-hr run and no mixed-bucket
+# runtime scheduler was ever implemented — the Phase I-P formal run used
+# this file's exposure budget but ran 1024-only (train-meta:
+# bucket_hr=1024). The production M4 stage is config/m4_1024.toml
+# (100% 256 LQ -> 1024 HR). This section is KEPT (not deleted) for
+# history; re-enabling mixed resolution requires a separate decision AND
+# a mixed-bucket sampler (data-layer change). Do not read the I-A..I-D
+# phases below as describing any run's actual behavior.
+# ---------------------------------------------------------------------
 [[phase1.curriculum]]
 label = "I-A"
 fraction = 0.20

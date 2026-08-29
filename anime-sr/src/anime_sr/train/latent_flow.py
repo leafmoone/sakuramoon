@@ -59,6 +59,7 @@ M3 checklist mapping (plan §13, "M3 未通过，不启动正式模型"):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing.pool
 import platform
@@ -105,7 +106,13 @@ from anime_sr.model.uflow import (
     apply_pixel_zero_init,
     count_parameters,
 )
-from anime_sr.train.ckpt_v2 import load_v2, make_provenance, restore_rng, save_v2
+from anime_sr.train.ckpt_v2 import (
+    CKPT_VERSION,
+    load_v2,
+    make_provenance,
+    restore_rng,
+    save_v2,
+)
 from anime_sr.train.ema_sample import SampleEMA
 from anime_sr.train.pixel_baseline import (
     _cosine_lr,
@@ -113,6 +120,17 @@ from anime_sr.train.pixel_baseline import (
     _unwrap,
 )
 from anime_sr.vae.mage import load_frozen_vae
+
+#: M4 launch decision (2026-08-29 M4 resolution revision) — stamped into
+#: every resolved-config.json and v2 provenance block from this tree
+#: forward, so no artifact silently implies the deferred mixed-resolution
+#: curriculum (production M4 = 256->1024 only; see config/m4_1024.toml and
+#: docs/m4-1024-launch-decision.md).
+M4_LAUNCH_DECISION = (
+    "2026-08-29 M4 resolution revision: primary production M4 uses 256→1024 only. "
+    "Mixed-resolution curriculum is deferred and is not silently implied by the "
+    "current run."
+)
 
 #: Fixed validation exposure (distinct from the train stream's cycling e).
 _VAL_CYCLE = 0
@@ -902,6 +920,7 @@ def _run_provenance(
         "attention_backend": cfg.hardware.attention_backend,
         "dtype": cfg.hardware.dtype,
     }
+    prov["launch_decision"] = M4_LAUNCH_DECISION
     return prov
 
 
@@ -1007,6 +1026,167 @@ def _apply_resume(
     return start_step, v2_meta
 
 
+def stamp_launch_decision(cfg: Config, out_dir: str | Path) -> Path:
+    """Dump the resolved config next to the checkpoints (contract §18) and
+    stamp the M4 launch decision into it, so the resolved config records
+    what this run MEANS (256→1024 only; curriculum deferred), not just what
+    it does."""
+    path = dump_resolved(cfg, Path(out_dir) / "resolved-config.json")
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    doc["launch_decision"] = M4_LAUNCH_DECISION
+    Path(path).write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    return Path(path)
+
+
+def _sha256_file(path: str | Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+#: Pixel-injection weights that must be ALIVE (non-zero) in a legacy-full
+#: stage-transition source: the M4-1024 transition continues a TRAINED pixel
+#: path and must never silently accept a zeroed one. (The sigmoid gates may
+#: legitimately sit near zero; the 1x1 projections are small-init and always
+#: non-zero by construction once trained.)
+_PIXEL_ALIVE_KEYS = ("trunk.proj_p64.weight", "trunk.proj_p32.weight", "trunk.proj_p16.weight")
+
+
+def _optimizer_state_compatible(ckpt_opt: Any, model: nn.Module, cfg: Config) -> tuple[bool, str]:
+    """Explicit compatibility gate for inheriting a legacy optimizer state
+    into the M4 stage (2026-08-29 work order): complete AdamW moments for
+    every parameter (shape-exact, in construction order) AND identical
+    betas/eps/weight-decay to this run's [optimizer]. LR is NOT compared —
+    the fresh M4 scheduler re-sets it every step (warmup from step 0); the
+    inherited moments are lr-independent gradient statistics, so a fresh
+    schedule and inherited m/v coexist by construction (update =
+    lr · m̂/(√v̂+ε), m/v unscaled by lr)."""
+    if not isinstance(ckpt_opt, dict) or "param_groups" not in ckpt_opt or "state" not in ckpt_opt:
+        return False, "malformed optimizer section (no param_groups/state)"
+    groups = ckpt_opt["param_groups"]
+    n_saved = sum(len(g.get("params", [])) for g in groups)
+    o = cfg.optimizer
+    # Reconstruct the optimizer's FLATTENED parameter sequence exactly as
+    # _optimizer_for orders it: AdamW state_dict() indices are positions in
+    # (decay-group params, then no-decay-group params) in module order — NOT
+    # plain named_parameters() order (the split interleaves them).
+    decay = [
+        p for n, p in model.named_parameters()
+        if p.ndim > 1 and not any(t in n for t in o.no_decay)
+    ]
+    no_decay = [
+        p for n, p in model.named_parameters()
+        if p.ndim <= 1 or any(t in n for t in o.no_decay)
+    ]
+    ordered = decay + no_decay
+    if n_saved != len(ordered):
+        return False, f"optimizer has {n_saved} params, model has {len(ordered)}"
+    state = ckpt_opt["state"]
+    for i, p in enumerate(ordered):
+        s = state.get(i)
+        if s is None or not {"exp_avg", "exp_avg_sq"} <= set(s.keys()):
+            return False, f"param {i} missing exp_avg/exp_avg_sq"
+        if tuple(s["exp_avg"].shape) != tuple(p.shape):
+            return False, f"param {i} exp_avg shape {tuple(s['exp_avg'].shape)} != {tuple(p.shape)}"
+    for g in groups:
+        if tuple(g.get("betas", ())) != (float(o.betas[0]), float(o.betas[1])):
+            return False, f"group betas {g.get('betas')} != cfg [optimizer].betas"
+        if abs(float(g.get("eps", -1.0)) - float(o.eps)) > 0.0:
+            return False, f"group eps {g.get('eps')} != cfg [optimizer].eps"
+    if len(groups) == 2:
+        if abs(float(groups[0].get("weight_decay", -1.0)) - float(o.weight_decay)) > 0.0:
+            return False, "decay-group weight_decay mismatch"
+        if float(groups[1].get("weight_decay", -1.0)) != 0.0:
+            return False, "no_decay group must have weight_decay 0"
+    return True, ""
+
+
+def _apply_stage_transition(
+    model: nn.Module,
+    opt: torch.optim.Optimizer,
+    path: str | Path,
+    device: torch.device,
+    rank: int,
+    pixel_stage: bool,
+    cfg: Config,
+) -> dict:
+    """legacy-full -> production-v2 stage transition (M4-1024, 2026-08-29).
+
+    Starts a NEW long stage from a FULL pixel checkpoint of the previous
+    stage (the Phase I-P v1 file: {step, model, optimizer}):
+
+    * strict full model load — every trained weight retained, the pixel
+      path is NEVER re-zeroed (no apply_pixel_zero_init, no key filtering);
+      a v2 production checkpoint WITH an EMA section is rejected here
+      (that is a same-stage resume source — use --resume);
+    * optimizer: inherited when the state passes the explicit compatibility
+      gate (complete shape-exact AdamW moments + identical betas/eps/wd);
+      otherwise a fresh optimizer, reported as such — the report must call
+      it a fresh-optimizer stage transition, not a same-stage resume;
+    * the caller re-seeds the EMA from the loaded weights (fresh shadow —
+      the new stage's EMA has no history) and starts at step/exposure 0
+      under a FRESH scheduler over this run's horizon (warmup from step 0);
+    * provenance records the source checkpoint's SHA256 (explicit M4-1024
+      requirement; the repo's no-project-hash rule is superseded for this
+      identifier by the launch work order).
+
+    Returns the transition meta (merged into every v2 provenance block of
+    the stage): ``{"transition", "source_sha256", "optimizer", "ema",
+    "n_model_tensors", "source_step"}``."""
+    if not pixel_stage:
+        raise ValueError("--stage-transition requires [latent_flow].pixel_features = true")
+    p = Path(path)
+    payload = torch.load(p, map_location=device, weights_only=False)
+    if not isinstance(payload, dict) or "model" not in payload or "step" not in payload:
+        raise ValueError(f"{p}: not a checkpoint payload (need 'model' + 'step')")
+    if int(payload.get("version", 1)) == CKPT_VERSION and payload.get("ema") is not None:
+        raise ValueError(
+            f"{p} is a production v2 checkpoint WITH an EMA section — a "
+            "same-stage resume source, not a stage-transition source. Use --resume."
+        )
+    sd = payload["model"]
+    # strict: full pixel model in, no silent key filtering, no re-zero-init
+    _unwrap(model).load_state_dict(sd, strict=True)
+    dead = [k for k in _PIXEL_ALIVE_KEYS if k in sd and float(sd[k].abs().max()) == 0.0]
+    if dead:
+        raise ValueError(
+            f"{p}: pixel-injection weights all-zero ({dead}) — refusing to "
+            "start a pixel stage from a checkpoint with a dead pixel path"
+        )
+    opt_mode = "fresh"
+    src_opt = payload.get("optimizer")
+    if src_opt is not None:
+        ok, why = _optimizer_state_compatible(src_opt, _unwrap(model), cfg)
+        if ok:
+            opt.load_state_dict(src_opt)
+            opt_mode = "inherited"
+        elif rank == 0:
+            print(
+                f"[latent] stage-transition: optimizer state NOT inherited "
+                f"({why}) — FRESH-optimizer M4 stage transition",
+                flush=True,
+            )
+    meta = {
+        "transition": "legacy-full->m4-v2",
+        "source_sha256": _sha256_file(p),
+        "optimizer": opt_mode,
+        "ema": "seeded-from-source-weights",
+        "n_model_tensors": len(sd),
+        "source_step": int(payload["step"]),
+    }
+    if rank == 0:
+        print(
+            f"[latent] stage-transition from {p}: {len(sd)} tensors in (pixel path "
+            f"retained, never re-zeroed), optimizer={opt_mode}, EMA to be seeded "
+            f"from source weights, stage step=0/exposure=0 under a fresh scheduler "
+            f"over this run's horizon; source sha256={meta['source_sha256'][:16]}…",
+            flush=True,
+        )
+    return meta
+
+
 def prepare_producer_prefork(
     cfg: Config,
     *,
@@ -1105,6 +1285,7 @@ def run_latent_flow(
     start_step: int = 0,
     resume: str | Path | None = None,
     init_trunk: str | Path | None = None,
+    stage_transition: str | Path | None = None,
     config_names: list[str] | None = None,
 ) -> int:
     """Train (or resume) the M3/M4 latent flow model; returns the final step.
@@ -1371,13 +1552,18 @@ def run_latent_flow(
     # semantic. decay=0.5 at ref_samples=half_life_samples makes the
     # retention exactly 1/2 after half_life_samples global samples.
     ema = SampleEMA(model, decay=0.5, ref_samples=cfg.ema.half_life_samples)
-    # P0-2: --init-trunk (stage transition) and --resume (same-stage
-    # recovery) are fully separate paths and mutually exclusive.
-    if init_trunk is not None and resume is not None:
-        raise ValueError(
-            "--init-trunk (stage transition) and --resume (same-stage "
-            "recovery) are mutually exclusive"
-        )
+    # P0-2 + M4-1024: --init-trunk (trunk-only -> pixel stage),
+    # --stage-transition (legacy-full -> v2 stage, e.g. Phase I-P -> M4)
+    # and --resume (same-stage recovery) are fully separate paths and
+    # pairwise mutually exclusive.
+    for a, b in (
+        (resume, init_trunk),
+        (resume, stage_transition),
+        (init_trunk, stage_transition),
+    ):
+        if a is not None and b is not None:
+            raise ValueError("--resume / --init-trunk / --stage-transition are mutually exclusive")
+    trans_meta: dict | None = None
     if init_trunk is not None:
         if not lf.pixel_features:
             raise ValueError(
@@ -1389,6 +1575,17 @@ def run_latent_flow(
         # set grows by pixel_encoder.*): re-seed the shadow from the
         # post-transition model
         ema = SampleEMA(model, decay=0.5, ref_samples=cfg.ema.half_life_samples)
+    elif stage_transition is not None:
+        # M4-1024 (2026-08-29): legacy-full -> production-v2 stage
+        # transition. Full pixel weights in (never re-zeroed), optimizer
+        # inherited-or-fresh (explicit), EMA re-seeded from the loaded
+        # weights, stage step/exposure = 0, fresh scheduler over this
+        # run's horizon (warmup from step 0).
+        trans_meta = _apply_stage_transition(
+            model, opt, Path(stage_transition), device, rank, lf.pixel_features, cfg
+        )
+        ema = SampleEMA(model, decay=0.5, ref_samples=cfg.ema.half_life_samples)
+        start_step = 0
     elif resume is not None:
         # Same-stage full resume: load_v2 overwrites the pre-seeded EMA
         # shadow when the checkpoint carries an EMA section (v2); a v1
@@ -1450,21 +1647,32 @@ def run_latent_flow(
             f"{bs * world_size})",
             flush=True,
         )
-        dump_resolved(cfg, out / "resolved-config.json")
+        # M4-1024: the resolved config carries the launch decision (256→1024
+        # only; curriculum deferred) so the artifact states what the run
+        # means, not just what it does.
+        stamp_launch_decision(cfg, out)
 
     def _prov() -> dict:
         """Fresh v2 provenance per save (per-save timestamp); the source
-        checkpoint is the resume file (same-stage) or the init-trunk file
-        (stage transition)."""
-        return _run_provenance(
+        checkpoint is the resume file (same-stage), the init-trunk file
+        (trunk->pixel transition) or the stage-transition file (legacy-full
+        -> v2, e.g. Phase I-P -> M4-1024, with its SHA256 + optimizer mode)."""
+        prov = _run_provenance(
             cfg,
             source_ckpt=(
                 str(resume)
                 if resume is not None
-                else (str(init_trunk) if init_trunk is not None else None)
+                else (
+                    str(init_trunk)
+                    if init_trunk is not None
+                    else (str(stage_transition) if stage_transition is not None else None)
+                )
             ),
             config_names=config_names,
         )
+        if trans_meta is not None:
+            prov["stage_transition"] = trans_meta
+        return prov
 
     # ------------------------------------------------------------------
     # CPU producer / accelerator consumer (M1 #8 data-wait gate): a
@@ -1569,6 +1777,9 @@ def run_latent_flow(
     loss_window: deque[float] = deque(maxlen=100)  # P2-1: scalars section of v2 ckpts
     loss: torch.Tensor | None = None  # bound in the loop; None on an empty loop
     lr = 0.0
+    # M4-1024: milestone production saves, keyed by GLOBAL exposures landed
+    # after the step (step+1 lands on (step+1)*bs*world_size exposures).
+    milestone_exposures = {int(e) for e in lf.save_at_exposures}
 
     def data_snapshot(done_steps: int, elapsed: float) -> str:
         """M1 #8 producer/consumer snapshot, printed at val milestones.
@@ -1736,10 +1947,16 @@ def run_latent_flow(
                     f"{data_snapshot(done, time.time() - t0)}",
                     flush=True,
                 )
-        # P1 ①: held-out val on its own cadence AND at run end (dedup)
+        # P1 ①: held-out val on its own cadence AND at run end (dedup);
+        # val_heldout_every_steps = 0 disables the periodic probe (run end
+        # still fires)
         if val_ds is not None and (
             (step + 1 == total)
-            or ((step + 1) % lf.val_heldout_every_steps == 0 and step + 1 < total)
+            or (
+                lf.val_heldout_every_steps > 0
+                and (step + 1) % lf.val_heldout_every_steps == 0
+                and step + 1 < total
+            )
         ):
             _validate_heldout(
                 model,
@@ -1754,7 +1971,13 @@ def run_latent_flow(
             )
         # P2-1: production saves are ckpt v2 (model/optimizer/EMA/step/
         # exposure cursor/RNG/scalars/provenance+resolved-config id).
-        if rank == 0 and (step + 1) % lf.save_every_steps == 0:
+        # M4-1024: periodic save (save_every_steps; 0 disables) OR a step
+        # landing exactly on a [latent_flow].save_at_exposures milestone
+        # (100k/250k/500k/1M/2M/4M global exposures); the run end always
+        # saves latest.pt.
+        periodic_due = lf.save_every_steps > 0 and (step + 1) % lf.save_every_steps == 0
+        milestone_due = (step + 1) * bs * world_size in milestone_exposures
+        if rank == 0 and (periodic_due or milestone_due):
             save_v2(
                 out / f"step-{step + 1:07d}.pt",
                 step=step + 1,

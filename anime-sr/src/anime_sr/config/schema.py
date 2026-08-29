@@ -518,6 +518,13 @@ class LatentFlowSpec(_Frozen):
 
     batch_size: int = 8
     save_every_steps: int = 1_000
+    # M4-1024 (2026-08-29): milestone production saves, in GLOBAL exposures
+    # (bs x world_size per step). A checkpoint is written when a step lands
+    # EXACTLY on a listed exposure (e.g. 100k/250k/500k/1M/2M/4M). The run
+    # end always saves latest.pt. Set save_every_steps = 0 to disable the
+    # periodic save and keep only the milestones (guarded: 0 no longer
+    # divides). Empty list = milestones off (legacy periodic-only behavior).
+    save_at_exposures: list[int] = Field(default_factory=list)
     val_every_steps: int = 5_000
     val_samples: int = 8
     # P1 ① held-out validation: validation split (not the train stream),

@@ -1,0 +1,114 @@
+# M4-1024: primary production M4 stage (2026-08-29 M4 resolution revision).
+#
+#   base.toml + data.toml + m4_1024.toml                  -> M4-1024 (6M)
+#   base.toml + data.toml + m4_1024.toml
+#       + m4_1024_canary.toml                             -> 10k production canary
+#
+# Scope (frozen for this stage):
+#   * AnimeSR-Mage-UFlow, HR 1024 / LQ 256, 4x blind anime SR
+#   * full AnimeSRModel: 122.67M trunk + PixelConditionEncoder
+#   * z_hr on-the-fly (P1 ④), pixel features enabled
+#   * process producer (canary #6 verified), deterministic dynamic crop,
+#     deterministic pool sampler 80/10/10
+#   * EMA (half-life 500k GLOBAL exposures), ckpt v2 production default
+#   * first-stage budget: 6,000,000 exposures (pinned; 10M/16M is a
+#     separate explicit decision after the 6M end-judgement — never
+#     auto-extended)
+#
+# 2026-08-29 M4 resolution revision: primary production M4 uses 256→1024
+# ONLY. The 512/768/1024 mixed-resolution curriculum (stage1_flow.toml) is
+# DEFERRED / inactive for M4-1024 and is NOT silently implied by this run —
+# the production trainer is a single --bucket-hr run and no mixed-bucket
+# scheduler exists. This decision is also stamped into resolved-config.json
+# and every v2 provenance block by the trainer (M4_LAUNCH_DECISION).
+#
+# Continuation: M4-1024 starts from the Phase I-P full checkpoint via
+# --stage-transition (NOT --init-trunk: that path zero-inits the pixel
+# stage from a trunk-only ckpt; here the pixel path is TRAINED and is
+# never re-zeroed):
+#
+#   --stage-transition /root/private_data/anime-sr/output_model/
+#       latent-flow-phase1-pi/latest.pt
+#
+#   (sha256 9c22a6d899dc66386771ed14… — recorded in provenance)
+
+[phase1]
+# Fixed first-stage budget (min=max pins it; extending requires editing
+# this file as an explicit decision, which the run end-judgement owns).
+exposure_target = 6000000
+exposure_min = 6000000
+exposure_max = 6000000
+final_256_extra_exposures = 0
+
+# 100% 256 LQ -> 1024 HR (the single production resolution for M4-1024).
+[[phase1.curriculum]]
+label = "M4-1024"
+fraction = 1.0
+mix = { "256" = 1.0 }
+
+[optimizer]
+# Frozen Phase-I optimizer (carried into M4-1024; the FRESH M4 scheduler
+# below re-anchors the LR: step 0 starts the warmup — weights continue,
+# long-stage scheduler starts fresh).
+name = "adamw"
+lr = 0.00015
+betas = [0.9, 0.95]
+eps = 1e-8
+weight_decay = 0.05
+no_decay = ["norm", "bias", "layerscale", "position", "gates"]
+
+[scheduler]
+# Fresh M4 long-stage schedule over the 6M horizon (375,000 optimizer
+# steps at global batch 16): 3% warmup from step 0, cosine to 10% floor.
+warmup_fraction = 0.03
+type = "cosine"
+min_lr_ratio = 0.10
+
+[gradient]
+clip_norm = 1.0
+
+[ema]
+# plan §14.3 / U233 P2-1: half-life in GLOBAL exposures (one step feeds
+# bs x world_size = 16 samples); retention is exactly 1/2 at 500k.
+half_life_samples = 500000
+
+[latent_flow]
+batch_size = 8
+pixel_features = true
+zhr_source = "onfly"
+producer = "process"
+prefetch_depth = 4
+out_dir = "output_model/latent-flow-m4-1024"
+# Production v2 checkpoints at the MAJOR MILESTONES (global exposures):
+# 100k / 250k / 500k / 1M / 2M / 4M (+ run-end latest.pt at 6M).
+# save_every_steps = 0 disables the periodic save (milestones only).
+save_every_steps = 0
+save_at_exposures = [100000, 250000, 500000, 1000000, 2000000, 4000000]
+# Held-out probes at 500k / 1M / 2M / 4M / 6M exposures (31,250 steps at
+# global batch 16; run end deduplicated) with l1_anchor/l1_1 live+EMA/
+# l1_4/ratio_4_1/toward_1/cos_v/endpoint consistency/trajectory deviation/
+# Pixel-path health.
+val_heldout_every_steps = 31250
+val_heldout_samples = 128
+# Small in-stream val + producer telemetry on the same milestone grid.
+val_every_steps = 31250
+val_samples = 128
+
+[hardware]
+dtype = "bf16"
+ddp = true
+fsdp = false
+# P2-2: "sdpa-correctness" = the frozen, verified EXPLICIT core (the
+# backend Phase I-P trained under — no kernel change at the stage
+# boundary). The SDPA backends (sdpa-repeat / sdpa-native-gqa) stay
+# benchmark-ready only; switching requires parity PASS + bf16 numeric
+# PASS + a real throughput win ON A HEALTHY HOST, then a separate
+# decision (tools/bench_attention_backends.py, see the launch decision
+# doc). Do NOT switch in the M4-1024 main run.
+attention_backend = "sdpa-correctness"
+activation_checkpointing = "selective"
+# Identical to the Phase I-P formal run (stage1_flow.toml) — the measured
+# throughput the M4 ETA formula is based on.
+target_latent_tokens_phase1 = 131072
+max_accumulation = 64
+overflow_policy = "halve_tokens_lr_x0.7"

@@ -1,0 +1,45 @@
+# M4-1024 PRODUCTION CANARY (10,000 exposures; work order suggests 5k-10k).
+#
+#   base.toml + data.toml + m4_1024.toml + m4_1024_canary.toml
+#
+# Otherwise IDENTICAL to the 6M production config: same source transition
+# (Phase I-P full ckpt via --stage-transition), same producer / dynamic
+# crop / pool sampler / backend / EMA / v2 settings — only the budget and
+# the cadences shrink. Run it BEFORE the 6M and verify the 8-item
+# checklist (docs/m4-1024-launch-decision.md §8):
+#   1. checkpoint transition (596/596 params, pixel path alive, no
+#      re-zero);
+#   2. EMA n_samples_total + save/load/resume;
+#   3. v2 sections present (model/optimizer/EMA/RNG/exposure/provenance);
+#   4. same-stage resume (mid-canary save -> resume -> continue) — NOT
+#      unit tests alone;
+#   5. process producer: 0 silent wedge, crash telemetry, data_wait,
+#      starve, queue occupancy;
+#   6. dynamic crop: same sample, different exposures -> different boxes;
+#   7. pool sampler: short-window shares ≈ 80/10/10;
+#   8. numerics: loss/grad finite, Pixel path active, no NaN/Inf.
+#
+# Mid-canary checkpoint at 5k exposures (step 313 at global batch 16:
+# 5,000/16 = 312.5 -> saved at the first step landing ON an exposure
+# milestone is 320 steps = 5,120 exposures — milestones must be
+# multiples of the global batch; 5,120 is the landing point).
+# NOTE: milestones are checked as (step+1)*bs*world — 5000 is NOT a
+# multiple of 16, so use 5120 (320 steps) and 10000 is not either —
+# 10,000/16 = 625 exactly? 625*16 = 10,000 YES (625 is an integer). 5,120
+# = 320*16. Final latest.pt always saves at step 625 (10,000 exposures).
+
+[phase1]
+exposure_target = 10000
+exposure_min = 10000
+exposure_max = 10000
+
+[latent_flow]
+out_dir = "output_model/latent-flow-m4-1024-canary"
+save_every_steps = 0
+# mid-canary checkpoint for the same-stage-resume test (item 4). 5,120
+# exposures = step 320 (a multiple of the global batch 16).
+save_at_exposures = [5120]
+# probes every 500 steps + run end (dedup)
+val_every_steps = 500
+val_samples = 128
+val_heldout_every_steps = 100000  # run-end only (0 would be guarded anyway)

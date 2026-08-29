@@ -62,6 +62,20 @@ def main(argv: list[str] | None = None) -> int:
         "[latent_flow].pixel_features = true; mutually exclusive with --resume",
     )
     ap.add_argument(
+        "--stage-transition",
+        default=None,
+        help="legacy-full -> production-v2 stage transition (M4-1024): "
+        "start a NEW long stage from a FULL pixel checkpoint of the "
+        "previous stage (e.g. the Phase I-P v1 latest.pt). All trained "
+        "weights are retained (the pixel path is NEVER re-zeroed), the "
+        "optimizer is inherited when its AdamW state is complete and "
+        "compatible (else a FRESH optimizer, reported as such), the EMA is "
+        "seeded from the loaded weights, and step/exposure start at 0 "
+        "under a fresh scheduler over this run's horizon. A legitimate v2 "
+        "production checkpoint (with an EMA section) must use --resume "
+        "instead. Mutually exclusive with --resume and --init-trunk.",
+    )
+    ap.add_argument(
         "--no-prefetch",
         action="store_true",
         help="synchronous data (prefetch_depth=0; M2-style canary)",
@@ -81,10 +95,11 @@ def main(argv: list[str] | None = None) -> int:
         cfg.latent_flow.prefetch_depth = args.prefetch_depth
     if cfg.latent_flow.zhr_source == "store" and args.latent_dir is None:
         raise SystemExit("--latent-dir is required for zhr_source=\"store\"")
-    if args.resume is not None and args.init_trunk is not None:
+    if sum(x is not None for x in (args.resume, args.init_trunk, args.stage_transition)) > 1:
         raise SystemExit(
-            "--resume (same-stage recovery) and --init-trunk (stage "
-            "transition) are mutually exclusive"
+            "--resume / --init-trunk / --stage-transition are mutually "
+            "exclusive (same-stage recovery vs trunk->pixel transition vs "
+            "legacy-full->v2 stage transition)"
         )
     out_dir = args.out_dir or cfg.latent_flow.out_dir
 
@@ -118,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         world_size=world_size,
         resume=args.resume,
         init_trunk=args.init_trunk,
+        stage_transition=args.stage_transition,
         config_names=list(args.config),
     )
     if world_size > 1 and dist.is_initialized():

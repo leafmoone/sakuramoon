@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = load_config(*args.config)
     index_dir = args.index_dir
-    webp_dir = args.webp_dir
+    webp_dir = Path(args.webp_dir)  # _decode_full_hr joins paths on it
     sidecar_path = _sidecar_path(index_dir)  # frozen sidecar under the index dir
 
     rows = []
