@@ -59,6 +59,10 @@ class SampleMeta:
     width: int
     height: int
     is_validation: bool
+    # §10.4 pool from the index row ("priority" | "regular" | "aux"); the
+    # P1 pool sampler (data/pool_sampler.py) consumes this. Default
+    # "regular" only protects hand-built test metas.
+    sampling_pool: str = "regular"
 
 
 class SRDataset(Dataset):
@@ -104,6 +108,7 @@ class SRDataset(Dataset):
                 width=int(row["width"]),
                 height=int(row["height"]),
                 is_validation=bool(row["is_validation"]),
+                sampling_pool=str(row.get("sampling_pool") or "regular"),
             )
             if meta.is_validation != (split == "validation"):
                 continue

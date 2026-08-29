@@ -83,6 +83,7 @@ from anime_sr.data.clean_score import CleanScoreCache
 from anime_sr.data.degradation import degrade_hr
 from anime_sr.data.latent_store import LatentStore, read_index
 from anime_sr.data.pipeline import _EXPOSURE_PER_CYCLE, SampleMeta, SRDataset
+from anime_sr.data.pool_sampler import SlotMap
 from anime_sr.flow.path import (
     interpolate,
     sample_sigma,
@@ -595,6 +596,47 @@ def _pp_worker_init() -> None:
         torch.set_num_threads(n)
 
 
+def _build_slot_map(ds: SRDataset, cfg: Config, legacy_order: list[int]) -> SlotMap:
+    """P1 pool sampler (2026-08-29): the train stream's slot->dataset-index
+    map. Pool membership comes from the index ``sampling_pool`` column on
+    each sample (priority/regular/aux, §10.4); unknown names defensively
+    fall into the regular pool. ``legacy_order`` is the pre-sampler stream
+    (index/store order) used when sampling is disabled, and kept as-is for
+    the val probe's separate contract."""
+    members: dict[str, list[int]] = {}
+    for i, m in enumerate(ds.samples):
+        pool = m.sampling_pool if m.sampling_pool in ("priority", "regular", "aux") else "regular"
+        members.setdefault(pool, []).append(i)
+    return SlotMap(len(legacy_order), members, cfg, legacy_order, salt=str(ds.global_seed))
+
+
+def _train_crop_box(
+    ds: SRDataset,
+    meta: SampleMeta,
+    store: LatentStore | None,
+    step: int,
+    exposure_per_cycle: int,
+) -> tuple[int, int]:
+    """Train-path crop box (P1-④ dynamic crop, 2026-08-29).
+
+    * store mode: pinned (0,0) — the pre-encoded z_hr was built from
+      ``box_seed(sample_id, 0, 0)`` (encode_latents.py), so the crop must
+      stay aligned with the store;
+    * on-fly mode: dynamic per exposure — z_hr is encoded by the consumer
+      from THIS exact crop, so the box follows the §11.5 exposure identity:
+      same (sample_id, data_cycle, exposure_index) -> same box, and a
+      resume to the same step reproduces the same crop. The crop-box
+      stream (``box_seed``) is independent of the degradation seed.
+
+    Val keeps its own pinned contract (``_VAL_CYCLE``/``_VAL_EXPOSURE``) so
+    the #3 gate metrics stay comparable across steps."""
+    if store is not None:
+        return ds.crop(meta, 0, 0)
+    data_cycle = step // exposure_per_cycle
+    exposure_index = step % exposure_per_cycle
+    return ds.crop(meta, data_cycle, exposure_index)
+
+
 def _pp_fetch(args: tuple[int, int]) -> tuple:
     """Process-worker body: returns (hr | None, lq, z_hr | None, meta, st).
 
@@ -606,14 +648,14 @@ def _pp_fetch(args: tuple[int, int]) -> tuple:
     ds: SRDataset = ctx["ds"]
     cfg: Config = ctx["cfg"]
     store: LatentStore | None = ctx["store"]
-    j = ctx["order"][slot % ctx["n"]]
+    j = ctx["slot_map"][slot]  # P1 pool stream (legacy order when disabled)
     meta = ds.samples[j]
     st: dict[str, float] = {}
     hr_full, dec = ds.decode_hr_timed(meta)  # shard/decode stage split
     st["shard"] = dec["shard"]
     st["decode"] = dec["decode"]
     t_c0 = time.perf_counter()
-    x, y = ds.crop(meta, 0, 0)  # pinned (0,0) box — matches the pre-encoded z_hr
+    x, y = _train_crop_box(ds, meta, store, step, int(ctx["exposure_per_cycle"]))
     bucket_hr = int(ctx["bucket_hr"])
     hr_crop = hr_full[..., y : y + bucket_hr, x : x + bucket_hr].contiguous()
     st["crop"] = time.perf_counter() - t_c0
@@ -905,10 +947,12 @@ def prepare_producer_prefork(
             )
         order = [sid_to_idx[s] for s in sids]
     n = len(order)
+    slot_map = _build_slot_map(ds, cfg, order)
     _PRODUCER_CTX = {
         "ds": ds,
         "order": order,
         "n": n,
+        "slot_map": slot_map,
         "cfg": cfg,
         "store": store,
         "global_seed": ds.global_seed,
@@ -1024,6 +1068,32 @@ def run_latent_flow(
         order = [sid_to_idx[s] for s in sids]
         n = len(order)
 
+    # P1 pool sampler (2026-08-29): the TRAIN stream is a per-cycle
+    # pool-mixed permutation (config [sampling]); `order` above is kept as
+    # the legacy stream for the val probe's separate contract. When
+    # sampling is disabled the slot map degenerates to `order[slot % n]`.
+    slot_map = _build_slot_map(ds, cfg, order)
+    if rank == 0:
+        rep = slot_map.pool_report()
+        if slot_map.enabled:
+            print(
+                f"[latent] pool sampler ON: per-cycle {n} slots = "
+                f"priority {rep.get('priority', 0)} / regular "
+                f"{rep.get('regular', 0)} / aux {rep.get('aux', 0)} "
+                f"(targets core/regular/aux = "
+                f"{cfg.sampling.core_fraction:g}/"
+                f"{cfg.sampling.regular_fraction:g}/"
+                f"{cfg.sampling.aux_fraction:g}, aux cap "
+                f"{cfg.filter.aux_max_fraction:g})",
+                flush=True,
+            )
+        else:
+            print(
+                "[latent] pool sampler OFF: legacy stream "
+                "(index/store order, straight read)",
+                flush=True,
+            )
+
     # P1 ①: held-out validation split. Val samples have no LatentStore rows
     # (the store covers train crops), so _validate_heldout encodes z_hr on
     # the fly with the frozen VAE. 0 disables the held-out probe entirely;
@@ -1075,6 +1145,7 @@ def run_latent_flow(
                 "ds": ds,
                 "order": order,
                 "n": n,
+                "slot_map": slot_map,
                 "cfg": cfg,
                 "store": store,
                 "global_seed": ds.global_seed,
@@ -1162,14 +1233,14 @@ def run_latent_flow(
         stages: dict[str, float]
 
     def _fetch(slot: int, step: int) -> _Prepared:
-        j = order[slot % n]
+        j = slot_map[slot]  # P1 pool stream (legacy order[slot % n] when disabled)
         meta = ds.samples[j]
         st: dict[str, float] = {}
         hr_full, dec = ds.decode_hr_timed(meta)  # shard/decode stage split
         st["shard"] = dec["shard"]
         st["decode"] = dec["decode"]
         t_c0 = time.perf_counter()
-        x, y = ds.crop(meta, 0, 0)  # pinned (0,0) box — matches the pre-encoded z_hr
+        x, y = _train_crop_box(ds, meta, store, step, _EXPOSURE_PER_CYCLE)
         hr_crop = hr_full[..., y : y + bucket_hr, x : x + bucket_hr].contiguous()
         st["crop"] = time.perf_counter() - t_c0
         t_d0 = time.perf_counter()

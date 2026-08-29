@@ -90,10 +90,14 @@ def _install_ctx(n: int, bucket_hr: int = 64) -> _StubDS:
     torch.set_num_threads(1)
     os.environ["OMP_NUM_THREADS"] = "1"
     ds = _StubDS(n)
+    # P1 pool sampler: members=None -> disabled -> the legacy identity
+    # stream (order[slot % n] with order=range(n)), i.e. the pre-sampler
+    # contract these tests pin down.
     lf._PRODUCER_CTX = {
         "ds": ds,
         "order": list(range(n)),
         "n": n,
+        "slot_map": lf.SlotMap(n, None, _CFG, list(range(n))),
         "cfg": _CFG,
         "store": None,  # on-fly style: the hr crop is returned to the caller
         "global_seed": ds.global_seed,

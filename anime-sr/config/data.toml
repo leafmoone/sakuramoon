@@ -36,6 +36,18 @@ crop_retention_min = 0.80
 clean_score_stage = "lazy"
 clean_score_cache = true
 
+[sampling]
+# P1 pool sampler (M4-prep 2026-08-29): per-cycle target shares of the §10.4
+# pools in the TRAIN stream. Targets only — a pool smaller than its target
+# has its shortfall redistributed (aux capped by [filter] aux_max_fraction
+# above). 80/10/10 default; 80/0/20 is equally valid — the config decides,
+# nothing is hardcoded. enabled=false restores the legacy straight-read
+# stream (index/store order) bit-for-bit.
+enabled = true
+core_fraction = 0.80
+regular_fraction = 0.10
+aux_fraction = 0.10
+
 [validation]
 # §16.1: synthetic pairs 5000 (1000 per degradation profile), stress 500,
 # real LQ min 200 / target 500. Zero overlap with training.

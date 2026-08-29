@@ -372,6 +372,24 @@ class FilterSpec(_Frozen):
     clean_score_cache: bool = True
 
 
+class SamplingSpec(_Frozen):
+    """P1 pool sampler (M4-prep work order, 2026-08-29): target per-cycle
+    fractions of the §10.4 pools (``priority``=core / ``regular`` / ``aux``)
+    in the train stream. Config-driven — nothing hardcoded in the trainer.
+
+    * the fractions are targets, normalized over their sum; the effective
+      ``aux`` share is additionally hard-capped by
+      ``[filter] aux_max_fraction`` (a pool smaller than its target has its
+      shortfall redistributed deterministically, core last);
+    * ``enabled = false`` restores the legacy stream (index / store order,
+      straight read) bit-for-bit."""
+
+    enabled: bool = True
+    core_fraction: float = 0.80
+    regular_fraction: float = 0.10
+    aux_fraction: float = 0.10
+
+
 class ValidationSpec(_Frozen):
     """§16.1 validation sets; train/validation zero overlap is structural."""
 
@@ -518,6 +536,7 @@ class Config(_Frozen):
     buckets: BucketsSpec = Field(default_factory=BucketsSpec)
     data: DataSpec = Field(default_factory=DataSpec)
     filter: FilterSpec = Field(default_factory=FilterSpec)
+    sampling: SamplingSpec = Field(default_factory=SamplingSpec)
     validation: ValidationSpec = Field(default_factory=ValidationSpec)
     degradation: DegradationSpec = Field(default_factory=DegradationSpec)
     phase1: Phase1Spec = Field(default_factory=Phase1Spec)
@@ -541,3 +560,8 @@ class Config(_Frozen):
             mix_sum = sum(p.mix.values())
             if abs(mix_sum - 1.0) > 1e-9:
                 raise ValueError(f"curriculum {p.label}: mix must sum to 1.0, got {mix_sum}")
+        s = self.sampling
+        if min(s.core_fraction, s.regular_fraction, s.aux_fraction) < 0:
+            raise ValueError("sampling fractions must be >= 0")
+        if s.core_fraction + s.regular_fraction + s.aux_fraction <= 0:
+            raise ValueError("sampling fractions must sum to > 0")
