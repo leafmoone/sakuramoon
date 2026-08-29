@@ -82,9 +82,24 @@ cannot be confused.
 | 250k | 15,625 | `step-0015625.pt` | |
 | 500k | 31,250 | `step-0031250.pt` | ✔ |
 | 1M | 62,500 | `step-0062500.pt` | ✔ |
+| 1.5M | 93,750 | | ✔ |
 | 2M | 125,000 | `step-0125000.pt` | ✔ |
+| 2.5M | 156,250 | | ✔ |
+| 3M | 187,500 | | ✔ |
+| 3.5M | 218,750 | | ✔ |
 | 4M | 250,000 | `step-0250000.pt` | ✔ |
+| 4.5M | 281,250 | | ✔ |
+| 5M | 312,500 | | ✔ |
+| 5.5M | 343,750 | | ✔ |
 | 6M | 375,000 | `latest.pt` (final) | ✔ + 6M extras (RGB eval, seam probe, gradient coverage, EMA-vs-live, 1-step vs 4-step, stress set) |
+
+Held-out cadence (2026-08-30 correction): `val_heldout_every_steps = 31,250`
+at global batch 16 = **one probe every 500k exposures**, i.e. **12 held-out
+nodes total: 0.5M / 1.0M / 1.5M / 2.0M / 2.5M / 3.0M / 3.5M / 4.0M / 4.5M /
+5.0M / 5.5M / 6.0M** (12 × 31,250 = 375,000 = run end, deduplicated). The
+production v2 ckpt grid (`save_at_exposures`) is the coarser 100k/250k/500k/
+1M/2M/4M set — the two grids are independent; do not read the ckpt grid as
+the probe grid.
 
 Probes: `l1_anchor`, `l1_1` (live **and** EMA), `l1_4`, `ratio_4_1`,
 `toward_1`, `cos_v`, endpoint consistency, trajectory deviation, Pixel-path
