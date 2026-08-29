@@ -24,7 +24,10 @@ import sys
 import torch.distributed as dist
 
 from anime_sr.config.loader import load_config
-from anime_sr.train.latent_flow import run_latent_flow
+from anime_sr.train.latent_flow import (
+    prepare_producer_prefork,
+    run_latent_flow,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,7 +46,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--out-dir", default=None, help="default: [latent_flow].out_dir")
     ap.add_argument("--bucket-hr", type=int, default=1024)
-    ap.add_argument("--resume", default=None, help="checkpoint to resume from")
+    ap.add_argument(
+        "--resume",
+        default=None,
+        help="same-stage full checkpoint to resume from (strict model + "
+        "optimizer + EMA/RNG/exposure when present; pixel zero-init is "
+        "NEVER re-applied); mutually exclusive with --init-trunk",
+    )
+    ap.add_argument(
+        "--init-trunk",
+        default=None,
+        help="trunk-only checkpoint for the trunk-only -> pixel-stage "
+        "transition (NEW stage: step=0, exposure=0, fresh optimizer, pixel "
+        "zero-init when configured); requires "
+        "[latent_flow].pixel_features = true; mutually exclusive with --resume",
+    )
     ap.add_argument(
         "--no-prefetch",
         action="store_true",
@@ -64,11 +81,29 @@ def main(argv: list[str] | None = None) -> int:
         cfg.latent_flow.prefetch_depth = args.prefetch_depth
     if cfg.latent_flow.zhr_source == "store" and args.latent_dir is None:
         raise SystemExit("--latent-dir is required for zhr_source=\"store\"")
+    if args.resume is not None and args.init_trunk is not None:
+        raise SystemExit(
+            "--resume (same-stage recovery) and --init-trunk (stage "
+            "transition) are mutually exclusive"
+        )
     out_dir = args.out_dir or cfg.latent_flow.out_dir
 
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size > 1 and dist.is_available() and not dist.is_initialized():
+        # P1-WEDGE-FIX: fork the CPU producer pool BEFORE NCCL/HCU init so
+        # workers never inherit accelerator runtime state (inheriting it
+        # makes forked workers SIGSEGV on their first CPU op; observed in
+        # the 2-rank smoke: SIGSEGV in torch.randn inside _noise_like).
+        if cfg.latent_flow.producer == "process":
+            prepare_producer_prefork(
+                cfg,
+                index_dir=args.index_dir,
+                webp_dir=args.webp_dir,
+                latent_dir=args.latent_dir,
+                bucket_hr=args.bucket_hr,
+                rank=rank,
+            )
         dist.init_process_group(backend="nccl")
 
     final = run_latent_flow(
@@ -82,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         rank=rank,
         world_size=world_size,
         resume=args.resume,
+        init_trunk=args.init_trunk,
     )
     if world_size > 1 and dist.is_initialized():
         dist.destroy_process_group()

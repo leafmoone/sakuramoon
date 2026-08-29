@@ -97,9 +97,10 @@ from anime_sr.model.uflow import (
     apply_pixel_zero_init,
     count_parameters,
 )
+from anime_sr.train.ckpt_v2 import load_v2
+from anime_sr.train.ema_sample import SampleEMA
 from anime_sr.train.pixel_baseline import (
     _cosine_lr,
-    _load_ckpt,
     _optimizer_for,
     _save_ckpt,
     _unwrap,
@@ -639,13 +640,289 @@ def _make_process_pool(n_workers: int) -> _MPPool:
 
 
 def _fut_done(f: Future | _MPAsyncResult) -> bool:
-    """Done-check across both producer backends (duck-identical APIs)."""
+    """Done-check across both producer backends.
+
+    ``multiprocessing.pool.AsyncResult`` exposes ``ready()``/``get(timeout)``
+    — NOT ``concurrent.futures.Future``'s ``done()``/``result()`` — so the
+    process backend must be dispatched on its own API (p1formal
+    P1-PRODUCER-PORT-V2 verified form; the duck-typed variant crashed the
+    process path on the first telemetry poll)."""
+    if isinstance(f, _MPAsyncResult):
+        return f.ready()
     return cast("Future", f).done()
 
 
 def _fut_result(f: Future | _MPAsyncResult, timeout: float | None = None) -> Any:
-    """Blocking collect across both producer backends."""
+    """Blocking collect across both producer backends.
+
+    AsyncResult raises the worker's exception on ``get()`` exactly like
+    ``Future.result()`` does, so the consumer fails loud on task errors."""
+    if isinstance(f, _MPAsyncResult):
+        return f.get(timeout)
     return cast("Future", f).result(timeout)
+
+
+# P1-WORKER-RECOVERY ---------------------------------------------------------
+# A forked producer worker can die (observed on sakrua10 HCU: SIGSEGV inside
+# a CPU op on a task, silent without PYTHONFAULTHANDLER). The lost in-flight
+# task's AsyncResult never completes and the consumer would block forever.
+# CPython's Pool auto-restarts dead workers (_handle_workers repopulates), so
+# a lost task is recovered by resubmitting the same (slot, step) payload:
+# _pp_fetch is deterministic (seeded from the exposure index), the restarted
+# worker recomputes the identical tensor, and in-place future replacement
+# keeps batch order with exactly-once consumption (the dead future is
+# dropped; only the resubmitted future is ever collected).
+_PP_RECOVER_POLL_S = 0.5  # liveness poll interval while waiting for a batch
+_PP_MAX_WORKER_CRASHES = 4  # then abort loudly instead of crash-looping
+
+
+def _pp_recover_lost_tasks(
+    ppool: _MPPool,
+    fs: list[Future | _MPAsyncResult],
+    ready: deque[list[Future | _MPAsyncResult]],
+    inflight: dict[Any, tuple[int, int]],
+    crash_state: list[int],
+    seen_workers: set,
+) -> None:
+    """Resubmit in-flight tasks after a worker death (in-place replacement).
+
+    The Pool's maintenance thread reaps dead workers OUT of ``ppool._pool``
+    (``_join_exited_workers`` does ``del pool[i]``; ``_repopulate_pool_static``
+    appends the replacements), so a dead worker is never observable by a
+    liveness scan of the list. Deaths are therefore detected by membership
+    diff against ``seen_workers`` (the previously observed set of Process
+    objects): anything that disappeared was reaped (P1-WORKER-RECOVERY r2).
+    No-op while the set is unchanged. ``crash_state[0]`` accumulates DISTINCT
+    worker deaths seen by this rank (a reaped worker is removed from
+    ``seen_workers`` after being counted, so one death counts exactly once
+    across the poll loop — an unbounded union would re-count the same corpse
+    every poll and trip the guard ~2 s after a single death); at
+    ``_PP_MAX_WORKER_CRASHES`` the pool is crash-looping and the run is
+    aborted (fail loud, not hang)."""
+    # ``_pool`` is a CPython/DTK Pool implementation detail (undeclared in
+    # typeshed): the list of live worker Process objects — the only reliable
+    # liveness signal for the membership-diff detector.
+    current = set(cast(Any, ppool)._pool)
+    gone = [w for w in seen_workers if w not in current]
+    seen_workers.update(current)
+    if not gone:
+        return
+    seen_workers.difference_update(gone)
+    crash_state[0] += len(gone)
+    codes = ", ".join(str(w.exitcode) for w in gone)
+    print(
+        f"[latent] producer: {len(gone)} pool worker(s) died "
+        f"(exit codes: {codes}); resubmitting in-flight tasks to the "
+        f"restarted workers (total crashes: {crash_state[0]}/"
+        f"{_PP_MAX_WORKER_CRASHES})",
+        flush=True,
+    )
+    if crash_state[0] >= _PP_MAX_WORKER_CRASHES:
+        raise RuntimeError(
+            f"producer worker crash-loop: {crash_state[0]} worker deaths "
+            f"(last exit codes: {codes}); in-flight tasks are not recoverable. "
+            "Relaunch with PYTHONFAULTHANDLER=1 to capture the crashing "
+            "worker's stack (last observed crash: SIGSEGV in a CPU op inside "
+            "_pp_fetch's degradation path)"
+        )
+    replaced: dict[Future | _MPAsyncResult, _MPAsyncResult] = {}
+    for f, task in list(inflight.items()):
+        if _fut_done(f):
+            continue
+        nf = ppool.apply_async(_pp_fetch, (task,))
+        replaced[f] = nf
+        inflight[nf] = task
+    for f in replaced:
+        inflight.pop(f, None)
+    for q in ready:
+        for i in range(len(q)):
+            if q[i] in replaced:
+                q[i] = replaced[q[i]]
+    fs[:] = [replaced.get(f, f) for f in fs]
+
+
+_PRE_FORK_POOL: _MPPool | None = None
+
+#: model state keys that mark a full (pixel-stage) checkpoint
+_PIXEL_KEY_PREFIX = "pixel_encoder."
+
+
+def _ckpt_is_full_pixel(path: str | Path, device: torch.device) -> bool:
+    """True when the checkpoint's model state carries pixel_encoder.* keys."""
+    payload = torch.load(path, map_location=device, weights_only=False)
+    return any(k.startswith(_PIXEL_KEY_PREFIX) for k in payload["model"])
+
+
+def _apply_init_trunk(
+    model: nn.Module,
+    path: str | Path,
+    cfg: Config,
+    device: torch.device,
+    rank: int,
+) -> int:
+    """Stage-initialization transition: trunk-only (M4-L0) checkpoint -> full
+    AnimeSRModel pixel stage.
+
+    Semantics (P0-2): NEW stage only — trunk weights loaded non-strict (the
+    missing keys must be exactly the pixel_encoder.* set), a FRESH optimizer
+    (the caller's), stage step = 0, exposure = 0, and
+    ``apply_pixel_zero_init()`` re-applied when configured (load_state_dict
+    overwrote the pixel weights).  A full pixel checkpoint passed here is a
+    stage checkpoint and is rejected: use ``--resume`` instead."""
+    payload = torch.load(path, map_location=device, weights_only=False)
+    sd = payload["model"]
+    if any(k.startswith(_PIXEL_KEY_PREFIX) for k in sd):
+        n_pix = sum(1 for k in sd if k.startswith(_PIXEL_KEY_PREFIX))
+        raise RuntimeError(
+            f"--init-trunk received a FULL pixel checkpoint ({path}: "
+            f"{n_pix} pixel_encoder keys). It is a stage checkpoint, not a "
+            "trunk-only source — use --resume for same-stage recovery."
+        )
+    res = model.load_state_dict(sd, strict=False)
+    bad_missing = [k for k in res.missing_keys if not k.startswith(_PIXEL_KEY_PREFIX)]
+    if bad_missing or res.unexpected_keys:
+        raise RuntimeError(
+            f"--init-trunk mismatch at {path}: non-pixel missing "
+            f"{bad_missing[:8]}, unexpected {res.unexpected_keys[:8]}"
+        )
+    if cfg.model.zero_init_pixel:
+        zeroed = apply_pixel_zero_init(cast(AnimeSRModel, model).trunk)
+        if rank == 0:
+            print(f"[latent] init-trunk: pixel zero-init applied: {zeroed}")
+    if rank == 0:
+        print(
+            f"[latent] init-trunk transition from {path}: trunk weights in, "
+            f"{len(res.missing_keys)} pixel_encoder keys absent by design, "
+            "fresh optimizer, stage step=0, exposure=0"
+        )
+    return 0  # fresh stage
+
+
+def _apply_resume(
+    model: nn.Module,
+    opt: torch.optim.Optimizer,
+    ema: SampleEMA | None,
+    path: str | Path,
+    device: torch.device,
+    rank: int,
+    pixel_stage: bool,
+) -> tuple[int, dict | None]:
+    """Same-stage FULL resume (P0-2): strict model load + optimizer + EMA
+    (when present) + step.  NEVER re-applies pixel zero-init and never
+    creates a fresh optimizer.  v2 payloads restore the RNG/exposure cursor
+    through the returned meta (``{"step", "legacy", "scalars", "exposure",
+    "provenance", "rng"}``); v1 legacy payloads load with ``legacy=True``.
+
+    Stage guards:
+    * a FULL pixel checkpoint in a trunk-only stage -> error;
+    * a trunk-only checkpoint in the pixel stage -> error (direct the
+      operator to --init-trunk for the transition).
+
+    Returns ``(start_step, v2_meta)`` — ``v2_meta`` is ``None`` for v1
+    legacy files (no RNG/exposure sections to restore)."""
+    if _ckpt_is_full_pixel(path, device) != pixel_stage:
+        if pixel_stage:
+            raise RuntimeError(
+                f"--resume in the pixel stage received a TRUNK-ONLY checkpoint "
+                f"({path}: no pixel_encoder keys). Trunk weights cannot "
+                "reconstruct a trained pixel model — if this starts a NEW "
+                "pixel stage, use --init-trunk instead."
+            )
+        raise RuntimeError(
+            f"--resume in the trunk-only stage received a FULL pixel "
+            f"checkpoint ({path}: pixel_encoder keys present); the strict "
+            "trunk load cannot accept them."
+        )
+    payload = torch.load(path, map_location=device, weights_only=False)
+    has_ema = payload.get("ema") is not None
+    meta = load_v2(
+        path,
+        model,
+        opt,
+        ema=ema if has_ema else None,
+        device=device,
+    )
+    start_step = int(meta["step"])
+    if ema is not None and not has_ema and rank == 0:
+        print(
+            f"[latent] resume {path}: no EMA section (v1 legacy) — "
+            "keeping the fresh EMA (decays in from the live weights)"
+        )
+    if rank == 0:
+        extra = "" if meta["legacy"] else " (v2: RNG/exposure cursor restorable)"
+        print(f"[latent] resumed at step {start_step} from {path}{extra}")
+    v2_meta = None if meta["legacy"] else meta
+    return start_step, v2_meta
+
+
+def prepare_producer_prefork(
+    cfg: Config,
+    *,
+    index_dir: str | Path,
+    webp_dir: str | Path,
+    latent_dir: str | Path | None,
+    bucket_hr: int,
+    rank: int,
+) -> None:
+    """P1-WEDGE-FIX: build the producer ctx and fork the worker pool BEFORE
+    ``dist.init_process_group`` (call from the CLI).
+
+    A forked worker that inherits NCCL/HCU runtime state SIGSEGVs on its
+    first heavy CPU op (observed: torch.randn in the degradation path,
+    2-rank smoke; the inherited OMP pool is a required factor — OMP=1 runs
+    are crash-free).  The dataset/store/order construction is CPU-only, so
+    it can run before any accelerator initialization; the forked pool then
+    carries a clean (pre-accelerator) address space.  ``run_latent_flow``
+    reuses the pool via ``_PRE_FORK_POOL``; its ``_PRODUCER_CTX`` is the
+    very dict the workers inherited at fork time."""
+    global _PRE_FORK_POOL, _PRODUCER_CTX
+    lf = cfg.latent_flow
+    onfly = lf.zhr_source == "onfly"
+    store: LatentStore | None = None
+    sids: list[str] = []
+    if not onfly:
+        if latent_dir is None:
+            raise RuntimeError("zhr_source=store requires latent_dir")
+        store = LatentStore(latent_dir, bucket_hr)
+        doc = read_index(latent_dir)
+        sids = sorted(doc["samples"].keys())
+    clean_cache: CleanScoreCache | None = None
+    if cfg.filter.clean_score_stage == "lazy" and cfg.filter.clean_score_cache:
+        clean_cache = CleanScoreCache(index_dir)
+    ds = SRDataset(
+        index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train",
+        clean_score_cache=clean_cache,
+    )
+    if onfly:
+        order = list(range(len(ds.samples)))
+    else:
+        sid_to_idx = {m.sample_id: i for i, m in enumerate(ds.samples)}
+        missing = [s for s in sids if s not in sid_to_idx]
+        if missing:
+            raise RuntimeError(
+                f"{len(missing)} latent sample ids missing from the train index "
+                f"(e.g. {missing[:3]}); rebuild the latent store from this index"
+            )
+        order = [sid_to_idx[s] for s in sids]
+    n = len(order)
+    _PRODUCER_CTX = {
+        "ds": ds,
+        "order": order,
+        "n": n,
+        "cfg": cfg,
+        "store": store,
+        "global_seed": ds.global_seed,
+        "bucket_hr": bucket_hr,
+        "exposure_per_cycle": _EXPOSURE_PER_CYCLE,
+    }
+    n_pp = max(1, (lf.prefetch_depth or 1) * lf.batch_size)
+    _PRE_FORK_POOL = _make_process_pool(n_pp)
+    if rank == 0:
+        print(
+            f"[latent] producer=process: {n_pp} forked workers BEFORE "
+            f"NCCL/HCU init (intra-op re-tuned from OMP_NUM_THREADS)",
+            flush=True,
+        )
 
 
 def run_latent_flow(
@@ -661,6 +938,7 @@ def run_latent_flow(
     world_size: int = 1,
     start_step: int = 0,
     resume: str | Path | None = None,
+    init_trunk: str | Path | None = None,
 ) -> int:
     """Train (or resume) the M3/M4 latent flow model; returns the final step.
 
@@ -780,25 +1058,37 @@ def run_latent_flow(
     # device — threads inheriting the HCU context is harmless.
     pool: ThreadPoolExecutor | _MPPool | None = None
     if lf.producer == "process":
-        global _PRODUCER_CTX
-        _PRODUCER_CTX = {
-            "ds": ds,
-            "order": order,
-            "n": n,
-            "cfg": cfg,
-            "store": store,
-            "global_seed": ds.global_seed,
-            "bucket_hr": bucket_hr,
-            "exposure_per_cycle": _EXPOSURE_PER_CYCLE,
-        }
-        n_pp = max(1, (lf.prefetch_depth or 1) * lf.batch_size)
-        pool = _make_process_pool(n_pp)
-        if rank == 0:
-            print(
-                f"[latent] producer=process: {n_pp} forked workers "
-                f"(intra-op re-tuned from OMP_NUM_THREADS)",
-                flush=True,
-            )
+        global _PRODUCER_CTX  # _PRE_FORK_POOL is only read here
+        if _PRE_FORK_POOL is not None:
+            # P1-WEDGE-FIX: the pool (and its inherited ctx) was created in
+            # prepare_producer_prefork() BEFORE dist.init_process_group, so
+            # the workers carry no NCCL/HCU runtime state.
+            pool = _PRE_FORK_POOL
+            if rank == 0:
+                print(
+                    "[latent] producer=process: reusing pre-NCCL pool "
+                    "(fork-before-init_process_group; ctx inherited at fork)",
+                    flush=True,
+                )
+        else:
+            _PRODUCER_CTX = {
+                "ds": ds,
+                "order": order,
+                "n": n,
+                "cfg": cfg,
+                "store": store,
+                "global_seed": ds.global_seed,
+                "bucket_hr": bucket_hr,
+                "exposure_per_cycle": _EXPOSURE_PER_CYCLE,
+            }
+            n_pp = max(1, (lf.prefetch_depth or 1) * lf.batch_size)
+            pool = _make_process_pool(n_pp)
+            if rank == 0:
+                print(
+                    f"[latent] producer=process: {n_pp} forked workers "
+                    f"(intra-op re-tuned from OMP_NUM_THREADS)",
+                    flush=True,
+                )
 
     vae = load_frozen_vae(vae_path or cfg.vae.path, device, dtype=dtype)
     if lf.pixel_features:
@@ -809,38 +1099,26 @@ def run_latent_flow(
         model = UFlowSR(cfg.model.uflow, cfg.model.output_head).to(device, dtype=dtype)
     n_params = count_parameters(model)
     opt = _optimizer_for(cfg, model)
-    if resume is not None:
-        if lf.pixel_features:
-            # Phase I-P transition: a trunk-only (M4-L0) checkpoint carries no
-            # pixel_encoder.* keys and its optimizer state is trunk-only. Load
-            # the weights non-strict (missing keys must be pixel_encoder.*
-            # only), keep a fresh optimizer, and re-apply the zero-init —
-            # load_state_dict overwrote the pixel weights.
-            payload = torch.load(Path(resume), map_location=device)
-            res = model.load_state_dict(payload["model"], strict=False)
-            bad_missing = [
-                k for k in res.missing_keys if not k.startswith("pixel_encoder.")
-            ]
-            if bad_missing or res.unexpected_keys:
-                raise RuntimeError(
-                    f"trunk-only resume mismatch: missing {bad_missing[:8]}, "
-                    f"unexpected {res.unexpected_keys[:8]}"
-                )
-            start_step = int(payload["step"])
-            if cfg.model.zero_init_pixel:
-                zeroed = apply_pixel_zero_init(cast(AnimeSRModel, model).trunk)
-                if rank == 0:
-                    print(f"[latent] pixel zero-init re-applied after resume: {zeroed}")
-            if rank == 0:
-                print(
-                    f"[latent] resumed trunk weights at step {start_step} from "
-                    f"{resume} (fresh optimizer; {len(res.missing_keys)} "
-                    f"pixel_encoder keys absent by design)"
-                )
-        else:
-            start_step = _load_ckpt(Path(resume), model, opt, device)
-            if rank == 0:
-                print(f"[latent] resumed at step {start_step} from {resume}")
+    # P0-2: --init-trunk (stage transition) and --resume (same-stage
+    # recovery) are fully separate paths and mutually exclusive.
+    if init_trunk is not None and resume is not None:
+        raise ValueError(
+            "--init-trunk (stage transition) and --resume (same-stage "
+            "recovery) are mutually exclusive"
+        )
+    if init_trunk is not None:
+        if not lf.pixel_features:
+            raise ValueError(
+                "--init-trunk is the trunk-only -> pixel-stage transition and "
+                "requires [latent_flow].pixel_features = true"
+            )
+        start_step = _apply_init_trunk(model, init_trunk, cfg, device, rank)
+    elif resume is not None:
+        # Same-stage full resume. EMA is wired in by the P2 section below;
+        # pass it once created (the trainer keeps ``self.ema`` there).
+        start_step, _v2_meta = _apply_resume(
+            model, opt, None, Path(resume), device, rank, lf.pixel_features
+        )
     if world_size > 1 and dist.is_available() and dist.is_initialized():
         model = DDP(
             model,
@@ -928,13 +1206,28 @@ def run_latent_flow(
         ]
         if _is_proc:
             ppool = cast("_MPPool", pool)
-            return [ppool.apply_async(_pp_fetch, (slot, st)) for slot, st in pairs]
+            # apply_async(func, args): args is the tuple of positional args,
+            # so the single-tuple payload ((slot, st),) binds to
+            # _pp_fetch(args) exactly once (p1formal P1-PRODUCER-PORT-V2
+            # verified form; a flattened (slot, st) raises TypeError in the
+            # worker and the batch is lost).
+            futs: list[Future | _MPAsyncResult] = [
+                ppool.apply_async(_pp_fetch, ((slot, st),)) for slot, st in pairs
+            ]
+            for f, task in zip(futs, pairs):
+                inflight[f] = task  # P1-WORKER-RECOVERY: track for resubmit
+            return futs
         tpool = cast("ThreadPoolExecutor", pool)
         return [tpool.submit(_fetch, slot, st) for slot, st in pairs]
 
     # ready queue: the producer keeps `depth` step-batches queued ahead of
     # the consumer (prefilled at start; refilled as each batch is consumed).
     ready: deque[list[Future | _MPAsyncResult]] = deque()
+    inflight: dict[Any, tuple[int, int]] = {}  # P1-WORKER-RECOVERY: future -> (slot, step)
+    crash_state = [0]  # P1-WORKER-RECOVERY: worker deaths seen by this rank
+    seen_workers: set = set()  # P1-WORKER-RECOVERY r2: live worker Process objects
+    if _is_proc:
+        seen_workers.update(cast(Any, pool)._pool)  # Pool impl detail (typeshed-undeclared)
     for k in range(depth):
         if start_step + k < total:
             ready.append(_submit_batch(start_step + k))
@@ -999,12 +1292,23 @@ def run_latent_flow(
 
         tf = time.perf_counter()
         if _is_proc:
+            # P1-WORKER-RECOVERY: poll with worker-liveness checks so a dead
+            # worker (lost in-flight task) is detected and its task
+            # resubmitted instead of blocking forever.
+            while not all(_fut_done(f) for f in futs):
+                _pp_recover_lost_tasks(
+                    cast("_MPPool", pool), futs, ready, inflight, crash_state,
+                    seen_workers,
+                )
+                time.sleep(_PP_RECOVER_POLL_S)
             # process pool hands back the (hr, lq, z_hr, meta, stages) tuple;
-            # rewrap into _Prepared (hr may be None in store mode)
+            # rewrap into _Prepared (hr is None in store mode)
             prepared = [
                 _Prepared(hr=r[0], lq=r[1], z_hr=r[2], meta=r[3], stages=r[4])
                 for r in (_fut_result(f) for f in futs)
             ]
+            for f in futs:
+                inflight.pop(f, None)
         else:
             prepared = [_fut_result(f) for f in futs]
         n_produced += bs
@@ -1016,12 +1320,16 @@ def run_latent_flow(
         # P1 ④ on-fly: the hr crop feeds the consumer-side VAE encode.
         t_s0 = time.perf_counter()
         lq = torch.stack([p.lq for p in prepared])
+        # p.z_hr/p.hr are `Tensor | None` (the other mode's field), narrowed
+        # to Tensor by the store/onfly branch above.
         if store is not None:
-            z_hr = torch.stack([p.z_hr for p in prepared])
+            z_hr = torch.stack([cast(torch.Tensor, p.z_hr) for p in prepared])
         else:
             z_hr = None
         hr_b = (
-            None if store is not None else torch.stack([p.hr for p in prepared])
+            None
+            if store is not None
+            else torch.stack([cast(torch.Tensor, p.hr) for p in prepared])
         )
         stage_cum["stack"] += time.perf_counter() - t_s0
         t_h0 = time.perf_counter()
