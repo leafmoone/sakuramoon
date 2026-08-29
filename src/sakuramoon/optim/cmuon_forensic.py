@@ -96,6 +96,15 @@ class ForensicConfig:
     # >=100x difference and trips with wide margin. Per-step drift at or
     # below the tolerance is still RECORDED (ring field rank_drift) so the
     # run-level rank inconsistency can be quantified.
+    #
+    # Scope of the comparison: the SCALE statistics (rms/max of the five
+    # stages, and param rms/max) are compared relatively; probe dots are
+    # compared absolutely against the stage rms; the finite/has-grad flags
+    # are exact. The SUM columns (sign-sensitive aggregates of zero-centered
+    # outputs) are recorded but never tripped on: for near-zero-gradient
+    # specs their cross-rank noise is arbitrarily large RELATIVE with no
+    # scale damage (measured on F2@97101: ns_sum rel 347.9, ns_rms rel
+    # 0.0017, delta healthy).
     divergence_rel_tol: float = 1e-1
 
 
@@ -313,15 +322,18 @@ class ForensicMonitor:
             worst: dict[str, object] | None = None
             worst_rel = -1.0
             param_drift_max = 0.0
+            # param sum is a sign-sensitive aggregate (~0 expectation):
+            # compare only the scale columns, same rule as the fp rows
+            param_cmp_cols = [0, 2]  # rms, max
             for a in range(self._world):
                 for b in range(a + 1, self._world):
                     diff = (gathered[a] - gathered[b]).abs()
                     rel = diff / gathered[a].abs().clamp(min=1e-30)
                     param_drift_max = max(param_drift_max, float(rel.max().item()))
-                    bad = (rel > tol).nonzero().flatten().tolist()
+                    bad = (rel[:, param_cmp_cols] > tol).nonzero().flatten().tolist()
                     if bad:
-                        i = int(bad[0])
-                        stage_col = int(diff[i].argmax())
+                        i, mc = int(bad[0] // 2), int(bad[0] % 2)
+                        stage_col = param_cmp_cols[mc]
                         rel_diff = float(rel[i, stage_col])
                         cand: dict[str, object] = {
                             "stage": "param",
@@ -434,31 +446,46 @@ class ForensicMonitor:
         tol = self.fcfg.divergence_rel_tol
         rank_drift: float | None = None
         if self._world > 1:
-            value_cols = list(range(15))  # 5 stages x (rms, sum, max)
+            # COMPARED columns: the scale statistics (rms/max of the 5
+            # stages) plus the exact flag columns. The SUM columns are
+            # sign-sensitive aggregates of zero-centered NS outputs: for
+            # near-zero-gradient specs their expectation is ~0, so cross-rank
+            # hardware noise shows up there as arbitrarily large RELATIVE
+            # differences with no scale damage (measured on F2@97101:
+            # ns_sum rel 347.9 vs ns_rms rel 0.0017, applied delta healthy).
+            # Sum columns stay in the ring/dump for analysis; they are not
+            # tripped on.
+            cmp_cols = [0, 2, 3, 5, 6, 8, 9, 11, 12, 14]  # rms+max, 5 stages
             flag_cols = [_N_FP_COLS - 2, _N_FP_COLS - 1]  # finite, has-grad
+            all_value_cols = list(range(15))
             drift_max = 0.0
             for a in range(self._world):
                 for b in range(a + 1, self._world):
                     d = (gathered[a] - gathered[b]).abs()
                     rel = d / gathered[a].abs().clamp(min=1e-30)
-                    # value columns: flag only above the hardware
-                    # nondeterminism floor (tol); the flag columns are exact
-                    # integers: any absolute diff = divergence
+                    # per-step cross-rank drift (ALL value cols, recorded
+                    # even below tol: this is the rank-inconsistency trace)
+                    drift_max = max(
+                        drift_max,
+                        float(rel[:, all_value_cols].max().item()),
+                    )
+                    # flag only above the hardware nondeterminism floor (tol);
+                    # the flag columns are exact integers: any diff = divergence
                     mask = torch.cat(
                         [
-                            rel[:, value_cols] > tol,
+                            rel[:, cmp_cols] > tol,
                             d[:, flag_cols] > 0.0,
                         ],
                         dim=1,
                     )
-                    # per-step cross-rank drift (recorded even below tol)
-                    drift_max = max(
-                        drift_max,
-                        float(rel.max().item()),
-                    )
                     bad = mask.nonzero()
                     if bad.numel() > 0:
-                        i, c = int(bad[0, 0]), int(bad[0, 1])
+                        i, mc = int(bad[0, 0]), int(bad[0, 1])
+                        c = (
+                            cmp_cols[mc]
+                            if mc < len(cmp_cols)
+                            else _N_FP_COLS - 2 + (mc - len(cmp_cols))
+                        )
                         divergence = {
                             "stage": _FP_COL_STAGES[c],
                             "spec": i,
@@ -474,13 +501,25 @@ class ForensicMonitor:
                         break
                 if divergence:
                     break
-            # probe comparison (the dots run through the same nondeterministic
-            # reductions, so the relative tolerance applies too)
+            # probe comparison: ABSOLUTE tolerance against the data scale. A
+            # unit-probe dot of a zero-centered tensor is O(rms) and can be
+            # near zero, so the cross-rank difference is judged against the
+            # stage rms (max over ranks), not against the dot value itself.
             if divergence is None:
+                stage_fp_cols = [0, 3, 9, 12]  # grad/momentum/ns/delta rms
+                scale = torch.zeros(
+                    len(self._probe_specs), len(stage_fp_cols), device=self.device
+                )
+                for p, (pi, _fqn) in enumerate(self._probe_specs):
+                    for s, c in enumerate(stage_fp_cols):
+                        scale[p, s] = max(
+                            (float(gathered[r][pi, c]) for r in range(self._world)),
+                            default=0.0,
+                        )
                 for a in range(self._world):
                     for b in range(a + 1, self._world):
                         pd = (probe_gathered[a] - probe_gathered[b]).abs()
-                        proll = pd / probe_gathered[a].abs().clamp(min=1e-30)
+                        proll = pd[:, : len(stage_fp_cols)] / scale.clamp(min=1e-30)
                         drift_max = max(drift_max, float(proll.max().item()))
                         bad = (proll > tol).nonzero()
                         if bad.numel() > 0:
@@ -492,9 +531,8 @@ class ForensicMonitor:
                                 "role": self._role[self._probe_specs[p][0]],
                                 "col": "probe_dot",
                                 "abs_diff": float(pd[p, s].item()),
-                                "rel_diff": float(
-                                    (pd[p, s] / probe_gathered[a][p, s].abs().clamp(min=1e-30)).item()
-                                ),
+                                "rel_diff": float(proll[p, s].item()),
+                                "scale": float(scale[p, s].item()),
                                 "ranks": [a, b],
                                 "probe": True,
                             }
