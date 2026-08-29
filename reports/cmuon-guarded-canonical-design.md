@@ -147,30 +147,48 @@ inactive:  ref_t = ref_{t-1}                 # 不衰减到 0
 per-(FQN, chunk) FP32 标量，随 checkpoint 保存（§10）；141 spec 合计
 < 240 个标量。
 
-### 5.4 数值（P3 校准后填入）
+### 5.4 数值（P3 校准完成，2026-08-30，salt1 100 shadow updates）
 
-来源：salt1 校准 JSONL（≤100 update，per-(FQN, chunk) nesterov_rms 时序）。
-分析规则（analyze_guard_calibration.py 实现，必须与本文一致）：
+来源：salt1 校准 JSONL（100 update × 166 NS 输入，per-(FQN, chunk)
+nesterov_rms/nesterov_fro 时序；cross-rank max_spread=0.0 全窗验证）。
 
-1. **谷底 T**：对每 spec 的 p50 排序，取相邻 p50 比值最大且 ≥10 的谷
-   （lo, hi）；要求 lo_p50 ≤ 2e-7 且 hi_p50 ≥ 1e-6（对应取证单步截面：
-   近零 ≤6.5e-8 / active ≥1.7e-6 / 谷 1e-7–2e-7）；T = √(lo·hi)。
-   不满足 → INCONCLUSIVE。
-2. **ref_i 语义 = 该输入 ACTIVE 时的典型尺度**（不是自身 pooled p99：
-   稳定近零的输入会自参照近零尺度、永不触发 skip）。
-   `ref_i = median( sig_i,t : sig_i,t ≥ T )`（校准窗内 active 样本的中位数）；
-   窗内无 active 样本 → 回退同 (role, shape) 类的 active 样本中位数
-   （§14 的类回退），再无 → 该 spec 标记需人工复核。
-3. **guard_ratio 选取**：对候选比值 r ∈ {0.01,0.02,0.05,0.1,0.15,0.2,
-   0.3,0.5} 在全窗口 (input, update) 对上实测
-   false_skip = P(skip | active)、elimination = P(skip | near-zero)；
-   取 **false_skip == 0 的最大 r**（若存在），报告该 r 的 elimination。
-   若所有 r 的 false_skip > 0 → INCONCLUSIVE（类在 active 尺度相对意义
-   上重叠）。
-4. `min_reference` = min_i(ref_i)（构造夹底）；
-   `numerical_floor` 候选 = 最小 fro/2（仅数值地板，非主判据）。
-5. `warmup_observations` 候选 = 50（transition bootstrap，非 LR warmup），
-   报告 ref 收敛速度后确认。
+**校准发现（规则修正）**：5.4 原第 1 条「per-spec p50 谷底 ≥10」规则
+被数据否证——166 个输入中 46 个是间歇类（40–72% 的 update 处于近零
+尺度），其 p50 被拖入近零带，谷底被填满（最大 p50 相邻比仅 2.96；全池
+分布无空带，1e-9.5–1e-5.25 连续）。正确的分离尺度是
+**per-(input, update)**：逐输入检验，对分析阈值 T ∈ [1e-8, 2e-7]
+**全部**零 per-input 重叠（每个 mixed 输入自身双峰干净分离）。规格门
+「no clean separation → INCONCLUSIVE」判定为**分离存在**（per-input
+层级），采用如下修正规则（analyze_guard_calibration_v3.py 实现）：
+
+1. **T 选取**（T 只是分析量，不进运行时判据）：取干净范围
+   （零 per-input 重叠的 T 集合）内**高于 never-active 类最大值
+   （2.812e-8）的最低网格点** = 3e-8。理由：T 必须高于 20 个
+   never-active 输入（100 窗内从未离开噪声底 1e-9–3e-9）的全部观测，
+   否则它们自参照噪声尺度得到近零 ref（T≤2.7e-8 时 min_ref=3.2e-9，
+   判据失效）；T=3e-8 同时是干净范围内 elimination 最大的点。
+2. **ref_i 语义**（不变）= 该输入 ACTIVE 时的典型尺度：
+   `ref_i = median( sig_i,t : sig_i,t ≥ T )`；窗内无 ≥T 观测的
+   20 个 never-active 输入 → 回退同 (role, shape) 类 active 样本
+   中位数（§14 类回退；146/166 直接用自身 active 中位数）。
+3. **guard_ratio 选取**（不变）：r ∈ {0.01,…,0.5} 全窗 (input, update)
+   实测；取 false_skip == 0 的最大 r。结果 **r = 0.1**
+   （0/14040 active 对误跳；r=0.15 时 14 对误跳即 >0）。
+   elimination = 38.75%（992/2560 近零对）；其中 never-active 类
+   （取证灾难类）2000/2000 = **100% 消除**；未消除的近零对全部位于
+   mixed 输入 1e-8–3e-8 带（该尺度取证放大因子 ×4e4 量级，低于
+   灾难截面 ×2e5）。
+4. **min_reference = 3.096e-08**（ref 表最小值，构造夹底，防 inactive
+   streak 衰减归零）；**numerical_floor = 6.575e-07** =
+   校准最小 fro（1.315e-6）/2 —— 低于全部观测，是安全阀而非活跃
+   约束（与 512-token 上限同一哲学）。
+5. `warmup_observations = 50`（transition bootstrap，非 LR warmup）。
+   `reference_decay = 0.999`。
+
+**部署值（S1 toml [optimizer.cmuon_guard]）**：enabled=true，
+guard_ratio=0.1，reference_decay=0.999，min_reference=3.096e-08，
+numerical_floor=6.575e-07，warmup_observations=50，invariant_check=true，
+references=166 条（fqn#chunk{i} → ref）。
 
 ## 6. 写前安全检查（fail closed，无 clamp）
 

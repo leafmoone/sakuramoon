@@ -1,4 +1,4 @@
-# GUARDED CANONICAL CMuon v1 — S1 SAFETY RUN (200 successful updates, 2xHCU).
+# GUARDED CANONICAL CMuon v1 鈥?S1 SAFETY RUN (200 successful updates, 2xHCU).
 #
 # The NEW candidate (hybrid_cmuon_guarded_canonical): canonical owner-rank
 # NS4 + guarded low-signal skip + two-phase atomic commit + per-step
@@ -38,20 +38,202 @@ enabled = false
 log_every_n = 100
 roles = []
 
-# P3 shadow-calibration values (fill from guard_calibration_analysis.json).
-# guard_ratio / reference_decay / min_reference / numerical_floor /
-# warmup_observations come from the calibration valley analysis; the
-# references table is the per-(FQN,chunk) bootstrap reference
-# (median of the input's ACTIVE calibration signals, class fallback).
+# P3 shadow-calibration values (salt1, 100 shadow updates from ckpt_97100,
+# 2026-08-30; artifact: reports P3 JSONL + guard_calibration_analysis_v3).
+# Calibration finding: the per-input p50-valley rule (design 5.4 as
+# written) false-negatives on the intermittent class (46/166 inputs are
+# near-zero on 40-72% of updates), but per-(input,update) separation is
+# clean (zero per-input overlap for every analysis threshold in
+# [1e-8, 2e-7]). Chosen analysis threshold T=3e-8: the lowest one above
+# the never-active class max (2.812e-8), so all 20 never-active inputs
+# bootstrap from the (role, shape) class active median, and it
+# maximizes elimination within the clean range.
+#   guard_ratio = 0.1: largest sweep ratio with false_skip_rate == 0
+#     over all 14040 active (input, update) pairs (0.15 already skips 14).
+#   elimination = 38.75% of the 2560 near-zero pairs; 100% of the 2000
+#     never-active (forensic-class) pairs are eliminated.
+#   numerical_floor = min_calibration_fro / 2 = 6.575e-7: below every
+#     observed Frobenius (min 1.315e-6) -- a safety valve, not an active
+#     constraint (same philosophy as the 512-token cap).
 [optimizer.cmuon_guard]
 enabled = true
-guard_ratio = 0.0            # P3: pending calibration
+guard_ratio = 0.1
 reference_decay = 0.999
-min_reference = 1e-20
-numerical_floor = 1e-20
+min_reference = 3.096e-08
+numerical_floor = 6.575e-07
 warmup_observations = 50
 invariant_check = true
 
 # Per-(FQN,chunk) bootstrap references: "fqn#chunk{i}" = value.
-# P3: filled from the calibration artifact (~141*chunk entries).
+# Filled from the P3 calibration artifact (166 NS inputs).
 [optimizer.cmuon_guard.references]
+
+# P3 calibration artifact (salt1, 100 shadow updates from ckpt_97100, 2026-08-30): per-(FQN,chunk) bootstrap reference =
+# median of the input's calibration signals at/above the analysis threshold T=3e-8;
+# 20 never-active inputs use the same (role, shape) class active median (design 14 fallback).
+"dit.blocks.slot_00.attention.content_gate.weight#chunk0" = 3.422218242e-08
+"dit.blocks.slot_00.attention.k_proj.weight#chunk0" = 4.233887196e-08
+"dit.blocks.slot_00.attention.out_proj.weight#chunk0" = 6.648182875e-07
+"dit.blocks.slot_00.attention.q_proj.weight#chunk0" = 7.045753847e-08
+"dit.blocks.slot_00.attention.v_proj.weight#chunk0" = 9.832111800e-07
+"dit.blocks.slot_00.mlp.down_proj.weight#chunk0" = 7.094460841e-08
+"dit.blocks.slot_00.mlp.in_proj.weight#chunk0" = 3.435863150e-08
+"dit.blocks.slot_00.mlp.in_proj.weight#chunk1" = 3.551961569e-08
+"dit.blocks.slot_01.attention.content_gate.weight#chunk0" = 8.909671578e-08
+"dit.blocks.slot_01.attention.k_proj.weight#chunk0" = 8.070811930e-08
+"dit.blocks.slot_01.attention.out_proj.weight#chunk0" = 1.058805239e-07
+"dit.blocks.slot_01.attention.q_proj.weight#chunk0" = 4.381340091e-08
+"dit.blocks.slot_01.attention.v_proj.weight#chunk0" = 1.584433562e-06
+"dit.blocks.slot_01.mlp.down_proj.weight#chunk0" = 4.969124845e-08
+"dit.blocks.slot_01.mlp.in_proj.weight#chunk0" = 4.150732025e-08
+"dit.blocks.slot_01.mlp.in_proj.weight#chunk1" = 4.273339727e-08
+"dit.blocks.slot_02.attention.content_gate.weight#chunk0" = 5.842981565e-08
+"dit.blocks.slot_02.attention.k_proj.weight#chunk0" = 1.204379174e-07
+"dit.blocks.slot_02.attention.out_proj.weight#chunk0" = 1.358821464e-07
+"dit.blocks.slot_02.attention.q_proj.weight#chunk0" = 7.045753847e-08
+"dit.blocks.slot_02.attention.v_proj.weight#chunk0" = 8.050841984e-07
+"dit.blocks.slot_02.mlp.down_proj.weight#chunk0" = 6.610758874e-08
+"dit.blocks.slot_02.mlp.in_proj.weight#chunk0" = 5.216658749e-08
+"dit.blocks.slot_02.mlp.in_proj.weight#chunk1" = 5.216658749e-08
+"dit.blocks.slot_03.attention.content_gate.weight#chunk0" = 7.248745248e-08
+"dit.blocks.slot_03.attention.k_proj.weight#chunk0" = 1.427254688e-07
+"dit.blocks.slot_03.attention.out_proj.weight#chunk0" = 9.850938198e-08
+"dit.blocks.slot_03.attention.q_proj.weight#chunk0" = 6.227535465e-08
+"dit.blocks.slot_03.attention.v_proj.weight#chunk0" = 1.713477900e-06
+"dit.blocks.slot_03.mlp.down_proj.weight#chunk0" = 4.960714506e-08
+"dit.blocks.slot_03.mlp.in_proj.weight#chunk0" = 3.921817537e-08
+"dit.blocks.slot_03.mlp.in_proj.weight#chunk1" = 4.043107538e-08
+"dit.blocks.slot_04.attention.content_gate.weight#chunk0" = 8.238011162e-08
+"dit.blocks.slot_04.attention.k_proj.weight#chunk0" = 1.058514556e-07
+"dit.blocks.slot_04.attention.out_proj.weight#chunk0" = 1.391614575e-07
+"dit.blocks.slot_04.attention.q_proj.weight#chunk0" = 5.634148792e-08
+"dit.blocks.slot_04.attention.v_proj.weight#chunk0" = 2.927376727e-06
+"dit.blocks.slot_04.mlp.down_proj.weight#chunk0" = 5.740836428e-08
+"dit.blocks.slot_04.mlp.in_proj.weight#chunk0" = 4.164562029e-08
+"dit.blocks.slot_04.mlp.in_proj.weight#chunk1" = 4.295517186e-08
+"dit.blocks.slot_06.attention.content_gate.weight#chunk0" = 5.639950729e-08
+"dit.blocks.slot_06.attention.k_proj.weight#chunk0" = 1.077530527e-07
+"dit.blocks.slot_06.attention.out_proj.weight#chunk0" = 1.291947456e-07
+"dit.blocks.slot_06.attention.q_proj.weight#chunk0" = 6.706498112e-08
+"dit.blocks.slot_06.attention.v_proj.weight#chunk0" = 1.213372684e-06
+"dit.blocks.slot_06.mlp.down_proj.weight#chunk0" = 5.927616442e-08
+"dit.blocks.slot_06.mlp.in_proj.weight#chunk0" = 4.460662950e-08
+"dit.blocks.slot_06.mlp.in_proj.weight#chunk1" = 4.772460116e-08
+"dit.blocks.slot_07.attention.content_gate.weight#chunk0" = 4.911061069e-08
+"dit.blocks.slot_07.attention.k_proj.weight#chunk0" = 1.152171976e-07
+"dit.blocks.slot_07.attention.out_proj.weight#chunk0" = 1.209015466e-07
+"dit.blocks.slot_07.attention.q_proj.weight#chunk0" = 7.150147496e-08
+"dit.blocks.slot_07.attention.v_proj.weight#chunk0" = 9.504307741e-07
+"dit.blocks.slot_07.mlp.down_proj.weight#chunk0" = 6.163278954e-08
+"dit.blocks.slot_07.mlp.in_proj.weight#chunk0" = 4.641102436e-08
+"dit.blocks.slot_07.mlp.in_proj.weight#chunk1" = 5.013291826e-08
+"dit.blocks.slot_08.attention.content_gate.weight#chunk0" = 5.842981565e-08
+"dit.blocks.slot_08.attention.k_proj.weight#chunk0" = 1.204379174e-07
+"dit.blocks.slot_08.attention.out_proj.weight#chunk0" = 1.358821464e-07
+"dit.blocks.slot_08.attention.q_proj.weight#chunk0" = 7.045753847e-08
+"dit.blocks.slot_08.attention.v_proj.weight#chunk0" = 1.627380755e-07
+"dit.blocks.slot_08.mlp.down_proj.weight#chunk0" = 6.610758874e-08
+"dit.blocks.slot_08.mlp.in_proj.weight#chunk0" = 5.216658749e-08
+"dit.blocks.slot_08.mlp.in_proj.weight#chunk1" = 5.216658749e-08
+"dit.blocks.slot_09.attention.content_gate.weight#chunk0" = 5.262138814e-08
+"dit.blocks.slot_09.attention.k_proj.weight#chunk0" = 1.072122160e-07
+"dit.blocks.slot_09.attention.out_proj.weight#chunk0" = 1.122975206e-07
+"dit.blocks.slot_09.attention.q_proj.weight#chunk0" = 5.726329277e-08
+"dit.blocks.slot_09.attention.v_proj.weight#chunk0" = 8.128478157e-07
+"dit.blocks.slot_09.mlp.down_proj.weight#chunk0" = 6.640592431e-08
+"dit.blocks.slot_09.mlp.in_proj.weight#chunk0" = 5.107370882e-08
+"dit.blocks.slot_09.mlp.in_proj.weight#chunk1" = 5.464125863e-08
+"dit.blocks.slot_10.attention.content_gate.weight#chunk0" = 5.232894296e-08
+"dit.blocks.slot_10.attention.k_proj.weight#chunk0" = 1.575642870e-07
+"dit.blocks.slot_10.attention.out_proj.weight#chunk0" = 1.366231999e-07
+"dit.blocks.slot_10.attention.q_proj.weight#chunk0" = 8.484551017e-08
+"dit.blocks.slot_10.attention.v_proj.weight#chunk0" = 6.854086223e-07
+"dit.blocks.slot_10.mlp.down_proj.weight#chunk0" = 7.258152124e-08
+"dit.blocks.slot_10.mlp.in_proj.weight#chunk0" = 5.887606846e-08
+"dit.blocks.slot_10.mlp.in_proj.weight#chunk1" = 6.483299586e-08
+"dit.blocks.slot_12.attention.content_gate.weight#chunk0" = 5.299357753e-08
+"dit.blocks.slot_12.attention.k_proj.weight#chunk0" = 1.380511350e-07
+"dit.blocks.slot_12.attention.out_proj.weight#chunk0" = 1.378071204e-07
+"dit.blocks.slot_12.attention.q_proj.weight#chunk0" = 7.683492953e-08
+"dit.blocks.slot_12.attention.v_proj.weight#chunk0" = 7.943899050e-07
+"dit.blocks.slot_12.mlp.down_proj.weight#chunk0" = 7.297009574e-08
+"dit.blocks.slot_12.mlp.in_proj.weight#chunk0" = 6.213455350e-08
+"dit.blocks.slot_12.mlp.in_proj.weight#chunk1" = 6.829614563e-08
+"dit.blocks.slot_13.attention.content_gate.weight#chunk0" = 5.249960466e-08
+"dit.blocks.slot_13.attention.k_proj.weight#chunk0" = 1.671812271e-07
+"dit.blocks.slot_13.attention.out_proj.weight#chunk0" = 1.465600548e-07
+"dit.blocks.slot_13.attention.q_proj.weight#chunk0" = 7.271811597e-08
+"dit.blocks.slot_13.attention.v_proj.weight#chunk0" = 8.442617059e-07
+"dit.blocks.slot_13.mlp.down_proj.weight#chunk0" = 8.142726671e-08
+"dit.blocks.slot_13.mlp.in_proj.weight#chunk0" = 6.720394197e-08
+"dit.blocks.slot_13.mlp.in_proj.weight#chunk1" = 7.387740908e-08
+"dit.blocks.slot_14.attention.content_gate.weight#chunk0" = 5.842981565e-08
+"dit.blocks.slot_14.attention.k_proj.weight#chunk0" = 4.372142115e-08
+"dit.blocks.slot_14.attention.out_proj.weight#chunk0" = 1.358821464e-07
+"dit.blocks.slot_14.attention.q_proj.weight#chunk0" = 7.045753847e-08
+"dit.blocks.slot_14.attention.v_proj.weight#chunk0" = 3.519980112e-07
+"dit.blocks.slot_14.mlp.down_proj.weight#chunk0" = 3.705918061e-08
+"dit.blocks.slot_14.mlp.in_proj.weight#chunk0" = 3.298648821e-08
+"dit.blocks.slot_14.mlp.in_proj.weight#chunk1" = 3.095637169e-08
+"dit.blocks.slot_15.attention.content_gate.weight#chunk0" = 7.068196339e-08
+"dit.blocks.slot_15.attention.k_proj.weight#chunk0" = 1.784780181e-07
+"dit.blocks.slot_15.attention.out_proj.weight#chunk0" = 1.856744944e-07
+"dit.blocks.slot_15.attention.q_proj.weight#chunk0" = 9.530014466e-08
+"dit.blocks.slot_15.attention.v_proj.weight#chunk0" = 6.297454433e-07
+"dit.blocks.slot_15.mlp.down_proj.weight#chunk0" = 8.723280587e-08
+"dit.blocks.slot_15.mlp.in_proj.weight#chunk0" = 6.890299176e-08
+"dit.blocks.slot_15.mlp.in_proj.weight#chunk1" = 7.903017973e-08
+"dit.blocks.slot_16.attention.content_gate.weight#chunk0" = 6.037434730e-08
+"dit.blocks.slot_16.attention.k_proj.weight#chunk0" = 1.947011583e-07
+"dit.blocks.slot_16.attention.out_proj.weight#chunk0" = 1.626647048e-07
+"dit.blocks.slot_16.attention.q_proj.weight#chunk0" = 8.403106477e-08
+"dit.blocks.slot_16.attention.v_proj.weight#chunk0" = 7.259562835e-07
+"dit.blocks.slot_16.mlp.down_proj.weight#chunk0" = 8.891294812e-08
+"dit.blocks.slot_16.mlp.in_proj.weight#chunk0" = 6.937431607e-08
+"dit.blocks.slot_16.mlp.in_proj.weight#chunk1" = 8.478889413e-08
+"dit.blocks.slot_18.attention.content_gate.weight#chunk0" = 8.951634101e-08
+"dit.blocks.slot_18.attention.k_proj.weight#chunk0" = 1.905427496e-07
+"dit.blocks.slot_18.attention.out_proj.weight#chunk0" = 1.903274978e-07
+"dit.blocks.slot_18.attention.q_proj.weight#chunk0" = 8.824114417e-08
+"dit.blocks.slot_18.attention.v_proj.weight#chunk0" = 7.897100431e-07
+"dit.blocks.slot_18.mlp.down_proj.weight#chunk0" = 9.630070252e-08
+"dit.blocks.slot_18.mlp.in_proj.weight#chunk0" = 7.558262638e-08
+"dit.blocks.slot_18.mlp.in_proj.weight#chunk1" = 1.054200922e-07
+"dit.blocks.slot_19.attention.content_gate.weight#chunk0" = 1.026704126e-07
+"dit.blocks.slot_19.attention.k_proj.weight#chunk0" = 1.966144794e-07
+"dit.blocks.slot_19.attention.out_proj.weight#chunk0" = 2.020764214e-07
+"dit.blocks.slot_19.attention.q_proj.weight#chunk0" = 1.011469521e-07
+"dit.blocks.slot_19.attention.v_proj.weight#chunk0" = 1.092555294e-06
+"dit.blocks.slot_19.mlp.down_proj.weight#chunk0" = 1.158699519e-07
+"dit.blocks.slot_19.mlp.in_proj.weight#chunk0" = 8.760946457e-08
+"dit.blocks.slot_19.mlp.in_proj.weight#chunk1" = 1.325097259e-07
+"dit.blocks.slot_20.attention.content_gate.weight#chunk0" = 5.842981565e-08
+"dit.blocks.slot_20.attention.k_proj.weight#chunk0" = 7.181223083e-08
+"dit.blocks.slot_20.attention.out_proj.weight#chunk0" = 4.808932275e-08
+"dit.blocks.slot_20.attention.q_proj.weight#chunk0" = 3.535932791e-08
+"dit.blocks.slot_20.attention.v_proj.weight#chunk0" = 4.677773688e-07
+"dit.blocks.slot_20.mlp.down_proj.weight#chunk0" = 5.126091551e-08
+"dit.blocks.slot_20.mlp.in_proj.weight#chunk0" = 3.913880775e-08
+"dit.blocks.slot_20.mlp.in_proj.weight#chunk1" = 3.842642116e-08
+"dit.blocks.slot_21.attention.content_gate.weight#chunk0" = 1.250726598e-07
+"dit.blocks.slot_21.attention.k_proj.weight#chunk0" = 1.622130554e-07
+"dit.blocks.slot_21.attention.out_proj.weight#chunk0" = 3.158494337e-07
+"dit.blocks.slot_21.attention.q_proj.weight#chunk0" = 1.047785219e-07
+"dit.blocks.slot_21.attention.v_proj.weight#chunk0" = 9.844123952e-07
+"dit.blocks.slot_21.mlp.down_proj.weight#chunk0" = 1.387938653e-07
+"dit.blocks.slot_21.mlp.in_proj.weight#chunk0" = 9.009439594e-08
+"dit.blocks.slot_21.mlp.in_proj.weight#chunk1" = 1.539951171e-07
+"dit.blocks.slot_22.attention.content_gate.weight#chunk0" = 1.077088498e-07
+"dit.blocks.slot_22.attention.k_proj.weight#chunk0" = 1.902896543e-07
+"dit.blocks.slot_22.attention.out_proj.weight#chunk0" = 4.269509759e-07
+"dit.blocks.slot_22.attention.q_proj.weight#chunk0" = 7.357530052e-08
+"dit.blocks.slot_22.attention.v_proj.weight#chunk0" = 2.070331902e-06
+"dit.blocks.slot_22.mlp.down_proj.weight#chunk0" = 3.050722057e-07
+"dit.blocks.slot_22.mlp.in_proj.weight#chunk0" = 1.047422060e-07
+"dit.blocks.slot_22.mlp.in_proj.weight#chunk1" = 1.568334369e-07
+"dit.conditioner.shared_block_projection.weight#chunk0" = 2.965066415e-06
+"dit.conditioner.shared_block_projection.weight#chunk1" = 4.690371952e-06
+"dit.conditioner.shared_block_projection.weight#chunk2" = 2.214182587e-06
+"dit.conditioner.shared_block_projection.weight#chunk3" = 2.169872459e-06
+"dit.conditioner.shared_block_projection.weight#chunk4" = 3.483637101e-06
+"dit.conditioner.shared_block_projection.weight#chunk5" = 2.003455393e-06
