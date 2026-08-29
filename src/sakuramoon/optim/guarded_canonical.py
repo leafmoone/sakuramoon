@@ -341,7 +341,12 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                     ns = cmuon_zeroth_power(
                         chunk, prep.ns_steps, self.cfg.ns_coefficients, self.cfg.eps
                     )
-                    delta = (-prep.alphas[ci]) * ns
+                    # .contiguous(): tall chunks return from NS as a .T
+                    # view; staged deltas must have the identical layout on
+                    # every rank (owner: computed here, receiver: fresh
+                    # broadcast buffer) so the cross-rank fp32 fingerprint
+                    # reductions run in the same order and compare exact.
+                    delta = ((-prep.alphas[ci]) * ns).contiguous()
                     if not bool(torch.isfinite(delta).all()):
                         fail_flags[fi - 1] = _NONFINITE
                         continue
@@ -381,7 +386,12 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                 if owner == self.rank:
                     tensor = staged[idx]
                     assert tensor is not None
-                    dist.broadcast(tensor, src=owner)
+                    # Tall chunks come back from cmuon_zeroth_power as a
+                    # .T view (non-contiguous); broadcast requires
+                    # contiguous storage. .contiguous() is a no-op copy
+                    # when already contiguous; broadcast does not modify
+                    # the sender, so staged[idx] keeps the same values.
+                    dist.broadcast(tensor.contiguous(), src=owner)
                 else:
                     buf = torch.empty(shape, dtype=torch.bfloat16, device=device)
                     dist.broadcast(buf, src=owner)

@@ -196,7 +196,7 @@ def main() -> None:
                     g = torch.randn(
                         p.shape, generator=gen, dtype=torch.float32
                     ) * args.grad_rms
-                    p.grad = g.to(p.dtype)
+                    p.grad = g.to(device=p.device, dtype=p.dtype)
             t0 = time.monotonic()
             optimizer.step()
             torch.cuda.synchronize(device)
@@ -257,6 +257,11 @@ def main() -> None:
                     flush=True,
                 )
         report["steps"] = step_reports
+        report["checks_passed"] = True
+    except Exception as exc:
+        report["failure"] = f"{type(exc).__name__}: {exc}"
+        report["checks_passed"] = False
+        raise
     finally:
         # gather rank-1 report fields via a single pickle-free channel:
         # each rank writes its own json; the launcher merges.
@@ -264,16 +269,24 @@ def main() -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(report, indent=2))
         if rank == 0:
+            passed = report.get("checks_passed") is True
             merged = {
-                "status": "PASS",
+                "status": "PASS" if passed else "FAIL",
                 "criteria": {
                     "param_rank_diff": 0,
                     "momentum_rank_diff": 0,
                     "owner_map_rank_diff": 0,
-                },
+                }
+                if passed
+                else {},
+                "steps": report.get("steps", []),
+                "failure": report.get("failure"),
             }
             Path(args.out).write_text(json.dumps(merged, indent=2))
-            print(f"[p5] PASS report -> {args.out}", flush=True)
+            print(
+                f"[p5] {'PASS' if passed else 'FAIL'} report -> {args.out}",
+                flush=True,
+            )
         dist.destroy_process_group()
 
 
