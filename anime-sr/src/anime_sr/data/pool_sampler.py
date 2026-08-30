@@ -1,17 +1,18 @@
-"""P1 pool sampler (M4-prep work order, 2026-08-29): the train stream is a
-per-cycle deterministic permutation that MIXES the §10.4 pools
-(``priority``=core / ``regular`` / ``aux``) at the configured target
-fractions — instead of the legacy straight read of the index/store order.
+"""P1 pool sampler (M4-prep work order, 2026-08-29; M4-1024 semantics
+frozen 2026-08-31): a DIVERSITY-FIRST FULL-SET DETERMINISTIC PERMUTATION of
+the eligible samples — instead of the legacy straight read of the
+index/store order.
 
-Contract (all pure functions of the inputs — resume-safe, DDP-safe):
+Formal contract (all pure functions of the inputs — resume-safe, DDP-safe):
 
-* per cycle of ``n`` slots, each eligible sample appears EXACTLY once
-  (the cycle order is a permutation of the dataset indices);
-* pool block sizes start at the ``[sampling]`` config targets (normalized
-  over their sum); the ``aux`` share is hard-capped by
-  ``[filter] aux_max_fraction``; a pool smaller than its target caps the
-  achievable share (no repetition within a cycle), and the freed slots
-  flow to pools with spare members, priority first (core is the anchor);
+* per cycle of ``n`` slots, every eligible sample appears EXACTLY once
+  (the cycle order is a permutation of the dataset indices; no
+  oversampling, no downsampling, no repetition within a cycle);
+* the LONG-TERM pool composition therefore equals the data's NATURAL
+  composition (priority / regular / aux as labeled in the index).  For the
+  M4-1024 production set that is ~19 / 60 / 21 and is ACCEPTED as a data
+  statistic — M4-1024 does NOT force an 80/10/10 quota and does NOT
+  re-label the index to chase one;
 * blocks are permuted within themselves (seeded by pool + cycle), then the
   concatenated blocks get one final global permutation (seeded by cycle),
   so consecutive slots never straight-read one pool or the index order;
@@ -21,6 +22,15 @@ Contract (all pure functions of the inputs — resume-safe, DDP-safe):
   of global slots; a resume to the same slot reproduces the same sample
   from a FRESH map (no hidden state beyond the cycle cache, which is a
   pure function of the cycle).
+
+``[sampling] core/regular/aux_fraction`` and ``[filter]
+aux_max_fraction`` are LEGACY QUOTA KNOBS and are INACTIVE for M4-1024:
+``pool_counts`` always resolves to the natural pool membership (each pool's
+base allocation is ``min(members, floor(n*target))`` and the deficit
+redistribution exactly exhausts the spare members, since the pools
+partition the dataset) — so the emitted stream is bit-identical with any
+quota values.  They are kept for schema/back-compat only; do not read them
+as achieved shares.
 
 ``enabled = false`` (or no pool membership) degenerates to the legacy
 ``order[slot % n]`` read — bit-for-bit the old stream.
@@ -62,12 +72,13 @@ def pool_counts(
     The counts sum to exactly ``n`` and never exceed a pool's member count;
     each pool's base allocation is ``min(members, floor(n * target))``
     (targets normalized over their sum, aux additionally capped by
-    ``cfg.filter.aux_max_fraction``), and the remaining slots — the floor
-    rounding plus any pool smaller than its target — flow to pools with
-    spare members in the fixed order priority -> regular -> aux (core is
-    the anchor pool). Deterministic and total-preserving: every cycle is a
-    permutation of all n samples, so a pool smaller than its target simply
-    caps the achievable share (no repetition within a cycle)."""
+    ``cfg.filter.aux_max_fraction``), and the remaining slots flow to pools
+    with spare members in the fixed order priority -> regular -> aux.
+    Because the pools partition the dataset, the spare capacity exactly
+    equals the deficit: the result ALWAYS equals the natural pool
+    membership (the legacy target fractions are an inactive no-op — see the
+    module docstring). Deterministic and total-preserving: every cycle is a
+    permutation of all n samples (no repetition within a cycle)."""
     s = cfg.sampling
     total = s.core_fraction + s.regular_fraction + s.aux_fraction
     targets = {

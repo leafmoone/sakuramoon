@@ -9,7 +9,14 @@
 #   * full AnimeSRModel: 122.67M trunk + PixelConditionEncoder
 #   * z_hr on-the-fly (P1 ④), pixel features enabled
 #   * process producer (canary #6 verified), deterministic dynamic crop,
-#     deterministic pool sampler 80/10/10
+#     diversity-first full-set deterministic pool permutation
+#   * pool sampler QUOTA INACTIVE (08-31 M4 resolution;
+#     docs/m4-1024-launch-decision.md §1 "pool sampler" row): the
+#     train stream is a per-cycle permutation of ALL eligible samples;
+#     priority/regular/aux keep the data's NATURAL composition
+#     (~19/60/21 on the production set) — no 80/10/10 oversampling, no
+#     regular downsampling, no aux forced cap, no index re-labeling
+#     (the [sampling] fractions in data.toml are legacy no-op knobs)
 #   * EMA (half-life 500k GLOBAL exposures), ckpt v2 production default
 #   * first-stage budget: 6,000,000 exposures (pinned; 10M/16M is a
 #     separate explicit decision after the 6M end-judgement — never
@@ -79,10 +86,14 @@ zhr_source = "onfly"
 producer = "process"
 prefetch_depth = 4
 out_dir = "output_model/latent-flow-m4-1024"
-# Production v2 checkpoints at the MAJOR MILESTONES (global exposures):
-# 100k / 250k / 500k / 1M / 2M / 4M (+ run-end latest.pt at 6M).
-# save_every_steps = 0 disables the periodic save (milestones only).
-save_every_steps = 0
+# Production v2 checkpoints: every 250k GLOBAL exposures (08-31 resolution:
+# worst-case training loss <= 250k exposures on a 4.8-day run) PLUS the
+# major milestones 100k/250k/500k/1M/2M/4M (+ run-end latest.pt at 6M).
+# 250000 / global-batch-16 = 15625 steps; a step landing on BOTH a periodic
+# due and a milestone writes exactly ONE step-NNNNNNN.pt (single save_v2).
+# 24 periodic files x ~1.23 GiB ~= 30 GiB + milestones (already on-grid) —
+# fits the volume with large headroom (verified pre-launch).
+save_every_steps = 15625
 save_at_exposures = [100000, 250000, 500000, 1000000, 2000000, 4000000]
 # Held-out probes at 500k / 1M / 2M / 4M / 6M exposures (31,250 steps at
 # global batch 16; run end deduplicated) with l1_anchor/l1_1 live+EMA/

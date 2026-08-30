@@ -435,7 +435,10 @@ def test_m4_config_milestones_land_on_steps() -> None:
     assert lf.pixel_features is True
     assert lf.zhr_source == "onfly"
     assert lf.producer == "process"
-    assert lf.save_every_steps == 0  # periodic save off; milestones only
+    # 08-31 post-canary resolution: periodic save every 250k GLOBAL
+    # exposures (worst-case loss cap on the 4.8-day run) PLUS the milestones
+    assert lf.save_every_steps == 15_625
+    assert lf.save_every_steps * bs * world == 250_000
     assert lf.save_at_exposures == [100_000, 250_000, 500_000, 1_000_000, 2_000_000, 4_000_000]
     expected_steps = {100_000: 6_250, 250_000: 15_625, 500_000: 31_250,
                       1_000_000: 62_500, 2_000_000: 125_000, 4_000_000: 250_000}
@@ -445,6 +448,14 @@ def test_m4_config_milestones_land_on_steps() -> None:
         assert step == expected_steps[e]
         # the loop predicate: (step + 1) * bs * world lands EXACTLY on e
         assert (step) * bs * world == e
+        # milestones (except the 100k one) sit ON the periodic 250k grid,
+        # so a step due for both writes exactly one file (single save_v2)
+        if e != 100_000:
+            assert e % (lf.save_every_steps * bs * world) == 0
+    # effective production grid: 100k + every 250k up to 6M (24 periodic
+    # files; the 6M one co-locates with the run-end latest.pt)
+    periodic = [lf.save_every_steps * bs * world * k for k in range(1, 25)]
+    assert periodic[-1] == 6_000_000
     # held-out probe grid: 500k/1M/2M/4M/6M exposures
     assert lf.val_heldout_every_steps == 31_250
     assert 31_250 * bs * world == 500_000

@@ -397,14 +397,20 @@ class FilterSpec(_Frozen):
 
 
 class SamplingSpec(_Frozen):
-    """P1 pool sampler (M4-prep work order, 2026-08-29): target per-cycle
-    fractions of the §10.4 pools (``priority``=core / ``regular`` / ``aux``)
-    in the train stream. Config-driven — nothing hardcoded in the trainer.
+    """P1 pool sampler (M4-prep work order, 2026-08-29; M4-1024 semantics
+    frozen 2026-08-31): DIVERSITY-FIRST FULL-SET DETERMINISTIC PERMUTATION
+    of the eligible samples — every sample exactly once per cycle, so the
+    train stream's pool composition equals the data's NATURAL composition
+    (no 80/10/10 quota, no re-labeling; M4-1024 accepts ~19/60/21 as a
+    data statistic).
 
-    * the fractions are targets, normalized over their sum; the effective
-      ``aux`` share is additionally hard-capped by
-      ``[filter] aux_max_fraction`` (a pool smaller than its target has its
-      shortfall redistributed deterministically, core last);
+    * ``core/regular/aux_fraction`` + ``[filter] aux_max_fraction`` are
+      LEGACY QUOTA KNOBS, INACTIVE for M4-1024: the per-cycle allocation
+      always resolves to the natural pool membership (the deficit
+      redistribution exhausts the spare members because the pools
+      partition the dataset), so the emitted stream is bit-identical for
+      any quota values.  Kept for schema/back-compat only; do not read
+      them as achieved shares.
     * ``enabled = false`` restores the legacy stream (index / store order,
       straight read) bit-for-bit."""
 

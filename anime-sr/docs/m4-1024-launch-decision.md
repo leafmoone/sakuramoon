@@ -23,7 +23,9 @@ scheduler exists).
 | pixel features | enabled (trained path carried from Phase I-P) |
 | producer | process pool (pre-fork before NCCL, canary #6 verified) |
 | dynamic crop | enabled, deterministic (§11.5 exposure identity) |
-| pool sampler | enabled, 80/10/10 priority/regular/aux |
+| pool sampler | enabled — diversity-first FULL-SET deterministic permutation
+  (08-31 resolution: quota inactive, natural ~19/60/21 composition; the
+  80/10/10 target was never achievable under the full-set contract) |
 | clean score | `clean_score_min = -1.0` (report-only; the stale buggy
   `clean-score-v1.jsonl` is NOT reused — see §6) |
 | EMA | production `SampleEMA`, half-life 500k GLOBAL exposures |
@@ -76,30 +78,37 @@ cannot be confused.
 
 ## 4. Checkpoint & validation cadence (world = 2)
 
+**08-31 post-canary resolution**: the production v2 grid is the PERIODIC
+`save_every_steps = 15,625` (= every **250k GLOBAL exposures**) PLUS the 100k
+milestone. A step landing on both a periodic due and a milestone writes
+exactly ONE `step-NNNNNNN.pt` (single `save_v2` call). Rationale: cap the
+worst-case training loss on the 4.8-day run at 250k exposures. Volume:
+24 periodic + 1 milestone-only ≈ 25 files × ~1.23 GiB ≈ **31 GiB** on the
+output volume (fits with headroom — re-verify free space pre-launch).
+
 | global exposures | step | production v2 ckpt | held-out probe (live + EMA) |
 |---|---|---|---|
-| 100k | 6,250 | `step-0006250.pt` | |
-| 250k | 15,625 | `step-0015625.pt` | |
-| 500k | 31,250 | `step-0031250.pt` | ✔ |
-| 1M | 62,500 | `step-0062500.pt` | ✔ |
-| 1.5M | 93,750 | | ✔ |
-| 2M | 125,000 | `step-0125000.pt` | ✔ |
-| 2.5M | 156,250 | | ✔ |
-| 3M | 187,500 | | ✔ |
-| 3.5M | 218,750 | | ✔ |
-| 4M | 250,000 | `step-0250000.pt` | ✔ |
-| 4.5M | 281,250 | | ✔ |
-| 5M | 312,500 | | ✔ |
-| 5.5M | 343,750 | | ✔ |
-| 6M | 375,000 | `latest.pt` (final) | ✔ + 6M extras (RGB eval, seam probe, gradient coverage, EMA-vs-live, 1-step vs 4-step, stress set) |
+| 100k | 6,250 | `step-0006250.pt` (milestone only) | |
+| 250k | 15,625 | `step-0015625.pt` (periodic) | |
+| 500k | 31,250 | `step-0031250.pt` (periodic) | ✔ |
+| 1M | 62,500 | `step-0062500.pt` (periodic) | ✔ |
+| 1.5M | 93,750 | `step-0093750.pt` (periodic) | ✔ |
+| 2M | 125,000 | `step-0125000.pt` (periodic) | ✔ |
+| 2.5M | 156,250 | `step-0156250.pt` (periodic) | ✔ |
+| 3M | 187,500 | `step-0187500.pt` (periodic) | ✔ |
+| 3.5M | 218,750 | `step-0218750.pt` (periodic) | ✔ |
+| 4M | 250,000 | `step-0250000.pt` (periodic) | ✔ |
+| 4.5M | 281,250 | `step-0281250.pt` (periodic) | ✔ |
+| 5M | 312,500 | `step-0312500.pt` (periodic) | ✔ |
+| 5.5M | 343,750 | `step-0343750.pt` (periodic) | ✔ |
+| 6M | 375,000 | `step-0375000.pt` (periodic) + `latest.pt` (final) | ✔ + 6M extras (RGB eval, seam probe, gradient coverage, EMA-vs-live, 1-step vs 4-step, stress set) |
 
 Held-out cadence (2026-08-30 correction): `val_heldout_every_steps = 31,250`
 at global batch 16 = **one probe every 500k exposures**, i.e. **12 held-out
 nodes total: 0.5M / 1.0M / 1.5M / 2.0M / 2.5M / 3.0M / 3.5M / 4.0M / 4.5M /
 5.0M / 5.5M / 6.0M** (12 × 31,250 = 375,000 = run end, deduplicated). The
-production v2 ckpt grid (`save_at_exposures`) is the coarser 100k/250k/500k/
-1M/2M/4M set — the two grids are independent; do not read the ckpt grid as
-the probe grid.
+production v2 ckpt grid (periodic 250k + the 100k milestone) is independent
+of the probe grid — do not read the ckpt grid as the probe grid.
 
 Probes: `l1_anchor`, `l1_1` (live **and** EMA), `l1_4`, `ratio_4_1`,
 `toward_1`, `cos_v`, endpoint consistency, trajectory deviation, Pixel-path

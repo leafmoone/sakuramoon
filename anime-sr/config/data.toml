@@ -26,7 +26,9 @@ priority_classification = ["illustration", "bangumi", "comic"]
 # aux pool: danbooru completeness / classification fields (was tag heuristic)
 aux_completeness = ["monochrome", "rough"]
 aux_classification = ["3d"]
-# aux pool capped at 20% of the dataset
+# LEGACY quota knob — INACTIVE for M4-1024 (diversity-first full-set
+# permutation: the per-cycle allocation always resolves to the natural pool
+# membership, so this cap never binds; kept for schema back-compat).
 aux_max_fraction = 0.20
 # classifications hard-rejected (plan §10.4: not_painting)
 hard_classifications = ["not_painting"]
@@ -47,12 +49,16 @@ clean_score_min = -1.0
 clean_score_candidates = [0.5, 0.6, 0.7]
 
 [sampling]
-# P1 pool sampler (M4-prep 2026-08-29): per-cycle target shares of the §10.4
-# pools in the TRAIN stream. Targets only — a pool smaller than its target
-# has its shortfall redistributed (aux capped by [filter] aux_max_fraction
-# above). 80/10/10 default; 80/0/20 is equally valid — the config decides,
-# nothing is hardcoded. enabled=false restores the legacy straight-read
-# stream (index/store order) bit-for-bit.
+# P1 pool sampler (M4-prep 2026-08-29; M4-1024 semantics frozen 2026-08-31):
+# DIVERSITY-FIRST FULL-SET DETERMINISTIC PERMUTATION — every eligible sample
+# exactly once per cycle, so the train stream's pool composition equals the
+# data's NATURAL composition (for M4-1024 ~19/60/21; accepted as a data
+# statistic, no 80/10/10 quota, no index re-labeling). enabled=false
+# restores the legacy straight-read stream (index/store order) bit-for-bit.
+# NOTE: core/regular/aux_fraction below are LEGACY QUOTA KNOBS and are
+# INACTIVE for M4-1024 — the per-cycle allocation always resolves to the
+# natural pool membership, so these values do not change the emitted
+# stream (kept for schema back-compat; do not read as achieved shares).
 enabled = true
 core_fraction = 0.80
 regular_fraction = 0.10

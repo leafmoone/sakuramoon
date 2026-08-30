@@ -186,6 +186,29 @@ def latent_sample_index(
     return (step * (bs * world) + rank * bs + i) % n
 
 
+def flow_step_seed(global_seed: int, step: int, rank: int) -> int:
+    """Stateless per-rank flow-target seed (M4-final, P0): a stable blake2b
+    hash of (global_seed, step, rank) — deliberately NOT the Python
+    ``hash()`` builtin (not stable across processes / PYTHONHASHSEED).
+
+    The train flow draw inside :func:`build_flow_targets` (sigma mix,
+    uniform t, source noise) becomes a pure function of
+    (global_seed, step, rank):
+
+    * same (global_seed, step, rank) -> bit-identical sigma/t/epsilon;
+    * different rank -> independent flow noise streams (DDP);
+    * different step -> different flow noise;
+    * a crash-resume to the same (step, rank) reproduces the exact flow
+      target without any process-global RNG snapshot (the v2 ckpt keeps
+      the CPU/CUDA/numpy RNG sections for other random modules, but the
+      core flow target no longer depends on the rank-0 snapshot).
+    """
+    payload = f"flow|{global_seed}|{step}|{rank}".encode()
+    return int.from_bytes(
+        hashlib.blake2b(payload, digest_size=8).digest(), "little"
+    ) & 0x7FFF_FFFF_FFFF_FFFF
+
+
 def build_flow_targets(
     z_hr: torch.Tensor,
     z_lr: torch.Tensor,
@@ -1825,6 +1848,13 @@ def run_latent_flow(
             f"stack:{ms['stack']:.1f} h2d:{ms['H2D']:.1f}"
         )
 
+    # M4-final (P0): stateless per-rank flow-target generator.  It is
+    # re-seeded EVERY step from flow_step_seed(global_seed, step, rank);
+    # manual_seed is a full reseed, so the draw depends only on
+    # (global_seed, step, rank) — never on prior generator state — and a
+    # crash-resume to the same (step, rank) is bit-exact without the
+    # process-global RNG snapshot.
+    flow_gen = torch.Generator(device=str(device))
     for step in range(start_step, total):
         if depth > 0:
             futs = ready.popleft()
@@ -1911,7 +1941,13 @@ def run_latent_flow(
                 t_e0 = time.perf_counter()
                 z_hr = vae.encode(hr_b.to(dtype))
                 stage_cum["zhr_enc"] += time.perf_counter() - t_e0
-            rt, v_star, sigma, _t = build_flow_targets(z_hr, z_lr, cfg, device=device)
+            # M4-final (P0): stateless per-rank flow seed — pure function of
+            # (global_seed, step, rank); the dedicated generator is never
+            # mixed with the process-global RNG.
+            flow_gen.manual_seed(flow_step_seed(ds.global_seed, step, rank))
+            rt, v_star, sigma, _t = build_flow_targets(
+                z_hr, z_lr, cfg, generator=flow_gen, device=device
+            )
             if lf.pixel_features:
                 # Phase I-P: the pixel path consumes the degraded LQ directly
                 # (the full model computes the encoder features internally).

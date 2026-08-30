@@ -4,9 +4,13 @@ resume-safe pool-mixed train stream.
 Contract under test:
   * each cycle order is a permutation of ALL eligible samples (every
     sample exactly once per cycle);
-  * pool block sizes follow the [sampling] config targets (aux additionally
-    capped by [filter] aux_max_fraction); a pool smaller than its target
-    redistributes deterministically;
+  * pool allocation arithmetic: base = min(members, floor(n * target))
+    (aux additionally capped by [filter] aux_max_fraction), the deficit
+    flows priority -> regular -> aux; when the pools PARTITION the
+    dataset (the M4-1024 production case) this always resolves to the
+    NATURAL pool composition, so the legacy target fractions are an
+    inactive no-op there (08-31 M4 resolution) — the config still drives
+    the allocation in the non-partition synthetic cases below;
   * deterministic: same (pools, cycle, cfg) -> same order; different cycle
     -> different order; a fresh SlotMap after a "resume" reproduces the
     exact sample stream;
@@ -107,7 +111,9 @@ def test_small_pool_redistribution() -> None:
 
 
 def test_config_drives_composition() -> None:
-    """The config fractions decide the composition:
+    """The config fractions decide the composition in the NON-PARTITION
+    synthetic cases (pool sizes do not sum to n — never the production
+    case, where the result is the natural composition instead):
     * no pool saturation -> composition = the exact floor(n * target);
     * partially saturated core -> targets still respected for the pools
       that have room, and a different config changes the composition;

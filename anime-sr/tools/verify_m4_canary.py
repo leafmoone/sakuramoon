@@ -29,8 +29,13 @@ plus the 2026-08-30 final execution gates:
   6. dynamic crop           — same sample, different exposures ->
      different crop boxes; identical (cycle, exposure) reproduces the
      same box (deterministic §11.5 stream) — needs the data dirs;
-  7. sampling pool          — short-window pool shares ≈ 80/10/10
-     (config targets, aux capped) — needs the data dirs;
+  7. sampling pool          — diversity-first FULL-SET deterministic
+     permutation (08-31 M4 resolution): full-cycle coverage == N,
+     duplicate count == 0, deterministic across fresh SlotMaps, observed
+     pool composition == the eligible index's NATURAL composition (the
+     ~19/60/21 data statistic is accepted; the 80/10/10 quota is an
+     inactive no-op and NOT checked), rank global slots disjoint, final
+     permutation is not an index-order straight read — needs the data dirs;
   8. numerics               — loss/grad finite, Pixel path active, no
      NaN/Inf anywhere (log + checkpoints + train-meta.json);
   9. throughput gate        — S_canary from the stable log intervals
@@ -55,7 +60,8 @@ Usage (remote DTK env, PYTHONPATH=src of the pinned execution tree):
         --leg-b-log /root/private_data/anime-sr/logs/m4-canary-legB.log \
         --index-dir /root/private_data/anime-sr/data/index-p1formal \
         --webp-dir /root/private_data/anime-sr/data/webp \
-        --bucket-hr 1024
+        --bucket-hr 1024 \
+        --world-size 2
 
 Prints a JSON report (and ``--out`` when given). Exit code 0 iff every
 item is PASS or SKIP (a SKIP is only allowed for the data-probe items
@@ -85,6 +91,7 @@ from anime_sr.train.latent_flow import (
     _build_slot_map,
     _sha256_file,
     _train_crop_box,
+    latent_sample_index,
 )
 from anime_sr.train.pixel_baseline import _cosine_lr, _optimizer_for
 
@@ -96,7 +103,6 @@ DATA_WAIT_WARN = 15.0
 DATA_WAIT_STOP = 30.0
 STARVE_WARN = 10.0
 STARVE_STOP = 20.0
-POOL_TOLERANCE = 0.05  # shares vs config targets, absolute fraction
 #: Item 9: hard throughput gate = 90% of the Phase I-P anchor (0.787 step/s
 #: at 6.298 img/s/rank); the 6M horizon is 375,000 global steps.
 S_CANARY_GATE = 0.71
@@ -455,31 +461,98 @@ def check_crop(rep: Report, cfg: Config, index_dir: str, webp_dir: str, bucket_h
     rep.add("6_dynamic_crop", not problems, detail, "; ".join(problems))
 
 
-def check_pool(rep: Report, cfg: Config, index_dir: str, webp_dir: str, bucket_hr: int) -> None:
-    ds = _dataset(cfg, index_dir, webp_dir, bucket_hr)
-    order = list(range(len(ds.samples)))
-    slot_map = _build_slot_map(ds, cfg, order)
+def check_pool(
+    rep: Report,
+    cfg: Config,
+    index_dir: str,
+    webp_dir: str,
+    bucket_hr: int,
+    world: int = 2,
+) -> None:
+    """Item 7 (08-31 M4 resolution): the train stream is a DIVERSITY-FIRST
+    FULL-SET deterministic permutation of the eligible samples — every
+    sample exactly once per cycle, so the long-term pool composition equals
+    the data's NATURAL composition (a data statistic: reported and
+    accepted; the 80/10/10 quota fractions are an inactive no-op and are
+    NOT checked)."""
+    ds1 = _dataset(cfg, index_dir, webp_dir, bucket_hr)
+    ds2 = _dataset(cfg, index_dir, webp_dir, bucket_hr)  # fresh instance: determinism
+    order = list(range(len(ds1.samples)))
     n = len(order)
-    perm = [slot_map[i] for i in range(n)]
-    counts = {"priority": 0, "regular": 0, "aux": 0}
-    for j in perm:
-        pool = ds.samples[j].sampling_pool if ds.samples[j].sampling_pool in counts else "regular"
-        counts[pool] += 1
-    shares = {k: v / n for k, v in counts.items()}
-    targets = {
-        "priority": cfg.sampling.core_fraction,
-        "regular": cfg.sampling.regular_fraction,
-        "aux": min(cfg.sampling.aux_fraction, cfg.filter.aux_max_fraction),
+    slot_map1 = _build_slot_map(ds1, cfg, order)
+    slot_map2 = _build_slot_map(ds2, cfg, order)
+    perm1 = [slot_map1[i] for i in range(n)]
+    perm2 = [slot_map2[i] for i in range(n)]
+
+    def _composition(indices: list[int]) -> dict[str, int]:
+        c = {"priority": 0, "regular": 0, "aux": 0}
+        for j in indices:
+            pool = ds1.samples[j].sampling_pool
+            c[pool if pool in c else "regular"] += 1
+        return c
+
+    # 1+2. one cycle is an exact permutation of the index: full coverage,
+    # zero duplicates
+    coverage = sorted(perm1) == order
+    duplicates = n - len(set(perm1))
+    # 3. pure-function contract: fresh instances -> identical cycle order
+    deterministic = perm1 == perm2
+    # 4. observed stream composition == the eligible index's NATURAL
+    # composition (the ~19/60/21 data statistic is accepted, not targeted)
+    natural = _composition(order)
+    observed = _composition(perm1)
+    shares = {k: round(v / n, 4) for k, v in natural.items()}
+    # 5. DDP safety: rank r owns the global-slot block [r*bs, (r+1)*bs) of
+    # each step (latent_sample_index) — the blocks must stay disjoint
+    bs = cfg.latent_flow.batch_size
+    rank_slots = [
+        {latent_sample_index(0, r, i, bs, world, n) for i in range(bs)}
+        for r in range(world)
+    ]
+    disjoint = all(
+        not (rank_slots[a] & rank_slots[b])
+        for a in range(world)
+        for b in range(a + 1, world)
+    )
+    # 6. the final global mix is alive: neither the identity read nor a
+    # long contiguous index run
+    k = min(1024, n)
+    identity = perm1 == order
+    straight_run = all(perm1[i + 1] == perm1[i] + 1 for i in range(k - 1))
+
+    detail = {
+        "n": n,
+        "enabled": slot_map1.enabled,
+        "coverage_full_cycle": coverage,
+        "duplicates": duplicates,
+        "deterministic_across_instances": deterministic,
+        "natural_composition": natural,
+        "natural_shares": shares,
+        "observed_composition": observed,
+        "composition_matches_natural": observed == natural,
+        "bs": bs,
+        "world": world,
+        "rank_slots_disjoint": disjoint,
+        "identity_straight_read": identity,
+        "leading_contiguous_run": straight_run,
     }
-    detail = {"n": n, "enabled": slot_map.enabled, "counts": counts,
-              "shares": {k: round(v, 4) for k, v in shares.items()},
-              "targets": {k: float(v) for k, v in targets.items()}}
     problems = []
-    if not slot_map.enabled:
+    if not slot_map1.enabled:
         problems.append("pool sampler disabled for the canary run")
-    for k in counts:
-        if abs(shares[k] - targets[k]) > POOL_TOLERANCE:
-            problems.append(f"pool {k} share {shares[k]:.3f} vs target {targets[k]:.3f}")
+    if not coverage:
+        problems.append("cycle order does not cover the full index set")
+    if duplicates:
+        problems.append(f"{duplicates} duplicated slot(s) in the cycle permutation")
+    if not deterministic:
+        problems.append("cycle order differs across fresh dataset instances")
+    if observed != natural:
+        problems.append("observed stream composition != natural index composition")
+    if not disjoint:
+        problems.append(f"rank global slots collide (bs={bs}, world={world})")
+    if identity:
+        problems.append("cycle order is the index-order straight read (identity)")
+    elif straight_run:
+        problems.append(f"first {k} slots are a contiguous index run (final mix dead)")
     rep.add("7_pool_sampler", not problems, detail, "; ".join(problems))
 
 
@@ -695,6 +768,8 @@ def main() -> int:
     ap.add_argument("--index-dir", default=None, help="data index (enables crop/pool probes)")
     ap.add_argument("--webp-dir", default=None, help="webp data root (enables crop/pool probes)")
     ap.add_argument("--bucket-hr", type=int, default=1024)
+    ap.add_argument("--world-size", type=int, default=2,
+                    help="DDP world size for the rank-slot disjointness probe (item 7)")
     ap.add_argument("--out", default=None, help="write the JSON report here too")
     args = ap.parse_args()
 
@@ -722,7 +797,7 @@ def main() -> int:
     check_producer(rep, out_dir, logs)
     if args.index_dir and args.webp_dir:
         check_crop(rep, cfg, args.index_dir, args.webp_dir, args.bucket_hr)
-        check_pool(rep, cfg, args.index_dir, args.webp_dir, args.bucket_hr)
+        check_pool(rep, cfg, args.index_dir, args.webp_dir, args.bucket_hr, world=args.world_size)
     else:
         rep.add("6_dynamic_crop", None, {}, "data dirs not supplied (probe skipped)")
         rep.add("7_pool_sampler", None, {}, "data dirs not supplied (probe skipped)")
