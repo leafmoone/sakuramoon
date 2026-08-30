@@ -138,7 +138,7 @@ def _gauss2d(k: int = 11, sigma: float = 1.5) -> torch.Tensor:
 
 def ssim(x: torch.Tensor, y: torch.Tensor) -> float:
     """x, y: (1, 3, H, W) in [0, 1]. Returns mean SSIM over channels."""
-    win = _gauss2d().to(x.device)
+    win = _gauss2d().to(x.device).view(1, 1, 11, 11)
     c1, c2 = 0.01 ** 2, 0.03 ** 2
     out = []
     for i in range(x.shape[1]):
@@ -190,9 +190,12 @@ def _nms8(mag: np.ndarray, gx: np.ndarray, gy: np.ndarray) -> np.ndarray:
     m2 = mag[1 : h - 1, 1 : w - 1]
     # direction-aware NMS: keep pixel if mag >= both along-gradient neighbors
     ang = np.arctan2(gy[1 : h - 1, 1 : w - 1], gx[1 : h - 1, 1 : w - 1]) * 2  # /pi
-    idx = ((ang + 4) % 8).astype(np.int64)
-    a1 = np.take(neigh, idx, axis=0)[1 : h - 1, 1 : w - 1]
-    a2 = np.take(neigh, (idx + 4) % 8, axis=0)[1 : h - 1, 1 : w - 1]
+    idx = ((ang + 4) % 8).astype(np.int64)  # (h-2, w-2)
+    # per-pixel gather along axis 0 (a 2-D np.take here would materialize
+    # (h-2, w-2, h, w) — ~4 TiB at 1024²; index the interior pixels directly)
+    iy, ix = np.ogrid[1 : h - 1, 1 : w - 1]
+    a1 = neigh[idx, iy, ix]
+    a2 = neigh[(idx + 4) % 8, iy, ix]
     core = m2 >= a1
     core &= m2 >= a2
     out[1 : h - 1, 1 : w - 1] = np.where(core, m2, 0.0)
@@ -225,11 +228,17 @@ def edge_map(gray: np.ndarray, frac_hi: float = 0.5, frac_lo: float = 0.25) -> n
 
 
 def _dilate(a: np.ndarray, iters: int = 3) -> np.ndarray:
-    p = np.pad(a.astype(np.uint8), 1)
-    out = a.astype(np.uint8)
+    """3x3 OR dilation, `iters` iterations (each iteration grows the mask by
+    one pixel in every direction)."""
+    out = a.astype(np.uint8).copy()
+    h, w = out.shape
     for _ in range(iters):
-        out = out | p
         p = np.pad(out, 1)
+        acc = np.zeros((h, w), np.uint8)
+        for dy in (0, 1, 2):
+            for dx in (0, 1, 2):
+                acc |= p[dy : dy + h, dx : dx + w]
+        out = acc
     return out.astype(bool)
 
 
@@ -313,8 +322,8 @@ def flat_hf(gray: np.ndarray) -> tuple[float, float]:
     Returns (flat_fraction, mean HF in 0-255 units)."""
     h, w = gray.shape
     g = gray.astype(np.float32)
-    lap = np.abs(np.zeros_like(g))
-    lap[1 : h - 1, 1 : w - 1] = (
+    lap = np.zeros_like(g)
+    lap[1 : h - 1, 1 : w - 1] = np.abs(
         4 * g[1 : h - 1, 1 : w - 1]
         - g[:-2, 1 : w - 1]
         - g[2:, 1 : w - 1]
@@ -345,7 +354,7 @@ def compute_metrics(gt_u8: np.ndarray, methods: dict[str, np.ndarray]) -> dict:
     gt_e = edge_map(g)
     out = {}
     flat_frac, _flat_hf_gt = flat_hf(g)
-    hf = {m: flat_hf(gray01(m).astype(np.float32))[1] for m in methods}
+    hf = {m: flat_hf(gray01(methods[m]).astype(np.float32))[1] for m in methods}
     out["psnr_rgb"] = {m: psnr(a, gt_u8) for m, a in methods.items()}
     out["psnr_y"] = {m: psnr(a, gt_u8, gray=True) for m, a in methods.items()}
     out["ssim_rgb"] = {}

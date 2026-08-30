@@ -68,13 +68,20 @@ def snapshot_rng() -> dict:
 
 
 def restore_rng(rng: dict | None) -> None:
-    """Restore :func:`snapshot_rng` output (missing keys are skipped)."""
+    """Restore :func:`snapshot_rng` output (missing keys are skipped).
+
+    Device-safe: the resume path loads checkpoints with
+    ``map_location=<accelerator>`` (weights must land on-device), which moves
+    the stored CPU RNG state there too — but the CPU generator setter requires
+    a CPU ByteTensor (crash: "RNG state must be a torch.ByteTensor", M4
+    canary Leg B on HCU, 08-30).  Re-home each state to the device its setter
+    expects; ``set_rng_state_all`` wants CPU states (it moves them itself)."""
     if not rng:
         return
     if "cpu" in rng and rng["cpu"] is not None:
-        torch.set_rng_state(rng["cpu"].clone())
+        torch.set_rng_state(rng["cpu"].cpu().clone())
     if "cuda" in rng and rng["cuda"] is not None:
-        torch.cuda.set_rng_state_all([s.clone() for s in rng["cuda"]])
+        torch.cuda.set_rng_state_all([s.cpu().clone() for s in rng["cuda"]])
     if "numpy" in rng and rng["numpy"] is not None:
         np.random.set_state(rng["numpy"])
 

@@ -1564,6 +1564,7 @@ def run_latent_flow(
         if a is not None and b is not None:
             raise ValueError("--resume / --init-trunk / --stage-transition are mutually exclusive")
     trans_meta: dict | None = None
+    carried_transition: dict | None = None  # resume: inherited stage-transition provenance
     if init_trunk is not None:
         if not lf.pixel_features:
             raise ValueError(
@@ -1598,6 +1599,13 @@ def run_latent_flow(
             # (cpu/cuda/numpy) and cross-check the stored exposure cursor
             # against this run's config
             restore_rng(v2_meta["rng"])
+            # M4 canary (08-30): lineage continuity through same-stage
+            # resumes — carry the source ckpt's stage_transition block
+            # (e.g. the legacy-full->m4-v2 origin) into this run's
+            # checkpoints, so the FINAL ckpt still records where the stage
+            # began (verify item 1 checks the final provenance).
+            src_prov = v2_meta.get("provenance") or {}
+            carried_transition = src_prov.get("stage_transition")
             exp = v2_meta["exposure"] or {}
             stored_target = exp.get("exposure_target")
             if stored_target is not None and int(stored_target) != int(p1.exposure_target):
@@ -1672,6 +1680,10 @@ def run_latent_flow(
         )
         if trans_meta is not None:
             prov["stage_transition"] = trans_meta
+        elif carried_transition is not None:
+            # same-stage resume from a checkpoint that itself records the
+            # original stage transition: preserve the lineage chain
+            prov["stage_transition"] = carried_transition
         return prov
 
     # ------------------------------------------------------------------
