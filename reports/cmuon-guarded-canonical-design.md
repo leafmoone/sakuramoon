@@ -22,6 +22,34 @@ S2 未执行（协议）。候选**未退役**：架构（canonical NS + 两阶�
 pre-write ceiling）验证通过（P5 spread=0、P6 +0.13s/step），guard 门控需
 A′/B′ 修订后 S1-b 重验。
 
+**S1-b 判定（2026-08-31，A′+B′ @eae895c 后重验）：FAIL（第二张量）** ——
+2 rank 200u 预算下 15 个成功 update 后崩 @97116，违规张量
+`slot_07.attention.k_proj.weight#chunk0`（[640,2560]）：u_t_rms=7.6e-08、
+ref=1.135e-07（rank 105/166）、delta_rms=4.85e-04=1.55×ceiling。
+**A′ 验证有效**（slot_08 q_proj sig 5.0e-09 已低于 floor，不再违规），但
+**危险队列延伸到 min_reference 之上**：k_proj 的 sig 在三条阈值线之上
+（按设计判 ACTIVE），NS4 仍落灾难分支。
+
+**量化结论（refs 分布分析，166 个 P3 校准 ref）**：ref 值连续分布
+3.10e-08…4.69e-06（1e-8 档 93 个 / 1e-7 档 61 个 / 1e-6 档 12 个），**无
+双峰间隙**；两个危险张量 ref rank 63/166 与 105/166，其邻域（rank 104-110：
+slot_09 out_proj、slot_19 mlp、slot_02 k_proj、**slot_08 k_proj、slot_07
+out_proj**）密集无间隙——slot_07/08 是结构性弱队列（与原 forensic 的
+slot_08 病理解一致）。要覆盖危险队列需 floor≈1.2-1.35e-07 ⇒ **skip 64-70%**，
+超过 §14.4 的 50%「guard 过紧」线。实证危险率 ≈ 1 次灾难/15 updates ⇒
+**v1 幅度 guard 在「skip≤50% + 200u 零灾难」双约束下不存在可行阈值**（P(200u
+clean)≈0）。危险在幅度上**集中**于低档（~3400 input-steps 中高档零事件），
+但低档本身占输入的大多数。
+
+**含义**：v1 guard（幅度判别）的设计边界已被实证——它能「减少」灾难频率
+（A′ 消掉了最坏的 q_proj），但**不能消除**本数据 regime 下 ~70% 输入所在的
+结构性危险类；ceiling+fail-closed 最后一道线持续按设计工作（零损坏、干净
+停机）。修复需换判别维度：**结构判别器（D1，v2）**——按 forensic 机制
+（rank-1 主导+薄尾 = NS4 边界混沌类）用归一化输入的 top-1 奇异能量
+（power iteration，~10ms/step）做类判别，离线 shadow run 校准阈值；或
+**band floor（D3，v1 停权）** floor≈1.2-1.35e-07 接受 64-70% skip 先跑通
+S1-c 验证架构端到端；或 **FAIL 结案（D4）** 另起 v2 开发轮。待用户拍板。
+
 
 本文件是"新候选"开发轮的设计定稿。guard 数值（ratio / reference_decay /
 min_reference / numerical_floor / warmup）由 P3 shadow-gradient 校准
@@ -390,21 +418,37 @@ PHASE2 全 PASS 才 AdamW step + apply deltas + momentum + 指纹）；
   ref 已有却禁 skip 50 update，而 ckpt fork 点即存在近零病理
   （P(50 obs 内崩)≈1−0.8^50≈99.9%）。架构（canonical NS + 原子 commit +
   ceiling）本身验证通过。
-- S2 未执行（协议：S1 未过不跑 S2）。
+- 修复 A′+B′（eae895c）后 **S1-b 重验：FAIL（第二张量）**——15 个成功
+  update 后崩 @97116，违规张量 = slot_07.attention.k_proj#chunk0
+  [640,2560]：u_t_rms=7.6e-08 > min_reference=3.1e-08、> ratio_line=
+  1.1e-08（按设计 ACTIVE），NS4 仍落灾难分支，delta_rms=4.85e-04=
+  1.55×ceiling。A′ 有效（q_proj 5e-09 已被 skip，不再违规）。
+- **量化结论（166 个 P3 校准 ref 分布）**：ref 连续分布 3.1e-08…4.7e-06
+  无间隙（1e-8 档 93 / 1e-7 档 61 / 1e-6 档 12）；危险张量 ref rank 63/166
+  与 105/166，邻域密集（rank 104-110 含 slot_08 k_proj、slot_07 out_proj——
+  slot_07/08 = 结构性弱队列）。覆盖危险队列需 floor≈1.2-1.35e-07 ⇒
+  skip 64-70%（>§14.4 的 50% 过紧线）。实证危险率 ≈1 次/15 updates ⇒
+  **v1 幅度 guard 在「skip≤50% + 200u 零灾难」下无可行阈值**（P(200u
+  clean)≈0）；危险幅度集中于低档（高档 ~3400 input-steps 零事件）但低档
+  占输入大多数。
+- S2 未执行（协议）。
 
-修复方向（未实施，S1 违规后禁在线调参）：
-A′（主修）skip 判定从 observation 1 激活——ref 构造即存在（方案 A），
-warmup 只门控 ref 更新或移除；需改规格 bootstrap 语义说明 + S1-b 重验
-（ckpt_97100 重 fork，数据基建全在 salt6：248 片 495.6G 缓存 +
-mainset 重置 647 completed，~30min relay + ~15min 复现）。
-B′ numerical_floor 增加 elementwise-rms 量纲并联（现 Frobenius 量纲
-∝sqrt(numel)，6.55M 元素块只有 rms<8e-11 才触发，大块失效）。
-C′ 次生风险：ref 衰减 0.999/update 对持续近零张量自指化侵蚀
-（ref 被拖向 ~5e-9，ratio_line 低于实际信号，skip 保护随时间退化）；
-需含 fork 点近零 regime 的重校准（非任意 threshold）。
-
-待用户拍板：(a) A′+B′ 修订 → S1-b 重验（本开发轮内）；(b) 以 FAIL
-结案，guard 门控重设计后另起开发轮。
+修复方向（A′/B′ 已实施 @eae895c，S1-b 仍 FAIL，见上；下一步待拍板）：
+D1（v2，机制级正解）结构判别器——归一化 NS 输入的 top-1 奇异能量
+（rank-1 主导度，power iteration ~10ms/step）判别 NS4 边界混沌类
+（forensic：危险 q_proj top-1 σ²=88.9%），离线 shadow run 校准阈值，
+skip 率保持低位；需新 guard 线+校准+S1-c。
+D3（v1，停权快验）band floor：min_reference≈1.2-1.35e-07（危险队列
+边界 rank ~105-115 之上），skip 64-70%，覆盖整个低档危险类（不只 2 个
+已观测实例）⇒ S1-c 大概率 PASS；代价=CMuon 只优化 ~30-35% DiT 矩阵，
+破 50% skip 线（§14.4）。基建全在，~30min。
+D2（v1，不推荐）定向 cohort：静态 skip slot_07/08 邻域 ~8-15 specs
+（~8% skip）——fit-to-crash，第三个危险张量（p~0.02 需 ~50+ 步才显形）
+会在 S1-c 中途再崩。
+D4 FAIL 结案：架构（canonical NS+原子 commit+ceiling）验证通过，
+v1 幅度 guard 设计不足，另起 v2 开发轮。
+推荐：D1 为正解；若要先快验架构端到端，D3→S1-c（停权，留档 64-70%
+skip 代价）后再 D1。
 硬约束不变：BF16 momentum / NS4 / Moonlight / chunk 划分 / batch 800 /
 LR recipe；禁 FP32 修复、clamp-continue、restart-until-luck、自动切
 AdamW、降 LR、改 NS depth。
