@@ -37,9 +37,13 @@ The signal reference ``ref`` is a per-(FQN, chunk) FP32 scalar:
 
 initialized by the calibration bootstrap (``[optimizer.cmuon_guard]
 references`` — the P3 shadow-gradient calibration artifact; see
-``reports/cmuon-guarded-canonical-design.md`` §5). The guard is inactive
-for the first ``warmup_observations`` updates after the AdamW -> guarded
-transition (optimizer-transition bootstrap, NOT LR warmup).
+``reports/cmuon-guarded-canonical-design.md`` §5). S1-b fix A': because
+those bootstrap refs exist at construction, the low-signal skip decision is
+active from observation 1 (the former ``warmup_observations`` skip-gate
+let near-zero-signal NS inputs present at the ckpt fork point feed NS4
+unprotected and crashed S1 4/4 runs; see safety.json). The
+``warmup_observations`` config field is kept for compatibility and is
+reported in telemetry but no longer gates the skip decision.
 
 Checkpoint semantics: guarded -> guarded resume is state-exact
 (references / counters / momentum / owner-mapping version / world_size must
@@ -135,9 +139,11 @@ class GuardedCanonicalGuardConfig:
 
     guard_ratio: float
     reference_decay: float  # (0, 1]; slow relaxation of the reference
-    min_reference: float  # absolute floor for every reference
+    min_reference: float  # elementwise-rms absolute floor (smallest P3 ref)
     numerical_floor: float  # secondary absolute floor on fro(u)
-    warmup_observations: int  # guard inactive for the first W updates
+    warmup_observations: int  # reserved (S1-b fix A'): skip decision is
+    # active from observation 1 because calibration bootstrap refs exist at
+    # construction; kept for config compatibility, not used for gating.
     invariant_check: bool = True  # per-step cross-rank param fingerprints
 
     def __post_init__(self) -> None:
@@ -240,12 +246,27 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
     # -- guard decision ----------------------------------------------------
 
     def _is_low_signal(self, sig: float, sig_fro: float, key: tuple[str, int]) -> bool:
-        """True => low signal => skip NS and parameter delta for this input."""
-        if self.observations < self.guard_cfg.warmup_observations:
-            return False  # bootstrap window: observe, do not skip
+        """True => low signal => skip NS and parameter delta for this input.
+
+        S1-b fix A'+B' (08-31, design §10):
+        - A': the skip decision is active from observation 1. Calibration
+          bootstrap refs exist at construction (fail-closed init), so there
+          is no "refs unknown" window to observe through; the former
+          warmup gate (observe, do not skip, for W updates) let
+          near-zero-signal NS inputs (present from the ckpt fork point)
+          feed NS4 unprotected and crash S1 4/4 runs (delta_rms ceiling).
+        - B': an elementwise-rms absolute floor (sig < min_reference, the
+          smallest P3-calibrated reference) in parallel with the relative
+          ratio line. This neutralizes ref-decay erosion (C' risk): a
+          persistently near-zero tensor cannot re-activate once its ref
+          decays toward its own signal level. The Frobenius floor is kept
+          as the original whole-chunk backstop.
+        """
         ref = self._refs[key]
-        return sig < self.guard_cfg.guard_ratio * ref or (
-            sig_fro < self.guard_cfg.numerical_floor
+        return (
+            sig < self.guard_cfg.guard_ratio * ref
+            or sig < self.guard_cfg.min_reference
+            or sig_fro < self.guard_cfg.numerical_floor
         )
 
     # -- step: two-phase atomic --------------------------------------------

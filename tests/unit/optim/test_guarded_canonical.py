@@ -6,7 +6,10 @@ Covers (design reports/cmuon-guarded-canonical-design.md §9):
   T2. Guard config validation (no preset defaults; explicit calibration).
   T3. Guarded schema/config wiring (OptimizerConfig contract).
   T4. Reference bootstrap: per-spec required, FQN fallback, min floor.
-  T5. Warmup: the guard is inactive for the first W observations.
+  T5. Skip decision active from observation 1 (S1-b fix A': no observe-only
+      warmup window — calibration bootstrap refs exist at construction; the
+      warmup_observations field is telemetry-only) + elementwise-rms
+      min_reference floor (fix B', independent of the ratio line).
   T6. Skip semantics: low-signal NS input => parameter BIT-UNCHANGED,
      momentum EMA still updates, skip counters, reference frozen.
   T7. ACTIVE equivalence: an all-active guarded step produces the SAME
@@ -270,23 +273,71 @@ def test_reference_bootstrap_requires_every_input(model_and_refs):
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="AdamW8bit requires CUDA/HCU"
 )
-def test_warmup_disables_guard_then_engages(model_and_refs):
+def test_skip_decision_active_from_observation_1(model_and_refs):
+    """T5 (S1-b fix A', 08-31): the low-signal skip decision is active from
+    observation 1. Calibration bootstrap refs exist at construction, so the
+    former observe-only warmup window (which let near-zero-signal NS inputs
+    present at the ckpt fork point feed NS4 unprotected and crashed S1 4/4
+    runs on the delta_rms ceiling) is gone; warmup_observations no longer
+    gates the skip (telemetry only). Regression guard: with refs far above
+    the real signal, the FIRST step must already skip."""
     model, refs = model_and_refs
-    # refs far ABOVE the real signal => every input is low-signal when the
-    # guard is engaged, but the warmup window keeps the guard off.
     big_refs = {k: v * 1e6 for k, v in refs.items()}
-    g = _build_guarded(
-        model, refs=big_refs, guard=_guard(warmup_observations=3)
+    g = _build_guarded(model, refs=big_refs, guard=_guard(warmup_observations=3))
+    _seed_grads(model, 100)
+    g.step()
+    assert g.skip_total > 0, (
+        "A': low-signal inputs must be skipped at observation 1 "
+        f"(skip_total={g.skip_total})"
     )
-    for step in range(4):
-        _seed_grads(model, 100 + step)
-        g.step()
-        if step < 3:
-            assert g.skip_total == 0, "warmup must not skip"
-        else:
-            assert g.skip_total > 0, "engaged guard must skip the weak inputs"
-            g.zero_grad(set_to_none=True)
-    assert g.observations == 4
+    assert g.observations == 1
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="AdamW8bit requires CUDA/HCU"
+)
+def test_min_reference_floor_independent_of_ratio_line(model_and_refs):
+    """T5b (S1-b fix B', 08-31): sig < min_reference skips even when the
+    relative ratio line does not fire — the elementwise-rms absolute floor
+    is the backstop against ref-decay erosion (C' risk: a persistently
+    near-zero tensor's ref decays toward its own signal and the ratio line
+    drops below it). The Frobenius floor stays in parallel (untested here:
+    its semantics are unchanged from v1)."""
+    model, refs = model_and_refs
+    g = _build_guarded(
+        model,
+        refs=refs,
+        guard=_guard(
+            guard_ratio=1e-30,  # ratio line can never fire
+            min_reference=1e-6,
+            numerical_floor=1e-300,  # Frobenius line can never fire
+        ),
+    )
+    key = next(iter(g._refs))  # pyright: ignore[reportPrivateUsage]
+    ref = g._refs[key]  # pyright: ignore[reportPrivateUsage]
+    # below the elementwise-rms floor => low signal
+    assert g._is_low_signal(1e-7, float("inf"), key) is True
+    # above the floor, ratio line off, Frobenius line off => active
+    assert g._is_low_signal(ref, float("inf"), key) is False
+    # and through a real step: first-step nesterov = (1-mu)*grad (momentum
+    # buffer starts at zero) => rms ~= 0.05 for these unit-scale mock grads;
+    # a floor above that skips every input on the first step
+    g2 = _build_guarded(
+        model,
+        refs={k: v for k, v in refs.items()},
+        guard=_guard(
+            guard_ratio=1e-30,
+            min_reference=0.2,
+            numerical_floor=1e-300,
+        ),
+    )
+    _seed_grads(model, 110)
+    g2.step()
+    n_inputs = sum(s.chunk_count for s in g2.routing.cmuon_specs)
+    assert g2.skip_total == n_inputs, (
+        f"B': the min_reference floor must skip all {n_inputs} inputs, "
+        f"got {g2.skip_total}"
+    )
 
 
 @pytest.mark.skipif(
