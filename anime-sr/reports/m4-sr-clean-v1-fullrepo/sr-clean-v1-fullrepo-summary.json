@@ -1,0 +1,139 @@
+{
+  "answers": {
+    "mode": "full-repo streaming scan (raw labels only, no frozen table)",
+    "q1_full_1024_eligible_train": 3519472,
+    "q2_p0_strict_priority": 672314,
+    "q3_p1_sr_clean_v1": 2301219,
+    "q4_p1_minus_p0_is_good_normal_polished": {
+      "n_added": 1628905,
+      "quality_tier": {
+        "good": 811582,
+        "normal": 817323
+      },
+      "classification": {
+        "illustration": 1590115,
+        "comic": 24595,
+        "bangumi": 14195
+      },
+      "completeness": {
+        "polished": 1628905
+      }
+    },
+    "q5_p2_minus_p1_low_worst": {
+      "n_added": 455642,
+      "quality_tier": {
+        "worst": 116386,
+        "low": 339256
+      },
+      "classification": {
+        "illustration": 443195,
+        "comic": 7416,
+        "bangumi": 5031
+      },
+      "completeness": {
+        "polished": 455642
+      }
+    },
+    "q6_recommendation": "NOT SET (full-repo scan is sizing data for future corpus expansion)"
+  },
+  "pool_sizes": [
+    {
+      "pool": "P0_priority",
+      "n": 672314,
+      "share_of_full": 0.19102694949697
+    },
+    {
+      "pool": "P1_sr_clean_v1",
+      "n": 2301219,
+      "share_of_full": 0.6538534757486351
+    },
+    {
+      "pool": "P2_sr_clean_wide",
+      "n": 2756861,
+      "share_of_full": 0.7833166452240563
+    },
+    {
+      "pool": "P3_lineart_extra",
+      "n": 430609,
+      "share_of_full": 0.12235045484095342
+    },
+    {
+      "pool": "P4_rough_extra",
+      "n": 416118,
+      "share_of_full": 0.11823307587047148
+    }
+  ],
+  "per_dir": {
+    "data/1_2024": {
+      "n_shards": 800,
+      "n_images": 7956611,
+      "n_unresolved": 11251,
+      "n_webp": 7956611,
+      "n_1024_eligible_train": 2533584
+    },
+    "data/1_2025.9": {
+      "n_shards": 405,
+      "n_images": 1714713,
+      "n_unresolved": 10374,
+      "n_webp": 1714713,
+      "n_1024_eligible_train": 856535
+    },
+    "data/2026.7": {
+      "n_shards": 384,
+      "n_images": 440077,
+      "n_unresolved": 0,
+      "n_webp": 440077,
+      "n_1024_eligible_train": 9547
+    },
+    "data/2_2026.1": {
+      "n_shards": 517,
+      "n_images": 543779,
+      "n_unresolved": 1,
+      "n_webp": 3538,
+      "n_1024_eligible_train": 271849
+    },
+    "data/artstation-2D": {
+      "n_shards": 857,
+      "n_images": 2170961,
+      "n_unresolved": 2170961,
+      "n_webp": 0,
+      "n_1024_eligible_train": 0
+    },
+    "data/background-2D": {
+      "n_shards": 1,
+      "n_images": 98,
+      "n_unresolved": 98,
+      "n_webp": 0,
+      "n_1024_eligible_train": 0
+    }
+  },
+  "coverage": {
+    "n_scanned_json": 12826239,
+    "n_scanned_webp": 10114939,
+    "n_unresolved_json": 2192685,
+    "unresolved_by_dir": {
+      "data/1_2024": 11251,
+      "data/1_2025.9": 10374,
+      "data/2026.7": 0,
+      "data/2_2026.1": 1,
+      "data/artstation-2D": 2170961,
+      "data/background-2D": 98
+    },
+    "unresolved_notes": {
+      "data/artstation-2D": "artstation 架构：id 为空（无 danbooru post id）+ 无 quality/anime_completeness/anime_classification 字段 + 图像成员为 .jpg（无 webp）→ 无法建索引（0 eligible 是「不可索引」而非「无好图」；标签/尺寸本身可读，若需利用要单独打标）",
+      "data/background-2D": "1 片 98 图，量级可忽略，未单独探测 schema",
+      "data/1_2024": "malformed / 维度为 null（21626/10655180 = 0.20%，与生产语料同档）",
+      "data/1_2025.9": "malformed / 维度为 null（21626/10655180 = 0.20%，与生产语料同档）",
+      "data/2026.7": "malformed / 维度为 null（21626/10655180 = 0.20%，与生产语料同档）",
+      "data/2_2026.1": "malformed / 维度为 null（21626/10655180 = 0.20%，与生产语料同档）"
+    },
+    "n_full_eligible_train": 3519472,
+    "n_full_eligible_validation": 113691,
+    "nsfw_distribution": {
+      "nsfw": 1085484,
+      "sfw": 8507426,
+      "questionable": 1040644
+    },
+    "n_webp_size_fallback_to_meta": 540240
+  }
+}

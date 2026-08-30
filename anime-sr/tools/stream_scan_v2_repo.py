@@ -391,6 +391,7 @@ def merge(out_dir: Path, cfg: Config, bucket_hr: int, seed: int, total_exposures
         shard_info[r["path"]] = {
             "n_images": r["n_json"],
             "n_unresolved_json": r["n_unresolved"],
+            "n_webp": r["n_webp"],
             "n_1024_eligible_train": len(r["pop"]),
             "n_1024_eligible_validation": r["n_val_eligible"],
             "requests": r["requests"],
@@ -420,10 +421,39 @@ def merge(out_dir: Path, cfg: Config, bucket_hr: int, seed: int, total_exposures
     per_dir: dict[str, dict] = {}
     for p in shard_info:
         d = p.rsplit("/", 1)[0]
-        per_dir.setdefault(d, {"n_shards": 0, "n_images": 0, "n_1024_eligible_train": 0})
+        per_dir.setdefault(
+            d,
+            {"n_shards": 0, "n_images": 0, "n_unresolved": 0, "n_webp": 0, "n_1024_eligible_train": 0},
+        )
         per_dir[d]["n_shards"] += 1
         per_dir[d]["n_images"] += shard_info[p]["n_images"]
+        per_dir[d]["n_unresolved"] += shard_info[p]["n_unresolved_json"]
+        per_dir[d]["n_webp"] += shard_info[p]["n_webp"]
         per_dir[d]["n_1024_eligible_train"] += shard_info[p]["n_1024_eligible_train"]
+
+    # schema notes for unresolved json (probed on salt5, 08-31):
+    # artstation-2D json carry id:"" (no danbooru post id), no
+    # quality/anime_completeness/anime_classification fields, and their image
+    # members are .jpg (no webp) -> not indexable by the pipeline (sample_id
+    # is the join key); background-2D is one shard / 98 images (negligible);
+    # the danbooru dirs show the normal ~0.2% malformed/null-dim rate.
+    non_danbooru = ("data/artstation-2D", "data/background-2D")
+    unresolved_notes = {
+        "data/artstation-2D": (
+            "artstation 架构：id 为空（无 danbooru post id）+ 无 quality/anime_completeness/"
+            "anime_classification 字段 + 图像成员为 .jpg（无 webp）→ 无法建索引（0 eligible 是"
+            "「不可索引」而非「无好图」；标签/尺寸本身可读，若需利用要单独打标）"
+        ),
+        "data/background-2D": "1 片 98 图，量级可忽略，未单独探测 schema",
+    }
+    danbooru_json = sum(v["n_images"] for k, v in per_dir.items() if k not in non_danbooru)
+    danbooru_unres = sum(v["n_unresolved"] for k, v in per_dir.items() if k not in non_danbooru)
+    for k in per_dir:
+        if k not in unresolved_notes and k not in non_danbooru:
+            unresolved_notes[k] = (
+                f"malformed / 维度为 null（{danbooru_unres}/{danbooru_json} = "
+                f"{(danbooru_unres / danbooru_json) if danbooru_json else 0:.2%}，与生产语料同档）"
+            )
 
     def _table2(counter: Counter) -> dict[str, dict[str, int]]:
         out: dict[str, dict[str, int]] = {}
@@ -555,6 +585,8 @@ def merge(out_dir: Path, cfg: Config, bucket_hr: int, seed: int, total_exposures
             "n_scanned_json": n_json,
             "n_scanned_webp": n_webp,
             "n_unresolved_json": n_unresolved,
+            "unresolved_by_dir": {k: v["n_unresolved"] for k, v in sorted(per_dir.items())},
+            "unresolved_notes": unresolved_notes,
             "n_full_eligible_train": n_full,
             "n_full_eligible_validation": n_val,
             "nsfw_distribution": dict(nsfw_dist),
@@ -626,8 +658,11 @@ def merge(out_dir: Path, cfg: Config, bucket_hr: int, seed: int, total_exposures
     )
     _write_csv(
         "per_dir.csv",
-        ["dir", "n_shards", "n_images", "n_1024_eligible_train"],
-        [[d, v["n_shards"], v["n_images"], v["n_1024_eligible_train"]] for d, v in sorted(per_dir.items())],
+        ["dir", "n_shards", "n_images", "n_unresolved", "n_webp", "n_1024_eligible_train"],
+        [
+            [d, v["n_shards"], v["n_images"], v["n_unresolved"], v["n_webp"], v["n_1024_eligible_train"]]
+            for d, v in sorted(per_dir.items())
+        ],
     )
 
     md: list[str] = []
@@ -637,14 +672,41 @@ def merge(out_dir: Path, cfg: Config, bucket_hr: int, seed: int, total_exposures
     md.append(f"- nsfw distribution (scanned): {dict(nsfw_dist)}")
     md.append(f"- population: **{n_full}** 1024-eligible train images (+{n_val} validation)")
     md.append(f"- webp-size fallbacks to meta dims: {n_fallback}")
-    md.append(f"- stream cost: {total_requests} range requests, {total_bytes / 1e9:.1f} GB fetched (headers+json only)")
+    md.append(f"- stream cost: {total_requests} range requests, {total_bytes / 1e9:.1f} GB transferred (transient 8KB windows; only json+headers useful; zero disk writes)")
     md.append("")
     md.append("## Per directory")
     md.append("")
-    md.append("| dir | shards | images | 1024-eligible train |")
-    md.append("| --- | ---: | ---: | ---: |")
+    md.append("| dir | shards | images | unresolved | webp members | 1024-eligible train |")
+    md.append("| --- | ---: | ---: | ---: | ---: | ---: |")
     for d, v in sorted(per_dir.items()):
-        md.append(f"| {d} | {v['n_shards']} | {v['n_images']} | {v['n_1024_eligible_train']} |")
+        md.append(
+            f"| {d} | {v['n_shards']} | {v['n_images']} | {v['n_unresolved']} | {v['n_webp']} | {v['n_1024_eligible_train']} |"
+        )
+    md.append("")
+    md.append("## 未解析 json 分解（schema 说明）")
+    md.append("")
+    md.append("| dir | unresolved | 说明 |")
+    md.append("| --- | ---: | --- |")
+    for d, v in sorted(per_dir.items(), key=lambda kv: -kv[1]["n_unresolved"]):
+        if v["n_unresolved"]:
+            md.append(f"| {d} | {v['n_unresolved']} | {unresolved_notes.get(d, '')} |")
+    md.append("")
+    md.append(
+        f"- webp 尺寸回退：{n_fallback} 张（tar 内无配对 .webp 成员或头不可读 → 用 meta 尺寸；"
+        "几乎全部位于 2_2026.1，该目录图像为原始 png/jpg 无缩放，meta 尺寸=实际尺寸（抽验 3/3）→ 无高估）"
+    )
+    for d, v in sorted(per_dir.items()):
+        if v["n_images"] and v["n_1024_eligible_train"] and v["n_webp"] < 0.5 * v["n_images"]:
+            md.append(
+                f"- {d}：仅 {v['n_webp']}/{v['n_images']} 图成员为 webp，其余为原始 png/jpg（无缩放步骤）；"
+                "抽验 meta 尺寸=实际文件尺寸（2_2026.1 3/3）→ eligible 判定可靠，"
+                "但该目录与 danbooru webp 语料不是同一图像管线"
+            )
+    art_n = per_dir.get("data/artstation-2D", {}).get("n_images", 0)
+    if art_n:
+        md.append(
+            f"- artstation-2D 的 {art_n} 张图 json 可读（tags+尺寸齐全）但不可索引；若未来要利用需单独打 danbooru 风格标签并赋 id"
+        )
     md.append("")
     md.append("## Pool sizes")
     md.append("")
