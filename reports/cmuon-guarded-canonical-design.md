@@ -5,6 +5,24 @@
 原候选 `hybrid_cmuon_ns4_core` **永久退役**（ORIGINAL_CANDIDATE_RETIRED=YES，
 任何后续运行/评测不得再使用该名）。
 
+**S1 判定（2026-08-30 终，见 safety.json）：FAIL** —— 4/4 运行在前 13 个
+observation 内触发 `delta_rms` ceiling 停机（obs 13/2/7/3），违规张量全部为
+slot_07/08 `attention.q_proj.weight#chunk0`，全部落在 warmup_observations=50
+「只观察不 skip」窗口内。机制：ckpt_97100 fork 即存在的近零 Nesterov 输入
+（取证捕获 u_t_rms=5.0e-9 < ratio_line=7.0e-9，would_skip_after_warmup=TRUE）
+在窗口内被结构性放行进 NS4 → 混沌放大 → delta_rms 0.1535 = 491× ceiling。
+**校准阈值本身正确、两阶段 fail-closed 全部按设计工作（零参数损坏、跨 rank
+判定一致、ckpt 保持 pristine）；失效的是 §10 方案 A（校准 bootstrap ref 构造
+即存在）与 warmup skip-gate（方案 B 语义残留）的叠加——ref 已存在却仍禁止
+skip 50 个 update。P(50 obs 内崩) ≈ 1−0.8^50 ≈ 99.9%。** 修复方向（未实施）：
+A′ skip 判定从 obs 1 激活（ref 构造即有，warmup 只门控 ref 更新或移除）；
+B′ 增加 elementwise-rms 绝对底线（现 numerical_floor 作用于整块 Frobenius，
+∝sqrt(numel)，大块永不触发）；C′ 含 fork 点近零 regime 的重校准。
+S2 未执行（协议）。候选**未退役**：架构（canonical NS + 两阶段原子 commit +
+pre-write ceiling）验证通过（P5 spread=0、P6 +0.13s/step），guard 门控需
+A′/B′ 修订后 S1-b 重验。
+
+
 本文件是"新候选"开发轮的设计定稿。guard 数值（ratio / reference_decay /
 min_reference / numerical_floor / warmup）由 P3 shadow-gradient 校准
 （salt1，ckpt_97100，≤100 fwd/bwd，无参数更新）决定后填入 §5.4；
@@ -322,3 +340,73 @@ loss 跳变；grad norm 合理；≥1 个可精确 resume 的 guarded hybrid ckp
 3. （P6）顺序 broadcast 的通信占比 → 是否需要 v2 overlap（本轮不做）。
 4. （P7）skip rate 过高（>50% specs 长期 skip）⇒ guard 过紧 ⇒ 回到
    校准重定阈值（不在线调参）。
+5. （S1 结案，08-30）**warmup skip-gate 与校准 bootstrap 的语义冲突已实证
+   为 S1 FAIL 根因**（§头部判定块）：方案 A 下 ref 构造即存在，warmup=50
+   期间禁止 skip 使近零病理张量在 50 个 update 内无保护地进 NS4。
+   另两项次生风险入 S1-b 前评估：ref 衰减（0.999/update）对持续近零张量
+   的自指化侵蚀；numerical_floor 的 Frobenius 量纲（大块失效，需
+   elementwise-rms 底线）。
+
+---
+
+## 15. 终报块
+
+```
+=== COPY TO CHATGPT: GUARDED CANONICAL CMUON ===
+
+项目：SakuraMoon G1（1.57B DiT 文生图，2×HCU bf16 DDP，batch 800，
+ModelScope danbooru v2 webdataset）。原 CMuon 候选已退役（机制级根因：
+近零 Nesterov 输入 → Frobenius 归一化 ×2.08e5 → NS4 收敛边界混沌，
+~20% 灾难分支，总放大 ×1.675e5，原候选 ORIGINAL_CANDIDATE_SAFE=NO）。
+
+新候选 Guarded Canonical CMuon v1（hybrid_cmuon_guarded_canonical_ns4）：
+① pre-NS low-signal guard（per-FQN/chunk FP32 校准 ref；skip ⟺
+u_t_rms < 0.1×ref 或 fro < 6.575e-07；ref 更新 max(sig, ref·0.999)，
+inactive 冻结；warmup_observations=50 内只观察不 skip）；
+② canonical owner-rank NS（stable_hash(FQN#chunk)%world 定 owner，
+owner 跑 NS4 → broadcast canonical delta，非 owner 不算 NS）；
+③ 两阶段原子 commit（PHASE1 全量 prepare 任一失败零参数写入 /
+PHASE2 全 PASS 才 AdamW step + apply deltas + momentum + 指纹）；
+④ pre-write 安全：finite + delta_rms ≤ 10×(0.2×lr)，无 clamp，
+违规 = CMuonSafetyError 干净停机。
+
+验证结果（分支 cmoun-guarded，2026-08-30）：
+- P5 2×HCU 一致性 PASS：param/momentum/delta spread 全 0（修复 tall-chunk
+  NS 输出非 contiguous → RCCL broadcast 崩溃；fp32 指纹布局差异）。
+- P6 单卡 benchmark（真实 1.57B，全 active 最坏例）：adamw8bit 0.2006s /
+  unguarded-ns4 0.5768s / guarded 0.7095s（NS 0.463 + guard 0.043 +
+  mom 0.015 + commit 0.008 + AdamW 0.201）；peak 14.9GiB vs 9.2GiB
+  （staged flat bf16 delta 缓冲 ~3.07GB 所致，预算内）。
+- P7 S1（ckpt_97100 健康 AdamW 锚点，2 rank，200u 预算，纯缓存供片
+  零网络）：**FAIL，4/4 运行崩溃，obs 13 / 2 / 7 / 3，全部在
+  warmup=50 窗口内，违规张量 = slot_07/08 attention.q_proj#chunk0，
+  检查 = delta_rms ceiling**。取证数字（instrumented dump，fail-closed
+  插桩不改行为）：u_t_rms=5.005e-09 < ratio_line=7.032e-09（ref=7.032e-08
+  校准值，would_skip_after_warmup=TRUE）；delta_rms=0.1535 = 491×
+  ceiling(3.125e-04)；lr@97101=1.5625e-04；chunk [2560,2560]。
+- 机制结论：校准阈值正确、两阶段 fail-closed 全部按设计工作（零参数
+  损坏、跨 rank 判定一致、ckpt 保持 pristine）；根因 = §10 方案 A
+  （校准 ref 构造即存在）与 warmup skip-gate（方案 B 语义残留）叠加——
+  ref 已有却禁 skip 50 update，而 ckpt fork 点即存在近零病理
+  （P(50 obs 内崩)≈1−0.8^50≈99.9%）。架构（canonical NS + 原子 commit +
+  ceiling）本身验证通过。
+- S2 未执行（协议：S1 未过不跑 S2）。
+
+修复方向（未实施，S1 违规后禁在线调参）：
+A′（主修）skip 判定从 observation 1 激活——ref 构造即存在（方案 A），
+warmup 只门控 ref 更新或移除；需改规格 bootstrap 语义说明 + S1-b 重验
+（ckpt_97100 重 fork，数据基建全在 salt6：248 片 495.6G 缓存 +
+mainset 重置 647 completed，~30min relay + ~15min 复现）。
+B′ numerical_floor 增加 elementwise-rms 量纲并联（现 Frobenius 量纲
+∝sqrt(numel)，6.55M 元素块只有 rms<8e-11 才触发，大块失效）。
+C′ 次生风险：ref 衰减 0.999/update 对持续近零张量自指化侵蚀
+（ref 被拖向 ~5e-9，ratio_line 低于实际信号，skip 保护随时间退化）；
+需含 fork 点近零 regime 的重校准（非任意 threshold）。
+
+待用户拍板：(a) A′+B′ 修订 → S1-b 重验（本开发轮内）；(b) 以 FAIL
+结案，guard 门控重设计后另起开发轮。
+硬约束不变：BF16 momentum / NS4 / Moonlight / chunk 划分 / batch 800 /
+LR recipe；禁 FP32 修复、clamp-continue、restart-until-luck、自动切
+AdamW、降 LR、改 NS depth。
+=== END COPY TO CHATGPT ===
+```

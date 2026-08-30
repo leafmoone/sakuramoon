@@ -1,0 +1,101 @@
+{
+  "candidate": "hybrid_cmuon_guarded_canonical_ns4",
+  "goal": "goal-35390cd0-8734-467e-8aad-87b3849815bf",
+  "verdict": "S1_FAIL",
+  "verdict_date": "2026-08-30",
+  "protocol_compliance": {
+    "fork_anchor": "ckpt_97100_raw-97100-update-cadence (sha dd0a913c215d3e474a33febea2eb9aa4822c60d657e3304592d9e35e2cde7862, 12/12 files size-exact)",
+    "ranks": 2,
+    "budget_updates": 200,
+    "restart_on_violation": false,
+    "online_tuning": false,
+    "run_naming": "g1_cmuon_guarded_canonical_s1",
+    "data_network_during_run": "none (248/248 shards preloaded, pure cache serving)",
+    "guard_telemetry_logging": "disabled by design (decisions in-memory); forensic dump added fail-closed (commit 8d86834)"
+  },
+  "runs": [
+    {
+      "run": 1,
+      "host_pod": "crdnotebook-...-salt6-35245 (old pod, wiped by platform restart 08-30 20:0x)",
+      "launched": "2026-08-30T18:04+08",
+      "crash_update": 97113,
+      "crash_observations": 13,
+      "violating_tensors": ["unknown (train.log wiped with old pod; failure.json carries error_type only)"],
+      "check": "delta_rms ceiling (CMuonSafetyError @optimizer)",
+      "evidence": "diagnostics/rank-0/optimizer-97113/failure.json (attempted 97113, successful 97112)"
+    },
+    {
+      "run": 2,
+      "host_pod": "crdnotebook-2093779006254743554-salt6-22057 (host UUID 2a5a886e-025d-11f1-9997-e8611ab02d86, not on anime-sr bad-host list)",
+      "launched": "2026-08-30T21:38+08",
+      "crash_update": 97102,
+      "crash_observations": 2,
+      "violating_tensors": [
+        "dit.blocks.slot_07.attention.q_proj.weight#chunk0",
+        "dit.blocks.slot_08.attention.q_proj.weight#chunk0"
+      ],
+      "check": "delta_rms ceiling",
+      "evidence": "diagnostics/rank-{0,1}/optimizer-97102/failure.json"
+    },
+    {
+      "run": 3,
+      "host_pod": "crdnotebook-2093779006254743554-salt6-22057",
+      "launched": "2026-08-30T22:02+08",
+      "crash_update": 97107,
+      "crash_observations": 7,
+      "violating_tensors": [
+        "dit.blocks.slot_07.attention.q_proj.weight#chunk0",
+        "dit.blocks.slot_08.attention.q_proj.weight#chunk0"
+      ],
+      "check": "delta_rms ceiling",
+      "evidence": "train.log traceback"
+    },
+    {
+      "run": 4,
+      "host_pod": "crdnotebook-2093779006254743554-salt6-22057",
+      "launched": "2026-08-30T22:16+08",
+      "crash_update": 97103,
+      "crash_observations": 3,
+      "violating_tensors": ["dit.blocks.slot_08.attention.q_proj.weight#chunk0"],
+      "check": "delta_rms ceiling",
+      "evidence": "guard-forensic-rank{0,1}.json (instrumented dump, commit 8d86834)"
+    }
+  ],
+  "forensic_capture_run4": {
+    "fqn": "dit.blocks.slot_08.attention.q_proj.weight",
+    "chunk": 0,
+    "owner": 0,
+    "shape": [2560, 2560],
+    "numel": 6553600,
+    "u_t_rms": 5.0045749766525205e-09,
+    "u_t_fro": 1.2811711712856777e-05,
+    "ref": 7.031669468915425e-08,
+    "guard_ratio": 0.1,
+    "ratio_line": 7.031669468915425e-09,
+    "numerical_floor": 6.575e-07,
+    "warmup_active": true,
+    "observations": 2,
+    "warmup_observations": 50,
+    "would_skip_after_warmup": true,
+    "delta_rms": 0.1535254567861557,
+    "lr": 0.00015624999650754035,
+    "target_delta_rms": 3.124999930150807e-05,
+    "ceiling": 0.0003124999930150807,
+    "delta_rms_over_ceiling": 491.3,
+    "cross_rank": "sig/fro/ref identical on both ranks; delta_rms present on owner rank only (as designed)"
+  },
+  "diagnosis": {
+    "primary": "Structural design gap: the low-signal guard is INACTIVE for the first warmup_observations=50 updates ('bootstrap window: observe, do not skip'), but the near-zero-signal pathology is present from update 1 (momentum restored from ckpt_97100 + persistently near-zero live gradients of slot_07/08 attention q_proj). During the window every update feeds the ~5e-9 Nesterov matrix into NS4, whose chaotic-bit amplification (forensic: ~20% catastrophic branch per application) produces a stochastic O(0.1) delta. P(crash within 50 observations) ~ 1 - 0.8^50 ~= 99.9%. Observed crash observations across 4 runs: 13, 2, 7, 3.",
+    "guard_calibration_is_not_the_fault": "would_skip_after_warmup=true: the calibrated ratio line (u_t_rms 5.0e-9 < 0.1*ref 7.0e-9) correctly classifies this tensor as low-signal. If the warmup gate were not suppressing the skip decision, the crash would not have occurred.",
+    "secondary_risk_reference_decay": "refs update as max(sig, ref*0.999) per active observation: for a persistently near-zero tensor the ref decays toward the ~5e-9 level, dragging ratio_line below the actual signal over time; the ratio test then becomes self-referential and the skip protection erodes even after warmup. Flagged for the next iteration (needs a data-driven recalibration, not an arbitrary threshold).",
+    "secondary_risk_floor_units": "numerical_floor (6.575e-07) applies to the whole-chunk Frobenius norm, which scales with sqrt(numel): for a 6.55M-element chunk the floor only catches rms < ~8e-11. It never fires for large chunks; the elementwise-rms backstop implied by the spec's 'absolute numerical floor' second line is not what is implemented.",
+    "fail_closed_verification": "The two-phase design behaved as intended in all 4 runs: no parameter write on violation (PHASE1 fail-closed), rank-consistent verdict (same tensors flagged on both ranks), clean stop with diagnostics, ckpt_97100 remains pristine (no new checkpoint written before crash; cadence 100)."
+  },
+  "fix_directions_not_implemented": [
+    "A (primary): activate the skip decision from observation 1 using the calibration bootstrap refs (they exist at construction); keep warmup only around reference updates, or remove it. Requires re-verification (new S1 run) and a documented rationale change to the spec's bootstrap semantics.",
+    "B: add an absolute elementwise-rms floor alongside the Frobenius floor (units-correct backstop for large chunks).",
+    "C: re-derive guard_ratio/floor/decay from a fresh calibration that includes the fork-point near-zero regime (current refs came from the salt1 shadow-gradient calibration; the live 97101+ regime reproduces the pathology)."
+  ],
+  "s2": "NOT RUN (S1 gate failed; protocol: no restart, no S2 on failed S1)",
+  "next_action": "User decision: (a) implement fix A (+B) and re-run S1 as S1-b from ckpt_97100, or (b) close the candidate round with this FAIL verdict and redesign the guard gating."
+}
