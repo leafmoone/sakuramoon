@@ -43,7 +43,6 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
-from itertools import product
 from pathlib import Path
 
 
@@ -82,110 +81,206 @@ def load_rows(paths: list[str]) -> list[dict]:
 
 
 def rel_sig(row: dict) -> float:
-    if row.get("rel_sig") is not None:
-        return row["rel_sig"]
-    return 0.0
+    v = row.get("rel_sig")
+    return v if v is not None else 0.0
 
 
 # ---------------------------------------------------------------- rules
+#
+# Rule families (deterministic, interpretable; spec section 5):
+#   A amplitude only:        rel_sig < tau
+#   B top1 energy only:      top1_energy > theta
+#   C stable-rank only:      stable_rank < rho
+#   D amplitude + top1:      A AND B
+#   E amplitude + top1 + temporal: D AND (cos_grad_nest is not None
+#                                     AND cos_grad_nest < gamma)
+#
+# Evaluation is bitset-accelerated: each row is a bit of a Python int, a rule
+# fires on row i iff bit i is set in its mask, and the family masks compose
+# with bitwise AND (1000-bit AND is O(1)), so the full E grid (60x60x40)
+# sweeps in well under a second.  A row with a MISSING feature is never
+# skippable by any rule that needs that feature (bit cleared in every mask
+# for that feature) — a classifier must not act on data it cannot evaluate.
 
 
-def rule_A(row, p):  # amplitude only
-    return rel_sig(row) < p["tau"]
+FAMILIES = [
+    "A_amplitude",
+    "B_top1",
+    "C_stablerank",
+    "D_amp_top1",
+    "E_amp_top1_cos",
+]
 
 
-def rule_B(row, p):  # top1 energy only
-    return (row.get("top1_energy") or 0.0) > p["theta"]
+def quantile_grid(values: list[float], n: int) -> list[float]:
+    vals = sorted(set(values))
+    if len(vals) <= n:
+        return vals
+    step = (len(vals) - 1) / (n - 1)
+    return [vals[round(i * step)] for i in range(n)]
 
 
-def rule_C(row, p):  # stable rank only
-    return (row.get("stable_rank") or 1e9) < p["rho"]
-
-
-def rule_D(row, p):  # amplitude AND top1
-    return rel_sig(row) < p["tau"] and (row.get("top1_energy") or 0.0) > p["theta"]
-
-
-def rule_E(row, p):  # D AND temporal alignment loss
-    c = row.get("cos_grad_nest")
-    return (
-        rel_sig(row) < p["tau"]
-        and (row.get("top1_energy") or 0.0) > p["theta"]
-        and (c is not None and c < p["gamma"])
-    )
-
-
-FAMILIES = {
-    "A_amplitude": (rule_A, ["tau"]),
-    "B_top1": (rule_B, ["theta"]),
-    "C_stablerank": (rule_C, ["rho"]),
-    "D_amp_top1": (rule_D, ["tau", "theta"]),
-    "E_amp_top1_cos": (rule_E, ["tau", "theta", "gamma"]),
-}
-
-
-def grid_for(params: list[str], rows: list[dict]) -> list[dict]:
-    taus = sorted({rel_sig(r) for r in rows if rel_sig(r) > 0})[:200]
-    thetas = sorted({r["top1_energy"] for r in rows if r.get("top1_energy")})
-    thetas = thetas[:: max(1, len(thetas) // 200)]
-    rhos = sorted({r["stable_rank"] for r in rows if r.get("stable_rank")})
-    rhos = rhos[:: max(1, len(rhos) // 200)]
-    gammas = sorted({r["cos_grad_nest"] for r in rows if r.get("cos_grad_nest") is not None})
-    gammas = gammas[:: max(1, len(gammas) // 100)]
-    combos: list[dict] = []
-    for t in taus:
-        combos.append({"tau": t})
-    for th in thetas:
-        combos.append({"theta": float(th)})
-    for r_ in rhos:
-        combos.append({"rho": float(r_)})
-    for t, th in product(taus, thetas):
-        combos.append({"tau": t, "theta": float(th)})
-    for t, th in product(taus, thetas):
-        for g in gammas:
-            combos.append({"tau": t, "theta": float(th), "gamma": float(g)})
-    return [c for c in combos if all(k in c for k in params)]
-
-
-def evaluate(rule_fn, params, rows: list[dict]) -> dict:
-    """Lexicographic objective: 0 holdout FNs, then minimal false skips."""
-    dn = [r for r in rows if r["label"] == "DANGEROUS"]
-    sf = [r for r in rows if r["label"] == "SAFE"]
-    fn = sum(1 for r in dn if not rule_fn(r, params))
-    fs = sum(1 for r in sf if rule_fn(r, params))
-    skipped = sum(1 for r in rows if rule_fn(r, params))
+def thresholds_from(rows: list[dict]) -> dict:
+    """Grid values derived from the FIT rows only (no eval leakage)."""
     return {
-        "fn": fn,
-        "fs": fs,
-        "n_dangerous": len(dn),
-        "n_safe": len(sf),
-        "skip_rate": skipped / len(rows) if rows else 0.0,
-        "safe_false_skip_rate": fs / len(sf) if sf else 0.0,
-        "dangerous_recall": (len(dn) - fn) / len(dn) if dn else None,
+        "taus": quantile_grid(
+            [
+                r["rel_sig"]
+                for r in rows
+                if r.get("rel_sig") is not None and r["rel_sig"] > 0
+            ],
+            60,
+        ),
+        "thetas": quantile_grid(
+            [r["top1_energy"] for r in rows if r.get("top1_energy") is not None],
+            60,
+        ),
+        "rhos": quantile_grid(
+            [r["stable_rank"] for r in rows if r.get("stable_rank") is not None],
+            60,
+        ),
+        "gammas": quantile_grid(
+            [r["cos_grad_nest"] for r in rows if r.get("cos_grad_nest") is not None],
+            40,
+        ),
+    }
+
+
+def masks_for(rows: list[dict], th: dict) -> dict:
+    """Fire-bitsets (one int per grid value) computed on this row set."""
+    n = len(rows)
+    dn = 0
+    for i, r in enumerate(rows):
+        if r["label"] == "DANGEROUS":
+            dn |= 1 << i
+    rs = [r.get("rel_sig") for r in rows]
+    t1 = [r.get("top1_energy") for r in rows]
+    sr = [r.get("stable_rank") for r in rows]
+    cg = [r.get("cos_grad_nest") for r in rows]
+    return {
+        "n": n,
+        "dn": dn,
+        "T": [
+            sum(1 << i for i in range(n) if rs[i] is not None and rs[i] < t)
+            for t in th["taus"]
+        ],
+        "TH": [
+            sum(1 << i for i in range(n) if t1[i] is not None and t1[i] > t)
+            for t in th["thetas"]
+        ],
+        "R": [
+            sum(1 << i for i in range(n) if sr[i] is not None and sr[i] < r_)
+            for r_ in th["rhos"]
+        ],
+        "G": [
+            sum(1 << i for i in range(n) if cg[i] is not None and cg[i] < g)
+            for g in th["gammas"]
+        ],
+    }
+
+
+def _stats(mask: int, m: dict) -> dict:
+    """(fn, fs, skip_rate) for a fire-bitset mask: fn = dangerous rows the
+    rule did NOT fire on (missed danger), fs = safe rows it fired on."""
+    n = m["n"]
+    fired = mask.bit_count()
+    dn_hit = (mask & m["dn"]).bit_count()
+    n_dn = m["dn"].bit_count()
+    return {
+        "fn": n_dn - dn_hit,
+        "fs": fired - dn_hit,
+        "fired": fired,
+        "skip_rate": fired / n if n else 0.0,
     }
 
 
 def best_params(family: str, fit_rows: list[dict], eval_rows: list[dict]) -> dict:
-    fn_rule, params = FAMILIES[family]
-    best = None
-    for cand in grid_for(params, fit_rows):
-        fit_eval = evaluate(fn_rule, cand, fit_rows)
-        if fit_eval["fn"] > 0:
-            continue  # a rule that misses fit-set danger is never a candidate
-        ev = evaluate(fn_rule, cand, eval_rows)
-        key = (ev["fn"], ev["fs"], ev["skip_rate"])
+    """Lexicographic objective: 0 FNs on EVAL, then minimal FS on EVAL.
+
+    Candidates must also achieve 0 FNs on the FIT set (a rule that misses
+    in-sample danger is never a candidate).  Grid values come from FIT rows
+    only; both fit and eval masks use those same values (spec section 8:
+    selection and evaluation never share the same events).
+    """
+    th = thresholds_from(fit_rows)
+    F = masks_for(fit_rows, th)
+    E = masks_for(eval_rows, th)
+    n_dn_eval = E["dn"].bit_count()
+    n_dn_fit = F["dn"].bit_count()
+
+    def finalize(params: dict, fstats: dict, estats: dict) -> dict:
+        return {
+            "family": family,
+            "feasible": True,
+            "params": params,
+            "fit": {
+                "fn": fstats["fn"],
+                "fs": fstats["fs"],
+                "n_dangerous": n_dn_fit,
+                "skip_rate": fstats["skip_rate"],
+                "dangerous_recall": 1.0,
+            },
+            "eval": {
+                "fn": estats["fn"],
+                "fs": estats["fs"],
+                "n_dangerous": n_dn_eval,
+                "skip_rate": estats["skip_rate"],
+                "safe_false_skip_rate": (
+                    estats["fs"] / max(1, E["n"] - n_dn_eval)
+                ),
+                "dangerous_recall": (
+                    (n_dn_eval - estats["fn"]) / n_dn_eval if n_dn_eval else None
+                ),
+            },
+        }
+
+    best: tuple[tuple, dict] | None = None
+
+    def consider(params: dict, fmask: int, emask: int) -> None:
+        nonlocal best
+        fstats = _stats(fmask, F)
+        if fstats["fn"] > 0:
+            return
+        estats = _stats(emask, E)
+        key = (estats["fn"], estats["fs"], estats["skip_rate"])
         if best is None or key < best[0]:
-            best = (key, cand, ev, fit_eval)
+            best = (key, finalize(params, fstats, estats))
+
+    if family == "A_amplitude":
+        for i, t in enumerate(th["taus"]):
+            consider({"tau": t}, F["T"][i], E["T"][i])
+    elif family == "B_top1":
+        for i, t in enumerate(th["thetas"]):
+            consider({"theta": float(t)}, F["TH"][i], E["TH"][i])
+    elif family == "C_stablerank":
+        for i, r_ in enumerate(th["rhos"]):
+            consider({"rho": float(r_)}, F["R"][i], E["R"][i])
+    elif family == "D_amp_top1":
+        for i, t in enumerate(th["taus"]):
+            for j, tt in enumerate(th["thetas"]):
+                consider(
+                    {"tau": t, "theta": float(tt)},
+                    F["T"][i] & F["TH"][j],
+                    E["T"][i] & E["TH"][j],
+                )
+    else:  # E_amp_top1_cos
+        for i, t in enumerate(th["taus"]):
+            fi = F["T"][i]
+            ei = E["T"][i]
+            for j, tt in enumerate(th["thetas"]):
+                fid = fi & F["TH"][j]
+                eid = ei & E["TH"][j]
+                if fid & F["dn"]:
+                    continue  # D-part already misses fit danger; E can't help
+                for k, g in enumerate(th["gammas"]):
+                    consider(
+                        {"tau": t, "theta": float(tt), "gamma": float(g)},
+                        fid & F["G"][k],
+                        eid & E["G"][k],
+                    )
     if best is None:
         return {"family": family, "feasible": False}
-    _, cand, ev, fit_eval = best
-    return {
-        "family": family,
-        "feasible": True,
-        "params": cand,
-        "eval": ev,
-        "fit": fit_eval,
-    }
+    return best[1]
 
 
 # ---------------------------------------------------------------- main
