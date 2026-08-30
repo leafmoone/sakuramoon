@@ -109,17 +109,22 @@ def _momentum_dtype(name: MomentumDtype) -> torch.dtype:
     raise ValueError(f"cmuon_momentum_dtype must be bfloat16 or float32, got {name!r}")
 
 
-def cmuon_zeroth_power(
+def cmuon_zeroth_power_bf16(
     grad: torch.Tensor,
     ns_steps: int = DEFAULT_NS_STEPS,
     ns_coefficients: tuple[float, float, float] = DEFAULT_NS_COEFFICIENTS,
     eps: float = DEFAULT_EPS,
 ) -> torch.Tensor:
-    """Quintic Newton-Schulz orthogonalization, replicating torch.optim.Muon.
+    """Quintic Newton-Schulz orthogonalization in BF16 (production path).
 
-    The result is always BF16 (the native Muon casts the input to BF16). Tall
-    matrices are transposed to wide form before iteration and transposed back
-    afterwards, so the output always has the input's shape.
+    Bit-identical to the historical ``cmuon_zeroth_power``: the input is
+    cast to BF16, the Frobenius normalization, gram matmuls and quintic
+    iterations all run in BF16. Tall matrices are transposed to wide form
+    before iteration and transposed back afterwards, so the output always
+    has the input's shape. This is the path known to have convergence-
+    boundary bit chaos on near-zero-signal inputs (S1/S1-b, D1 round) —
+    kept as the fast production path with the post-NS safety ceiling in
+    front of it; see ``cmuon_zeroth_power_fp32`` for the rescue path.
     """
     if ns_steps <= 0 or ns_steps >= 100:
         raise ValueError("ns_steps must be in [1, 99]")
@@ -139,6 +144,66 @@ def cmuon_zeroth_power(
         # gram_update = b*gram + c*(gram @ gram)
         gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
         # ortho = a*ortho + gram_update @ ortho
+        ortho = torch.addmm(ortho, gram_update, ortho, beta=a)
+    if transposed:
+        ortho = ortho.T
+    return ortho
+
+
+def cmuon_zeroth_power(
+    grad: torch.Tensor,
+    ns_steps: int = DEFAULT_NS_STEPS,
+    ns_coefficients: tuple[float, float, float] = DEFAULT_NS_COEFFICIENTS,
+    eps: float = DEFAULT_EPS,
+) -> torch.Tensor:
+    """Alias of the BF16 production path (unchanged semantics)."""
+    return cmuon_zeroth_power_bf16(grad, ns_steps, ns_coefficients, eps)
+
+
+def cmuon_zeroth_power_fp32(
+    grad: torch.Tensor,
+    ns_steps: int = DEFAULT_NS_STEPS,
+    ns_coefficients: tuple[float, float, float] = DEFAULT_NS_COEFFICIENTS,
+    eps: float = DEFAULT_EPS,
+) -> torch.Tensor:
+    """Quintic Newton-Schulz orthogonalization in pure FP32 (rescue path).
+
+    Same algorithm and coefficients as the BF16 production path, but the
+    entire computation — input cast, Frobenius normalization, gram matmuls
+    and all quintic iterations — stays in FP32. There is NO BF16 cast
+    anywhere inside this function (the BF16 path's convergence-boundary
+    bit chaos, measured at ~20% catastrophic branch rate on pathological
+    near-zero-signal inputs, comes from BF16 rounding inside the NS
+    iteration; FP32 has ~24x the mantissa and the same iteration is
+    deterministically stable on identical inputs).
+
+    The result is FP32 with the input's shape (tall matrices are
+    transposed to wide form and back, exactly like the BF16 path).
+    Callers decide the final parameter-dtype rounding; this function never
+    rounds to BF16 itself.
+    """
+    if ns_steps <= 0 or ns_steps >= 100:
+        raise ValueError("ns_steps must be in [1, 99]")
+    if grad.ndim != 2:
+        raise ValueError("cmuon input must be a 2D matrix")
+    if len(ns_coefficients) != 3:
+        raise ValueError("ns_coefficients must be a 3-tuple")
+    a, b, c = ns_coefficients
+    ortho = grad.float()
+    if ortho.dtype is not torch.float32:
+        raise TypeError(
+            f"cmuon_zeroth_power_fp32 requires an fp32-working input, got {ortho.dtype}"
+        )
+    transposed = ortho.size(0) > ortho.size(1)
+    if transposed:
+        ortho = ortho.T
+    # FP32 Frobenius normalization (same clamp semantics as the BF16 path).
+    ortho = ortho / ortho.norm().clamp(min=eps)
+    for _ in range(ns_steps):
+        gram = ortho @ ortho.T
+        # gram_update = b*gram + c*(gram @ gram) — all FP32
+        gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
+        # ortho = a*ortho + gram_update @ ortho — all FP32
         ortho = torch.addmm(ortho, gram_update, ortho, beta=a)
     if transposed:
         ortho = ortho.T
