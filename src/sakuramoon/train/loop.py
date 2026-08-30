@@ -19,6 +19,7 @@ from sakuramoon.checkpoint.policy import (
     CheckpointReason,
 )
 from sakuramoon.optim.guard_calibration import GuardCalibrationComplete
+from sakuramoon.optim.structural_calibration import StructuralCalibrationComplete
 from sakuramoon.telemetry.timers import PhaseTimer
 from sakuramoon.train.failures import FailureSnapshot, write_failure_bundle
 from sakuramoon.train.scheduler import CheckpointScheduler
@@ -248,7 +249,9 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                 active_detection_boundary = "update_finalize"
                 update = step.finish_update(phase_timer=phase_timer)
             except BaseException as exc:
-                if isinstance(exc, GuardCalibrationComplete):
+                if isinstance(
+                    exc, (GuardCalibrationComplete, StructuralCalibrationComplete)
+                ):
                     # Clean calibration stop: no failure bundle, no abort.
                     raise
                 detected_at = step.detection_phase or active_detection_boundary

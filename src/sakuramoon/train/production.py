@@ -59,6 +59,10 @@ from sakuramoon.optim.guard_calibration import (
     GuardCalibrationComplete,
     install_guard_calibration,
 )
+from sakuramoon.optim.structural_calibration import (
+    StructuralCalibrationComplete,
+    install_structural_calibration,
+)
 
 if TYPE_CHECKING:
     from sakuramoon.optim.cmuon import HybridCMuon
@@ -1156,6 +1160,61 @@ def _run_accepted_lifecycle(
                 f"steps={calibration_steps} out={calibration.output_path}"
             )
 
+    # Structural/SNR pre-NS classifier calibration (D1 round, 08-31):
+    # SAKURAMOON_STRUCTURAL_CALIBRATION_STEPS>0 swaps the optimizer step for
+    # the structural shadow observation (pre-NS features + K production NS4
+    # label runs + HCU cost accounting; NO parameter update, NO AdamW step)
+    # and neutralizes the same side effects as the guard calibration.
+    # Fail-closed: only legal on the hybrid CMuon optimizer.
+    structural: object | None = None
+    structural_steps = int(
+        os.environ.get("SAKURAMOON_STRUCTURAL_CALIBRATION_STEPS", "0") or 0
+    )
+    if structural_steps > 0:
+        if not isinstance(optimizer, _hybrid_cmuon_class()):
+            raise ValueError(
+                "SAKURAMOON_STRUCTURAL_CALIBRATION_STEPS requires the hybrid "
+                f"CMuon optimizer, got {type(optimizer)!r}"
+            )
+        refs_path = os.environ.get("SAKURAMOON_STRUCTURAL_REFS_JSON", "")
+        refs = None
+        if refs_path:
+            import json as _json
+
+            _raw = _json.loads(Path(refs_path).read_text(encoding="utf-8"))
+            refs = {
+                (k.rpartition("#chunk")[0], int(k.rpartition("#chunk")[2])): float(v)
+                for k, v in _raw.items()
+            }
+        structural = install_structural_calibration(
+            optimizer,
+            observations=structural_steps,
+            ns_repeat=int(
+                os.environ.get("SAKURAMOON_STRUCTURAL_NS_REPEAT", "5") or 5
+            ),
+            pi_iters=int(
+                os.environ.get("SAKURAMOON_STRUCTURAL_PI_ITERS", "10") or 10
+            ),
+            sigma_method=os.environ.get("SAKURAMOON_STRUCTURAL_SIGMA_METHOD", "svd")
+            or "svd",
+            output_path=artifact_root / f"structural-calibration-rank{rank}.jsonl",
+            artifact_dir=artifact_root / "structural-calibration",
+            rank=rank,
+            world_size=world_size,
+            update_offset=restored.state.trainer.successful_updates,
+            refs=refs,
+            svd_samples=int(
+                os.environ.get("SAKURAMOON_STRUCTURAL_SVD_SAMPLES", "24") or 24
+            ),
+        )
+        if is_main_process:
+            _log(
+                f"[structural-calibration] shadow step 已安装: "
+                f"steps={structural_steps} refs={refs_path or '-'} "
+                f"out={structural.output_path}"  # type: ignore[union-attr]
+            )
+    in_calibration = calibration is not None or structural is not None
+
     if isinstance(optimizer, _hybrid_cmuon_class()) and optimizer.forensic is not None:
         # The forensic run is forked from a live checkpoint: anchor the
         # monitor's update numbering to the restored trainer count so the
@@ -1267,7 +1326,7 @@ def _run_accepted_lifecycle(
             restored=restored,
             device=device,
         )
-        if calibration is not None:
+        if in_calibration:
             publisher: (
                 ProductionSingleGpuCheckpointPublisher
             ) = _GuardCalibrationCheckpointPublisher()
@@ -1333,7 +1392,7 @@ def _run_accepted_lifecycle(
                 telemetry = (
                     # Calibration: no W&B run at all (design constraint).
                     _NoopTelemetry(device)
-                    if calibration is not None
+                    if in_calibration
                     else build_training_telemetry_from_config(
                         config,
                         repository_root=repository_root,
@@ -1476,7 +1535,7 @@ def _run_accepted_lifecycle(
                 # skip it, so no barrier is lost.
                 calibration_observer = (
                     (lambda observation: None)
-                    if calibration is not None
+                    if in_calibration
                     else observe_successful_update
                 )
                 with telemetry:
@@ -1520,7 +1579,7 @@ def _run_accepted_lifecycle(
                         ),
                         log_updates=is_main_process,
                     )
-                if not verified_checkpoints and calibration is None:
+                if not verified_checkpoints and not in_calibration:
                     raise RuntimeError(
                         "production training completed without a durable checkpoint"
                     )
@@ -1532,7 +1591,7 @@ def _run_accepted_lifecycle(
                     loop_result.state.successful_updates,
                     False,
                 )
-            except GuardCalibrationComplete as done:
+            except (GuardCalibrationComplete, StructuralCalibrationComplete) as done:
                 # Clean calibration stop (no failure, no checkpoint).
                 result = ProductionTrainingResult(
                     resolved_config_path,
@@ -1543,9 +1602,14 @@ def _run_accepted_lifecycle(
                     False,
                 )
                 if is_main_process:
+                    _cal_out = (
+                        calibration.output_path
+                        if calibration is not None
+                        else getattr(structural, "output_path", "-")
+                    )
                     _log(
-                        f"[guard-calibration] 完成: {done.observations} 次观察, "
-                        f"记录={calibration.output_path if calibration else '-'}"
+                        f"[calibration] 完成: {done.observations} 次观察 "
+                        f"({type(done).__name__}), 记录={_cal_out}"
                     )
             except Exception as error:
                 raise ProductionTrainingError(
