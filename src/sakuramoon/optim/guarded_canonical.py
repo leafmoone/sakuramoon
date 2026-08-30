@@ -427,6 +427,78 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                     )
 
         if failure_msgs:
+            # ---- forensic dump (analysis-only; fail-closed unchanged) ----
+            try:
+                import json as _json
+                d_rms_vals = (
+                    torch.stack(d_rms_list).tolist() if d_rms_list else []
+                )
+                d_rms_by_idx = dict(zip(d_rms_owner_idx, d_rms_vals))
+                recs = []
+                for idx, flag in enumerate(fail_flags.tolist()):
+                    if flag <= 0:
+                        continue
+                    fqn, cix = self._input_key(idx)
+                    key = (fqn, cix)
+                    sig = sig_by_input[idx]
+                    sigf = sigf_vals[idx] if idx < len(sigf_vals) else None
+                    ref = float(self._refs.get(key, float("nan")))
+                    ratio_line = self.guard_cfg.guard_ratio * ref
+                    floor = self.guard_cfg.numerical_floor
+                    warmup = self.observations < self.guard_cfg.warmup_observations
+                    would_skip = (
+                        (sig is not None and sig < ratio_line)
+                        or (sigf is not None and sigf < floor)
+                    )
+                    shape = self._chunk_shape(idx) if hasattr(self, "_chunk_shape") else None
+                    recs.append({
+                        "failure": _FAILURE_NAMES.get(int(flag), str(flag)),
+                        "fqn": fqn,
+                        "chunk": cix,
+                        "owner": owners[idx] if idx < len(owners) else None,
+                        "this_rank": self.rank,
+                        "shape": list(shape) if shape is not None else None,
+                        "numel": int(__import__("math").prod(shape)) if shape is not None else None,
+                        "u_t_rms": sig,
+                        "u_t_fro": sigf,
+                        "ref": ref,
+                        "ratio_line": ratio_line,
+                        "numerical_floor": floor,
+                        "warmup_active": warmup,
+                        "observations": self.observations,
+                        "warmup_observations": self.guard_cfg.warmup_observations,
+                        "would_skip_after_warmup": bool(would_skip),
+                        "delta_rms": d_rms_by_idx.get(idx),
+                        "lr": lr,
+                        "target_delta_rms": target_delta_rms,
+                        "ceiling": ceiling,
+                    })
+                import os as _os
+                out_dir = "/sakuramoon-runtime/artifacts/g1"
+                _os.makedirs(out_dir, exist_ok=True)
+                out_path = f"{out_dir}/guard-forensic-rank{self.rank}.json"
+                with open(out_path, "w") as _f:
+                    _json.dump(
+                        {"observations": self.observations, "records": recs}, _f, indent=1
+                    )
+                line = " | ".join(
+                    f"{r['fqn']}#c{r['chunk']} u_t_rms={r['u_t_rms']:.3e} fro={r['u_t_fro']:.3e} "
+                    f"ref={r['ref']:.3e} ratio_line={r['ratio_line']:.3e} floor={r['numerical_floor']:.3e} "
+                    f"warmup={r['warmup_active']} obs={r['observations']} would_skip={r['would_skip_after_warmup']} "
+                    f"delta_rms={r['delta_rms'] if r['delta_rms'] is None else format(r['delta_rms'], '.3e')} "
+                    f"ceiling={r['ceiling']:.3e}"
+                    for r in recs
+                )
+                if self.stats_logger is not None:
+                    self.stats_logger("[guard-forensic] " + line)
+            except Exception as exc:  # noqa: BLE001 - analysis must never mask the real failure
+                try:
+                    if self.stats_logger is not None:
+                        self.stats_logger(f"[guard-forensic] dump failed: {exc!r}")
+                except Exception as log_exc:  # noqa: BLE001
+                    import sys as _sys
+
+                    print(f"[guard-forensic] log failed: {log_exc!r}", file=_sys.stderr)
             raise CMuonSafetyError(
                 "guarded canonical safety violation: " + " | ".join(failure_msgs)
             )
