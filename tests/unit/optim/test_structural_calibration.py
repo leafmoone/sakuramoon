@@ -240,7 +240,7 @@ def test_shadow_install_end_to_end_cpu(tmp_path: Path, monkeypatch):
         world_size=1,
         update_offset=97100,
         refs=refs,
-        svd_samples=2,
+        full_sample_obs=3,
     )
     for _ in range(3):
         p1.grad = torch.randn_like(p1.tensor)
@@ -285,12 +285,13 @@ def test_shadow_install_end_to_end_cpu(tmp_path: Path, monkeypatch):
     assert row["label"] in ("SAFE", "DANGEROUS")
     rec2 = json.loads(lines[1])
     assert rec2["rows"][0]["cos_nest_mom_prev"] is not None
-    # SVD samples saved on obs 1 only
-    samples = sorted((art / "svd-samples").glob("sample-*.pt"))
-    assert len(samples) == 2
-    blob = torch.load(samples[0], map_location="cpu", weights_only=False)
-    assert blob["tensor"].shape[0] == 32
-    assert blob["tensor"].dtype in (torch.bfloat16, torch.float32)
+    # full chunk dumps saved for obs 1..3 (rank 0)
+    sample_dirs = sorted((art / "full-samples").glob("obs-*"))
+    assert [d.name for d in sample_dirs] == ["obs-01", "obs-02", "obs-03"]
+    blobs = sorted((sample_dirs[0]).glob("chunk-*.pt"))
+    assert len(blobs) == 3  # 1 chunk + 2 chunks
+    blob = torch.load(blobs[0], map_location="cpu", weights_only=False)
+    assert blob["tensor"].dtype == torch.float32
     assert handle.observations == 3
     # parameters strictly unchanged (fresh grads each obs, momentum updated)
     assert opt._momenta[p1].abs().sum() > 0

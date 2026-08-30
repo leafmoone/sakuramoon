@@ -1193,18 +1193,21 @@ def _run_accepted_lifecycle(
                 os.environ.get("SAKURAMOON_STRUCTURAL_NS_REPEAT", "5") or 5
             ),
             pi_iters=int(
-                os.environ.get("SAKURAMOON_STRUCTURAL_PI_ITERS", "10") or 10
+                os.environ.get("SAKURAMOON_STRUCTURAL_PI_ITERS", "20") or 20
             ),
-            sigma_method=os.environ.get("SAKURAMOON_STRUCTURAL_SIGMA_METHOD", "svd")
-            or "svd",
+            sigma_method=os.environ.get("SAKURAMOON_STRUCTURAL_SIGMA_METHOD", "pi")
+            or "pi",
             output_path=artifact_root / f"structural-calibration-rank{rank}.jsonl",
             artifact_dir=artifact_root / "structural-calibration",
             rank=rank,
             world_size=world_size,
             update_offset=restored.state.trainer.successful_updates,
             refs=refs,
-            svd_samples=int(
-                os.environ.get("SAKURAMOON_STRUCTURAL_SVD_SAMPLES", "24") or 24
+            full_sample_obs=int(
+                os.environ.get(
+                    "SAKURAMOON_STRUCTURAL_FULL_SAMPLE_OBS", "5"
+                )
+                or 5
             ),
         )
         if is_main_process:

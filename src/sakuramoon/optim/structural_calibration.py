@@ -211,7 +211,7 @@ class StructuralCalibration:
         rank: int,
         world_size: int,
         update_offset: int,
-        svd_samples: int,
+        full_sample_obs: int,
     ) -> None:
         self.observations_requested = observations
         self.observations = 0
@@ -223,7 +223,7 @@ class StructuralCalibration:
         self.rank = rank
         self.world_size = world_size
         self.update_offset = update_offset
-        self.svd_samples = svd_samples
+        self.full_sample_obs = full_sample_obs
         self.max_rank_spread = 0.0
 
     def summary(self) -> dict[str, object]:
@@ -241,14 +241,14 @@ def install_structural_calibration(
     observations: int,
     ns_repeat: int,
     pi_iters: int,
-    sigma_method: str = "svd",
+    sigma_method: str = "pi",
     output_path: Path,
     artifact_dir: Path,
     rank: int,
     world_size: int,
     update_offset: int = 0,
     refs: dict[tuple[str, int], float] | None = None,
-    svd_samples: int = 24,
+    full_sample_obs: int = 5,
 ) -> StructuralCalibration:
     """Replace ``optimizer.step`` with the structural shadow routine.
 
@@ -272,6 +272,8 @@ def install_structural_calibration(
         raise ValueError("ns_repeat must be >= 1")
     if pi_iters < 1:
         raise ValueError("pi_iters must be >= 1")
+    if full_sample_obs < 0:
+        raise ValueError("full_sample_obs must be >= 0")
     if world_size > 1 and not dist.is_initialized():
         raise RuntimeError("world_size > 1 requires an initialized process group")
 
@@ -285,7 +287,7 @@ def install_structural_calibration(
         rank=rank,
         world_size=world_size,
         update_offset=update_offset,
-        svd_samples=svd_samples,
+        full_sample_obs=full_sample_obs,
     )
     if rank == 0:
         handle.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -490,12 +492,13 @@ def install_structural_calibration(
 
         handle.observations += 1
         obs = handle.observations
-        # SVD reference samples (rank 0, observation 1 only): save the
-        # per-chunk nesterov tensors as NS sees them (bf16) for the
-        # offline power-iteration accuracy audit (spec section 4).
-        if rank == 0 and obs == 1:
-            (handle.artifact_dir / "svd-samples").mkdir(parents=True, exist_ok=True)
-            saved = 0
+        # Full nesterov-chunk dump (rank 0, observations 1..full_sample_obs):
+        # the offline exact-SVD reference for the spec section-4 power-
+        # iteration accuracy audit (HCU/CPU SVD of these tensors vs the PI
+        # features recorded in the JSONL rows for the same obs).
+        if rank == 0 and 1 <= obs <= handle.full_sample_obs:
+            sample_dir = handle.artifact_dir / f"full-samples/obs-{obs:02d}"
+            sample_dir.mkdir(parents=True, exist_ok=True)
             for spec in optimizer.routing.cmuon_specs:
                 g = spec.parameter.grad
                 if g is None:
@@ -504,31 +507,28 @@ def install_structural_calibration(
                 grad_md = g.to(buf.dtype)
                 nest = grad_md.lerp(buf, mu)
                 cs = spec.chunk_size()
-                for ci, chunk_t in enumerate(
+                chunk_t = (
                     (nest,)
                     if spec.chunk_count == 1
                     else tuple(
                         nest.narrow(spec.chunk_dim, ci * cs, cs)
                         for ci in range(spec.chunk_count)
                     )
-                ):
-                    if saved >= handle.svd_samples:
-                        break
+                )
+                for ci, ct in enumerate(chunk_t):
                     torch.save(
                         {
                             "fqn": spec.name,
                             "chunk": ci,
-                            "tensor": chunk_t.detach().cpu().float(),
+                            "tensor": ct.detach().cpu().float(),
                             "meta": {
                                 "shape": [int(x) for x in spec.parameter.shape],
                                 "chunk_dim": spec.chunk_dim,
                                 "chunk_size": cs,
                             },
                         },
-                        handle.artifact_dir
-                        / f"svd-samples/sample-{saved:03d}.pt",
+                        sample_dir / f"chunk-{spec.name.replace('.', '_').replace('/', '_')}-c{ci}.pt",
                     )
-                    saved += 1
         if rank >= 0:
             record = {
                 "obs": obs,
