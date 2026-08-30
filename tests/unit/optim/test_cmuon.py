@@ -47,6 +47,8 @@ from sakuramoon.optim.cmuon import (
     build_hybrid_cmuon,
     cmuon_moonlight_alpha,
     cmuon_zeroth_power,
+    cmuon_zeroth_power_bf16,
+    cmuon_zeroth_power_fp32,
     cmuon_zeroth_power_traced,
     resolve_ns_map,
     route_cmuon_parameters,
@@ -135,6 +137,68 @@ def test_ns_matches_native_muon_ortho():
         assert torch.allclose(mine, ref, atol=1e-3, rtol=1e-3), (
             f"NS mismatch at {shape}"
         )
+
+
+def test_bf16_alias_is_the_bf16_path():
+    """cmuon_zeroth_power must remain the BF16 production path (D2 rename)."""
+    g = torch.Generator().manual_seed(2)
+    for shape in [(64, 16), (16, 64)]:
+        x = torch.randn(*shape, generator=g, dtype=torch.bfloat16)
+        assert torch.equal(
+            cmuon_zeroth_power(x, NS_STEPS),
+            cmuon_zeroth_power_bf16(x, NS_STEPS),
+        )
+        assert cmuon_zeroth_power(x, NS_STEPS).dtype == torch.bfloat16
+
+
+def test_fp32_ns_pure_fp32_finite_orthogonal():
+    """The FP32 rescue path: fp32 out, finite, deterministic, and matching
+    an FP64 reference of the same quintic algorithm to FP32 precision.
+
+    NS4 does not fully orthogonalize a generic random matrix (4 quintic
+    steps), so instead of an orthogonality gate the implementation is
+    pinned against the same formula evaluated in FP64: any divergence
+    beyond ~1e-3 relative would indicate an accidental low-precision
+    op inside the rescue path (the bug class this function exists to
+    prevent). Pathological near-zero-signal inputs are covered by the HCU
+    replay (scripts/fp32_rescue_replay.py), not by CPU unit tests.
+    """
+    g = torch.Generator().manual_seed(3)
+    for shape in [(64, 16), (16, 64), (32, 32)]:
+        x = torch.randn(*shape, generator=g, dtype=torch.float32) * 1e-2
+        out1 = cmuon_zeroth_power_fp32(x, NS_STEPS)
+        out2 = cmuon_zeroth_power_fp32(x, NS_STEPS)
+        assert out1.shape == shape
+        assert out1.dtype == torch.float32, "rescue path must stay FP32"
+        assert torch.isfinite(out1).all()
+        assert torch.equal(out1, out2), "fp32 NS must be deterministic"
+        # FP64 reference of the identical quintic iteration.
+        a, b, c = cmuon_mod.DEFAULT_NS_COEFFICIENTS
+        ref = x.double()
+        transposed = ref.size(0) > ref.size(1)
+        if transposed:
+            ref = ref.T
+        ref = ref / ref.norm().clamp(min=1e-7)
+        for _ in range(NS_STEPS):
+            gram = ref @ ref.T
+            gram = torch.addmm(gram, gram, gram, beta=b, alpha=c)
+            ref = torch.addmm(ref, gram, ref, beta=a)
+        if transposed:
+            ref = ref.T
+        rel = float((out1.double() - ref).norm() / ref.norm())
+        assert rel < 1e-3, f"fp32 path diverges from fp64 reference: {rel:.3e}"
+
+
+def test_fp32_vs_bf16_close_on_well_conditioned():
+    """On ordinary inputs the two paths implement the same Muon update."""
+    g = torch.Generator().manual_seed(4)
+    x = torch.randn(64, 32, generator=g, dtype=torch.float32)
+    bf16 = cmuon_zeroth_power_bf16(x, NS_STEPS)
+    fp32 = cmuon_zeroth_power_fp32(x, NS_STEPS)
+    cos = torch.nn.functional.cosine_similarity(
+        bf16.float().flatten(), fp32.flatten(), dim=0
+    )
+    assert float(cos) > 0.999, f"paths diverge on ordinary input: cos={float(cos)}"
 
 
 # ---------------------------------------------------------------------------
