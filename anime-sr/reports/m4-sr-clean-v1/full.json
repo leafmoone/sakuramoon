@@ -1,0 +1,728 @@
+{
+  "params": {
+    "mode": "frozen-population",
+    "shard_dir": "/root/private_data/anime-sr/danbooru-v2/data/1_2024",
+    "index_dir": "/root/private_data/anime-sr/data/index-p1formal",
+    "bucket_hr": 1024,
+    "config": [
+      "config/base.toml",
+      "config/data.toml",
+      "config/m4_1024.toml"
+    ],
+    "clean_score": "/root/private_data/anime-sr/data/index-p1formal/clean-score-v1.jsonl",
+    "seed": 20260831,
+    "total_exposures": 6000000,
+    "workers": 4
+  },
+  "shard_scan": {
+    "shard-000000.tar": {
+      "n_images": 9844,
+      "n_unresolved_json": 17
+    },
+    "shard-000001.tar": {
+      "n_images": 9839,
+      "n_unresolved_json": 13
+    },
+    "shard-000002.tar": {
+      "n_images": 9901,
+      "n_unresolved_json": 15
+    }
+  },
+  "coverage": {
+    "n_scanned_images": 29584,
+    "n_full_eligible_train": 9430,
+    "n_full_eligible_validation": 0,
+    "nsfw_distribution": null,
+    "population_missing_in_raw_shards": 0,
+    "population_missing_ids_head": [],
+    "n_webp_size_fallback_to_meta": 0
+  },
+  "cross_check": {
+    "label_field_mismatches_raw_vs_frozen": {},
+    "eligibility_rederive_mismatches": 0,
+    "webp_dim_checked": 9430,
+    "webp_dim_mismatches_raw_tar_vs_frozen": 0
+  },
+  "cross_tables": {
+    "completeness_x_quality": {
+      "rough": {
+        "low": 210,
+        "normal": 362,
+        "good": 267,
+        "best": 49,
+        "worst": 99,
+        "great": 66,
+        "masterpiece": 12
+      },
+      "polished": {
+        "best": 731,
+        "great": 799,
+        "normal": 2352,
+        "masterpiece": 309,
+        "good": 2242,
+        "low": 881,
+        "worst": 301
+      },
+      "monochrome": {
+        "worst": 249,
+        "normal": 182,
+        "low": 162,
+        "good": 106,
+        "best": 14,
+        "great": 34,
+        "masterpiece": 3
+      }
+    },
+    "classification_x_quality": {
+      "illustration": {
+        "low": 1053,
+        "great": 839,
+        "normal": 2614,
+        "masterpiece": 310,
+        "good": 2420,
+        "best": 750,
+        "worst": 382
+      },
+      "3d": {
+        "best": 10,
+        "good": 47,
+        "low": 26,
+        "masterpiece": 3,
+        "normal": 88,
+        "great": 21,
+        "worst": 10
+      },
+      "comic": {
+        "normal": 158,
+        "best": 30,
+        "worst": 254,
+        "low": 154,
+        "good": 124,
+        "great": 30,
+        "masterpiece": 10
+      },
+      "bangumi": {
+        "good": 24,
+        "normal": 36,
+        "low": 20,
+        "masterpiece": 1,
+        "best": 4,
+        "worst": 3,
+        "great": 9
+      }
+    },
+    "completeness_x_classification": {
+      "rough": {
+        "illustration": 778,
+        "comic": 243,
+        "3d": 27,
+        "bangumi": 17
+      },
+      "polished": {
+        "3d": 175,
+        "illustration": 7251,
+        "comic": 110,
+        "bangumi": 79
+      },
+      "monochrome": {
+        "comic": 407,
+        "illustration": 339,
+        "bangumi": 1,
+        "3d": 3
+      }
+    }
+  },
+  "top30_3d": [
+    {
+      "completeness": "polished",
+      "classification": "illustration",
+      "quality": "normal",
+      "n": 2221
+    },
+    {
+      "completeness": "polished",
+      "classification": "illustration",
+      "quality": "good",
+      "n": 2141
+    },
+    {
+      "completeness": "polished",
+      "classification": "illustration",
+      "quality": "low",
+      "n": 842
+    },
+    {
+      "completeness": "polished",
+      "classification": "illustration",
+      "quality": "great",
+      "n": 764
+    },
+    {
+      "completeness": "polished",
+      "classification": "illustration",
+      "quality": "best",
+      "n": 700
+    },
+    {
+      "completeness": "polished",
+      "classification": "illustration",
+      "quality": "masterpiece",
+      "n": 300
+    },
+    {
+      "completeness": "polished",
+      "classification": "illustration",
+      "quality": "worst",
+      "n": 283
+    },
+    {
+      "completeness": "rough",
+      "classification": "illustration",
+      "quality": "normal",
+      "n": 268
+    },
+    {
+      "completeness": "monochrome",
+      "classification": "comic",
+      "quality": "worst",
+      "n": 215
+    },
+    {
+      "completeness": "rough",
+      "classification": "illustration",
+      "quality": "good",
+      "n": 200
+    },
+    {
+      "completeness": "rough",
+      "classification": "illustration",
+      "quality": "low",
+      "n": 145
+    },
+    {
+      "completeness": "monochrome",
+      "classification": "illustration",
+      "quality": "normal",
+      "n": 125
+    },
+    {
+      "completeness": "monochrome",
+      "classification": "comic",
+      "quality": "low",
+      "n": 96
+    },
+    {
+      "completeness": "monochrome",
+      "classification": "illustration",
+      "quality": "good",
+      "n": 79
+    },
+    {
+      "completeness": "polished",
+      "classification": "3d",
+      "quality": "normal",
+      "n": 74
+    },
+    {
+      "completeness": "rough",
+      "classification": "comic",
+      "quality": "normal",
+      "n": 71
+    },
+    {
+      "completeness": "monochrome",
+      "classification": "illustration",
+      "quality": "low",
+      "n": 66
+    },
+    {
+      "completeness": "rough",
+      "classification": "illustration",
+      "quality": "worst",
+      "n": 65
+    },
+    {
+      "completeness": "rough",
+      "classification": "comic",
+      "quality": "good",
+      "n": 62
+    },
+    {
+      "completeness": "monochrome",
+      "classification": "comic",
+      "quality": "normal",
+      "n": 57
+    },
+    {
+      "completeness": "rough",
+      "classification": "comic",
+      "quality": "low",
+      "n": 52
+    },
+    {
+      "completeness": "rough",
+      "classification": "illustration",
+      "quality": "great",
+      "n": 52
+    },
+    {
+      "completeness": "polished",
+      "classification": "3d",
+      "quality": "good",
+      "n": 42
+    },
+    {
+      "completeness": "rough",
+      "classification": "illustration",
+      "quality": "best",
+      "n": 40
+    },
+    {
+      "completeness": "polished",
+      "classification": "comic",
+      "quality": "good",
+      "n": 37
+    },
+    {
+      "completeness": "monochrome",
+      "classification": "illustration",
+      "quality": "worst",
+      "n": 34
+    },
+    {
+      "completeness": "rough",
+      "classification": "comic",
+      "quality": "worst",
+      "n": 33
+    },
+    {
+      "completeness": "polished",
+      "classification": "comic",
+      "quality": "normal",
+      "n": 30
+    },
+    {
+      "completeness": "polished",
+      "classification": "bangumi",
+      "quality": "normal",
+      "n": 27
+    },
+    {
+      "completeness": "monochrome",
+      "classification": "comic",
+      "quality": "good",
+      "n": 25
+    }
+  ],
+  "pool_sizes": [
+    {
+      "pool": "P0_priority",
+      "n": 1808,
+      "share_of_full": 0.19172852598091197,
+      "in_p1_share": 0.2876232898504613
+    },
+    {
+      "pool": "P1_sr_clean_v1",
+      "n": 6286,
+      "share_of_full": 0.6665959703075292,
+      "in_p1_share": 1.0
+    },
+    {
+      "pool": "P2_sr_clean_wide",
+      "n": 7440,
+      "share_of_full": 0.7889713679745494,
+      "in_p1_share": 1.1835825644288895
+    },
+    {
+      "pool": "P3_lineart_extra",
+      "n": 1103,
+      "share_of_full": 0.11696712619300106,
+      "in_p1_share": 0.17546929685014317
+    },
+    {
+      "pool": "P4_rough_extra",
+      "n": 1065,
+      "share_of_full": 0.1129374337221633,
+      "in_p1_share": 0.16942411708558702
+    }
+  ],
+  "p1_detail": {
+    "n_unique_images": 6286,
+    "quality": {
+      "good": 2200,
+      "normal": 2278,
+      "great": 781,
+      "best": 721,
+      "masterpiece": 306
+    },
+    "classification": {
+      "illustration": 6126,
+      "bangumi": 62,
+      "comic": 98
+    },
+    "completeness": {
+      "polished": 6286
+    },
+    "width": {
+      "p10": 1182.0,
+      "p25": 1366.0,
+      "p50": 1634.5,
+      "p75": 1773.0,
+      "p90": 2048.5,
+      "min": 1024,
+      "max": 3940,
+      "mean": 1634.1705377028318
+    },
+    "height": {
+      "p10": 1310.5,
+      "p25": 1600.0,
+      "p50": 2048.0,
+      "p75": 2433.0,
+      "p90": 2524.0,
+      "min": 1024,
+      "max": 3684,
+      "mean": 1992.457047406936
+    },
+    "min_dim": {
+      "p10": 1125.5,
+      "p25": 1256.0,
+      "p50": 1536.0,
+      "p75": 1722.0,
+      "p90": 1795.0,
+      "min": 1024,
+      "max": 2048,
+      "mean": 1504.4918867324213
+    },
+    "max_dim": {
+      "p10": 1500.0,
+      "p25": 1815.0,
+      "p50": 2122.0,
+      "p75": 2435.0,
+      "p90": 2590.0,
+      "min": 1024,
+      "max": 3940,
+      "mean": 2122.1356983773467
+    },
+    "crop_flexibility_exact": {
+      "==1": 28,
+      ">1": 6258,
+      ">4": 6258,
+      ">16": 6258,
+      ">64": 6258,
+      ">256": 6253
+    },
+    "crop_flexibility_stride64": {
+      "==1": 38,
+      ">1": 6248,
+      ">4": 6198,
+      ">16": 5642,
+      ">64": 4538,
+      ">256": 899
+    }
+  },
+  "exposures_6m": [
+    {
+      "pool": "P0_priority",
+      "n": 1808,
+      "mean_exposures_per_source": 3318.5840707964603,
+      "sum_crop_positions_stride64": 302143,
+      "mean_exposures_per_possible_crop_proxy": 19.858146639174166
+    },
+    {
+      "pool": "P1_sr_clean_v1",
+      "n": 6286,
+      "mean_exposures_per_source": 954.5020680878142,
+      "sum_crop_positions_stride64": 994631,
+      "mean_exposures_per_possible_crop_proxy": 6.032387890584548
+    },
+    {
+      "pool": "P2_sr_clean_wide",
+      "n": 7440,
+      "mean_exposures_per_source": 806.4516129032259,
+      "sum_crop_positions_stride64": 1159533,
+      "mean_exposures_per_possible_crop_proxy": 5.174496974212894
+    },
+    {
+      "pool": "full_eligible",
+      "n": 9430,
+      "mean_exposures_per_source": 636.2672322375398,
+      "sum_crop_positions_stride64": null,
+      "mean_exposures_per_possible_crop_proxy": null
+    }
+  ],
+  "clean_score": {
+    "status": "ok",
+    "note": "correlation analysis only; clean_score_min stays -1.0; no data removed",
+    "groups": {
+      "P0_priority": {
+        "n": 1808,
+        "n_covered": 1808,
+        "coverage": 1.0,
+        "p10": 0.33947120000000003,
+        "p25": 0.34650325000000004,
+        "p50": 0.355095,
+        "p75": 0.36571,
+        "p90": 0.38198469999999995,
+        "min": 0.210855,
+        "max": 0.500219,
+        "mean": 0.35894031249999936
+      },
+      "P1_sr_clean_v1": {
+        "n": 6286,
+        "n_covered": 6286,
+        "coverage": 1.0,
+        "p10": 0.33939600000000003,
+        "p25": 0.347169,
+        "p50": 0.35568449999999996,
+        "p75": 0.3674175,
+        "p90": 0.3868435,
+        "min": 0.208183,
+        "max": 0.527355,
+        "mean": 0.3604439196627422
+      },
+      "P2_sr_clean_wide": {
+        "n": 7440,
+        "n_covered": 7440,
+        "coverage": 1.0,
+        "p10": 0.3391241,
+        "p25": 0.34711575,
+        "p50": 0.355865,
+        "p75": 0.36807175000000003,
+        "p90": 0.3883857,
+        "min": 0.208183,
+        "max": 0.527355,
+        "mean": 0.36079192782258085
+      },
+      "P3_lineart_extra": {
+        "n": 1103,
+        "n_covered": 1103,
+        "coverage": 1.0,
+        "p10": 0.3523118,
+        "p25": 0.36480049999999997,
+        "p50": 0.38078,
+        "p75": 0.4080185,
+        "p90": 0.4471004,
+        "min": 0.300242,
+        "max": 0.517738,
+        "mean": 0.39118747506799667
+      },
+      "P4_rough_extra": {
+        "n": 1065,
+        "n_covered": 1065,
+        "coverage": 1.0,
+        "p10": 0.3388726,
+        "p25": 0.34738,
+        "p50": 0.356732,
+        "p75": 0.371731,
+        "p90": 0.3930988,
+        "min": 0.292707,
+        "max": 0.497671,
+        "mean": 0.3627417774647882
+      },
+      "full_eligible": {
+        "n": 9430,
+        "n_covered": 9430,
+        "coverage": 1.0,
+        "p10": 0.3395293,
+        "p25": 0.34775124999999996,
+        "p50": 0.35727600000000004,
+        "p75": 0.37179225,
+        "p90": 0.3984994,
+        "min": 0.208183,
+        "max": 0.527355,
+        "mean": 0.36420769628844096
+      }
+    },
+    "spearman_quality_ordinal_vs_score": -0.11243154636962455,
+    "polished_vs_non_polished": {
+      "polished": {
+        "n": 7615,
+        "p10": 0.3390974,
+        "p25": 0.347089,
+        "p50": 0.355889,
+        "p75": 0.36819250000000003,
+        "p90": 0.3889052,
+        "min": 0.208183,
+        "max": 0.527355,
+        "mean": 0.3609680078791865
+      },
+      "non_polished": {
+        "n": 1815,
+        "p10": 0.34304480000000004,
+        "p25": 0.351969,
+        "p50": 0.366699,
+        "p75": 0.393682,
+        "p90": 0.43088880000000007,
+        "min": 0.292707,
+        "max": 0.517738,
+        "mean": 0.37780010798898056
+      }
+    },
+    "by_classification": {
+      "3d": {
+        "n_covered": 205,
+        "p10": 0.338384,
+        "p25": 0.345752,
+        "p50": 0.35884,
+        "p75": 0.380018,
+        "p90": 0.418354,
+        "min": 0.300414,
+        "max": 0.513269,
+        "mean": 0.3692470536585365
+      },
+      "bangumi": {
+        "n_covered": 97,
+        "p10": 0.33658,
+        "p25": 0.345285,
+        "p50": 0.358716,
+        "p75": 0.379322,
+        "p90": 0.40361579999999997,
+        "min": 0.316343,
+        "max": 0.491121,
+        "mean": 0.36648888659793805
+      },
+      "comic": {
+        "n_covered": 760,
+        "p10": 0.35547029999999996,
+        "p25": 0.36888275,
+        "p50": 0.38681,
+        "p75": 0.412742,
+        "p90": 0.4525603,
+        "min": 0.322554,
+        "max": 0.515465,
+        "mean": 0.3960389473684211
+      },
+      "illustration": {
+        "n_covered": 8368,
+        "p10": 0.33904870000000004,
+        "p25": 0.34709500000000004,
+        "p50": 0.3559,
+        "p75": 0.36813425,
+        "p90": 0.3894742,
+        "min": 0.208183,
+        "max": 0.527355,
+        "mean": 0.36116681500956005
+      }
+    }
+  },
+  "diffs": {
+    "P1_minus_P0": {
+      "n_added": 4478,
+      "quality_tier": {
+        "good": 2200,
+        "normal": 2278
+      },
+      "classification": {
+        "comic": 67,
+        "illustration": 4362,
+        "bangumi": 49
+      },
+      "completeness": {
+        "polished": 4478
+      },
+      "clean_score": {
+        "n_covered": 4478,
+        "p10": 0.339342,
+        "p25": 0.34737375000000004,
+        "p50": 0.35600750000000003,
+        "p75": 0.368113,
+        "p90": 0.3893835,
+        "min": 0.208183,
+        "max": 0.527355,
+        "mean": 0.361051003573024
+      }
+    },
+    "P2_minus_P1": {
+      "n_added": 1154,
+      "quality_tier": {
+        "low": 862,
+        "worst": 292
+      },
+      "classification": {
+        "illustration": 1125,
+        "bangumi": 17,
+        "comic": 12
+      },
+      "completeness": {
+        "polished": 1154
+      },
+      "clean_score": {
+        "n_covered": 1154,
+        "p10": 0.3373325,
+        "p25": 0.34689925,
+        "p50": 0.357093,
+        "p75": 0.3711735,
+        "p90": 0.3961187,
+        "min": 0.298071,
+        "max": 0.511531,
+        "mean": 0.3626875771230499
+      }
+    }
+  },
+  "answers": {
+    "q1_full_1024_eligible_train": 9430,
+    "q2_p0_strict_priority": 1808,
+    "q3_p1_sr_clean_v1": 6286,
+    "q4_p1_minus_p0_is_good_normal_polished": {
+      "n_added": 4478,
+      "quality_tier": {
+        "good": 2200,
+        "normal": 2278
+      },
+      "classification": {
+        "comic": 67,
+        "illustration": 4362,
+        "bangumi": 49
+      },
+      "completeness": {
+        "polished": 4478
+      },
+      "clean_score": {
+        "n_covered": 4478,
+        "p10": 0.339342,
+        "p25": 0.34737375000000004,
+        "p50": 0.35600750000000003,
+        "p75": 0.368113,
+        "p90": 0.3893835,
+        "min": 0.208183,
+        "max": 0.527355,
+        "mean": 0.361051003573024
+      }
+    },
+    "q5_p2_minus_p1_low_worst": {
+      "n_added": 1154,
+      "quality_tier": {
+        "low": 862,
+        "worst": 292
+      },
+      "classification": {
+        "illustration": 1125,
+        "bangumi": 17,
+        "comic": 12
+      },
+      "completeness": {
+        "polished": 1154
+      },
+      "clean_score": {
+        "n_covered": 1154,
+        "p10": 0.3373325,
+        "p25": 0.34689925,
+        "p50": 0.357093,
+        "p75": 0.3711735,
+        "p90": 0.3961187,
+        "min": 0.298071,
+        "max": 0.511531,
+        "mean": 0.3626875771230499
+      }
+    },
+    "q6_recommendation": "推荐：P2（SR-clean-wide，7440 张 = 78.9% eligible 全集）\n\n原因（N / 6M exposures / 内容覆盖 / quality 构成 / crop flexibility / clean-score 相关性）：\n- N：P2 = 7440，是「polished + illustration/bangumi/comic」内可定义的最大标签池；P1 = 6286（3.48× strict priority 1808），P0 单独 6M 需 3319 exposures/source（5.3× 全集速率），过拟合风险高，不作 6M 候选。\n- 6M exposures：P2 = 806 exposures/source；按 stride-64 可能 crop 位计 = 5.17 次/可能 crop（P1 = 6.03，P0 = 19.86）——P2 的 crop 重复强度与全集同档，无重复过训信号。\n- 内容覆盖：覆盖 1024-eligible 全集的 78.9%；排除的 21.1% 是 aux 类（rough 1065 / monochrome+line-art / 3d 渲染），其高频纹理统计与「完成的涂色动画」SR 目标域不同（rough=未完成渲染，3d=不同纹理域）——若部署需要线稿覆盖，用随附 P3 manifest（1103 张，monochrome∪comic、非 corrupt、非 not_painting）作为显式附加候选，不混入主池。\n- quality 构成：P2 = P1（polished+core+tier≥normal：masterpiece 306 + best 721 + great 781 = 1808，恰等于 strict priority P0；good 2200 + normal 2278）+ low 862 + worst 292。P1 分类 = illustration 6126 / bangumi 62 / comic 98。纳入 low/worst 的依据：唯一保真度代理 clean_score 与 quality tier 不相关（Spearman −0.112，且符号为负——画评越高质量分反而略低，进一步证明画评≠保真度），按主观画评剔除 low/worst 没有可测量的保真度收益，只会损失 18% 的 HR-GT。\n- crop flexibility（P1 实测，P2 同档）：webp 真实尺寸 min_dim 中位 1536、max≤2048；stride-64 crop 位分布 ==1: 38 / >1: 6248 / >16: 5642 / >64: 4538 / >256: 899——99.4% 的图 >1 个 crop 位，crop 多样性充足。\n- clean-score 相关性：不可用（近常数 0.34–0.40，Spearman −0.112）⇒「clean pool」只能由 Danbooru 标签结构（quality×completeness×classification）定义，clean_score 永不作 hard gate（保持 -1.0）。\n\n操作后果（供 6M GO 决策）：6M 语料从当前 9430（1c74230 冻结的 19/60/21 自然组成）切到 P2(7440) = 重建 slot map = 数据侧重启动，必须在 6M GO 前拍板；候选清单见 sr-clean-v1-sample-ids.txt（P1 全集 6286）与 P2 = P1 ∪ {low/worst 1154}（p2_low_worst_samples.txt 为抽样）。若维持 FULL(9430) 不改，本报告的池定义与 manifest 仍作为 6M 后的 Stage 数据候选存档。"
+  },
+  "sample_counts": {
+    "p0_priority_samples": 100,
+    "p1_added_good_normal_samples": 200,
+    "p2_low_worst_samples": 200,
+    "p3_lineart_samples": 200,
+    "p4_rough_samples": 100
+  },
+  "elapsed_s": 7.69
+}
