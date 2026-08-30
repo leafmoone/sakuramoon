@@ -1,0 +1,98 @@
+{
+  "round": "D1 structural/SNR pre-NS classifier calibration",
+  "date": "2026-08-31",
+  "goal": "goal-a3a53bfb-cdb5-4a28-a88e-368aca78a11e",
+  "verdict": "FAIL",
+  "shadow": {
+    "source_ckpt": "ckpt_97100_raw-97100-update-cadence",
+    "observations": 100,
+    "ranks": 2,
+    "parameter_updates": 0,
+    "cmuon_chunks_per_obs": 166,
+    "ns4_label_runs_per_input_per_rank": 5,
+    "total_ns4_runs": 166000,
+    "rank_consistency_max_spread": 0.0,
+    "stop": "clean StructuralCalibrationComplete",
+    "ckpt_97100": "untouched",
+    "s1_mainset": "untouched (647)",
+    "structural_mainset": "647 -> 657 (31 shards consumed; reset to 647 required)"
+  },
+  "known_pathology": {
+    "mechanism": "near-zero-signal nesterov chunk -> Frobenius normalize amplifies x2.0766e5 -> NS4 convergence-boundary bf16 bit chaos (~20% catastrophic branch) -> total amplification x1.675e5",
+    "s1_crashes": "obs 13/2/7/3 (slot_07 q_proj) + S1-b obs 15 (slot_07 k_proj)",
+    "dangerous_events_found": 108,
+    "input_obs_total": 16600,
+    "dangerous_rate": 0.0065,
+    "by_slot": {"slot_21": 33, "slot_07": 29, "slot_02": 20, "slot_08": 16, "slot_01": 10},
+    "by_role": {"attention_k": 34, "attention_content_gate": 32, "attention_q": 31, "attention_v": 10, "attention_out": 1, "ffn": 0, "adaln": 0},
+    "temporal": {
+      "obs_with_danger": 77,
+      "obs_range": "3..100",
+      "events_first50": 50,
+      "events_last50": 58,
+      "note": "danger persists and accelerates through the whole window; momentum-from-zero early-phase hypothesis FALSIFIED"
+    }
+  },
+  "feature_separation": {
+    "pi_validation": {
+      "method": "power iteration w/ rank-1 deflation vs exact torch SVD on 200 real saved tensors (CPU fp64 reference)",
+      "pi_iters_20": {"sigma1_rel_err_median": 9.5e-08, "sigma1_rel_err_max": 7.7e-04, "top1_energy_abs_err_median": 4.2e-08, "top1_energy_abs_err_max": 4.5e-04},
+      "pi_iters_5_max_top1_err": 0.0879,
+      "pi_iters_10_max_top1_err": 0.0761,
+      "conclusion": "PI@20 validated; PI@5/10 unacceptable max error on slow-convergence tensors"
+    },
+    "class_overlap": {
+      "min_dangerous_top1": 0.2583,
+      "min_dangerous_example": "obs=3 slot_07 k_proj (the S1-b crash tensor), hazard=5/5",
+      "safe_top1_max": 0.998,
+      "safe_rows_above_best_threshold": 13245,
+      "safe_rows_total": 16492,
+      "conclusion": "top1_energy of dangerous inputs (0.258-0.995) lies INSIDE the safe distribution (0.01-0.998); no threshold separates the classes"
+    },
+    "q_proj_88p9_top1_question": "belongs to a general dangerous cluster: danger spans 5 slots (21/07/02/08/01) and 4 attention roles (k/q/gate/v); FFN/AdaLN have zero dangerous events. Not an outlier."
+  },
+  "classifier": {
+    "protocol": "grid sweep on fit rows only; lexicographic objective (holdout FN=0, then minimal false skip); slot holdout = fit on non-slot_07/08, eval on slot_07/08; time holdout = half/half of observations",
+    "A_amplitude_only": {"slot_holdout": {"fn": 2, "fs": 1555, "skip_rate": 0.999}, "verdict": "INFEASIBLE (misses danger at any skip rate)"},
+    "B_top1_only": {"slot_holdout": {"theta": 0.2558, "fn": 0, "fs": 1105, "skip_rate": 0.719, "safe_false_skip_rate": 0.711}, "time_holdout_skip": [0.862, 0.681], "verdict": "FN=0 but skip 68-86% >> 50% red line"},
+    "C_stablerank_only": {"slot_holdout": {"rho": 3.909, "fn": 0, "fs": 1105, "skip_rate": 0.719}, "verdict": "identical to B (stable_rank ~= top1 dominance)"},
+    "D_amplitude_top1": {"slot_holdout": {"tau": 1.303, "theta": 0.2558, "fn": 2, "skip_rate": 0.718}, "verdict": "amplitude AND-condition loses 2 holdout danger events"},
+    "E_amplitude_top1_temporal": {"slot_holdout": "INFEASIBLE (no 3-threshold box hits all fit danger)"},
+    "baseline_amplitude_floor_v1": {"floor_1.2e-7": {"skip_rate": 0.703, "dangerous_caught": 76, "dangerous_missed": 32}, "floor_1.35e-7": {"skip_rate": 0.735, "dangerous_caught": 76, "dangerous_missed": 32}}
+  },
+  "counterexamples": {
+    "record_dir": "/root/private_data/sakuramoon-g1-forensic/artifacts-fail-record/",
+    "dangerous_lowest_top1": {"obs": 3, "fqn": "dit.blocks.slot_07.attention.k_proj.weight", "chunk": 0, "top1": 0.2583, "rel_sig": 0.4324, "hazard_rate": 1.0, "tensor": "tensors/dangerous-min-top1-obs03-slot07-k_proj-c0.pt"},
+    "safe_false_skips_first": [
+      {"obs": 1, "fqn": "dit.blocks.slot_00.attention.out_proj.weight", "top1": 0.9304, "rel_sig": 0.1709, "tensor": "tensors/false-skip-obs01-slot00-out_proj-c0.pt"},
+      {"obs": 1, "fqn": "dit.blocks.slot_00.attention.v_proj.weight", "top1": 0.9254, "rel_sig": 0.18}
+    ],
+    "safe_false_skip_count_under_best_rule": 13245
+  },
+  "cost": {
+    "per_obs_hcu_ms_median_of_200_rank_obs": {
+      "ns_label_k5": 36349,
+      "feat_pi": 2622,
+      "feat_cos": 351,
+      "feat_reduce": 114,
+      "step_total": 40693
+    },
+    "production_step_baseline_ms": 16000,
+    "shadow_overhead_factor": 2.54,
+    "hypothetical_v2_classifier_overhead_ms": 3087,
+    "hypothetical_v2_classifier_overhead_pct": 0.17
+  },
+  "s1c": "NOT RUN (spec: only after PASS)",
+  "verdict": "FAIL — per frozen spec sections 6/10/12: the dangerous NS-input class is identifiable (top1>0.2558 catches 108/108) but NOT separable: every rule achieving holdout FN=0 false-skips 68-86% of all inputs (>50% red line; not <<64-70%). No deployable classifier in the frozen rule families A-E. v2 NOT implemented. S1-c NOT run. No deployment.",
+  "open_questions": [
+    "Danger is time-persistent and accelerating (37/25 obs in the LAST window), so a time-limited guard (skip first N updates only) is NOT a viable alternative.",
+    "Per-input dynamic baselines (skip when top1 deviates from that input's own rolling history) are outside the frozen A-E families; the static-threshold overlap does not prove dynamic baselines fail, but they were not in the authorized candidate set.",
+    "The bf16 NS4 bit chaos may be intrinsic: if the chaotic branch is selected by sub-ulp nondeterminism, no pre-NS feature can perfectly predict it; higher-precision NS or NS depth changes were hard-constrained out of this round."
+  ],
+  "artifacts": {
+    "nfs_fail_record": "/root/private_data/sakuramoon-g1-forensic/artifacts-fail-record/ (analysis json + raw rank jsonl + counterexamples + 2 tensor dumps)",
+    "full_samples_obs1to5_local": "/sakuramoon-runtime/artifacts/g1/structural-calibration/full-samples/ (30G, volatile local disk)",
+    "pi_audit_log": "/root/sakuramoon-logs-structural/pi-audit.log",
+    "reports": ["reports/cmuon-structural-guard-calibration.md", "reports/cmuon-structural-guard-calibration.json"]
+  }
+}
