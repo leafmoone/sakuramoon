@@ -237,3 +237,15 @@ invariant_check = true
 "dit.conditioner.shared_block_projection.weight#chunk3" = 2.169872459e-06
 "dit.conditioner.shared_block_projection.weight#chunk4" = 3.483637101e-06
 "dit.conditioner.shared_block_projection.weight#chunk5" = 2.003455393e-06
+
+# S1 cache watermark (salt6 host): the full S1 window (queue rows 647-894,
+# 248 shards, ~496 GiB = 200 consumption + 48 verified-shard lookahead) is
+# preloaded before start via the salt3 relay (salt6 has no egress proxy).
+# high must stay above the full preload: otherwise the service's first
+# fetch evicts the queue head (LRU-by-mtime) and the run dies on a local
+# miss. No eviction ever fires in-run => static, deterministic cache
+# (same condition as the P3 calibration, which ran under <256 GiB).
+# low is kept at the G1 value; it only matters if an eviction did fire.
+[data.cache]
+low_watermark_gib = 192
+high_watermark_gib = 500
