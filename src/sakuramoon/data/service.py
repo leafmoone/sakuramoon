@@ -109,11 +109,16 @@ class _QueueStore:
         self,
         path: Path,
         manifest: DatasetManifest,
-        selection: ValidationSelection,
+        selection: ValidationSelection | None,
     ) -> None:
-        validate_selection_manifest(selection, manifest)
+        if selection is not None:
+            validate_selection_manifest(selection, manifest)
+            excluded = frozenset(selection.shard_paths)
+        else:
+            # Train-only corpus (validation shard_count = 0): every manifest
+            # shard is trainable and nothing is excluded.
+            excluded = frozenset()
         self.path = path
-        excluded = frozenset(selection.shard_paths)
         self.paths = frozenset(
             item.path for item in manifest.shards if item.path not in excluded
         )
@@ -242,7 +247,7 @@ class DataSupplyService:
     def __init__(
         self,
         manifest: DatasetManifest,
-        validation_selection: ValidationSelection,
+        validation_selection: ValidationSelection | None,
         cache: ShardCache,
         mainset_path: Path,
         ownership_lock_path: Path,

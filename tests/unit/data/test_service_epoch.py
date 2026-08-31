@@ -43,6 +43,21 @@ def _queue_store(tmp_path: Path) -> tuple[_QueueStore, ShardRecord]:
     return _QueueStore(tmp_path / "mainset.json", manifest, selection), training
 
 
+def test_train_only_queue_store_keeps_every_manifest_shard(tmp_path: Path) -> None:
+    shards = (
+        ShardRecord(path="data/sr-000000.tar", bytes=1),
+        ShardRecord(path="data/sr-000001.tar", bytes=1),
+    )
+    manifest = DatasetManifest.from_shards(
+        DatasetSourceIdentity(repo_id="leafmoone/SR_v2", revision="master"),
+        shards,
+    )
+
+    store = _QueueStore(tmp_path / "mainset.json", manifest, None)
+
+    assert store.paths == frozenset(item.path for item in shards)
+
+
 def test_legacy_queue_state_is_upgraded_without_resetting_epoch(
     tmp_path: Path,
 ) -> None:

@@ -65,7 +65,7 @@ def is_safe_shard_path(value: str) -> bool:
 
 
 class DatasetSourceIdentity(StrictModel):
-    repo_id: Literal["leafmoone/webdataset_danbooru_v2"]
+    repo_id: Literal["leafmoone/webdataset_danbooru_v2", "leafmoone/SR_v2"]
     revision: Literal["master"]
 
 

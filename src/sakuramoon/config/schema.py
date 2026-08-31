@@ -174,7 +174,10 @@ class AssetsConfig(StrictModel):
 
 
 class DataSourceConfig(StrictModel):
-    repo_id: Literal["leafmoone/webdataset_danbooru_v2"]
+    # Config-routed dataset supply: the same service template serves the G1
+    # T2I corpus (webdataset_danbooru_v2) or the SR corpus (SR_v2); instances
+    # are isolated by their socket/lock/cache/manifest paths, never by code.
+    repo_id: Literal["leafmoone/webdataset_danbooru_v2", "leafmoone/SR_v2"]
     revision: Literal["master"]
 
 
@@ -216,12 +219,46 @@ class DataCacheConfig(StrictModel):
 
 
 class DataServiceConfig(StrictModel):
-    socket_path: Literal["/run/sakuramoon/data-service.sock"]
-    ownership_lock_path: Literal["/run/sakuramoon/data-service.lock"]
+    # Runtime paths stay host-local under /run/sakuramoon; per-corpus instance
+    # names (data-service vs sr-data-service) keep co-located instances
+    # (G1 + SR) isolated on the same host.
+    socket_path: Annotated[str, StringConstraints(min_length=1)]
+    ownership_lock_path: Annotated[str, StringConstraints(min_length=1)]
     mainset_path: Annotated[str, StringConstraints(min_length=1)]
     request_timeout_seconds: Annotated[ExactFloat, Field(gt=0.0, le=300.0)]
     lease_channel_capacity: PositiveInt
     ack_channel_capacity: PositiveInt
+
+    @model_validator(mode="after")
+    def validate_runtime_paths(self) -> DataServiceConfig:
+        for name, suffix in (
+            ("socket_path", ".sock"),
+            ("ownership_lock_path", ".lock"),
+        ):
+            value = getattr(self, name)
+            path = PurePosixPath(value)
+            if (
+                value != value.strip()
+                or "\\" in value
+                or path.as_posix() != value
+                or not path.is_absolute()
+                or ".." in path.parts
+                or str(path.parent) != "/run/sakuramoon"
+                or not path.name.endswith(suffix)
+                or len(path.name) <= len(suffix)
+            ):
+                raise ValueError(
+                    f"data service {name} must be a normalized path under "
+                    f"/run/sakuramoon ending with {suffix}"
+                )
+        if (
+            PurePosixPath(self.socket_path).parent
+            != PurePosixPath(self.ownership_lock_path).parent
+        ):
+            raise ValueError(
+                "data service socket and ownership lock must share a directory"
+            )
+        return self
 
 
 class DataTransportConfig(StrictModel):
@@ -242,7 +279,9 @@ class DataLoaderConfig(StrictModel):
 class DataValidationConfig(StrictModel):
     selection_path: Annotated[str, StringConstraints(min_length=1)]
     shard_root: Annotated[str, StringConstraints(min_length=1)]
-    shard_count: PositiveInt
+    # 0 = train-only corpus (e.g. the SR_v2 P2 pool): no held-out validation
+    # split, the service skips selection and keeps every shard trainable.
+    shard_count: Annotated[int, Field(ge=0)]
 
     @model_validator(mode="after")
     def validate_paths(self) -> DataValidationConfig:

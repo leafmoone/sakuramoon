@@ -84,19 +84,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         refresh_existing=config.data.manifest.refresh_existing,
     )
     _log(f"数据分片: {len(manifest.shards)}")
-    validation_selection = ensure_validation_selection(
-        manifest,
-        _root_path(root, config.data.validation.selection_path),
-        expected_shard_count=config.data.validation.shard_count,
-    )
-    validation_root = _root_path(root, config.data.validation.shard_root)
-    if len(validation_selection.shards) >= VALIDATION_SHARD_COUNT:
-        require_published_validation_shards(manifest, validation_selection, validation_root)
+    if config.data.validation.shard_count == 0:
+        # Train-only corpus (e.g. SR_v2): no held-out validation split.
+        _log("验证集分片: 0（训练专用语料，跳过验证选择）")
+        validation_selection = None
     else:
-        prepare_validation_shards(
-            transport, manifest, validation_selection, validation_root
+        validation_selection = ensure_validation_selection(
+            manifest,
+            _root_path(root, config.data.validation.selection_path),
+            expected_shard_count=config.data.validation.shard_count,
         )
-    _log(f"验证集分片: {len(validation_selection.shards)}")
+        validation_root = _root_path(root, config.data.validation.shard_root)
+        if len(validation_selection.shards) >= VALIDATION_SHARD_COUNT:
+            require_published_validation_shards(
+                manifest, validation_selection, validation_root
+            )
+        else:
+            prepare_validation_shards(
+                transport, manifest, validation_selection, validation_root
+            )
+        _log(f"验证集分片: {len(validation_selection.shards)}")
     cache = ShardCache(
         _root_path(root, config.paths.cache_dir),
         manifest,

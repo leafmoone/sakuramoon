@@ -1,0 +1,124 @@
+# SR data-service instance: config-routed sibling of the G1 production data
+# service (same template, same service process code).
+#
+# Routing: [data.source].repo_id = "leafmoone/SR_v2" selects the SR corpus;
+# isolation: this instance owns its own socket/lock (sr-data-service.*),
+# cache dir, manifest and queue-state paths, so a co-located G1 instance
+# (data-service.*) is unaffected — and vice versa.
+#
+# Corpus facts: 2,750 train-only shards (~1.5 TiB) in leafmoone/SR_v2@master;
+# no held-out validation split -> [data.validation].shard_count = 0. The corpus
+# is larger than venue storage, so only a bounded shard window is cached.
+#
+# The model/stage/caption sections are inherited placeholders required by the
+# runtime schema; the data-service CLI never reads them.
+#
+# Launch (salt5, SR root on NFS):
+#   python -m sakuramoon.cli.data_service \
+#       --config sr_data_service.toml --config-root <repo>/config \
+#       --root /root/private_data/anime-sr/sr-ds
+# with MODELSCOPE_API_TOKEN exported and the SCNet proxy env sourced.
+
+extends = ["base.toml"]
+
+[run]
+run_id = "sr-data-service"
+stage = "S0"
+seed = 44
+
+[paths]
+run_dir = "runs/sr-ds"
+checkpoint_dir = "output_model/sr-ds"
+artifact_dir = "artifacts/sr-ds"
+
+[storage]
+shared_mount_source = "scnet.hx:/mnt/public/home/salt5"
+
+[distributed]
+backend = "accelerate"
+world_size = 2
+frozen_encoders_outside_wrapper = true
+automatic_backend_fallback = false
+
+[checkpoint]
+full_every_updates = 100
+slots = 2
+
+[data.source]
+repo_id = "leafmoone/SR_v2"
+revision = "master"
+
+[data.manifest]
+path = "data/dataset-manifest-sr-v2.json"
+initialize_if_missing = true
+refresh_existing = false
+
+[data.cache]
+# salt5's NFS quota is 50 GiB. Keep headroom for the state/index files and
+# let the generic cache evict between these watermarks; the SR consumer must
+# prefetch the deterministic upcoming shard window to hide re-downloads.
+low_watermark_gib = 40
+high_watermark_gib = 48
+download_concurrency = 8
+verified_shard_lookahead = 48
+persistent_workers_per_rank = 8
+ready_batches_per_rank = 8
+
+[data.service]
+# Isolated SR runtime paths (G1 keeps /run/sakuramoon/data-service.sock|.lock).
+socket_path = "/run/sakuramoon/sr-data-service.sock"
+ownership_lock_path = "/run/sakuramoon/sr-data-service.lock"
+mainset_path = "/root/private_data/anime-sr/sr-ds/state/data-service-mainset.json"
+request_timeout_seconds = 30.0
+lease_channel_capacity = 24
+ack_channel_capacity = 24
+
+[data.transport]
+connect_timeout_seconds = 10.0
+read_timeout_seconds = 30.0
+stream_chunk_bytes = 1048576
+streams_per_shard = 4
+
+[data.validation]
+# Train-only corpus: 0 held-out validation shards (the two paths are inert
+# when shard_count = 0).
+selection_path = "data/validation-none/selection.json"
+shard_root = "data/validation-none/shards"
+shard_count = 0
+
+[stage]
+name = "S0"
+enabled = true
+predecessor = ""
+world_size = 2
+depth = 16
+resolution = 256
+local_batch = 38
+accumulation = 10
+global_batch = 760
+activation_checkpoint_mode = "none"
+planned_updates = 100000
+manual_finalize = true
+automatic_transition = false
+
+[growth]
+enabled = false
+alpha_schedule = "half_cosine"
+alpha_fraction = 0.02
+min_updates = 1000
+max_updates = 5000
+random_new_slots = true
+copy_old_slots = false
+
+[logging]
+local_jsonl_path = "artifacts/sr-ds/metrics.jsonl"
+flush_every_updates = 1
+async_remote = true
+noise_observation_boundary = 0.95
+observer_queue_capacity = 64
+observer_event_timeout_seconds = 30.0
+
+[wandb]
+enabled = false
+retry_jsonl_path = "artifacts/sr-ds/wandb-retry.jsonl"
+queue_capacity = 64
