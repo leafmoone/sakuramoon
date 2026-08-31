@@ -1,0 +1,266 @@
+{
+ "windows_metrics": {
+  "97101-97200": {
+   "updates": 100,
+   "update_range": [
+    97101,
+    97600
+   ],
+   "loss_min": 0.5309998989105225,
+   "loss_mean": 0.563549120426178,
+   "loss_max": 0.604732871055603,
+   "preclip_mean": 0.047657582201063635,
+   "preclip_p90": 0.06918179988861084,
+   "preclip_max": 0.12622611224651337,
+   "nonfinite": 0,
+   "optimizer_s_mean": 0.8392555230712887,
+   "optimizer_s_max": 25.687130859375,
+   "full_update_s_mean": 16.99897008452353,
+   "full_update_s_max": 99.43759118279137
+  },
+  "97201-97300": {
+   "updates": 100,
+   "update_range": [
+    97101,
+    97600
+   ],
+   "loss_min": 0.5292401909828186,
+   "loss_mean": 0.5588214373588563,
+   "loss_max": 0.5880265831947327,
+   "preclip_mean": 0.04314171187579632,
+   "preclip_p90": 0.06716831773519516,
+   "preclip_max": 0.08677605539560318,
+   "nonfinite": 0,
+   "optimizer_s_mean": 0.5905664825439452,
+   "optimizer_s_max": 1.3417130126953125,
+   "full_update_s_mean": 16.139483937569622,
+   "full_update_s_max": 27.856066445581178
+  },
+  "97301-97400": {
+   "updates": 100,
+   "update_range": [
+    97101,
+    97600
+   ],
+   "loss_min": 0.5250614881515503,
+   "loss_mean": 0.5601492857933045,
+   "loss_max": 0.6018155813217163,
+   "preclip_mean": 0.05073418837040663,
+   "preclip_p90": 0.07384654879570007,
+   "preclip_max": 0.11428965628147125,
+   "nonfinite": 0,
+   "optimizer_s_mean": 0.6499444927978517,
+   "optimizer_s_max": 6.82811083984375,
+   "full_update_s_mean": 16.81835817964299,
+   "full_update_s_max": 85.84648207880667
+  },
+  "97401-97500": {
+   "updates": 100,
+   "update_range": [
+    97101,
+    97600
+   ],
+   "loss_min": 0.5000691413879395,
+   "loss_mean": 0.5488393729925156,
+   "loss_max": 0.5940759778022766,
+   "preclip_mean": 0.04612119872123003,
+   "preclip_p90": 0.07376576960086823,
+   "preclip_max": 0.10325542837381363,
+   "nonfinite": 0,
+   "optimizer_s_mean": 0.6441361798095704,
+   "optimizer_s_max": 6.26596533203125,
+   "full_update_s_mean": 17.05352968662927,
+   "full_update_s_max": 82.76123567599983
+  },
+  "97501-97600": {
+   "updates": 100,
+   "update_range": [
+    97101,
+    97600
+   ],
+   "loss_min": 0.538788914680481,
+   "loss_mean": 0.5592909377813339,
+   "loss_max": 0.5841414332389832,
+   "preclip_mean": 0.04667557451874018,
+   "preclip_p90": 0.07189398258924484,
+   "preclip_max": 0.09236228466033936,
+   "nonfinite": 0,
+   "optimizer_s_mean": 0.5791300592041017,
+   "optimizer_s_max": 0.5978186645507813,
+   "full_update_s_mean": 16.320876048382303,
+   "full_update_s_max": 29.733686379907645
+  }
+ },
+ "rescue_stream": {
+  "method": "Window deltas from the atomic cadence-checkpoint counter chain 12(97300) -> 16(97400) -> 26(97500) -> 28(97600); rescue event lines localize updates within windows (observations counter is cumulative from the 97100 guard fork: update ~= 97100 + obs, +/-1 update granularity). seg2 (97301-97463, pre-resume) contributes ONLY the 97301-97400 window; its 97401-97463 overlap (13 rescues) is invalid per the user-approved 97400 resume and is excluded from the gate chain.",
+  "safety_errors": [],
+  "cmuon_safety_error_lines": 0,
+  "max_delta_rank_spread": 0.0,
+  "max_param_rank_diff": 0.0,
+  "counter_chain": {
+   "97300": {
+    "bf16_safety_failures": 12,
+    "fp32_rescues": 12,
+    "fp32_rescue_failures": 0,
+    "rescue_by_role": {
+     "attention_content_gate": 5,
+     "attention_q": 5,
+     "attention_k": 2
+    }
+   },
+   "97400": {
+    "bf16_safety_failures": 16,
+    "fp32_rescues": 16,
+    "fp32_rescue_failures": 0,
+    "rescue_by_role": {
+     "attention_content_gate": 8,
+     "attention_q": 6,
+     "attention_k": 2
+    }
+   },
+   "97500": {
+    "bf16_safety_failures": 26,
+    "fp32_rescues": 26,
+    "fp32_rescue_failures": 0,
+    "rescue_by_role": {
+     "attention_content_gate": 8,
+     "attention_q": 16,
+     "attention_k": 2
+    }
+   },
+   "97600": {
+    "bf16_safety_failures": 28,
+    "fp32_rescues": 28,
+    "fp32_rescue_failures": 0,
+    "rescue_by_role": {
+     "attention_content_gate": 10,
+     "attention_q": 16,
+     "attention_k": 2
+    }
+   }
+  },
+  "windows": {
+   "97101-97200": {
+    "bf16_safety_failures": 2,
+    "fp32_rescues": 2,
+    "fp32_rescue_failures": 0,
+    "rescue_by_role_delta": {
+     "attention_content_gate": 1,
+     "attention_q": 1
+    },
+    "rescue_updates": [
+     97122,
+     97164
+    ],
+    "source": "R1 archived evidence"
+   },
+   "97201-97300": {
+    "bf16_safety_failures": 10,
+    "fp32_rescues": 10,
+    "fp32_rescue_failures": 0,
+    "rescue_by_role_delta": {
+     "attention_content_gate": 4,
+     "attention_q": 4,
+     "attention_k": 2
+    },
+    "rescue_updates": [
+     97203,
+     97204,
+     97210,
+     97212,
+     97235,
+     97237,
+     97242,
+     97242,
+     97243,
+     97292
+    ],
+    "source": "R1 archived evidence"
+   },
+   "97301-97400": {
+    "bf16_safety_failures": 4,
+    "fp32_rescues": 4,
+    "fp32_rescue_failures": 0,
+    "rescue_by_role_delta": {
+     "attention_content_gate": 3,
+     "attention_q": 1
+    },
+    "rescue_updates": [
+     97325,
+     97334,
+     97337,
+     97391
+    ],
+    "source": "seg2 (valid portion), ckpt 12->16"
+   },
+   "97401-97500": {
+    "bf16_safety_failures": 10,
+    "fp32_rescues": 10,
+    "fp32_rescue_failures": 0,
+    "rescue_by_role_delta": {
+     "attention_q": 10
+    },
+    "rescue_updates": [
+     97417,
+     97421,
+     97430,
+     97431,
+     97433,
+     97436,
+     97437,
+     97438,
+     97439,
+     97440
+    ],
+    "source": "seg3, ckpt 16->26"
+   },
+   "97501-97600": {
+    "bf16_safety_failures": 2,
+    "fp32_rescues": 2,
+    "fp32_rescue_failures": 0,
+    "rescue_by_role_delta": {
+     "attention_content_gate": 2
+    },
+    "rescue_updates": [
+     97555,
+     97580
+    ],
+    "source": "seg3, ckpt 26->28"
+   }
+  },
+  "rescue_frequency_per_100_updates": [
+   2,
+   10,
+   4,
+   10,
+   2
+  ],
+  "frequency_verdict": "small fluctuations (2,10,4,10,2), no sustained growth; total 28/500 = 0.056/update, in line with R1's 0.06/update. NOT a dynamics warning. Note: an excluded pre-resume overlap segment (seg2 97401-97463) showed a similar 13-rescue cluster at comparable queue-region updates, i.e. the q-role bursts are data-region localized, not a run-level trend."
+ },
+ "counter_chain_ckpt": {
+  "97300": {
+   "bf16_safety_failures": 12,
+   "fp32_rescues": 12,
+   "fp32_rescue_failures": 0
+  },
+  "97400": {
+   "bf16_safety_failures": 16,
+   "fp32_rescues": 16,
+   "fp32_rescue_failures": 0
+  },
+  "97500": {
+   "bf16_safety_failures": 26,
+   "fp32_rescues": 26,
+   "fp32_rescue_failures": 0
+  },
+  "97600": {
+   "bf16_safety_failures": 28,
+   "fp32_rescues": 28,
+   "fp32_rescue_failures": 0
+  }
+ },
+ "verdict": {
+  "SAFE_500": "YES",
+  "READY_FOR_1000_SAFETY_GATE": "YES"
+ }
+}

@@ -1,0 +1,40 @@
+{
+ "world": 2,
+ "n_inputs": 166,
+ "bytes_total": 2352742400,
+ "bytes_per_rank_owned": [
+  1176371200,
+  1176371200
+ ],
+ "current": {
+  "per_step_seconds": 0.02277100360079203,
+  "collectives": 166
+ },
+ "bucket_64m": {
+  "per_step_seconds": 0.026232265800354072,
+  "collectives": 40,
+  "buckets_per_rank": [
+   20,
+   20
+  ],
+  "max_bucket_bytes": 66191360
+ },
+ "bucket_128m": {
+  "per_step_seconds": 0.025647222201223487,
+  "collectives": 20,
+  "buckets_per_rank": [
+   10,
+   10
+  ],
+  "max_bucket_bytes": 133038080
+ },
+ "bucket_256m": {
+  "per_step_seconds": 0.025077328601037153,
+  "collectives": 10,
+  "buckets_per_rank": [
+   5,
+   5
+  ],
+  "max_bucket_bytes": 267386880
+ }
+}

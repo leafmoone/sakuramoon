@@ -1,0 +1,95 @@
+{
+ "updates_total": 500,
+ "windows": {
+  "97101-97200": {
+   "updates": 100,
+   "update_range": [
+    97101,
+    97600
+   ],
+   "loss_min": 0.5309998989105225,
+   "loss_mean": 0.563549120426178,
+   "loss_max": 0.604732871055603,
+   "preclip_mean": 0.047657582201063635,
+   "preclip_p90": 0.06918179988861084,
+   "preclip_max": 0.12622611224651337,
+   "nonfinite": 0,
+   "optimizer_s_mean": 0.8392555230712887,
+   "optimizer_s_max": 25.687130859375,
+   "full_update_s_mean": 16.99897008452353,
+   "full_update_s_max": 99.43759118279137
+  },
+  "97201-97300": {
+   "updates": 100,
+   "update_range": [
+    97101,
+    97600
+   ],
+   "loss_min": 0.5292401909828186,
+   "loss_mean": 0.5588214373588563,
+   "loss_max": 0.5880265831947327,
+   "preclip_mean": 0.04314171187579632,
+   "preclip_p90": 0.06716831773519516,
+   "preclip_max": 0.08677605539560318,
+   "nonfinite": 0,
+   "optimizer_s_mean": 0.5905664825439452,
+   "optimizer_s_max": 1.3417130126953125,
+   "full_update_s_mean": 16.139483937569622,
+   "full_update_s_max": 27.856066445581178
+  },
+  "97301-97400": {
+   "updates": 100,
+   "update_range": [
+    97101,
+    97600
+   ],
+   "loss_min": 0.5250614881515503,
+   "loss_mean": 0.5601492857933045,
+   "loss_max": 0.6018155813217163,
+   "preclip_mean": 0.05073418837040663,
+   "preclip_p90": 0.07384654879570007,
+   "preclip_max": 0.11428965628147125,
+   "nonfinite": 0,
+   "optimizer_s_mean": 0.6499444927978517,
+   "optimizer_s_max": 6.82811083984375,
+   "full_update_s_mean": 16.81835817964299,
+   "full_update_s_max": 85.84648207880667
+  },
+  "97401-97500": {
+   "updates": 100,
+   "update_range": [
+    97101,
+    97600
+   ],
+   "loss_min": 0.5000691413879395,
+   "loss_mean": 0.5488393729925156,
+   "loss_max": 0.5940759778022766,
+   "preclip_mean": 0.04612119872123003,
+   "preclip_p90": 0.07376576960086823,
+   "preclip_max": 0.10325542837381363,
+   "nonfinite": 0,
+   "optimizer_s_mean": 0.6441361798095704,
+   "optimizer_s_max": 6.26596533203125,
+   "full_update_s_mean": 17.05352968662927,
+   "full_update_s_max": 82.76123567599983
+  },
+  "97501-97600": {
+   "updates": 100,
+   "update_range": [
+    97101,
+    97600
+   ],
+   "loss_min": 0.538788914680481,
+   "loss_mean": 0.5592909377813339,
+   "loss_max": 0.5841414332389832,
+   "preclip_mean": 0.04667557451874018,
+   "preclip_p90": 0.07189398258924484,
+   "preclip_max": 0.09236228466033936,
+   "nonfinite": 0,
+   "optimizer_s_mean": 0.5791300592041017,
+   "optimizer_s_max": 0.5978186645507813,
+   "full_update_s_mean": 16.320876048382303,
+   "full_update_s_max": 29.733686379907645
+  }
+ }
+}

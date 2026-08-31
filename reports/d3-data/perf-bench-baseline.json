@@ -1,0 +1,39 @@
+{
+ "config": {
+  "lr": 5e-05,
+  "grad_rms": 0.001,
+  "n_warmup": 6,
+  "n_iters": 28,
+  "device": "BW",
+  "world_size": 1,
+  "note": "same P5 methodology on the D3 500-gate pod; real 97300 model; synthetic 1e-3-rms grads (all 166 NS inputs active); ws=1 single-rank arm; 2-rank broadcast cost separately in perf-bench-broadcast.json"
+ },
+ "adamw8bit": {
+  "avg_step_s": 0.2055450255699855,
+  "min_step_s": 0.20497916199383326,
+  "max_step_s": 0.20660450900322758,
+  "peak_allocated_bytes": 9804396032,
+  "peak_reserved_bytes": 10074718208
+ },
+ "cmuon_unguarded_ns4": {
+  "avg_step_s": 0.5648694183905069,
+  "min_step_s": 0.5629974469920853,
+  "max_step_s": 0.570459030001075,
+  "peak_allocated_bytes": 9865415680,
+  "peak_reserved_bytes": 10156507136
+ },
+ "cmuon_guarded_canonical": {
+  "avg_step_s": 0.6947218552871034,
+  "min_step_s": 0.6923632130055921,
+  "max_step_s": 0.697976698007551,
+  "peak_allocated_bytes": 16023693312,
+  "peak_reserved_bytes": 16510877696
+ },
+ "cmuon_fp32_rescue": {
+  "avg_step_s": 0.6971048813211382,
+  "min_step_s": 0.6947851770091802,
+  "max_step_s": 0.6997371750039747,
+  "peak_allocated_bytes": 16023693312,
+  "peak_reserved_bytes": 16510877696
+ }
+}
