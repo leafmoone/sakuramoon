@@ -792,7 +792,12 @@ class CMuonGuardConfig(StrictModel):
 
 
 class OptimizerConfig(StrictModel):
-    name: Literal["torchao_adamw8bit", "hybrid_cmuon", "hybrid_cmuon_guarded_canonical"]
+    name: Literal[
+        "torchao_adamw8bit",
+        "hybrid_cmuon",
+        "hybrid_cmuon_guarded_canonical",
+        "hybrid_cmuon_canonical_ns4_fp32_rescue",
+    ]
     base_lr: PositiveFloat
     reference_batch: PositiveInt
     lr_scaling: Literal["linear_global_batch"]
@@ -840,11 +845,19 @@ class OptimizerConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_cmuon_guard(self) -> OptimizerConfig:
-        if self.name == "hybrid_cmuon_guarded_canonical":
+        # Both guarded candidates require the [optimizer.cmuon_guard]
+        # section: the guarded canonical uses it for the pre-NS low-signal
+        # skip; the FP32-rescue candidate does NOT skip (the retired
+        # structural guard) but keeps the per-input reference table in the
+        # checkpoint contract inherited from the guarded canonical base.
+        if self.name in (
+            "hybrid_cmuon_guarded_canonical",
+            "hybrid_cmuon_canonical_ns4_fp32_rescue",
+        ):
             if self.cmuon_guard is None or not self.cmuon_guard.enabled:
                 raise ValueError(
-                    "hybrid_cmuon_guarded_canonical requires an enabled "
-                    "[optimizer.cmuon_guard] section"
+                    f"{self.name} requires an enabled [optimizer.cmuon_guard] "
+                    "section"
                 )
             if not self.cmuon_guard.references:
                 raise ValueError(
@@ -854,7 +867,8 @@ class OptimizerConfig(StrictModel):
         elif self.cmuon_guard is not None:
             raise ValueError(
                 "[optimizer.cmuon_guard] is only valid for optimizer.name = "
-                '"hybrid_cmuon_guarded_canonical"'
+                '"hybrid_cmuon_guarded_canonical" or '
+                '"hybrid_cmuon_canonical_ns4_fp32_rescue"'
             )
         return self
 

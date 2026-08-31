@@ -441,7 +441,10 @@ def _build_optimizer(
             **telemetry_kwargs,
             **common,
         )
-    if optimizer.name == "hybrid_cmuon_guarded_canonical":
+    if optimizer.name in (
+        "hybrid_cmuon_guarded_canonical",
+        "hybrid_cmuon_canonical_ns4_fp32_rescue",
+    ):
         from sakuramoon.optim.guarded_canonical import (
             GuardedCanonicalGuardConfig,
             build_guarded_canonical,
@@ -462,10 +465,32 @@ def _build_optimizer(
             )
         if optimizer.cmuon_ns is None:
             raise ValueError(
-                "hybrid_cmuon_guarded_canonical requires an explicit "
-                "[optimizer.cmuon_ns] per-role NS map (no legacy scalar fallback)"
+                f"{optimizer.name} requires an explicit [optimizer.cmuon_ns] "
+                "per-role NS map (no legacy scalar fallback)"
             )
         stats_logger = telemetry_logger if rank == 0 else None
+        if optimizer.name == "hybrid_cmuon_canonical_ns4_fp32_rescue":
+            from sakuramoon.optim.fp32_rescue import build_fp32_rescue
+
+            return build_fp32_rescue(
+                module,
+                ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
+                guard_cfg=GuardedCanonicalGuardConfig(
+                    guard_ratio=guard.guard_ratio,
+                    reference_decay=guard.reference_decay,
+                    min_reference=guard.min_reference,
+                    numerical_floor=guard.numerical_floor,
+                    warmup_observations=guard.warmup_observations,
+                    invariant_check=guard.invariant_check,
+                ),
+                guard_bootstrap_refs=dict(guard.references),
+                rank=rank,
+                world_size=world_size,
+                momentum_dtype=optimizer.cmuon_momentum_dtype,
+                chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
+                stats_logger=stats_logger,
+                **common,
+            )
         return build_guarded_canonical(
             module,
             ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
