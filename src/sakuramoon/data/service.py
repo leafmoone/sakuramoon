@@ -117,7 +117,7 @@ class _QueueStore:
         else:
             # Train-only corpus (validation shard_count = 0): every manifest
             # shard is trainable and nothing is excluded.
-            excluded = frozenset()
+            excluded: frozenset[str] = frozenset()
         self.path = path
         self.paths = frozenset(
             item.path for item in manifest.shards if item.path not in excluded
