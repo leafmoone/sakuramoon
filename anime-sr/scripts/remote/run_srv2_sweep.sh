@@ -4,6 +4,8 @@
 # overlay), wandb run per arm. Throughput is read from the it/s console lines
 # and <out>/train-meta.json (consumer_img_s_per_rank).
 set -u
+# all outbound (wandb) needs the SCNet proxy: no proxy -> wandb.init times out
+. /etc/profile.d/zz-scnet-proxy.sh
 cd /root/private_data/anime-sr/m4canary-src/anime-sr || exit 1
 export LD_LIBRARY_PATH=/opt/dtk-26.04/lib:/opt/dtk-26.04/hip/lib:/opt/hyhal/lib
 export PYTHONPATH=src
