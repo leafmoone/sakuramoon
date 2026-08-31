@@ -1,0 +1,32 @@
+# SR_v2 THROUGHPUT SWEEP shared overlay (2026-08-31).
+#
+#   base.toml + data.toml + m4_1024.toml + srv2_throughput.toml + srv2_tp_<arm>.toml
+#
+# Purpose: find the max-throughput hyperparameters on the current SR_v2
+# corpus snapshot (2x Hygon BW DCU, 64GiB HBM each). NOT the 6M run:
+# fresh init (no --stage-transition), short budget, no periodic saves,
+# probes off (val_every_steps set far beyond the budget; 0 is a div-by-zero
+# in the loop). [logging] inherits m4_1024.toml (wandb on) with the
+# per-arm run name from the arm overlay.
+#
+# Budget: 50,000 exposures per arm (= 3,125 steps at global batch 16;
+# 1,563 at 32; 781 at 64) — enough for a stable consumer img/s reading
+# after warmup. Throughput is read from the console it/s lines +
+# train-meta.json (consumer_img_s_per_rank).
+
+[phase1]
+exposure_target = 50000
+exposure_min = 50000
+exposure_max = 50000
+
+[latent_flow]
+save_every_steps = 0
+save_at_exposures = []
+# far beyond any arm budget (0 would divide-by-zero in the loop)
+val_every_steps = 999999999
+val_heldout_every_steps = 0
+
+[logging]
+log_every_steps = 50
+sample_every_steps = 2000
+sample_images = 2

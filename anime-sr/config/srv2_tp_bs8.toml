@@ -1,0 +1,9 @@
+# Arm A: M4-1024 production baseline (reference throughput point).
+# batch 8/rank x 2 DCU = global 16, tokens 131072 (inherited), prefetch 4.
+
+[latent_flow]
+batch_size = 8
+out_dir = "output_model/srv2-tp/bs8"
+
+[logging]
+wandb_run_name = "srv2-tp-bs8"

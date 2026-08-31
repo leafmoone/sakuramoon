@@ -113,7 +113,7 @@ val_samples = 128
 # Rank 0 only; console prints are unchanged. The API key comes from the
 # WANDB_API_KEY environment variable on the training host (never here).
 wandb_enabled = true
-wandb_entity = "leafmoone"
+wandb_entity = "2574905817leaf-jinan-university"
 wandb_project = "anime-sr"
 wandb_run_name = "m4-1024-6m"
 wandb_mode = "online"
