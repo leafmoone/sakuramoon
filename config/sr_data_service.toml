@@ -6,14 +6,19 @@
 # cache dir, manifest and queue-state paths, so a co-located G1 instance
 # (data-service.*) is unaffected — and vice versa.
 #
-# Corpus facts: 2,750 train-only shards (~1.5 TiB) in leafmoone/SR_v2@master;
-# no held-out validation split -> [data.validation].shard_count = 0. The corpus
-# is larger than venue storage, so only a bounded shard window is cached.
+# Corpus facts: 2,105 train-only shards (~1.63 TiB) in leafmoone/SR_v2@master;
+# no held-out validation split -> [data.validation].shard_count = 0.
+#
+# Streaming mode (user rule, 08-31): the corpus is consumed as a stream
+# through the bounded cache window (high watermark hard-capped at 512 GiB by
+# the schema); the streaming prep pipeline (anime-sr
+# scripts/remote/sr_stream_prep.py) leases shards, extracts them to the
+# persistent webp tree, ACKs, and lets the cache LRU evict processed tars.
 #
 # The model/stage/caption sections are inherited placeholders required by the
 # runtime schema; the data-service CLI never reads them.
 #
-# Launch (salt5, SR root on NFS):
+# Launch (salt8, SR root on NFS):
 #   python -m sakuramoon.cli.data_service \
 #       --config sr_data_service.toml --config-root <repo>/config \
 #       --root /root/private_data/anime-sr/sr-ds
@@ -32,7 +37,7 @@ checkpoint_dir = "output_model/sr-ds"
 artifact_dir = "artifacts/sr-ds"
 
 [storage]
-shared_mount_source = "scnet.hx:/mnt/public/home/salt5"
+shared_mount_source = "scnet.hx:/mnt/public/home/salt8"
 
 [distributed]
 backend = "accelerate"
@@ -54,11 +59,10 @@ initialize_if_missing = true
 refresh_existing = false
 
 [data.cache]
-# salt5's NFS quota is 50 GiB. Keep headroom for the state/index files and
-# let the generic cache evict between these watermarks; the SR consumer must
-# prefetch the deterministic upcoming shard window to hide re-downloads.
-low_watermark_gib = 40
-high_watermark_gib = 48
+# Streaming window at the 512 GiB cap (user rule, 08-31): ~660 shards of
+# in-flight + already-fetched data; processed shards are evicted after ACK.
+low_watermark_gib = 448
+high_watermark_gib = 512
 download_concurrency = 8
 verified_shard_lookahead = 48
 persistent_workers_per_rank = 8

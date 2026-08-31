@@ -204,8 +204,11 @@ class DataManifestConfig(StrictModel):
 
 
 class DataCacheConfig(StrictModel):
-    low_watermark_gib: Annotated[int, Field(ge=0, lt=500)]
-    high_watermark_gib: Annotated[int, Field(gt=0, le=500)]
+    # 512 GiB hard cap on the shard cache high watermark (user rule, 08-31):
+    # all deployments stream through a bounded cache window; the SR corpus
+    # (~1.6 TiB) is consumed via the streaming prep pipeline, never held whole.
+    low_watermark_gib: Annotated[int, Field(ge=0, lt=512)]
+    high_watermark_gib: Annotated[int, Field(gt=0, le=512)]
     download_concurrency: PositiveInt
     verified_shard_lookahead: PositiveInt
     persistent_workers_per_rank: PositiveInt

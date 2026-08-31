@@ -9,6 +9,7 @@ import pytest
 
 from sakuramoon.config import load_config
 from sakuramoon.config.schema import (
+    DataCacheConfig,
     DataServiceConfig,
     DataValidationConfig,
     RuntimeConfig,
@@ -52,9 +53,9 @@ def test_sr_data_service_config_loads_and_routes(
     )
     # Train-only corpus: no held-out validation split.
     assert config.data.validation.shard_count == 0
-    # Corpus-sized window (whole SR shard set held without LRU eviction).
-    assert config.data.cache.low_watermark_gib == 40
-    assert config.data.cache.high_watermark_gib == 48
+    # Streaming window at the 512 GiB cap (user rule, 08-31).
+    assert config.data.cache.low_watermark_gib == 448
+    assert config.data.cache.high_watermark_gib == 512
     assert "BENCHMARK" not in loaded.resolved_toml
 
 
@@ -98,6 +99,28 @@ def test_runtime_path_validation_rejects_bad_paths(
             lease_channel_capacity=24,
             ack_channel_capacity=24,
         )
+
+
+def test_cache_high_watermark_is_capped_at_512_gib() -> None:
+    """Streaming rule (08-31): the shard cache window never exceeds 512 GiB."""
+    with pytest.raises(ValueError):
+        DataCacheConfig(
+            low_watermark_gib=448,
+            high_watermark_gib=513,
+            download_concurrency=8,
+            verified_shard_lookahead=48,
+            persistent_workers_per_rank=8,
+            ready_batches_per_rank=8,
+        )
+    accepted = DataCacheConfig(
+        low_watermark_gib=448,
+        high_watermark_gib=512,
+        download_concurrency=8,
+        verified_shard_lookahead=48,
+        persistent_workers_per_rank=8,
+        ready_batches_per_rank=8,
+    )
+    assert accepted.high_watermark_gib == 512
 
 
 @pytest.mark.parametrize(
