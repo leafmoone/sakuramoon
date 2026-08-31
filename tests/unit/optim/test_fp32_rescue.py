@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 import torch
@@ -268,61 +269,69 @@ def test_C_bad_fp32_too_fails_atomically(monkeypatch) -> None:
 
 
 # D+E. 2 ranks: owner-only rescue + broadcast/rank consistency
+# (the worker must be a MODULE-LEVEL function: mp.spawn pickles it)
+def _de_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None:
+    import torch.distributed as dist
+
+    device = torch.device("cuda", rank)
+    torch.cuda.set_device(device)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"file://{init_file}",
+        world_size=world_size,
+        rank=rank,
+        device_id=device,
+    )
+    try:
+        torch.manual_seed(20260831)
+        model = _MockComposite(_MockDiT(256, 512, 2)).to(device)
+        # chaos stand-in on the BF16 path (identical on both ranks)
+        fr.cmuon_zeroth_power_bf16 = _evil_ns_amplified(1e9)
+        opt = _build(model, rank=rank, world_size=world_size)
+        routing = route_cmuon_parameters(
+            model, matrix_weight_decay=0.0, sensitive_weight_decay=0.0
+        )
+        owned = sum(
+            1
+            for spec in routing.cmuon_specs
+            for ci in range(spec.chunk_count)
+            if stable_owner(spec.name, ci, world_size) == rank
+        )
+        _seed_grads(model, 21)
+        opt.step()
+        (Path(out_dir) / f"per-rank-{rank}.json").write_text(
+            json.dumps(
+                {
+                    "rank": rank,
+                    "observations": opt.observations,
+                    "bf16_attempts": opt.bf16_attempts,
+                    "fp32_attempts": opt.fp32_attempts,
+                    "fp32_rescues": opt.fp32_rescues,
+                    "fp32_rescue_failures": opt.fp32_rescue_failures,
+                    "owned_inputs": owned,
+                    "max_delta_rank_spread": opt.max_delta_rank_spread,
+                    "max_param_rank_diff": opt.max_param_rank_diff,
+                }
+            )
+        )
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="2-rank test requires CUDA/HCU (nccl)"
 )
 def test_DE_two_rank_owner_only_and_consistency(tmp_path) -> None:
-    import torch.distributed as dist
     import torch.multiprocessing as mp
 
     with tempfile.TemporaryDirectory(dir=tmp_path) as td:
         init_file = os.path.join(td, "init")
-
-        def worker(rank: int, world_size: int, i: str) -> None:
-            device = torch.device("cuda", rank)
-            torch.cuda.set_device(device)
-            dist.init_process_group(
-                backend="nccl",
-                init_method=f"file://{i}",
-                world_size=world_size,
-                rank=rank,
-                device_id=device,
-            )
-            try:
-                torch.manual_seed(20260831)
-                model = _MockComposite(_MockDiT(256, 512, 2)).to(device)
-                fr.cmuon_zeroth_power_bf16 = _evil_ns_amplified(1e9)
-                opt = _build(model, rank=rank, world_size=world_size)
-                routing = route_cmuon_parameters(
-                    model, matrix_weight_decay=0.0, sensitive_weight_decay=0.0
-                )
-                owned = sum(
-                    1
-                    for spec in routing.cmuon_specs
-                    for ci in range(spec.chunk_count)
-                    if stable_owner(spec.name, ci, world_size) == rank
-                )
-                _seed_grads(model, 21)
-                opt.step()
-                (tmp_path / f"per-rank-{rank}.json").write_text(
-                    json.dumps(
-                        {
-                            "rank": rank,
-                            "observations": opt.observations,
-                            "bf16_attempts": opt.bf16_attempts,
-                            "fp32_attempts": opt.fp32_attempts,
-                            "fp32_rescues": opt.fp32_rescues,
-                            "fp32_rescue_failures": opt.fp32_rescue_failures,
-                            "owned_inputs": owned,
-                            "max_delta_rank_spread": opt.max_delta_rank_spread,
-                            "max_param_rank_diff": opt.max_param_rank_diff,
-                        }
-                    )
-                )
-            finally:
-                dist.destroy_process_group()
-
-        mp.spawn(worker, args=(2, init_file), nprocs=2, join=True)
+        mp.spawn(
+            _de_worker,
+            args=(2, init_file, str(tmp_path)),
+            nprocs=2,
+            join=True,
+        )
         r0 = json.loads((tmp_path / "per-rank-0.json").read_text())
         r1 = json.loads((tmp_path / "per-rank-1.json").read_text())
 
