@@ -69,6 +69,7 @@ class TrainLogger:
         self.enabled = False
         self._run: Any = None
         self._wandb: Any = None
+        self._warned: set[str] = set()
         if spec.wandb_enabled and rank == 0:
             self._init(run_dir, list(tags or []))
 
@@ -115,11 +116,27 @@ class TrainLogger:
             flush=True,
         )
 
+    def _swallow(self, where: str, exc: Exception) -> None:
+        # A W&B transport/serialization failure must NEVER kill training:
+        # warn (at most once per exception type), then drop the point.
+        key = type(exc).__name__
+        if key in self._warned:
+            return
+        self._warned.add(key)
+        print(
+            f"[wandb] {where} failed ({key}: {exc}) — dropping this "
+            "log point; W&B telemetry degraded, training continues",
+            flush=True,
+        )
+
     def set_config(self, cfg: dict[str, Any]) -> None:
         """Structured run config (the resolved-config doc; no secrets —
         it is already written to disk next to the checkpoints)."""
         if self.enabled:
-            self._run.config.update(cfg, allow_val_change=True)
+            try:
+                self._run.config.update(cfg, allow_val_change=True)
+            except Exception as exc:  # noqa: BLE001 - telemetry must not kill training
+                self._swallow("config.update", exc)
 
     def log(
         self,
@@ -137,8 +154,14 @@ class TrainLogger:
             payload[k] = float(v)
         for k, t in (images or {}).items():
             payload[k] = tensor_grid(self._wandb, t, caption=f"step {step}")
-        self._run.log(payload)
+        try:
+            self._run.log(payload)
+        except Exception as exc:  # noqa: BLE001 - telemetry must not kill training
+            self._swallow(f"log(step={step})", exc)
 
     def finish(self) -> None:
         if self.enabled:
-            self._run.finish()
+            try:
+                self._run.finish()
+            except Exception as exc:  # noqa: BLE001 - telemetry must not kill training
+                self._swallow("finish", exc)
