@@ -50,13 +50,41 @@ Fork：ckpt_97100_raw-97100-update-cadence（12/12 manifest verified，AdamW S0 
   A 安全步不触发 FP32 / B 坏BF16→FP32 rescue 成功且 delta 在带内 / C 坏BF16+坏FP32→CMuonSafetyError 零提交 / D 2-rank owner-only（各 rank 只 rescue 自己的输入）/ E rescue 后 broadcast 一致（spread=0、rank 参数 diff=0）/ F ckpt roundtrip 计数器 state-exact + 父类 ckpt 兼容 / G AdamW 路径与 core hybrid bit-identical / H retired 机制不可选（无 pre-NS skip、base skip gate 不被调用、schema 要求 guard 段）
 - 回归：tests/unit/optim/ 全量 108/108 通过（216.73s）
 
-## 3. R1 安全门（§12）
+## 3. R1 安全门（§12）— PASS
 
-配置：config/train_g1_fp32_rescue_r1.toml（2 rank，ckpt_97100 fork，structural 647 mainset/预热缓存，W&B 关，外部看门狗 97300 停）
-Gates：0 unresolved safety failure / 0 rank drift / 0 nonfinite / 0 catastrophic loss jump / 全部 BF16 事件被 rescue / 原子 ckpt resume PASS（97200 cadence ckpt）
+配置：config/train_g1_fp32_rescue_r1.toml（2 rank，ckpt_97100 fork，structural mainset，W&B 关，外部看门狗 successful_update≥97300 停）。
+运行：13:09:36–14:08:33，200 个成功 update（97101–97300），17.6 s/update（含首 update），无重启。
 
-[运行中 — 结果待填]
+| Gate | 结果 | 证据 |
+|---|---|---|
+| BF16 事件全部 FP32 rescue | **12/12，0 失败** | obs 22/64/103/104/110/112/135/137/142×2/143/192；角色分布 content_gate×5、q×5、k×2（= D1 危险类）；fp32_rescue_failures=0 |
+| 0 unresolved safety failure | PASS | CMuonSafetyError=0；无 fingerprint spread |
+| 0 rank drift | PASS | obs 200 stats：max_delta_rank_spread=0.0，max_param_rank_diff=0.0；invariant 违例=0 |
+| 0 nonfinite | PASS | metrics nonfinite_count 200/200 = 0 |
+| 0 catastrophic loss jump | PASS | loss 0.529240 / 0.561185 / 0.604733（min/mean/max）；无任何 update >3× median(first50=0.5627)；max 比 1.075× |
+| 原子 ckpt resume | PASS | ckpt_97200（cadence）+ ckpt_97300（停栈强制保存）；从 97300 重启 → 97318 共 18 updates，rescue 计数器 12→14 连续（+2 新 rescue，0 失败），loss 正常，干净停止 |
+
+现场要点：run 内 obs 22（update ~97122）首次撞 BF16 灾难（S1-b 同类崩溃点），FP32 rescue 成功、训练无中断 —— 机制在真实生产梯度下按设计工作；R1 实测 rescue 频率 0.06/obs（离线最坏估计 1.08/obs，chaos run-dependent）。
 
 ## 4. 裁决（§13/§14）
 
-[待 R1 结果]
+- PRE_NS_CLASSIFIER_ROUTE = **FAILED**（D1 已判 FAIL 结案：无可行工作点；structural top1 pre-NS guard retired）
+- FP32_RESCUE_MECHANISM = **VALIDATED**（离线 KILL GATE + 单测 A–H + R1 现场 12/12）
+- KNOWN_DANGERS_RESCUED = **YES**（replay 1/1；repeats 0/700 catastrophic；R1 live 12/12）
+- NEW_CANDIDATE_SAFE_200 = **YES**
+- **READY_FOR_500_SAFETY_GATE = YES**（按规格停止，不自动起 500/1000/5000）
+
+## 5. Open questions
+
+1. R1 实测 rescue 频率 0.06/obs 低于离线最坏估计 1.08/obs（chaos 是 run-dependent；200 obs 不能排除更长 run 的更高峰值）——成本结论（开销 ≈0）在两种频率下都稳健。
+2. SAFE 输入上 FP32/BF16 delta 非 bit-identical（cosine p50 0.9966，rel Fro p50 0.09）——长程质量影响未知，需 500-update 质量门（FID 等）验证。
+3. R1 谱系 ckpt（97200/97300）在 salt6 本地盘（易失）——500 轮前须镜像到 NFS。
+4. R1 期间 W&B 关闭（隔离）——500 轮遥测策略待定。
+5. S1 的 496G 预热窗口在 R1 期间被 LRU 驱逐（新 salt6 代理可用、运行中按需重下）；structural mainset 已重置为全新 cycle-0 队列（2099 pending，loader 验证过；旧态备份 data-service-mainset-structural.json.bak-round-d2）。
+
+## 6. 产物索引
+
+- 离线：NFS artifacts-fp32-rescue/（fp32-rescue-{replay,repeats,align,benchmark}.json + 2656 full-sample tensors）
+- R1：NFS artifacts-fp32-rescue/r1/（train.log、watchdog.log、start/resume-start.log、两个 ckpt manifest、ckpt 目录清单）
+- 代码：cmoun-guarded @ 0116e07（候选 9ab667f/7ec1c53，R1 toml a7d7e66，本报告）
+- 配置：config/train_g1_fp32_rescue_r1.toml（500 轮复用：从 97300 继续，看门狗目标 97600）

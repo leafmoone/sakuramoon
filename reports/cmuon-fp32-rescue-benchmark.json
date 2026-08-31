@@ -58,21 +58,36 @@
     "unit_tests": "A-H 8/8 passed on HCU (88.95s); optim suite 108/108 (216.73s)"
   },
   "r1_200": {
-    "status": "running",
-    "updates": 0,
-    "bf16_safety_failures": null,
-    "fp32_rescues": null,
-    "fp32_rescue_failures": null,
-    "rank_drift": null,
-    "nonfinite": null,
-    "loss_behavior": null,
-    "PASS": null
+    "status": "complete",
+    "window": "2026-08-31 13:09:36 - 14:08:33, no restart",
+    "updates": 200,
+    "update_range": "97101-97300",
+    "bf16_safety_failures": 12,
+    "fp32_rescues": 12,
+    "fp32_rescue_failures": 0,
+    "rescue_by_role": {"attention_content_gate": 5, "attention_q": 5, "attention_k": 2},
+    "rescue_observations": [22, 64, 103, 104, 110, 112, 135, 137, 142, 142, 143, 192],
+    "safety_errors": 0,
+    "rank_drift": 0.0,
+    "delta_rank_spread": 0.0,
+    "nonfinite": 0,
+    "loss": {"min": 0.52924, "mean": 0.561185, "max": 0.604733, "jumps_gt_3x_median": 0, "max_over_median_first50": 1.075},
+    "checkpoints": ["ckpt_97200_raw-97200-update-cadence (cadence)", "ckpt_97300_raw-97300-update-cadence (forced save on clean stop)"],
+    "resume_test": {"from": 97300, "updates_run": 18, "last_update": 97318, "counters_continued": "12 -> 14 (+2 rescues, 0 failures)", "loss_ok": true, "clean_stop": true},
+    "PASS": true
   },
   "verdict": {
-    "PRE_NS_CLASSIFIER_ROUTE": "FAILED (D1 closed)",
-    "FP32_RESCUE_MECHANISM": "VALIDATED OFFLINE (kill gate passed)",
-    "KNOWN_DANGERS_RESCUED": "1/1 replay + 0/700 repeats",
-    "NEW_CANDIDATE_SAFE_200": "PENDING R1",
-    "READY_FOR_500_SAFETY_GATE": "PENDING R1"
-  }
+    "PRE_NS_CLASSIFIER_ROUTE": "FAILED (D1 closed, no viable working point)",
+    "FP32_RESCUE_MECHANISM": "VALIDATED (offline kill gate + unit tests A-H + R1 live)",
+    "KNOWN_DANGERS_RESCUED": "YES (replay 1/1, repeats 0/700 catastrophic, R1 live 12/12)",
+    "NEW_CANDIDATE_SAFE_200": "YES",
+    "READY_FOR_500_SAFETY_GATE": "YES"
+  },
+  "open_questions": [
+    "R1 measured rescue frequency 0.06/obs vs offline worst-case estimate 1.08/obs (chaos is run-dependent; cost conclusion robust either way)",
+    "FP32/BF16 deltas not bit-identical on SAFE inputs (cosine p50 0.9966, rel Fro p50 0.09): long-horizon quality impact needs the 500-update quality gate",
+    "R1 lineage checkpoints (97200/97300) are on salt6 local disk (volatile): mirror to NFS before any 500 run",
+    "W&B disabled during R1 (isolation): telemetry policy for the 500 run undecided",
+    "S1 496G preload window was LRU-evicted during R1; structural mainset reset to a fresh cycle-0 queue (2099 pending, loader-verified; prior state kept at .bak-round-d2)"
+  ]
 }
