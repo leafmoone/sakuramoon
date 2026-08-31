@@ -1,0 +1,12 @@
+# Tar-direct canary (2026-09-01): the short end-to-end run over the
+# streaming data plane. Overlay on base + data + smoke; the run is
+# ~200 steps (3200 exposures at bs 8 x world 2) — just long enough to
+# exercise the window driver (pin / release / epoch edge), the in-tar
+# decode path and the resume-free canary contract. NOT a model canary:
+# the M3 structure checklist runs in its own smoke run; this one only
+# proves the tar-direct DATA PATH is training-safe.
+
+[phase1]
+exposure_target = 3200
+exposure_min = 1000
+exposure_max = 10000
