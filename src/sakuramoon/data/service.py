@@ -777,13 +777,41 @@ class DataServiceServer:
                 return
             if ready_callback is not None:
                 ready_callback()
+            # Connections are handled on bounded per-connection daemon threads:
+            # a lease blocks until its shard is downloaded and ready, so during
+            # a degraded download window (e.g. proxy flap) one blocking lease
+            # must not starve the other workers' ACKs/leases/health checks.
+            connection_slots = threading.BoundedSemaphore(
+                self.service.limits.ack_channel_capacity * 2
+            )
             while not stop_event.is_set():
                 try:
                     connection, _ = listener.accept()
                 except TimeoutError:
                     continue
-                with connection:
-                    self._handle_connection(connection)
+                if not connection_slots.acquire(timeout=1.0):
+                    # Handler saturated; close so the client retries.
+                    with connection:
+                        pass
+                    continue
+
+                def _handle(conn: socket.socket = connection) -> None:
+                    try:
+                        with conn:
+                            self._handle_connection(conn)
+                    except Exception as error:  # noqa: BLE001 - surface, then drop
+                        _log(f"连接处理失败: {error!r}")
+                        import traceback
+
+                        traceback.print_exc()
+                    finally:
+                        connection_slots.release()
+
+                threading.Thread(
+                    target=_handle,
+                    name="data-service-conn",
+                    daemon=True,
+                ).start()
         finally:
             if listener is not None:
                 listener.close()
