@@ -92,6 +92,39 @@ def slot_of(fqn: str) -> str:
     return f"slot_{m.group(1)}" if m else "nonslot"
 
 
+def role_slot_of_name(name: str) -> tuple[str, str]:
+    """Role/slot from a dump basename ('chunk-<fqn.dots->underscores>-cN.pt').
+
+    The fqn is not recoverable unambiguously (slot_02 / q_proj both use
+    underscores), so parse the role/slot directly from the underscore form.
+    """
+    stem = re.sub(r"^chunk-", "", name)
+    stem = re.sub(r"-c\d+\.pt$", "", stem)
+    m = re.search(r"slot_(\d+)", stem)
+    slot = f"slot_{m.group(1)}" if m else "nonslot"
+    if "conditioner_shared_block_projection" in stem:
+        role = "adaln_shared"
+    else:
+        m2 = re.search(
+            r"attention_(q_proj|k_proj|v_proj|out_proj|content_gate)_weight$", stem
+        )
+        if m2:
+            role = {
+                "q_proj": "attention_q",
+                "k_proj": "attention_k",
+                "v_proj": "attention_v",
+                "out_proj": "attention_out",
+                "content_gate": "attention_content_gate",
+            }[m2.group(1)]
+        elif re.search(r"mlp_in_proj_weight$", stem):
+            role = "ffn_in"
+        elif re.search(r"mlp_down_proj_weight$", stem):
+            role = "ffn_down"
+        else:
+            role = "other"
+    return role, slot
+
+
 def run_ns(t: torch.Tensor, fp32: bool) -> torch.Tensor:
     if fp32:
         return cmuon_zeroth_power_fp32(t, NS_STEPS, COEFFS, EPS)
@@ -278,14 +311,19 @@ def cmd_align(args) -> None:
     import random
 
     dev = torch.device(args.device)
-    # load all tensors with their D1 labels (from the shadow JSONLs)
-    labels: dict[tuple[int, str, int], str] = {}
+    # The full-sample dumps do not carry the fqn in meta; the D1 labels are
+    # keyed by (obs, fqn, chunk) in the shadow JSONLs. The dump filename is
+    # exactly f"chunk-{fqn.replace('.', '_')}-c{chunk}.pt" inside
+    # "obs-{obs:02d}/", so index the labels by (obs, basename) for an exact
+    # match (dot/underscore round-tripping is ambiguous otherwise).
+    labels: dict[tuple[int, str], str] = {}
     for jl in args.jsonl:
         with open(jl) as f:
             for line in f:
                 rec = json.loads(line)
                 for r in rec["rows"]:
-                    key = (rec["obs"], r["fqn"], r["chunk"])
+                    name = r["fqn"].replace(".", "_")
+                    key = (rec["obs"], f"chunk-{name}-c{r['chunk']}.pt")
                     labels[key] = r["label"]
     # Two-pass streaming: pass 1 collects (path, meta, label, amplitude) one
     # tensor at a time; pass 2 reloads only the stratified picks. Peak RSS is
@@ -296,20 +334,19 @@ def cmd_align(args) -> None:
         lo, hi = s[k], s[2 * k]
         return ["low" if v < lo else ("high" if v > hi else "mid") for v in vals]
 
-    safe: list[tuple[str, dict, float]] = []
+    safe: list[tuple[str, str, float]] = []
     unlabeled = 0
     total = 0
     for p in iter_tensor_paths(args.tensors):
-        t, meta = load_tensor(p)
+        t, _meta = load_tensor(p)
         total += 1
-        fqn = meta.get("fqn", "")
         obs = obs_of(p)
-        chunk = meta.get("chunk")
-        lab = labels.get((obs, fqn, chunk)) if obs is not None else None
+        base = os.path.basename(p)
+        lab = labels.get((obs, base)) if obs is not None else None
         if lab is None:
             unlabeled += 1
         if lab == "SAFE":
-            safe.append((p, meta, float(t.pow(2).mean().sqrt())))
+            safe.append((p, base, float(t.pow(2).mean().sqrt())))
         del t
     if unlabeled:
         print(f"WARNING: {unlabeled}/{total} tensors without a D1 label (excluded)")
@@ -321,9 +358,11 @@ def cmd_align(args) -> None:
     # coverage requirements (all roles, all slots, low/med/high amplitude);
     # top1 spread is handled by the replay rows (sec 2/3).
     buckets: dict[str, list[int]] = {}
-    for i, (p, meta, amp) in enumerate(safe):
-        fqn = meta.get("fqn", "")
-        bucket = f"{role_of(fqn)}|{slot_of(fqn)}|{amp_t[i]}"
+    roles: list[tuple[str, str]] = []
+    for i, (p, base, amp) in enumerate(safe):
+        role, slot = role_slot_of_name(base)
+        roles.append((role, slot))
+        bucket = f"{role}|{slot}|{amp_t[i]}"
         buckets.setdefault(bucket, []).append(i)
     n_buckets = len(buckets)
     per_bucket = max(1, args.min_samples // max(1, n_buckets))
@@ -337,7 +376,7 @@ def cmd_align(args) -> None:
     print(f"stratified sample: {len(picked)} of {len(safe)} safe tensors ({n_buckets} buckets)")
     rows = []
     for i in picked:
-        p, meta, _amp = safe[i]
+        p, base, _amp = safe[i]
         t, _meta2 = load_tensor(p)
         t = t.to(dev)
         a = evaluate(t, False)
@@ -351,13 +390,14 @@ def cmd_align(args) -> None:
             )
         )
         rel_err = float((d_bf16 - d_fp32).norm() / d_fp32.norm().clamp(min=1e-30))
+        role, slot = roles[i]
         rows.append(
             {
                 "obs": obs_of(p),
-                "fqn": meta.get("fqn"),
-                "role": role_of(meta.get("fqn", "")),
-                "slot": slot_of(meta.get("fqn", "")),
-                "chunk": meta.get("chunk"),
+                "fqn": base,
+                "role": role,
+                "slot": slot,
+                "chunk": None,
                 "shape": list(t.shape),
                 "delta_ratio_fp32_over_bf16": ratio,
                 "update_cosine": cos,
