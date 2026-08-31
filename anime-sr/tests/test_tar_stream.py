@@ -36,12 +36,16 @@ from PIL import Image
 
 CFG = Config()
 
+# Meta dimensions are DOUBLE the shipped webp (the danbooru-v2 trap: meta =
+# original post size, shipped webp = resized). The SHIPPED sizes (meta//2)
+# must stay train-eligible for bucket 512 — hence meta >= 1024 on both
+# sides (700x600 / 900x800 shipped, the codec_bank fixture's eligible set).
 _CASES = [
-    (2001, 700, 600, "sfw"),
-    (2002, 900, 800, "sfw"),
-    (2003, 700, 600, "sfw"),
-    (2004, 900, 800, "sfw"),
-    (2005, 700, 600, "sfw"),
+    (2001, 1400, 1200, "sfw"),
+    (2002, 1800, 1600, "sfw"),
+    (2003, 1400, 1200, "sfw"),
+    (2004, 1800, 1600, "sfw"),
+    (2005, 1400, 1200, "sfw"),
 ]
 
 
@@ -115,7 +119,11 @@ def test_scan_shard_full_records_coordinates(tmp_path: Path) -> None:
 
     with tarfile.open(shard) as tf:
         members = {m.name: m for m in tf.getmembers() if m.isfile()}
-        tfh = tf
+        bodies = {
+            name: tf.extractfile(m).read()
+            for name, m in members.items()
+            if m.isfile() and name.endswith(".webp")
+        }
     for rec, (cid, meta_w, meta_h, _nsfw) in zip(records, _CASES):
         stem = f"danbooru/5.9/1_2024/{cid}"
         member = members[f"{stem}.webp"]
@@ -125,7 +133,7 @@ def test_scan_shard_full_records_coordinates(tmp_path: Path) -> None:
         with open(shard, "rb") as fh:
             fh.seek(rec.webp_offset)
             body = fh.read(rec.webp_size)
-        assert body == tfh.extractfile(member).read()
+        assert body == bodies[f"{stem}.webp"]
         # real pixel size = the SHIPPED webp (meta/2), NOT the meta dims
         img = Image.open(io.BytesIO(body))
         assert (img.width, img.height) == (meta_w // 2, meta_h // 2)
