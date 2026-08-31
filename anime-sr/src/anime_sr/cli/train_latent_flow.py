@@ -36,6 +36,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--index-dir", required=True)
     ap.add_argument("--webp-dir", required=True)
     ap.add_argument(
+        "--tar-dir",
+        default=None,
+        help="streaming tar-direct path (2026-09-01): decode webp in place "
+        "from the pinned shard tars under this directory (window-driver "
+        "pin dir) instead of the extracted --webp-dir tree; requires an "
+        "index built with the streaming scan (webp_offset/webp_size rows)",
+    )
+    ap.add_argument(
         "--latent-dir",
         default=None,
         help="LatentStore root (index-v1.json + z/); required unless "
@@ -118,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
                 latent_dir=args.latent_dir,
                 bucket_hr=args.bucket_hr,
                 rank=rank,
+                tar_dir=args.tar_dir,
             )
         dist.init_process_group(backend="nccl")
 
@@ -135,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         init_trunk=args.init_trunk,
         stage_transition=args.stage_transition,
         config_names=list(args.config),
+        tar_dir=args.tar_dir,
     )
     if world_size > 1 and dist.is_initialized():
         dist.destroy_process_group()

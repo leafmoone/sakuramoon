@@ -786,6 +786,25 @@ def _build_slot_map(ds: SRDataset, cfg: Config, legacy_order: list[int]) -> Slot
     return SlotMap(len(legacy_order), members, cfg, legacy_order, salt=str(ds.global_seed))
 
 
+def _write_step_heartbeat(out: Path, step: int) -> None:
+    """Lightweight progress heartbeat for the streaming window driver
+    (2026-09-01 tar-direct path): the driver sizes its shard pin window
+    from the newest reported step so the 512 GiB cache LRU never evicts a
+    tar the trainer still needs. Atomic JSON, rank 0 only; a write failure
+    degrades to a coarser (checkpoint-based) window, never to a crash."""
+    import json
+
+    try:
+        p = out / "step-heartbeat.json"
+        tmp = p.with_name(f".{p.name}.tmp")
+        tmp.write_text(
+            json.dumps({"step": step, "t": time.time()}) + "\n", encoding="utf-8"
+        )
+        tmp.replace(p)
+    except OSError as error:
+        print(f"[latent] step-heartbeat write failed: {error}", flush=True)
+
+
 def _train_crop_box(
     ds: SRDataset,
     meta: SampleMeta,
@@ -1347,6 +1366,7 @@ def prepare_producer_prefork(
     latent_dir: str | Path | None,
     bucket_hr: int,
     rank: int,
+    tar_dir: str | Path | None = None,
 ) -> None:
     """P1-WEDGE-FIX: build the producer ctx and fork the worker pool BEFORE
     ``dist.init_process_group`` (call from the CLI).
@@ -1370,7 +1390,9 @@ def prepare_producer_prefork(
         store = LatentStore(latent_dir, bucket_hr)
         doc = read_index(latent_dir)
         sids = sorted(doc["samples"].keys())
-    ds = SRDataset(index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train")
+    ds = SRDataset(
+        index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train", tar_dir=tar_dir
+    )
     # P1-4 (2026-08-29): the clean-score gate is FROZEN + read-only here —
     # the sidecar was precomputed offline; the identical filter on every
     # rank keeps the DDP stream consistent. (The start-up report + rank-0
@@ -1441,11 +1463,15 @@ def run_latent_flow(
     init_trunk: str | Path | None = None,
     stage_transition: str | Path | None = None,
     config_names: list[str] | None = None,
+    tar_dir: str | Path | None = None,
 ) -> int:
     """Train (or resume) the M3/M4 latent flow model; returns the final step.
 
     ``latent_dir`` may be ``None`` for P1 ④ ``zhr_source="onfly"`` (no
-    pre-encoded store; z_hr is encoded in the consumer)."""
+    pre-encoded store; z_hr is encoded in the consumer). ``tar_dir`` (the
+    streaming tar-direct path, 2026-09-01): when set, webp is decoded in
+    place from the pinned shard tars under that directory instead of the
+    extracted ``webp_dir`` tree (``webp_dir`` becomes a placeholder)."""
     lf = cfg.latent_flow
     p1 = cfg.phase1
     # plan §15.1: the exposure budget is a SAMPLE budget (hardware-invariant);
@@ -1502,7 +1528,9 @@ def run_latent_flow(
         if cfg.filter.clean_score_stage == "lazy" and cfg.filter.clean_score_cache
         else None
     )
-    ds = SRDataset(index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train")
+    ds = SRDataset(
+        index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="train", tar_dir=tar_dir
+    )
     train_ids = [m.sample_id for m in ds.samples]
     if clean_scores is not None and rank == 0:
         report = build_clean_score_report(
@@ -1621,7 +1649,8 @@ def run_latent_flow(
     if lf.val_heldout_samples > 0:
         try:
             val_ds = SRDataset(
-                index_dir, webp_dir, cfg, bucket_hr=bucket_hr, split="validation",
+                index_dir, webp_dir, cfg, bucket_hr=bucket_hr,
+                split="validation", tar_dir=tar_dir,
             )
         except (RuntimeError, ValueError):
             val_ds = None
@@ -2258,6 +2287,7 @@ def run_latent_flow(
                 f"({(step + 1 - start_step) / max(1e-3, time.time() - t0):.1f} it/s){extra}",
                 flush=True,
             )
+            _write_step_heartbeat(out, step + 1)
 
     if _is_proc:
         ppool = cast("_MPPool", pool)

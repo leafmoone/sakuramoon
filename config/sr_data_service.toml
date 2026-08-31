@@ -11,9 +11,13 @@
 #
 # Streaming mode (user rule, 08-31): the corpus is consumed as a stream
 # through the bounded cache window (high watermark hard-capped at 512 GiB by
-# the schema); the streaming prep pipeline (anime-sr
-# scripts/remote/sr_stream_prep.py) leases shards, extracts them to the
-# persistent webp tree, ACKs, and lets the cache LRU evict processed tars.
+# the schema). Tar-direct path (2026-09-01): the streaming prep pipeline
+# (anime-sr scripts/remote/sr_stream_prep.py) runs in `index` mode (one
+# pass, member coordinates, no extraction) and `window` mode (training-time
+# demand driver: request(worker, path) pins the shards the trainer's next
+# stream window touches; the trainer decodes webp members in place from the
+# pinned tars via SRDataset(tar_dir=...)); the legacy `extract` mode remains
+# as fallback.
 #
 # The model/stage/caption sections are inherited placeholders required by the
 # runtime schema; the data-service CLI never reads them.
@@ -64,7 +68,11 @@ refresh_existing = false
 low_watermark_gib = 448
 high_watermark_gib = 512
 download_concurrency = 8
-verified_shard_lookahead = 48
+# Demand-driven (2026-09-01): the window driver requests the shards the
+# trainer actually needs next; the queue-order lookahead is only a warm
+# prefix now. Kept small so internal prefetch does not burn proxy bandwidth
+# on shards the window will not reach this cycle.
+verified_shard_lookahead = 16
 persistent_workers_per_rank = 8
 ready_batches_per_rank = 8
 

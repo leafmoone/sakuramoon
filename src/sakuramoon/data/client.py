@@ -68,22 +68,30 @@ class DataServiceClient:
         self.request_timeout_seconds = request_timeout_seconds
         self.identity, _ = self._health_identity()
 
-    def _request(self, payload: dict[str, object]) -> dict[str, Any]:
+    def _request(
+        self, payload: dict[str, object], timeout_seconds: float | None = None
+    ) -> dict[str, Any]:
         frame = canonical_json_bytes(payload)
         if len(frame) > MAX_SERVICE_FRAME_BYTES:
             raise DataServiceUnavailable("data service request exceeds the frame bound")
-        response = self._request_transport(frame)
+        response = self._request_transport(frame, timeout_seconds)
         if response.get("ok") is not True:
             reason = response.get("error")
             detail = reason if isinstance(reason, str) and reason else "unknown error"
             raise DataServiceUnavailable(f"data service rejected the request: {detail}")
         return response
 
-    def _request_transport(self, frame: bytes) -> dict[str, Any]:
+    def _request_transport(
+        self, frame: bytes, timeout_seconds: float | None = None
+    ) -> dict[str, Any]:
         last_error: OSError | None = None
         for attempt in range(_TRANSPORT_ATTEMPTS):
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            connection.settimeout(self.request_timeout_seconds)
+            connection.settimeout(
+                self.request_timeout_seconds
+                if timeout_seconds is None
+                else timeout_seconds
+            )
             try:
                 connection.connect(str(self.socket_path))
                 connection.sendall(frame)
@@ -171,6 +179,53 @@ class DataServiceClient:
         )
         if set(response) != {"ok"}:
             raise DataServiceUnavailable("data service ACK response is invalid")
+
+    def request(
+        self,
+        worker_id: int,
+        path: str,
+        timeout_seconds: float | None = None,
+    ) -> ShardLeaseDescriptor:
+        """Demand-directed lease (streaming window driver): pin ``path``,
+        downloading it first when not ready. Blocks until the shard is
+        ready; ``timeout_seconds`` bounds both the server-side wait and
+        this client's socket read (the default session timeout is far too
+        short for an 800 MB download)."""
+        if type(path) is not str or not path:
+            raise ValueError("request path must be nonempty text")
+        payload: dict[str, object] = {
+            "op": "request",
+            "session_id": self.identity.session_id,
+            "worker_id": worker_id,
+            "path": path,
+        }
+        effective = timeout_seconds
+        if effective is not None:
+            if type(effective) is not float or not 0.0 < effective <= 86400.0:
+                raise ValueError("request timeout is invalid")
+            payload["timeout_seconds"] = effective
+        response = self._request(
+            payload,
+            timeout_seconds=(
+                None if effective is None else effective + 30.0
+            ),
+        )
+        if set(response) != {"lease", "ok"}:
+            raise DataServiceUnavailable("data service request response is invalid")
+        try:
+            descriptor = ShardLeaseDescriptor.from_dict(response["lease"])
+        except DataServiceProtocolError:
+            raise DataServiceUnavailable(
+                "data service requested lease is invalid"
+            ) from None
+        if (
+            descriptor.worker_id != worker_id
+            or not descriptor.local_path.is_file()
+        ):
+            raise DataServiceUnavailable(
+                "data service requested lease identity is invalid"
+            )
+        return descriptor
 
 
 class RankedDataServiceClient:

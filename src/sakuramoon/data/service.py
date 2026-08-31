@@ -651,6 +651,104 @@ class DataSupplyService:
                 )
             self._schedule_lookahead()
 
+    def request(
+        self,
+        worker_id: int,
+        path: str,
+        timeout_seconds: float,
+    ) -> ShardLeaseDescriptor:
+        """Demand-directed lease for the streaming window driver (2026-09-01).
+
+        Pin a SPECIFIC shard (the trainer's next stream window), downloading
+        it first when it is not ready. Unlike :meth:`lease` (queue order),
+        the caller names the path — the SR window driver demands shards in
+        the trainer's deterministic slot-stream order, not the queue order.
+
+        Blocks until the shard is ready or ``timeout_seconds`` elapses.
+        This runs on a per-connection handler thread; the lock is held in
+        short chunks (same pattern as the blocking lease in
+        :meth:`_wait_for_ready_count`), so other connections make progress
+        between iterations.
+
+        Lease semantics match :meth:`lease`: one outstanding lease per
+        worker, released by ACK (the shard becomes LRU-evictable). A
+        worker that already holds a lease for ANOTHER shard gets a hard
+        error — the driver must serialize per worker id."""
+        if type(path) is not str or not path:
+            raise DataServiceError("requested shard path is invalid")
+        with self._lock:
+            self._require_running()
+            if (
+                type(worker_id) is not int
+                or not 0 <= worker_id < self.identity.worker_count
+            ):
+                raise DataServiceError("worker identity is invalid")
+            existing_lease_id = self._worker_leases.get(worker_id)
+            if existing_lease_id is not None:
+                descriptor = self._outstanding.get(existing_lease_id)
+                if descriptor is None:
+                    raise DataServiceError("worker lease state is inconsistent")
+                if descriptor.record.path != path:
+                    raise DataServiceError(
+                        f"worker={worker_id} already holds a lease for "
+                        f"{descriptor.record.path}; ACK it first"
+                    )
+                _log(f"worker={worker_id} 定向分片已持有: {descriptor.record.path}")
+                return descriptor
+            if len(self._outstanding) >= self.limits.lease_channel_capacity:
+                raise DataServiceError("lease capacity is exhausted")
+            row = next((r for r in self.state.rows if r.path == path), None)
+            if row is None:
+                raise DataServiceError(f"requested shard is absent from the queue: {path}")
+            if row.status == "completed":
+                raise DataServiceError(
+                    f"requested shard is completed in this cycle: {path}"
+                )
+            if path not in self._futures:
+                _log(f"定向加载分片: {path}")
+                self._futures[path] = self._executor.submit(
+                    self.cache.fetch,
+                    path,
+                    protected_paths=self._protected_paths(),
+                    progress=self._download_progress(path),
+                    cancelled=self._cancelled,
+                )
+            deadline = time.monotonic() + timeout_seconds
+            cached: CachedShard | None = None
+            while cached is None:
+                if self._cancelled():
+                    raise _ServiceStopping
+                self._collect_completed()
+                cached = self._ready.pop(path, None)
+                if cached is not None:
+                    break
+                if time.monotonic() >= deadline:
+                    raise DataServiceError(f"shard request timed out: {path}")
+                self._schedule_lookahead()
+                if self._futures:
+                    wait(
+                        tuple(self._futures.values()),
+                        timeout=0.25,
+                        return_when=FIRST_COMPLETED,
+                    )
+                else:
+                    time.sleep(0.25)
+            self._replace_status(path, "active")
+            lease_id = secrets.token_urlsafe(16)
+            descriptor = ShardLeaseDescriptor(
+                lease_id=lease_id,
+                worker_id=worker_id,
+                cycle_index=self.state.cycle,
+                state_revision=self._revision,
+                record=self.manifest.shard(path),
+                local_path=cached.fetched.path,
+            )
+            self._outstanding[lease_id] = descriptor
+            self._worker_leases[worker_id] = lease_id
+            _log(f"worker={worker_id} 定向加载分片完成: {path}")
+            self._schedule_lookahead()
+            return descriptor
+
     @property
     def done(self) -> bool:
         return False
@@ -775,6 +873,21 @@ class DataServiceServer:
                 request["lease_id"], request["worker_id"], request["state_revision"]
             )
             return {"ok": True}
+        if operation == "request":
+            if set(request) not in (
+                {"op", "session_id", "worker_id", "path"},
+                {"op", "session_id", "worker_id", "path", "timeout_seconds"},
+            ):
+                raise DataServiceError("request fields are invalid")
+            if request["session_id"] != self.service.identity.session_id:
+                raise DataServiceError("data service session changed")
+            timeout = request.get("timeout_seconds", self.request_timeout_seconds)
+            if type(timeout) is not float or not 0.0 < timeout <= 86400.0:
+                raise DataServiceError("request timeout is invalid")
+            descriptor = self.service.request(
+                request["worker_id"], request["path"], timeout
+            )
+            return {"lease": descriptor.as_dict(), "ok": True}
         raise DataServiceError("service operation is invalid")
 
     def _handle_connection(self, connection: socket.socket) -> None:
