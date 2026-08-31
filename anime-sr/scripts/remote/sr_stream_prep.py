@@ -351,9 +351,11 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
     driver pins [0, window) (warm start before the trainer begins)."""
     cfg = _load_anime_sr_cfg(args)
     from anime_sr.data.pipeline import SRDataset
-    from anime_sr.data.pool_sampler import SlotMap
     from anime_sr.data.stream import window_shards
-    from anime_sr.train.latent_flow import clean_score_gate_retained
+    from anime_sr.train.latent_flow import (
+        _build_slot_map,
+        clean_score_gate_retained,
+    )
 
     shard_dir = Path(args.shard_dir)
     shard_dir.mkdir(parents=True, exist_ok=True)
@@ -362,6 +364,10 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
         args.index_dir, shard_dir, cfg,
         bucket_hr=args.bucket_hr, split="train", tar_dir=shard_dir,
     )
+    # Mirror the trainer exactly (latent_flow.run_latent_flow): the
+    # clean-score gate filters ds.samples BEFORE the stream is built, and
+    # on-fly mode's legacy order is the identity — the window driver must
+    # reproduce the trainer's §11.5 slot stream sample-for-sample.
     retained = clean_score_gate_retained(
         [m.sample_id for m in ds.samples], args.index_dir, cfg.filter.clean_score_min
     )
@@ -371,6 +377,8 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
             _log("window", "clean-score gate removed all train samples")
             return 1
     n = len(ds.samples)
+    slot_map = _build_slot_map(ds, cfg, list(range(n)))
+    shards = [m.shard for m in ds.samples]
 
     val_shards: set[str] = set()
     try:
@@ -381,13 +389,6 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
         val_shards = {m.shard for m in val_ds.samples}
     except (RuntimeError, ValueError):
         pass
-
-    members: dict[str, list[int]] = {}
-    for i, m in enumerate(ds.samples):
-        pool = m.sampling_pool if m.sampling_pool in ("priority", "regular", "aux") else "regular"
-        members.setdefault(pool, []).append(i)
-    slot_map = SlotMap(n, members, cfg, list(range(n)), salt=str(ds.global_seed))
-    shards = [m.shard for m in ds.samples]
 
     _log(
         "window",
