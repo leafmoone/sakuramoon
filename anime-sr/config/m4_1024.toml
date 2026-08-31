@@ -105,6 +105,22 @@ val_heldout_samples = 128
 val_every_steps = 31250
 val_samples = 128
 
+[logging]
+# W&B telemetry (2026-08-31): loss/lr/data-wait scalars every 10 steps,
+# decoded train-sample grids (LQ / 1-step / 4-step / GT) every 3125 steps
+# (= 50k global exposures at batch 16; 120 probes over the 6M run), plus
+# val/* and heldout/* metrics + sample grids on their own cadences.
+# Rank 0 only; console prints are unchanged. The API key comes from the
+# WANDB_API_KEY environment variable on the training host (never here).
+wandb_enabled = true
+wandb_entity = "leafmoone"
+wandb_project = "anime-sr"
+wandb_run_name = "m4-1024-6m"
+wandb_mode = "online"
+log_every_steps = 10
+sample_every_steps = 3125
+sample_images = 4
+
 [hardware]
 dtype = "bf16"
 ddp = true

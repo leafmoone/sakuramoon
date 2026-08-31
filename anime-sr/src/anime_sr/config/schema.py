@@ -281,6 +281,31 @@ class EMASpec(_Frozen):
     half_life_samples: int = 500_000
 
 
+class LoggingSpec(_Frozen):
+    """W&B telemetry for the latent-flow loop (2026-08-31; default OFF).
+
+    The loop's console prints are unchanged; W&B is additive and rank-0
+    only. The API key comes from the ``WANDB_API_KEY`` environment
+    variable (repo rule: no secrets in config files). ``wandb_mode``:
+    "online" (default) | "offline" (air-gapped; files under
+    ``<out_dir>/wandb``) | "disabled" (rejected when enabled).
+    """
+
+    wandb_enabled: bool = False
+    wandb_entity: str = ""
+    wandb_project: str = "anime-sr"
+    wandb_run_name: str = ""
+    wandb_mode: Literal["online", "offline", "disabled"] = "online"
+    # step cadence of the scalar telemetry (train/loss, lr, data_wait, ...)
+    log_every_steps: int = 10
+    # step cadence of the DECODED train-sample probe (LQ / 1-step / 4-step /
+    # GT grid of the CURRENT batch; a couple of extra forwards). 0 = off.
+    # Kept separate from val_every_steps (the full val probe is expensive).
+    sample_every_steps: int = 0
+    # number of samples in each sample grid
+    sample_images: int = 4
+
+
 # ---------------------------------------------------------------------------
 # hardware (plan §15)
 # ---------------------------------------------------------------------------
@@ -587,6 +612,7 @@ class Config(_Frozen):
     vae: VAESpec = Field(default_factory=VAESpec)
     pixel_baseline: PixelBaselineSpec = Field(default_factory=PixelBaselineSpec)
     latent_flow: LatentFlowSpec = Field(default_factory=LatentFlowSpec)
+    logging: LoggingSpec = Field(default_factory=LoggingSpec)
 
     def validate_all(self) -> None:
         self.model.validate_structure()

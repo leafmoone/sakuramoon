@@ -119,6 +119,7 @@ from anime_sr.train.pixel_baseline import (
     _optimizer_for,
     _unwrap,
 )
+from anime_sr.train.wandb_log import TrainLogger
 from anime_sr.vae.mage import load_frozen_vae
 
 #: M4 launch decision (2026-08-29 M4 resolution revision) — stamped into
@@ -380,14 +381,20 @@ def _validate_latent(
     step: int,
     bucket_hr: int,
     autocast: Callable[[], Any],
-) -> None:
+    logger: TrainLogger | None = None,
+) -> dict[str, float]:
     """Quantitative M3 checklist subset on a fixed val slice (rank 0 only).
 
     ``store=None`` (P1 ④ ``zhr_source="onfly"``): the val slice is built
     from the train index, so the samples have no pre-encoded rows — z_hr is
-    encoded on the fly with the frozen VAE, like the held-out val path."""
+    encoded on the fly with the frozen VAE, like the held-out val path.
+
+    Returns the metrics dict (console prints unchanged); with a W&B
+    ``logger`` it also logs the metrics (``val/*``) plus decoded sample
+    grids (GT / LQ-anchor / 1-step / 4-step) of the first
+    ``[logging].sample_images`` val samples."""
     if rank != 0:
-        return
+        return {}
     lf = cfg.latent_flow
     mod = _unwrap(model)
     was_training = mod.training
@@ -479,6 +486,17 @@ def _validate_latent(
         ratio_41 = m4["l1"] / m1["l1"] if m1["l1"] > 1e-8 else float("inf")
     if was_training:
         mod.train()
+    metrics: dict[str, float] = {
+        "l1_1step": m1["l1"],
+        "l1_4step": m4["l1"],
+        "ratio_4_1": ratio_41,
+        "l1_anchor": m1["l1_anchor"],
+        "toward_1step": m1["toward_frac"],
+        "toward_4step": m4["toward_frac"],
+        "cos_v": cos_v,
+        **{k.replace("ep_l1_", "ep_"): v for k, v in ep.items()},
+        **d4,
+    }
     print(
         f"[latent] val step {step}: l1_1={m1['l1']:.4f} l1_4={m4['l1']:.4f} "
         f"ratio_4_1={ratio_41:.4f} l1_anchor={m1['l1_anchor']:.4f} "
@@ -493,6 +511,22 @@ def _validate_latent(
         + " ".join(f"{k}={v:.4f}" for k, v in d4.items()),
         flush=True,
     )
+    if logger is not None:
+        logger.log(step, scalars={f"val/{k}": v for k, v in metrics.items()})
+        k = min(cfg.logging.sample_images, n_val)
+        if k > 0:
+            with torch.no_grad():
+                imgs = {
+                    name: vae.decode(t[:k].to(vae.device, vae.dtype)).to(device)
+                    for name, t in (
+                        ("gt", z_hr_b),
+                        ("lq_anchor", z_lr_b),
+                        ("one_step", z1),
+                        ("four_step", z4),
+                    )
+                }
+            logger.log(step, images={f"val/{name}": t for name, t in imgs.items()})
+    return metrics
 
 
 def _validate_heldout(
@@ -505,7 +539,8 @@ def _validate_heldout(
     step: int,
     bucket_hr: int,
     autocast: Callable[[], Any],
-) -> None:
+    logger: TrainLogger | None = None,
+) -> dict[str, float]:
     """P1 ① held-out validation (rank 0 only).
 
     Sampled from the VALIDATION split (never the train stream) with a fully
@@ -513,13 +548,16 @@ def _validate_heldout(
     across runs. Held-out samples have no pre-encoded store row (the
     LatentStore covers train crops only), so z_hr is encoded on the fly by
     the frozen VAE — the same path the P1 ④ on-the-fly design generalizes.
-    """
+
+    Returns the metrics dict; with a W&B ``logger`` it also logs them
+    (``heldout/*``) plus decoded sample grids (first
+    ``[logging].sample_images`` samples)."""
     if rank != 0:
-        return
+        return {}
     lf = cfg.latent_flow
     n = min(lf.val_heldout_samples, len(val_ds.samples))
     if n <= 0:
-        return
+        return {}
     mod = _unwrap(model)
     was_training = mod.training
     mod.eval()
@@ -597,6 +635,17 @@ def _validate_heldout(
         ratio_41 = m4["l1"] / m1["l1"] if m1["l1"] > 1e-8 else float("inf")
     if was_training:
         mod.train()
+    metrics: dict[str, float] = {
+        "l1_1step": m1["l1"],
+        "l1_4step": m4["l1"],
+        "ratio_4_1": ratio_41,
+        "l1_anchor": m1["l1_anchor"],
+        "toward_1step": m1["toward_frac"],
+        "toward_4step": m4["toward_frac"],
+        "cos_v": cos_v,
+        **{k.replace("ep_l1_", "ep_"): v for k, v in ep.items()},
+        **d4,
+    }
     print(
         f"[latent] heldout-val step {step}: l1_1={m1['l1']:.4f} "
         f"l1_4={m4['l1']:.4f} ratio_4_1={ratio_41:.4f} "
@@ -612,6 +661,76 @@ def _validate_heldout(
         + " ".join(f"{k}={v:.4f}" for k, v in d4.items()),
         flush=True,
     )
+    if logger is not None:
+        logger.log(step, scalars={f"heldout/{k}": v for k, v in metrics.items()})
+        k = min(cfg.logging.sample_images, n)
+        if k > 0:
+            with torch.no_grad():
+                imgs = {
+                    name: vae.decode(t[:k].to(vae.device, vae.dtype)).to(device)
+                    for name, t in (
+                        ("gt", z_hr_b),
+                        ("lq_anchor", z_lr_b),
+                        ("one_step", z1),
+                        ("four_step", z4),
+                    )
+                }
+            logger.log(step, images={f"heldout/{name}": t for name, t in imgs.items()})
+    return metrics
+
+
+def _log_train_sample(
+    model: nn.Module,
+    vae,
+    z_hr: torch.Tensor,
+    z_lr: torch.Tensor,
+    lq: torch.Tensor,
+    lq_up: torch.Tensor,
+    cfg: Config,
+    device: torch.device,
+    step: int,
+    autocast: Callable[[], Any],
+    logger: TrainLogger,
+) -> None:
+    """Decoded train-sample probe from the CURRENT batch (W&B only).
+
+    Runs one 1-step and one 4-step flow sample on the batch's own latents
+    (sigma=0, a step-seeded throwaway generator — the §11.5 stream RNG is
+    untouched) and logs VAE-decoded grids: the GT HR crop, the 4x-upsampled
+    LQ the model consumes, and the 1/4-step outputs. A couple of extra
+    forwards + small decodes per probe; deterministic per step. No-op when
+    the logger is disabled (checked by the caller)."""
+    if not logger.enabled:
+        return
+    lf = cfg.latent_flow
+    mod = _unwrap(model)
+    was_training = mod.training
+    mod.eval()
+    pixel = lf.pixel_features
+    k = min(cfg.logging.sample_images, z_hr.shape[0])
+    try:
+        if pixel:
+            sampler = FlowSampler(_PixelVelocity(cast(AnimeSRModel, mod)))
+        else:
+            sampler = FlowSampler(_LatentVelocity(cast(UFlowSR, mod)))
+        g = torch.Generator(device=str(device)).manual_seed(0x5EED ^ (step % (2**31)))
+        with torch.no_grad(), autocast():
+            if pixel:
+                z1 = sampler.one_step(z_lr[:k], (z_lr[:k], lq[:k]), sigma=0.0, generator=g)
+                z4 = sampler.four_step(z_lr[:k], (z_lr[:k], lq[:k]), sigma=0.0, generator=g)
+            else:
+                z1 = sampler.one_step(z_lr[:k], z_lr[:k], sigma=0.0, generator=g)
+                z4 = sampler.four_step(z_lr[:k], z_lr[:k], sigma=0.0, generator=g)
+            imgs = {
+                "hr_gt": vae.decode(z_hr[:k].to(vae.device, vae.dtype)).to(device),
+                "lq_upsampled": lq_up[:k].to(device).float(),
+                "one_step": vae.decode(z1[:k].to(vae.device, vae.dtype)).to(device),
+                "four_step": vae.decode(z4[:k].to(vae.device, vae.dtype)).to(device),
+            }
+        logger.log(step, images={f"sample/{name}": t for name, t in imgs.items()})
+    finally:
+        if was_training:
+            mod.train()
 
 
 # ---------------------------------------------------------------------------
@@ -1683,6 +1802,27 @@ def run_latent_flow(
         # means, not just what it does.
         stamp_launch_decision(cfg, out)
 
+    # W&B telemetry (2026-08-31): additive, rank-0 only, no-op unless
+    # [logging].wandb_enabled. The API key comes from the WANDB_API_KEY
+    # environment (never from the config).
+    logger = TrainLogger(
+        cfg.logging,
+        rank=rank,
+        run_dir=out,
+        tags=[
+            f"bucket-{bucket_hr}",
+            f"zhr-{lf.zhr_source}",
+            f"producer-{lf.producer}",
+            "pixel" if lf.pixel_features else "trunk",
+        ],
+    )
+    if rank == 0 and logger.enabled:
+        # structured run config on the W&B run page: the same document that
+        # was just stamped next to the checkpoints (no secrets)
+        logger.set_config(
+            json.loads((out / "resolved-config.json").read_text(encoding="utf-8"))
+        )
+
     def _prov() -> dict:
         """Fresh v2 provenance per save (per-save timestamp); the source
         checkpoint is the resume file (same-stage), the init-trunk file
@@ -1971,6 +2111,38 @@ def run_latent_flow(
             torch.cuda.synchronize(device)
         t_comp_cum += time.perf_counter() - tc
 
+        # W&B telemetry (no-op unless [logging].wandb_enabled)
+        if (step + 1) % cfg.logging.log_every_steps == 0:
+            done = step + 1 - start_step
+            logger.log(
+                step + 1,
+                scalars={
+                    "train/loss": loss.item(),
+                    "train/loss_window_mean": sum(loss_window) / len(loss_window),
+                    "train/lr": lr,
+                    "train/img_s_per_rank": done * bs / max(1e-9, time.time() - t0),
+                    "train/global_exposures": (step + 1) * bs * world_size,
+                    "train/data_wait_pct": (
+                        100.0 * t_data_cum / max(1e-9, t_data_cum + t_comp_cum)
+                        if done >= 50
+                        else 0.0
+                    ),
+                    **{
+                        f"train/stage_ms/{s}": 1000.0 * stage_cum[s] / max(1, n_produced)
+                        for s in stage_cum
+                    },
+                },
+            )
+        if (
+            rank == 0
+            and logger.enabled
+            and cfg.logging.sample_every_steps > 0
+            and (step + 1) % cfg.logging.sample_every_steps == 0
+        ):
+            _log_train_sample(
+                model, vae, z_hr, z_lr, lq, lq_up, cfg, device, step + 1, autocast, logger
+            )
+
         if (step + 1) % lf.val_every_steps == 0:
             _validate_latent(
                 model,
@@ -1985,6 +2157,7 @@ def run_latent_flow(
                 step + 1,
                 bucket_hr,
                 autocast,
+                logger=logger,
             )
             # M1 #8 / revised-#3 milestone: data pipeline + producer/consumer
             # telemetry alongside the model metrics above.
@@ -2016,6 +2189,7 @@ def run_latent_flow(
                 step + 1,
                 bucket_hr,
                 autocast,
+                logger=logger,
             )
         # P2-1: production saves are ckpt v2 (model/optimizer/EMA/step/
         # exposure cursor/RNG/scalars/provenance+resolved-config id).
@@ -2107,6 +2281,7 @@ def run_latent_flow(
         }
         (out / "train-meta.json").write_text(json.dumps(meta, indent=2))
         print(f"[latent] done: {out / 'latest.pt'}", flush=True)
+        logger.finish()
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()
     return total
