@@ -11,6 +11,7 @@ import secrets
 import socket
 import stat
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -20,7 +21,11 @@ from typing import Any, BinaryIO, Literal, cast
 
 from sakuramoon.data.cache import CachedShard, ShardCache, ShardCacheError
 from sakuramoon.data.manifest import DatasetManifest
-from sakuramoon.data.modelscope import DatasetTransientError, DatasetTransportError
+from sakuramoon.data.modelscope import (
+    DatasetAuthenticationError,
+    DatasetTransientError,
+    DatasetTransportError,
+)
 from sakuramoon.data.service_protocol import (
     MAX_SERVICE_FRAME_BYTES,
     SERVICE_PROTOCOL_VERSION,
@@ -33,6 +38,17 @@ from sakuramoon.data.service_protocol import (
 from sakuramoon.data.validation import ValidationSelection, validate_selection_manifest
 
 _QUEUE_SCHEMA_VERSION = 2
+
+# Failure governance for the prefetch loop. The remote can put a repo-level
+# gate on file routes (ModelScope returned 401 "login required" for a healthy
+# token mid-download in 2026-08-31), so an auth failure is transient for a
+# while and only fatal when sustained; and a burst of failures means the
+# prefetch window is hammering a degraded endpoint — cool it down instead.
+_AUTH_FAILURE_HARD_LIMIT_PER_SHARD = 30
+_AUTH_FAILURE_SUSTAINED_LIMIT = 200
+_FAILURE_WINDOW_SECONDS = 60.0
+_FAILURE_BURST_THRESHOLD = 8
+_PREFETCH_COOLDOWN_SECONDS = 120.0
 
 _CLIENT_DISCONNECTED_ERRNOS = frozenset(
     {
@@ -286,6 +302,10 @@ class DataSupplyService:
         self._ownership_handle: BinaryIO | None = None
         self._external_stop: threading.Event | None = None
         self._shutdown = threading.Event()
+        self._auth_failures: dict[str, int] = {}
+        self._auth_failures_since_success = 0
+        self._recent_failures: list[float] = []
+        self._cooldown_until = 0.0
 
     @property
     def state(self) -> _QueueState:
@@ -366,6 +386,8 @@ class DataSupplyService:
         )
 
     def _schedule_lookahead(self) -> None:
+        if time.monotonic() < self._cooldown_until:
+            return
         occupied = len(self._ready) + len(self._futures)
         candidates = list(self._pending_paths())
         if len(candidates) < self.limits.verified_shard_lookahead:
@@ -428,6 +450,28 @@ class DataSupplyService:
                 if self._cancelled():
                     raise _ServiceStopping from None
                 _log(f"分片下载暂时失败，保留进度并重试: {path}: {error}")
+                self._note_failure()
+                continue
+            except DatasetAuthenticationError as error:
+                if self._cancelled():
+                    raise _ServiceStopping from None
+                # Auth failures are transient while a repo-level gate is
+                # active (ModelScope returned 401 for a healthy token
+                # mid-corpus in 2026-08-31); only fail hard when sustained.
+                self._auth_failures[path] = self._auth_failures.get(path, 0) + 1
+                self._auth_failures_since_success += 1
+                if self._auth_failures[path] >= _AUTH_FAILURE_HARD_LIMIT_PER_SHARD:
+                    raise DataServiceError(
+                        f"data shard authentication kept failing: {path}: {error}"
+                    ) from None
+                if self._auth_failures_since_success >= _AUTH_FAILURE_SUSTAINED_LIMIT:
+                    raise DataServiceError(
+                        f"sustained authentication failures ({self._auth_failures_since_success} "
+                        f"since last download success): check ModelScope token/repo access "
+                        f"(possible repo-level gate), last error: {path}: {error}"
+                    ) from None
+                _log(f"分片下载认证失败(暂态)，稍后重试: {path}: {error}")
+                self._note_failure()
                 continue
             except (DatasetTransportError, OSError, ShardCacheError) as error:
                 if self._cancelled():
@@ -436,8 +480,33 @@ class DataSupplyService:
                     f"data shard could not be prepared: {path}: {error}"
                 ) from None
             self._ready[path] = result
+            self._auth_failures.pop(path, None)
+            if not result.fetched.cache_hit:
+                self._auth_failures_since_success = 0
             source = "缓存" if result.fetched.cache_hit else "下载"
             _log(f"分片就绪({source}): {path}")
+
+    def _note_failure(self) -> None:
+        """Burst-detect download failures and cool the prefetch window down.
+
+        A degraded remote (repo gate, proxy flap) answers every prefetch
+        within seconds; hammering it at full rate prolongs the gate. Eight
+        failures within a rolling 60s window pauses new prefetches for two
+        minutes while the already-in-flight attempts keep running."""
+        now = time.monotonic()
+        self._recent_failures = [
+            item for item in self._recent_failures if now - item < _FAILURE_WINDOW_SECONDS
+        ]
+        self._recent_failures.append(now)
+        if (
+            len(self._recent_failures) >= _FAILURE_BURST_THRESHOLD
+            and now >= self._cooldown_until
+        ):
+            self._cooldown_until = now + _PREFETCH_COOLDOWN_SECONDS
+            _log(
+                f"下载失败密集 ({len(self._recent_failures)}/{_FAILURE_WINDOW_SECONDS:.0f}s)，"
+                f"预取冷却 {_PREFETCH_COOLDOWN_SECONDS:.0f}s"
+            )
 
     def _wait_for_ready_count(self, count: int) -> None:
         announced = False

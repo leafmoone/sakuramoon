@@ -11,8 +11,16 @@ from typing import cast
 import pytest
 
 from sakuramoon.data.cache import CachedShard
-from sakuramoon.data.modelscope import DatasetTransientError, DatasetTransportError
+from sakuramoon.data.modelscope import (
+    DatasetAuthenticationError,
+    DatasetTransientError,
+    DatasetTransportError,
+)
 from sakuramoon.data.service import (
+    _AUTH_FAILURE_HARD_LIMIT_PER_SHARD,
+    _AUTH_FAILURE_SUSTAINED_LIMIT,
+    _FAILURE_BURST_THRESHOLD,
+    _PREFETCH_COOLDOWN_SECONDS,
     DataServiceError,
     DataServiceServer,
     DataSupplyService,
@@ -54,6 +62,10 @@ def _service_with_failed_future(error: Exception) -> DataSupplyService:
     service._ready = {}
     service._shutdown = threading.Event()
     service._external_stop = None
+    service._auth_failures = {}
+    service._auth_failures_since_success = 0
+    service._recent_failures = []
+    service._cooldown_until = 0.0
     return service
 
 
@@ -74,6 +86,51 @@ def test_permanent_download_failure_keeps_exact_reason() -> None:
         match=r"data/shard\.tar: shard is unavailable",
     ):
         service._collect_completed()
+
+
+def test_auth_failure_is_transient_for_a_repo_gate() -> None:
+    service = _service_with_failed_future(
+        DatasetAuthenticationError("ModelScope authentication failed")
+    )
+
+    service._collect_completed()
+
+    assert service._futures == {}
+    assert service._ready == {}
+    assert service._auth_failures == {"data/shard.tar": 1}
+
+
+def test_sustained_auth_failures_fail_hard() -> None:
+    service = _service_with_failed_future(
+        DatasetAuthenticationError("ModelScope authentication failed")
+    )
+    service._auth_failures_since_success = (
+        _AUTH_FAILURE_SUSTAINED_LIMIT - 1
+    )
+
+    with pytest.raises(DataServiceError, match="sustained authentication failures"):
+        service._collect_completed()
+
+
+def test_repeated_auth_failure_on_one_shard_fails_hard() -> None:
+    service = _service_with_failed_future(
+        DatasetAuthenticationError("ModelScope authentication failed")
+    )
+    service._auth_failures["data/shard.tar"] = _AUTH_FAILURE_HARD_LIMIT_PER_SHARD - 1
+
+    with pytest.raises(DataServiceError, match="authentication kept failing"):
+        service._collect_completed()
+
+
+def test_failure_burst_engages_prefetch_cooldown() -> None:
+    import time
+
+    service = _service_with_failed_future(DatasetTransientError("transfer failed"))
+
+    for _ in range(_FAILURE_BURST_THRESHOLD):
+        service._note_failure()
+
+    assert time.monotonic() < service._cooldown_until < time.monotonic() + _PREFETCH_COOLDOWN_SECONDS + 1
 
 
 @pytest.mark.parametrize(
