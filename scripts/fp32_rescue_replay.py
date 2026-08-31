@@ -136,16 +136,23 @@ class ReplayResult:
     rows: list[dict] = field(default_factory=list)
 
 
+def iter_tensor_paths(patterns: list[str]) -> list[str]:
+    paths: list[str] = []
+    for pat in patterns:
+        paths.extend(sorted(glob.glob(pat)))
+    return paths
+
+
 def cmd_replay(args) -> None:
+    # Streaming: load/evaluate/discard one tensor at a time. The full-sample
+    # set is ~90 GB on disk; holding it all in RAM is what stressed the old
+    # pod. RSS stays flat at a few hundred MB.
     dev = torch.device(args.device)
-    tensors: list[tuple[str, torch.Tensor, dict]] = []
-    for pat in args.tensors:
-        for p in sorted(glob.glob(pat)):
-            t, meta = load_tensor(p)
-            tensors.append((p, t, meta))
-    print(f"loaded {len(tensors)} tensors")
+    paths = iter_tensor_paths(args.tensors)
+    print(f"replaying {len(paths)} tensors (streaming)")
     res = ReplayResult()
-    for p, t, meta in tensors:
+    for p in paths:
+        t, meta = load_tensor(p)
         t = t.to(dev)
         a = evaluate(t, False)
         b = evaluate(t, True)
@@ -191,6 +198,7 @@ def cmd_replay(args) -> None:
                 f"bf16 dr={a['delta_rms']:.3e} fin={a['finite']} | "
                 f"fp32 dr={b['delta_rms']:.3e} fin={b['finite']} -> {verdict}"
             )
+        del t, a, b
     out = {
         "dangerous_total_bf16": res.bf16_catastrophic,
         "bf16_safe": res.bf16_safe,
@@ -279,43 +287,49 @@ def cmd_align(args) -> None:
                 for r in rec["rows"]:
                     key = (rec["obs"], r["fqn"], r["chunk"])
                     labels[key] = r["label"]
-    tensors: list[tuple[str, torch.Tensor, dict, str | None]] = []
-    for pat in args.tensors:
-        for p in sorted(glob.glob(pat)):
-            t, meta = load_tensor(p)
-            fqn = meta.get("fqn", "")
-            obs = obs_of(p)
-            chunk = meta.get("chunk")
-            lab = labels.get((obs, fqn, chunk)) if obs is not None else None
-            tensors.append((p, t, meta, lab))
-    safe = [x for x in tensors if x[3] == "SAFE"]
-    unlabeled = len(tensors) - len([x for x in tensors if x[3] is not None])
-    if unlabeled:
-        print(f"WARNING: {unlabeled} tensors without a D1 label (excluded)")
-    rng = random.Random(args.seed)
-    # stratified: round-robin over (role, slot, amplitude tercile)
+    # Two-pass streaming: pass 1 collects (path, meta, label, amplitude) one
+    # tensor at a time; pass 2 reloads only the stratified picks. Peak RSS is
+    # one tensor plus the metadata list (a few hundred MB for ~3k tensors).
     def terciles(vals: list[float]) -> list[str]:
         s = sorted(vals)
         k = len(s) // 3
         lo, hi = s[k], s[2 * k]
         return ["low" if v < lo else ("high" if v > hi else "mid") for v in vals]
 
-    amps = [float(x[1].pow(2).mean().sqrt()) for x in safe]
+    safe: list[tuple[str, dict, float]] = []
+    unlabeled = 0
+    total = 0
+    for p in iter_tensor_paths(args.tensors):
+        t, meta = load_tensor(p)
+        total += 1
+        fqn = meta.get("fqn", "")
+        obs = obs_of(p)
+        chunk = meta.get("chunk")
+        lab = labels.get((obs, fqn, chunk)) if obs is not None else None
+        if lab is None:
+            unlabeled += 1
+        if lab == "SAFE":
+            safe.append((p, meta, float(t.pow(2).mean().sqrt())))
+        del t
+    if unlabeled:
+        print(f"WARNING: {unlabeled}/{total} tensors without a D1 label (excluded)")
+    rng = random.Random(args.seed)
+    amps = [x[2] for x in safe]
     amp_t = terciles(amps)
     # top1 energy is not in the dump; the D1 replay rows carry it. The
     # stratification axes role x slot x amplitude already cover the spec's
     # coverage requirements (all roles, all slots, low/med/high amplitude);
     # top1 spread is handled by the replay rows (sec 2/3).
-    slots: dict[str, list[int]] = {}
-    for i, (p, t, meta, lab) in enumerate(safe):
+    buckets: dict[str, list[int]] = {}
+    for i, (p, meta, amp) in enumerate(safe):
         fqn = meta.get("fqn", "")
         bucket = f"{role_of(fqn)}|{slot_of(fqn)}|{amp_t[i]}"
-        slots.setdefault(bucket, []).append(i)
-    n_buckets = len(slots)
+        buckets.setdefault(bucket, []).append(i)
+    n_buckets = len(buckets)
     per_bucket = max(1, args.min_samples // max(1, n_buckets))
     picked: list[int] = []
-    for key in sorted(slots):
-        idxs = slots[key]
+    for key in sorted(buckets):
+        idxs = buckets[key]
         rng.shuffle(idxs)
         picked.extend(idxs[:per_bucket])
     rng.shuffle(picked)
@@ -323,7 +337,8 @@ def cmd_align(args) -> None:
     print(f"stratified sample: {len(picked)} of {len(safe)} safe tensors ({n_buckets} buckets)")
     rows = []
     for i in picked:
-        p, t, meta, lab = safe[i]
+        p, meta, _amp = safe[i]
+        t, _meta2 = load_tensor(p)
         t = t.to(dev)
         a = evaluate(t, False)
         b = evaluate(t, True)
@@ -349,7 +364,7 @@ def cmd_align(args) -> None:
                 "rel_fro_error": rel_err,
             }
         )
-        t = t.cpu()
+        del t, a, b
 
     def q(vals: list[float], qname: str) -> float:
         s = sorted(vals)
