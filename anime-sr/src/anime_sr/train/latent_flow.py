@@ -92,6 +92,7 @@ from anime_sr.data.degradation import degrade_hr
 from anime_sr.data.latent_store import LatentStore, read_index
 from anime_sr.data.pipeline import _EXPOSURE_PER_CYCLE, SampleMeta, SRDataset
 from anime_sr.data.pool_sampler import SlotMap
+from anime_sr.data.stream import latent_sample_index
 from anime_sr.flow.path import (
     interpolate,
     sample_sigma,
@@ -178,13 +179,8 @@ class _PixelVelocity(nn.Module):
         return self.model(rt, z_lr, lq, t, sigma)
 
 
-def latent_sample_index(
-    step: int, rank: int, i: int, bs: int, world: int, n: int
-) -> int:
-    """M2-style deterministic stream slot (plan §11.5): the global slot
-    ``step * bs * world + rank * bs + i`` wrapped by the set size. A resume
-    at step ``s0`` reproduces the same stream position at step ``s``."""
-    return (step * (bs * world) + rank * bs + i) % n
+# latent_sample_index lives in anime_sr.data.stream (single source of
+# truth shared with the streaming window driver, 2026-09-01).
 
 
 def flow_step_seed(global_seed: int, step: int, rank: int) -> int:

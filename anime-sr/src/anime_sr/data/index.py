@@ -51,6 +51,13 @@ class MetaRecord:
     anime_completeness: str = ""  # "polished" | "rough" | "monochrome"
     anime_classification: str = ""  # "illustration" | "comic" | "bangumi" | "3d" | "not_painting"
     ai_corrupted: bool = False  # the ai_image_corrupted meta key is present
+    # tar-direct read coordinates (2026-09-01 streaming path, scan_shard_full):
+    # byte offset / size of the webp member inside the shard tar. 0 = not
+    # scanned (extracted-webp path). When scanned, width/height above are
+    # ALREADY the real webp-header size (scan_shard_full replaces the meta
+    # dimensions, which describe the original post, not the shipped webp).
+    webp_offset: int = 0
+    webp_size: int = 0
 
     @property
     def sample_hash10k(self) -> int:
@@ -65,6 +72,8 @@ class ShardSummary:
     n_images: int = 0
     n_sfw: int = 0
     n_unresolved: int = 0  # json members dropped (null dims / malformed)
+    n_webp_missing: int = 0  # tar-direct: meta without its webp member
+    n_webp_bad_header: int = 0  # tar-direct: webp member with unreadable header
     bytes_total: int = 0
     min_size: int = 0
     max_size: int = 0
@@ -171,6 +180,92 @@ def scan_shard(shard_path: str | Path, progress: bool = True) -> tuple[list[Meta
     summary.scan_seconds = time.monotonic() - t0
     if progress:
         print(f"[index] {path.name}: {summary.n_images} images ({summary.n_sfw} sfw) in {summary.scan_seconds:.1f}s")
+    return records, summary
+
+
+def scan_shard_full(
+    shard_path: str | Path,
+    flat_name: str,
+    progress: bool = True,
+) -> tuple[list[MetaRecord], ShardSummary]:
+    """Single-pass tar scan for the streaming (tar-direct) data path.
+
+    Pairs each ``*.json`` meta with its ``*.webp`` member in one stream and
+    records the member's byte offset / size (the tar-direct read
+    coordinates) plus the REAL pixel size from the webp header — the
+    danbooru meta dimensions describe the original post, not the shipped
+    (resized) webp, so records come back with header dimensions in place
+    of the meta ones (extracted-webp-era semantics, without extraction).
+
+    ``flat_name`` is the frozen release-prefixed shard name (cross-release
+    basenames collide: every release ships a shard-000000) — the index
+    ``shard`` column and the pin-dir tar name. Corrupt tars fail loudly
+    (repo rule: no silent sample skipping); a meta without its webp
+    member is counted in ``n_webp_missing`` and the caller fails the run
+    on any positive count (the consumer's coverage gate).
+    """
+    path = Path(shard_path)
+    t0 = time.monotonic()
+    records: list[MetaRecord] = []
+    summary = ShardSummary(shard=flat_name)
+    with tarfile.open(path, "r") as tf:
+        members = [m for m in tf.getmembers() if m.isfile()]
+        # pass 1: webp members -> (offset, size, header dims)
+        webp_info: dict[str, tuple[int, int, tuple[int, int] | None]] = {}
+        for member in members:
+            if not member.name.endswith(".webp"):
+                summary.bytes_total += member.size
+                continue
+            summary.bytes_total += member.size
+            base = member.name.rsplit(".", 1)[0]
+            f = tf.extractfile(member)
+            header = f.read(64) if f is not None else b""
+            webp_info[base] = (member.offset_data, member.size, webp_header_size(header))
+        # pass 2: json members -> records (meta), attached with webp info
+        for member in members:
+            if not member.name.endswith(".json") or member.name.endswith(".tar.json"):
+                continue
+            base = member.name.rsplit(".", 1)[0]
+            if base.endswith(".json"):
+                base = base.rsplit(".", 1)[0]
+            f = tf.extractfile(member)
+            if f is None:
+                continue
+            rec = _parse_meta(f.read())
+            if rec is None:
+                summary.n_unresolved += 1
+                continue
+            if base not in webp_info:
+                summary.n_webp_missing += 1
+                records.append(
+                    dataclasses.replace(rec, shard=flat_name, rel_path=base + ".webp")
+                )
+                continue
+            offset, size, dims = webp_info[base]
+            rec = dataclasses.replace(
+                rec,
+                shard=flat_name,
+                rel_path=base + ".webp",
+                webp_offset=offset,
+                webp_size=size,
+            )
+            if dims is None:
+                summary.n_webp_bad_header += 1
+            else:
+                rec = dataclasses.replace(rec, width=dims[0], height=dims[1])
+            records.append(rec)
+    summary.n_images = len(records)
+    summary.n_sfw = sum(1 for r in records if r.nsfw == "sfw")
+    if records:
+        summary.min_size = min(min(r.width, r.height) for r in records) or min(r.width for r in records)
+        summary.max_size = max(max(r.width, r.height) for r in records)
+    summary.scan_seconds = time.monotonic() - t0
+    if progress:
+        print(
+            f"[index] {flat_name}: {summary.n_images} images ({summary.n_sfw} sfw) "
+            f"webp-missing={summary.n_webp_missing} bad-header={summary.n_webp_bad_header} "
+            f"in {summary.scan_seconds:.1f}s"
+        )
     return records, summary
 
 
@@ -340,6 +435,9 @@ def _record_row(rec: MetaRecord, elig: Eligibility, cfg: Config) -> dict:
         "eligible_buckets": list(elig.eligible_buckets),
         "reasons": list(elig.reasons),
         "is_validation": is_validation(rec, cfg),
+        # tar-direct read coordinates (0 on the extracted-webp path)
+        "webp_offset": rec.webp_offset,
+        "webp_size": rec.webp_size,
     }
 
 
@@ -371,6 +469,7 @@ def build_index(
     cfg: Config,
     out_dir: str | Path,
     size_overrides: Mapping[str, tuple[int, int]] | None = None,
+    scan=scan_shard,
 ) -> dict:
     """Scan shards, evaluate eligibility, write all four index artifacts.
 
@@ -380,6 +479,11 @@ def build_index(
     records without an override are counted in ``n_size_missing`` so a
     caller can detect incomplete coverage.
 
+    ``scan`` defaults to :func:`scan_shard` (extracted-webp path); the
+    streaming tar-direct path passes a wrapper around
+    :func:`scan_shard_full`, whose records already carry the real webp
+    dimensions + read coordinates (no ``size_overrides`` needed).
+
     Returns a summary dict (also embedded in filter-report-v1.json).
     """
     out = Path(out_dir)
@@ -387,9 +491,29 @@ def build_index(
     all_records: list[MetaRecord] = []
     summaries: list[ShardSummary] = []
     for sp in shard_paths:
-        records, summary = scan_shard(sp)
+        records, summary = scan(sp)
         all_records.extend(records)
         summaries.append(summary)
+    return build_index_from_records(
+        all_records, summaries, cfg, out, size_overrides=size_overrides
+    )
+
+
+def build_index_from_records(
+    all_records: list[MetaRecord],
+    summaries: list[ShardSummary],
+    cfg: Config,
+    out_dir: str | Path,
+    size_overrides: Mapping[str, tuple[int, int]] | None = None,
+) -> dict:
+    """Eligibility + artifact writing over pre-scanned records.
+
+    The CPU-only half of :func:`build_index`; the streaming index pass
+    (per-shard partitions scanned one shard at a time through the 512 GiB
+    window) merges its partitions here at the end.
+    """
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
     if size_overrides is not None:
         n_missing = 0
         corrected = []
@@ -446,6 +570,10 @@ def build_index(
         "n_unresolved": sum(s.n_unresolved for s in summaries),
         "n_size_corrected": (n_total - n_missing) if size_overrides is not None else None,
         "n_size_missing": n_missing if size_overrides is not None else None,
+        # tar-direct scan coverage (0 on the extracted-webp path): any
+        # positive count is a coverage failure for the streaming consumer
+        "n_webp_missing": sum(s.n_webp_missing for s in summaries),
+        "n_webp_bad_header": sum(s.n_webp_bad_header for s in summaries),
         "n_sfw": n_sfw,
         "n_eligible_train": n_eligible,
         "n_by_quality": n_by_quality,

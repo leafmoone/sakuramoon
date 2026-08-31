@@ -1,9 +1,15 @@
 """M1 training dataset: webp → HR crop → deterministic LQ (plan §10-§11).
 
-The dataset reads the M1 index (``sr-eligibility-v1``), decodes webp from
-the extracted shard directory (``webp/<shard>/<id>.webp``), crops the HR
-square (deterministic offset, ``buckets.crop_box``) and applies the
-exposure-deterministic degradation chain (``degradation.degrade_hr``).
+The dataset reads the M1 index (``sr-eligibility-v1``) and decodes webp
+either from the extracted shard directory (``webp/<shard>/<id>.webp``,
+legacy / salt5 path) or IN PLACE from the pinned shard tar member at
+(``webp_offset``, ``webp_size``) (``tar_dir`` set — the streaming
+tar-direct path, 2026-09-01: the corpus is never materialized as a webp
+tree; the 512 GiB service cache is the only resident store). Both paths
+hand back identical bytes, so the decode is bit-exact across modes. The
+dataset then crops the HR square (deterministic offset,
+``buckets.crop_box``) and applies the exposure-deterministic degradation
+chain (``degradation.degrade_hr``).
 
 ``__getitem__`` returns (hr_crop, lq, meta) for the default exposure;
 training with a multi-exposure schedule calls :meth:`fetch` with explicit
@@ -13,6 +19,7 @@ training with a multi-exposure schedule calls :meth:`fetch` with explicit
 from __future__ import annotations
 
 import hashlib
+import io
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +69,10 @@ class SampleMeta:
     # P1 pool sampler (data/pool_sampler.py) consumes this. Default
     # "regular" only protects hand-built test metas.
     sampling_pool: str = "regular"
+    # tar-direct read coordinates (streaming path): byte offset / size of
+    # the webp member inside the shard tar (0 = extracted-webp path).
+    offset: int = 0
+    size: int = 0
 
 
 class SRDataset(Dataset):
@@ -76,6 +87,7 @@ class SRDataset(Dataset):
         split: str = "train",
         global_seed: int = 42,
         bank: CodecBank | None = None,
+        tar_dir: str | Path | None = None,
     ) -> None:
         if split not in ("train", "validation"):
             raise ValueError(f"split must be train|validation, got {split}")
@@ -89,6 +101,11 @@ class SRDataset(Dataset):
                     f"outside the frozen range {lo}-{hi} (plan §11.4)"
                 )
         self.webp_dir = Path(webp_dir)
+        # Streaming (tar-direct) path: decode webp members in place from the
+        # pinned shard tars (no extracted webp tree; the corpus is consumed
+        # as a 512 GiB-bounded stream, 2026-09-01). ``webp_dir`` is then a
+        # placeholder and must be a valid path argument only.
+        self.tar_dir = Path(tar_dir) if tar_dir is not None else None
         self.cfg = cfg
         self.bucket = next(b for b in check_buckets(cfg) if b.hr == bucket_hr)
         self.split = split
@@ -98,7 +115,19 @@ class SRDataset(Dataset):
         # training never computes/appends it at decode time; the trainer
         # loads the sidecar once at start-up (gate + report).
         self.samples: list[SampleMeta] = []
+        n_no_coords = 0
         for row in index_mod.iter_index(find_eligibility(index_dir)):
+            if row.get("is_validation") != (split == "validation"):
+                continue
+            if not row["eligible_train"]:
+                continue
+            if bucket_hr not in (row["eligible_buckets"] or []):
+                continue
+            offset = int(row.get("webp_offset") or 0)
+            size = int(row.get("webp_size") or 0)
+            if self.tar_dir is not None and (offset <= 0 or size <= 0):
+                n_no_coords += 1
+                continue
             meta = SampleMeta(
                 sample_id=str(row["sample_id"]),
                 shard=str(row["shard"]),
@@ -107,14 +136,16 @@ class SRDataset(Dataset):
                 height=int(row["height"]),
                 is_validation=bool(row["is_validation"]),
                 sampling_pool=str(row.get("sampling_pool") or "regular"),
+                offset=offset,
+                size=size,
             )
-            if meta.is_validation != (split == "validation"):
-                continue
-            if not row["eligible_train"]:
-                continue
-            if bucket_hr not in (row["eligible_buckets"] or []):
-                continue
             self.samples.append(meta)
+        if self.tar_dir is not None and n_no_coords:
+            raise RuntimeError(
+                f"{n_no_coords} eligible rows lack tar-direct coordinates "
+                f"(webp_offset/webp_size) in {index_dir} — rebuild the index "
+                f"with the streaming scan (scan_shard_full)"
+            )
         if not self.samples:
             raise RuntimeError(f"no {split} samples eligible for HR bucket {bucket_hr} in {index_dir}")
 
@@ -126,14 +157,43 @@ class SRDataset(Dataset):
         img_id = meta.rel_path.rsplit("/", 1)[-1]
         return self.webp_dir / meta.shard / img_id
 
+    def _tar_path(self, meta: SampleMeta) -> Path:
+        # pin-dir convention: <tar_dir>/<shard> where <shard> is the frozen
+        # release-prefixed flat name (the index ``shard`` column)
+        return self.tar_dir / meta.shard
+
+    def _open_webp(self, meta: SampleMeta) -> Image.Image:
+        """Open the sample's webp: extracted file (webp_dir) or the tar
+        member at (offset, size) (tar_dir). Both paths hand back IDENTICAL
+        bytes, so the PIL decode downstream is bit-exact across modes."""
+        if self.tar_dir is None:
+            p = self._webp_path(meta)
+            if not p.is_file():
+                raise FileNotFoundError(f"webp missing (extract shards first): {p}")
+            return Image.open(p)
+        p = self._tar_path(meta)
+        if not p.is_file():
+            raise FileNotFoundError(
+                f"tar shard missing (the window driver did not pin it): {p}"
+            )
+        with p.open("rb") as fh:
+            fh.seek(meta.offset)
+            data = fh.read(meta.size)
+        if len(data) != meta.size:
+            raise RuntimeError(
+                f"truncated webp member for {meta.sample_id} in {p}: "
+                f"got {len(data)} bytes, want {meta.size}"
+            )
+        return Image.open(io.BytesIO(data))
+
     def decode_hr(self, meta: SampleMeta) -> torch.Tensor:
         """webp → [3, H, W] fp32 in [-1, 1] (full image, no crop)."""
-        p = self._webp_path(meta)
-        if not p.is_file():
-            raise FileNotFoundError(f"webp missing (extract shards first): {p}")
-        img = Image.open(p).convert("RGB")
+        img = self._open_webp(meta).convert("RGB")
         if (img.width, img.height) != (meta.width, meta.height):
-            raise RuntimeError(f"size mismatch for {p}: {img.size} vs ({meta.width}, {meta.height})")
+            raise RuntimeError(
+                f"size mismatch for {meta.sample_id} ({self._tar_path(meta) if self.tar_dir else self._webp_path(meta)}): "
+                f"{img.size} vs ({meta.width}, {meta.height})"
+            )
         # .copy(): PIL's __array__ is a read-only view of its internal buffer;
         # torch.from_numpy on a non-writable array is undefined behavior.
         arr = np.asarray(img, dtype=np.uint8).copy()
@@ -146,22 +206,20 @@ class SRDataset(Dataset):
         producer profiling, §13 M3 data-throughput gate).
 
         Returns ``(hr_full, {"shard": t, "decode": t})`` — bit-exact with
-        ``decode_hr`` (same operations, same order), split into the webp file
-        open (``shard``; the shards are extracted webp dirs, so the raw
-        WebDataset tar is already unpacked and is not a stage here) and the
-        PIL decode -> tensor (``decode``; the lazy file read lands in this
-        window).
+        ``decode_hr`` (same operations, same order), split into the webp
+        open/read (``shard``: file open on the extracted-webp path, or
+        open+seek+member-read on the tar-direct path) and the PIL decode
+        -> tensor (``decode``; the lazy file read lands in this window).
         """
-        p = self._webp_path(meta)
-        if not p.is_file():
-            raise FileNotFoundError(f"webp missing (extract shards first): {p}")
         t_open = time.perf_counter()
-        img = Image.open(p)
+        img = self._open_webp(meta)
         t_shard = time.perf_counter() - t_open
         t_dec0 = time.perf_counter()
         img = img.convert("RGB")
         if (img.width, img.height) != (meta.width, meta.height):
-            raise RuntimeError(f"size mismatch for {p}: {img.size} vs ({meta.width}, {meta.height})")
+            raise RuntimeError(
+                f"size mismatch for {meta.sample_id}: {img.size} vs ({meta.width}, {meta.height})"
+            )
         arr = np.asarray(img, dtype=np.uint8).copy()
         t = torch.from_numpy(arr).permute(2, 0, 1).float()
         out = t * (2.0 / 255.0) - 1.0
