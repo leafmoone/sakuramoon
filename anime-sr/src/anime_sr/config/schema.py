@@ -586,6 +586,15 @@ class LatentFlowSpec(_Frozen):
     # function of (step, slot) — the bit-exact §11.5 stream is unchanged,
     # only the transport differs (fork start method required, i.e. Linux).
     producer: Literal["thread", "process"] = "thread"
+    # producer_intra_op_threads: torch intra-op thread cap PER producer
+    # process (process backend only). 0 = legacy behavior (re-tune each
+    # worker from OMP_NUM_THREADS). With depth*bs workers per rank, 4
+    # intra-op threads each over-subscribes the box: multi-threaded CPU
+    # stages (webp decode glue, degrade convs) inflate 5-58x under
+    # contention (2026-08-31 SR_v2 sweep: 32-128 workers/rank x 4 threads
+    # on 128 cores). 1-2 keeps each worker single/few-thread and is faster
+    # end-to-end.
+    producer_intra_op_threads: int = 0
 
 
 # ---------------------------------------------------------------------------

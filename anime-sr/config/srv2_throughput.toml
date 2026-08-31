@@ -25,6 +25,10 @@ save_at_exposures = []
 # far beyond any arm budget (0 would divide-by-zero in the loop)
 val_every_steps = 999999999
 val_heldout_every_steps = 0
+# per-producer-process intra-op thread cap: the 128-core box over-subscribes
+# at depth*bs workers/rank x 4 OMP threads (stage_ms blowup 5-58x measured);
+# 2 threads/worker is the 2026-08-31 sweep optimization
+producer_intra_op_threads = 2
 
 [logging]
 log_every_steps = 50

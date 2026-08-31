@@ -744,6 +744,12 @@ def _log_train_sample(
 _PRODUCER_CTX: dict[str, Any] | None = None
 
 
+# [latent_flow].producer_intra_op_threads, latched into this module global
+# before the process pool is created (inherited COW by the forked workers).
+# 0 = legacy behavior: re-tune each worker from OMP_NUM_THREADS.
+_PP_INTRA_OP = 0
+
+
 def _pp_worker_init() -> None:
     """Pool initializer (fork start method, runs once per worker).
 
@@ -751,15 +757,23 @@ def _pp_worker_init() -> None:
     pinned torch intra-op threads to 1 (P1 ⑤); a worker that re-runs small
     CPU torch ops (degrade convs) with a single intra-op thread leaves its
     cores idle, so re-tune from OMP_NUM_THREADS (the launch env, inherited
-    through the fork)."""
+    through the fork) — UNLESS [latent_flow].producer_intra_op_threads is
+    set (2026-08-31: at 32-128 workers/rank x 4 intra-op threads the box
+    over-subscribes and multi-threaded stages inflate 5-58x; 1-2 threads
+    per worker is faster end-to-end)."""
     import os
 
-    try:
-        n = int(os.environ.get("OMP_NUM_THREADS", "1"))
-    except ValueError:
-        n = 1
+    if _PP_INTRA_OP > 0:
+        n = _PP_INTRA_OP
+    else:
+        try:
+            n = int(os.environ.get("OMP_NUM_THREADS", "1"))
+        except ValueError:
+            n = 1
     if n > 1 and torch.get_num_threads() != n:
         torch.set_num_threads(n)
+    elif n == 1:
+        torch.set_num_threads(1)
 
 
 def _build_slot_map(ds: SRDataset, cfg: Config, legacy_order: list[int]) -> SlotMap:
@@ -1404,6 +1418,8 @@ def prepare_producer_prefork(
         "exposure_per_cycle": _EXPOSURE_PER_CYCLE,
     }
     n_pp = max(1, (lf.prefetch_depth or 1) * lf.batch_size)
+    global _PP_INTRA_OP
+    _PP_INTRA_OP = lf.producer_intra_op_threads
     _PRE_FORK_POOL = _make_process_pool(n_pp)
     if rank == 0:
         print(
@@ -1659,11 +1675,13 @@ def run_latent_flow(
                 "exposure_per_cycle": _EXPOSURE_PER_CYCLE,
             }
             n_pp = max(1, (lf.prefetch_depth or 1) * lf.batch_size)
+            global _PP_INTRA_OP
+            _PP_INTRA_OP = lf.producer_intra_op_threads
             pool = _make_process_pool(n_pp)
             if rank == 0:
                 print(
                     f"[latent] producer=process: {n_pp} forked workers "
-                    f"(intra-op re-tuned from OMP_NUM_THREADS)",
+                    f"(intra-op={'producer_intra_op_threads=' + str(lf.producer_intra_op_threads) if lf.producer_intra_op_threads > 0 else 'OMP_NUM_THREADS'})",
                     flush=True,
                 )
 

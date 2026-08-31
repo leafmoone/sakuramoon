@@ -131,6 +131,18 @@ def test_config_schema_logging_defaults() -> None:
     assert cfg.logging.log_every_steps == 10
     assert cfg.logging.sample_every_steps == 0
     assert cfg.logging.sample_images == 4
+    # producer_intra_op_threads default 0 = legacy OMP_NUM_THREADS behavior
+    assert cfg.latent_flow.producer_intra_op_threads == 0
+
+
+def test_srv2_throughput_overlay_intra_op_threads() -> None:
+    cfg = load_config(
+        CFG / "base.toml",
+        CFG / "data.toml",
+        CFG / "m4_1024.toml",
+        CFG / "srv2_throughput.toml",
+    )
+    assert cfg.latent_flow.producer_intra_op_threads == 2
 
 
 def test_m4_config_logging_overlay() -> None:
