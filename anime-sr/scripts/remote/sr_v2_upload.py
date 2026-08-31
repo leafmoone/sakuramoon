@@ -46,6 +46,7 @@ def main() -> None:
     ap.add_argument("--token-file", default="/root/private_data/anime-sr/.ms-token")
     ap.add_argument("--raw-dir", default=None, help="if set: corrupted outputs are cleared for re-extraction")
     ap.add_argument("--idle-limit", type=int, default=30 * 60)
+    ap.add_argument("--commit-interval", type=float, default=3.0, help="steady pause between successful commits (stay under the repo throttle)")
     args = ap.parse_args()
 
     import os
@@ -113,7 +114,20 @@ def main() -> None:
                 time.sleep(min(2 ** (attempt + 1), 60))
         return ("blob-fail", rel)
 
+    def _throttled(exc: Exception) -> bool:
+        # ModelScope commit throttling (429 RateLimitError, shared-platform
+        # peak load): a repo-level condition, so retrying the SAME file
+        # immediately is pointless — back off and move on to other files.
+        msg = str(exc).lower()
+        return "429" in msg or "ratelimit" in type(exc).__name__.lower() or "throttl" in msg
+
     def commit_one(tar: Path) -> tuple[str, str]:
+        """One create_commit with per-error retry.
+
+        Returns ("commit-ok" | "commit-throttled" | "commit-fail", rel).
+        "commit-throttled" = first attempt hit a 429: the caller should
+        pause committing for a while and try OTHER ready files (the throttle
+        is repo-level, the blob itself is fine)."""
         rel = tar.relative_to(out_dir).as_posix()
         sha = (tar.parent / (tar.name + ".sha256")).read_text(encoding="utf-8").strip()
         size = tar.stat().st_size
@@ -139,6 +153,12 @@ def main() -> None:
                 (tar.parent / (tar.name + ".commit")).touch()
                 return ("commit-ok", rel)
             except Exception as exc:  # noqa: BLE001 - serial committer retries
+                if _throttled(exc):
+                    if attempt == 0:
+                        print(f"[up] commit throttled (429) {rel}; pausing commits, moving on", flush=True)
+                        return ("commit-throttled", rel)
+                    time.sleep(60)  # still throttled after a pause: wait more, stay on file
+                    continue
                 print(f"[up] commit retry {attempt + 1}/5 {rel}: {type(exc).__name__} {str(exc)[:160]}", flush=True)
                 time.sleep(min(2 ** (attempt + 1), 60))
         return ("commit-fail", rel)
@@ -155,6 +175,8 @@ def main() -> None:
     commit_fails: list[str] = []
     t0 = time.monotonic()
     last_activity = t0
+    throttle_until = 0.0  # repo-level commit-throttle pause (429 backoff)
+    throttle_step = 0  # escalating cooldown: 30/90/270s, reset on success
     print(f"[up] start: repo={repo_id} already-committed={committed} ({committed_bytes / 1e9:.1f} GB)", flush=True)
 
     with ThreadPoolExecutor(max_workers=args.blob_workers) as pool:
@@ -178,16 +200,33 @@ def main() -> None:
                     pass  # cleared for re-extraction; will reappear as a new .done
                 else:
                     blob_fails.append(rel)
-            # serial committer
-            for tar in find_ready("blob", exclude="commit"):
-                status, rel = commit_one(tar)
-                if status == "commit-ok":
-                    committed += 1
-                    committed_bytes += tar.stat().st_size
-                    last_activity = time.monotonic()
-                    print(f"[up] committed {committed} {rel} ({committed_bytes / 1e9:.1f} GB total)", flush=True)
-                else:
-                    commit_fails.append(rel)
+            # serial committer (throttle-aware: a 429 is a repo-level
+            # condition — pause, escalate the pause after repeats, and let
+            # OTHER ready files commit in the meantime instead of head-of-line
+            # blocking on the throttled one; 2026-08-31: 986 commits had been
+            # head-of-line blocked for 45+ min on one 429-looping file)
+            if time.monotonic() >= throttle_until:
+                skip_this_pass: set[Path] = set()
+                for tar in find_ready("blob", exclude="commit"):
+                    if tar in skip_this_pass:
+                        continue  # hit a 429 earlier this pass; rotate to the back
+                    if time.monotonic() < throttle_until:
+                        break
+                    status, rel = commit_one(tar)
+                    if status == "commit-ok":
+                        throttle_step = 0  # reset: the limit is not active
+                        committed += 1
+                        committed_bytes += tar.stat().st_size
+                        last_activity = time.monotonic()
+                        print(f"[up] committed {committed} {rel} ({committed_bytes / 1e9:.1f} GB total)", flush=True)
+                        time.sleep(args.commit_interval)
+                    elif status == "commit-throttled":
+                        throttle_step = min(throttle_step + 1, 3)
+                        cooldown = (30, 90, 270, 270)[throttle_step - 1]
+                        throttle_until = time.monotonic() + cooldown
+                        skip_this_pass.add(tar)
+                    else:
+                        commit_fails.append(rel)
             # monitor daemon: exit only after the queue has been empty AND no
             # activity for idle_limit (i.e. the extract stage is finished)
             if time.monotonic() - last_activity > args.idle_limit:
