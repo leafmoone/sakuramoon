@@ -401,14 +401,21 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
     wlock = threading.Lock()
     pinned: dict[str, tuple[object, int]] = {}
     pending: dict[str, int] = {}
+    # slots currently in flight on a worker (from queue pickup until the pin
+    # succeeds); a slot must not be re-assigned while its job is sleeping or
+    # re-queued, or the service would see two concurrent leases for one
+    # worker id ("already holds a lease" retry storm)
+    inflight: set[int] = set()
 
-    def lease_worker(slot: int) -> None:
-        name = f"pin{slot:02d}"
+    def lease_worker() -> None:
+        name = "pin"
         while not _stop.is_set():
             try:
                 flat, slot = q.get(timeout=1.0)
             except queue.Empty:
                 continue
+            with wlock:
+                inflight.add(slot)
             rel = flat_to_relpath(flat)
             try:
                 desc = client.request(slot, rel, timeout_seconds=args.request_timeout)
@@ -417,8 +424,9 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
                     os.link(desc.local_path, link)
                 with wlock:
                     pending.pop(flat, None)
+                    inflight.discard(slot)
                     pinned[flat] = (desc, slot)
-                _log(name, f"pinned {flat}")
+                _log(name, f"pinned {flat} (slot {slot})")
             except DataServiceUnavailable as error:
                 with wlock:
                     pending.pop(flat, None)
@@ -441,7 +449,7 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
                     q.put((flat, slot))
 
     threads = [
-        threading.Thread(target=lease_worker, args=(i,), name=f"prep-pin-{i}", daemon=True)
+        threading.Thread(target=lease_worker, name=f"prep-pin-{i}", daemon=True)
         for i in range(args.lease_slots)
     ]
     for t in threads:
@@ -475,9 +483,9 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
                 with wlock:
                     if flat in pinned or flat in pending:
                         continue
-                    # a free slot: one of the lease slots not currently
-                    # carrying a pending pin
-                    busy = set(pending.values())
+                    # a free slot: not carrying a pending pin AND not in
+                    # flight on a worker (sleeping / re-queued job)
+                    busy = set(pending.values()) | inflight
                     free = [s for s in range(args.lease_slots) if s not in busy]
                     if not free:
                         continue
