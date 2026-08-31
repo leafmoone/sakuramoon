@@ -186,15 +186,14 @@ def test_blocking_lease_does_not_starve_other_connections(
     lease_conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     lease_conn.connect(str(server.socket_path))
     lease_conn.sendall(
-        _json.dumps({"op": "lease", "session_id": "x", "worker_id": 0})
-        + "\n"
+        (_json.dumps({"op": "lease", "session_id": "x", "worker_id": 0}) + "\n").encode()
     )
     time.sleep(0.5)  # let the server accept and enter the blocked lease
 
     health_conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     health_conn.settimeout(5.0)
     health_conn.connect(str(server.socket_path))
-    health_conn.sendall(_json.dumps({"op": "health"}) + "\n")
+    health_conn.sendall((_json.dumps({"op": "health"}) + "\n").encode())
     response = b""
     while not response.endswith(b"\n"):
         block = health_conn.recv(4096)
