@@ -294,11 +294,23 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGTERM, lambda *_a: _stop.set())
 
-    client = DataServiceClient(
-        Path(args.socket),
-        worker_count=args.service_workers,
-        request_timeout_seconds=60.0,
-    )
+    # The service blocks client connections until its startup barrier (the
+    # first worker_count shards ready), which during a degraded download
+    # window (proxy flap) can take a long time: wait it out, not crash.
+    client: DataServiceClient | None = None
+    while client is None:
+        try:
+            client = DataServiceClient(
+                Path(args.socket),
+                worker_count=args.service_workers,
+                request_timeout_seconds=60.0,
+            )
+            break
+        except DataServiceUnavailable as error:
+            if _stop.is_set():
+                return 1
+            _log("main", f"service not ready yet ({error}); waiting")
+            time.sleep(15.0)
     _log("main", f"connected to {args.socket}; corpus session ready")
 
     stats: dict[str, int] = {}
