@@ -1,0 +1,8 @@
+# Arm B: batch 16/rank x 2 DCU = global 32 (2x baseline).
+
+[latent_flow]
+batch_size = 16
+out_dir = "output_model/srv2-tp2/bs16"
+
+[logging]
+wandb_run_name = "srv2-tp2-bs16"

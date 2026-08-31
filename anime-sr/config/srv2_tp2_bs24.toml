@@ -1,0 +1,8 @@
+# Arm C: batch 24/rank x 2 DCU = global 48 (3x baseline).
+
+[latent_flow]
+batch_size = 24
+out_dir = "output_model/srv2-tp2/bs24"
+
+[logging]
+wandb_run_name = "srv2-tp2-bs24"
