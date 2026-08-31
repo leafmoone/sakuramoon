@@ -276,6 +276,9 @@ def main(argv: list[str] | None = None) -> int:
         help="single index rebuild over current disk state, no service session",
     )
     args = ap.parse_args()
+    args.shard_dir = Path(args.shard_dir)
+    args.webp_dir = Path(args.webp_dir)
+    args.index_dir = Path(args.index_dir)
 
     shard_dir = Path(args.shard_dir)
     state = State(shard_dir / STATE_NAME)
