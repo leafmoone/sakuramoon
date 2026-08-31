@@ -725,6 +725,17 @@ class DataSupplyService:
                 if time.monotonic() >= deadline:
                     raise DataServiceError(f"shard request timed out: {path}")
                 self._schedule_lookahead()
+                # forward progress for THIS shard: a transient failure popped
+                # its future; if the lookahead cap is already full the queue
+                # order would never reschedule it, so pin it back explicitly
+                if path not in self._futures:
+                    self._futures[path] = self._executor.submit(
+                        self.cache.fetch,
+                        path,
+                        protected_paths=self._protected_paths(),
+                        progress=self._download_progress(path),
+                        cancelled=self._cancelled,
+                    )
                 if self._futures:
                     wait(
                         tuple(self._futures.values()),
