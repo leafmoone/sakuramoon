@@ -1,0 +1,78 @@
+{
+  "round": "D2 - POST-NS DETECTION + FP32 RESCUE",
+  "date": "2026-08-31",
+  "host": "crdnotebook-2094222483963629569-salt6-55513 (172.31.33.71), 2x HCU",
+  "code": "cmoun-guarded",
+  "fork": "ckpt_97100_raw-97100-update-cadence",
+  "replay": {
+    "tensors": 2657,
+    "bf16_catastrophic": 1,
+    "fp32_rescued": 1,
+    "fp32_failed": 0,
+    "fp32_nonfinite": 0,
+    "rescue_rate": 1.0
+  },
+  "repeatability": {
+    "n_repeat": 100,
+    "tensors": 7,
+    "bf16_repeat_catastrophic_rate": {
+      "obs08_slot02_content_gate": 0.25,
+      "obs10_slot02_content_gate": 0.15,
+      "obs10_slot04_k_proj": 0.0,
+      "obs13_slot07_q_proj": 0.51,
+      "obs15_slot07_q_proj": 0.18,
+      "obs16_slot07_q_proj": 0.38,
+      "nfs_obs03_slot07_k_proj": 0.0
+    },
+    "bf16_rms_range_worst": [9.77e-06, 6.26e+02],
+    "fp32_repeat_catastrophic_rate": 0.0,
+    "fp32_nonfinite": 0,
+    "fp32_output_spread_worst": 0.0
+  },
+  "safe_alignment": {
+    "samples": 1958,
+    "buckets": 257,
+    "delta_ratio_fp32_over_bf16": {"p50": 0.982885, "p90": 1.010828, "p99": 1.019736, "min": 0.330123, "max": 1.023905},
+    "update_cosine": {"p50": 0.996632, "p90": 1.0004, "p99": 1.001628, "min": 0.309573, "max": 1.003191},
+    "relative_fro_error": {"p50": 0.090305, "p90": 0.410129, "p99": 0.91638, "min": 0.018825, "max": 2.876597}
+  },
+  "cost": {
+    "fp32_over_bf16_wall_ratio": {
+      "2560x2560": 0.915,
+      "640x2560": 0.918,
+      "6912x2560": 0.939,
+      "2560x6912": 1.0,
+      "2560x1024": 0.96
+    },
+    "expected_rescues_per_obs": 1.08,
+    "per_rescue_wall_s": 0.0006,
+    "weighted_expected_overhead_per_obs_s": 0.00065,
+    "note": "FP32 NS4 is not slower than BF16 on this HCU at production shapes; overhead ~0.65ms/obs (~0.004% of the 15.8s update)"
+  },
+  "implementation": {
+    "bf16_first": true,
+    "fp32_on_failure_only": true,
+    "canonical_owner": true,
+    "atomic_commit": true,
+    "telemetry": "bf16_attempts / bf16_safety_failures / fp32_attempts / fp32_rescues / fp32_rescue_failures / rescue_by_role (inside guard state)",
+    "unit_tests": "A-H 8/8 passed on HCU (88.95s); optim suite 108/108 (216.73s)"
+  },
+  "r1_200": {
+    "status": "running",
+    "updates": 0,
+    "bf16_safety_failures": null,
+    "fp32_rescues": null,
+    "fp32_rescue_failures": null,
+    "rank_drift": null,
+    "nonfinite": null,
+    "loss_behavior": null,
+    "PASS": null
+  },
+  "verdict": {
+    "PRE_NS_CLASSIFIER_ROUTE": "FAILED (D1 closed)",
+    "FP32_RESCUE_MECHANISM": "VALIDATED OFFLINE (kill gate passed)",
+    "KNOWN_DANGERS_RESCUED": "1/1 replay + 0/700 repeats",
+    "NEW_CANDIDATE_SAFE_200": "PENDING R1",
+    "READY_FOR_500_SAFETY_GATE": "PENDING R1"
+  }
+}
