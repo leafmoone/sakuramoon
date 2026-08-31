@@ -1,0 +1,10 @@
+# Arm A-compile: bs8/rank, torch.compile=all (VAE encoder + model trunk).
+# DTK triton 3.3.0 wheel required (salt5: installed from salt3 vendor copy).
+
+[latent_flow]
+batch_size = 8
+out_dir = "output_model/srv2-tp3/bs8"
+compile = "all"
+
+[logging]
+wandb_run_name = "srv2-tp3-bs8"

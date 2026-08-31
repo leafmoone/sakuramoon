@@ -595,6 +595,17 @@ class LatentFlowSpec(_Frozen):
     # on 128 cores). 1-2 keeps each worker single/few-thread and is faster
     # end-to-end.
     producer_intra_op_threads: int = 0
+    # torch.compile (2026-08-31; requires the DTK triton wheel — the plain
+    # DTK install has no working triton, so inductor raises TritonMissing):
+    # "off" = eager (default, canary semantics); "vae" = compile the frozen
+    # VAE encoder (_encode_moments: pure deterministic core, the designed
+    # compile target) — in on-fly zhr the consumer encodes z_lr AND z_hr
+    # per step, so this pays every step; "all" = vae + the model trunk
+    # (compiled before DDP; parameters are unchanged, optimizer/EMA are
+    # unaffected). Inductor generates triton kernels, which replace the
+    # native MIOpen/DCU kernels for the compiled regions — measure, don't
+    # assume.
+    compile: Literal["off", "vae", "all"] = "off"
 
 
 # ---------------------------------------------------------------------------

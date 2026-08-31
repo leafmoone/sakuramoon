@@ -1686,6 +1686,15 @@ def run_latent_flow(
                 )
 
     vae = load_frozen_vae(vae_path or cfg.vae.path, device, dtype=dtype)
+    if lf.compile != "off":
+        # _encode_moments is the pure deterministic core of the VAE encode
+        # (no RNG, no asserts) — the designed compile target
+        # (mage_vae_impl). In on-fly zhr the consumer encodes z_lr AND z_hr
+        # every step, so a compiled encoder pays off on every step. Every
+        # rank compiles its own copy (independent triton caches).
+        vae._encode_moments = torch.compile(vae._encode_moments, mode="default")
+        if rank == 0:
+            print(f"[latent] torch.compile: vae encoder (compile={lf.compile!r})", flush=True)
     # P2-2 (2026-08-30): the attention core is selected by
     # hardware.attention_backend (default "sdpa-correctness" = the frozen
     # verified manual core; sdpa-repeat / sdpa-native-gqa only after a
@@ -1701,6 +1710,15 @@ def run_latent_flow(
         model = UFlowSR(
             cfg.model.uflow, cfg.model.output_head, attention_backend=attn_backend
         ).to(device, dtype=dtype)
+    if lf.compile == "all":
+        # Compile the trunk BEFORE DDP (the torch 2.9 pattern). Inductor
+        # generates triton kernels for the compiled regions — they replace
+        # the native MIOpen/DCU kernels, so the net effect is measured per
+        # arm, not assumed. Parameters are unchanged by the compile wrapper,
+        # so the optimizer / EMA constructed below are unaffected.
+        model = torch.compile(model, mode="default")
+        if rank == 0:
+            print("[latent] torch.compile: model trunk (compile='all')", flush=True)
     if rank == 0:
         print(f"[latent] attention_backend={attn_backend}", flush=True)
     n_params = count_parameters(model)

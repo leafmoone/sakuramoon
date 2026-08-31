@@ -133,6 +133,20 @@ def test_config_schema_logging_defaults() -> None:
     assert cfg.logging.sample_images == 4
     # producer_intra_op_threads default 0 = legacy OMP_NUM_THREADS behavior
     assert cfg.latent_flow.producer_intra_op_threads == 0
+    # compile default off = eager (canary semantics)
+    assert cfg.latent_flow.compile == "off"
+
+
+def test_srv2_tp3_overlay_compile_all() -> None:
+    cfg = load_config(
+        CFG / "base.toml",
+        CFG / "data.toml",
+        CFG / "m4_1024.toml",
+        CFG / "srv2_throughput.toml",
+        CFG / "srv2_tp3_bs16.toml",
+    )
+    assert cfg.latent_flow.compile == "all"
+    assert cfg.latent_flow.batch_size == 16
 
 
 def test_srv2_throughput_overlay_intra_op_threads() -> None:

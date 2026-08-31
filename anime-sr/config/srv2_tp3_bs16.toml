@@ -1,0 +1,9 @@
+# Arm B-compile: bs16/rank, torch.compile=all (VAE encoder + model trunk).
+
+[latent_flow]
+batch_size = 16
+out_dir = "output_model/srv2-tp3/bs16"
+compile = "all"
+
+[logging]
+wandb_run_name = "srv2-tp3-bs16"

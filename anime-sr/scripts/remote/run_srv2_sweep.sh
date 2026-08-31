@@ -7,7 +7,7 @@ set -u
 # all outbound (wandb) needs the SCNet proxy: no proxy -> wandb.init times out
 . /etc/profile.d/zz-scnet-proxy.sh
 cd /root/private_data/anime-sr/m4canary-src/anime-sr || exit 1
-export LD_LIBRARY_PATH=/opt/dtk-26.04/lib:/opt/dtk-26.04/hip/lib:/opt/hyhal/lib
+export LD_LIBRARY_PATH=/opt/dtk-26.04/lib:/opt/dtk-26.04/hip/lib:/opt/hyhal/lib:/opt/dtk-26.04/dcc/gcvm/lib
 export PYTHONPATH=src
 export OMP_NUM_THREADS=4
 KEY=$(grep '^WANDB_API_KEY=' /root/private_data/anime-sr/.ms-wandb-creds | cut -d= -f2-)
