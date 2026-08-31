@@ -704,7 +704,9 @@ class DataSupplyService:
                 raise DataServiceError(
                     f"requested shard is completed in this cycle: {path}"
                 )
-            if path not in self._futures:
+            # already downloaded (queue-order lookahead)? lease it without a
+            # redundant fetch — the wait loop below picks it up from _ready
+            if path not in self._ready and path not in self._futures:
                 _log(f"定向加载分片: {path}")
                 self._futures[path] = self._executor.submit(
                     self.cache.fetch,
