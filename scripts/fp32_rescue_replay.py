@@ -383,7 +383,7 @@ def cmd_align(args) -> None:
         b = evaluate(t, True)
         d_bf16 = a["delta"].to(torch.bfloat16).float()  # production rounding
         d_fp32 = b["delta"]  # fp32 value (param is bf16; final rounding identical)
-        ratio = float(d_fp32.pow(2).mean().sqrt()) / a["delta_rms"].clamp(min=1e-30)
+        ratio = float(d_fp32.pow(2).mean().sqrt()) / max(a["delta_rms"], 1e-30)
         cos = float(
             torch.nn.functional.cosine_similarity(
                 d_bf16.flatten(), d_fp32.flatten(), dim=0
