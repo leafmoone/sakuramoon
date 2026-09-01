@@ -125,6 +125,10 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
         rescue_floor = _RESCUE_SANITY_LOW * target_delta_rms
         specs = self.routing.cmuon_specs
         device = self._first_device()
+        # Device-side ceiling constant for the batched safety flags: the
+        # predicate compares FP64 values (fp32 rms -> fp64 is exact), so the
+        # flag decision is bit-identical to the old host-side comparison.
+        ceiling_t = torch.tensor(ceiling, device=device, dtype=torch.float64)
 
         # ---- PHASE 1: PREPARE ---------------------------------------------
         # Identical to the guarded canonical base (momentum EMA + nesterov +
@@ -199,20 +203,26 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                         chunk, prep.ns_steps, self.cfg.ns_coefficients, self.cfg.eps
                     )
                     delta = ((-prep.alphas[ci]) * ns).contiguous()
-                    if not bool(torch.isfinite(delta).all()):
-                        fail_flags[fi - 1] = _NONFINITE
-                        rescue_meta[fi - 1] = _RescueMeta(
-                            chunk=chunk,
-                            alpha=prep.alphas[ci],
-                            ns_steps=prep.ns_steps,
-                            role=spec.role,
-                            spec_name=spec.name,
-                            chunk_idx=ci,
-                        )
-                        continue
-                    d_rms_list.append(delta.float().pow(2).mean().sqrt())
+                    staged[fi - 1] = delta
+                    # Device-side safety flags (no host sync per chunk):
+                    # nonfinite first, ceiling second (only where not already
+                    # flagged) — owner-local codes identical to the pre-cleanup
+                    # path. The ceiling compare runs in FP64 exactly like the
+                    # old host-side `float(rms) > ceiling` (fp32->fp64 is
+                    # exact, so the predicate is bit-identical).
+                    rms = delta.float().pow(2).mean().sqrt()
+                    d_rms_list.append(rms)
                     d_rms_owner_idx.append(fi - 1)
-                    staged[-1] = delta
+                    fail_flags[fi - 1] = torch.where(
+                        ~torch.isfinite(delta).all(),
+                        _NONFINITE,
+                        fail_flags[fi - 1],
+                    )
+                    fail_flags[fi - 1] = torch.where(
+                        rms.double() > ceiling_t,
+                        _CEILING,
+                        fail_flags[fi - 1],
+                    )
                     rescue_meta[fi - 1] = _RescueMeta(
                         chunk=chunk,
                         alpha=prep.alphas[ci],
@@ -222,47 +232,56 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                         chunk_idx=ci,
                     )
 
-        # One batched sync of the owner delta RMS values, then ceiling check.
-        if d_rms_list:
-            for rms, idx in zip(torch.stack(d_rms_list).tolist(), d_rms_owner_idx):
-                if rms > ceiling:
-                    fail_flags[idx] = _CEILING
-
         # ---- FP32 RESCUE (owner rank only) ---------------------------------
         # Runs on the OWNER-LOCAL flags, before the cross-rank all_reduce:
         # the owner is the only rank that has the NS input and the only rank
         # that may recompute it (canonical owner semantics). A successful
         # rescue clears the flag so the rescued (single-rounded) BF16 delta
         # flows through the unchanged broadcast/fingerprint/commit path.
+        # The owner-local flags are read back ONCE, packed (the pre-cleanup
+        # loop called .item() per chunk on every rank); non-owner ranks skip
+        # the read entirely and reach the same all_reduce below.
         rescued_this_step = 0
-        for idx in range(n_inputs):
-            flag = int(fail_flags[idx].item())
-            if flag <= 0 or not is_active[idx] or owners[idx] != self.rank:
-                continue
-            meta = rescue_meta[idx]
-            self.fp32_attempts += 1
-            self.bf16_safety_failures += 1
-            ns32 = cmuon_zeroth_power_fp32(
-                meta.chunk.float(),
-                meta.ns_steps,
-                self.cfg.ns_coefficients,
-                self.cfg.eps,
-            )
-            delta32 = (-meta.alpha) * ns32
-            rms32 = float(delta32.pow(2).mean().sqrt())
-            if (
-                not bool(torch.isfinite(delta32).all())
-                or rms32 < rescue_floor
-                or rms32 > ceiling
-            ):
-                # FP32 also failed: keep the flag -> hard fail-closed below.
-                self.fp32_rescue_failures += 1
-                continue
-            staged[idx] = delta32.bfloat16().contiguous()
-            fail_flags[idx] = 0
-            self.fp32_rescues += 1
-            rescued_this_step += 1
-            self.rescue_by_role[meta.role] = self.rescue_by_role.get(meta.role, 0) + 1
+        if any(owner == self.rank for owner in owners):
+            flags_host = fail_flags.tolist()
+            for idx, flag in enumerate(flags_host):
+                if flag <= 0 or not is_active[idx] or owners[idx] != self.rank:
+                    continue
+                meta = rescue_meta[idx]
+                self.fp32_attempts += 1
+                self.bf16_safety_failures += 1
+                ns32 = cmuon_zeroth_power_fp32(
+                    meta.chunk.float(),
+                    meta.ns_steps,
+                    self.cfg.ns_coefficients,
+                    self.cfg.eps,
+                )
+                delta32 = (-meta.alpha) * ns32
+                # One packed readback for the rescue verdict (was two
+                # separate syncs); tolist() on FP32 scalars yields the exact
+                # same Python floats the old float()/bool() calls produced,
+                # so the verdict comparisons are bit-identical.
+                rms32, finite32 = torch.stack(
+                    (
+                        delta32.pow(2).mean().sqrt(),
+                        torch.isfinite(delta32).all().to(torch.float32),
+                    )
+                ).tolist()
+                if (
+                    not bool(finite32)
+                    or rms32 < rescue_floor
+                    or rms32 > ceiling
+                ):
+                    # FP32 also failed: keep the flag -> hard fail-closed below.
+                    self.fp32_rescue_failures += 1
+                    continue
+                staged[idx] = delta32.bfloat16().contiguous()
+                fail_flags[idx] = 0
+                self.fp32_rescues += 1
+                rescued_this_step += 1
+                self.rescue_by_role[meta.role] = (
+                    self.rescue_by_role.get(meta.role, 0) + 1
+                )
         if rescued_this_step and self.stats_logger is not None:
             self.stats_logger(
                 json.dumps(
@@ -282,8 +301,11 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
         # Rank-consistent failure verdict (every rank learns every failure).
         if self.world_size > 1:
             dist.all_reduce(fail_flags, op=dist.ReduceOp.MAX)
+        # Single host verdict read (the pre-cleanup path read the same tensor
+        # back twice, once for the messages and once for the `failed` set).
+        final_flags = fail_flags.tolist()
         failure_msgs = []
-        for idx, flag in enumerate(fail_flags.tolist()):
+        for idx, flag in enumerate(final_flags):
             if flag > 0:
                 fqn, chunk_idx = self._input_key(idx)
                 failure_msgs.append(
@@ -292,7 +314,7 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
 
         # Broadcast: every ACTIVE, non-failed chunk is sent owner -> all
         # ranks (rescued deltas included; they are plain BF16 tensors).
-        failed = {idx for idx, flag in enumerate(fail_flags.tolist()) if flag > 0}
+        failed = {idx for idx, flag in enumerate(final_flags) if flag > 0}
         if self.world_size > 1:
             for idx, (a, owner) in enumerate(zip(is_active, owners)):
                 if not a or idx in failed:
