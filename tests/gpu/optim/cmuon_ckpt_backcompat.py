@@ -58,9 +58,15 @@ def _seed_grads(model, seed: int) -> None:
     g = torch.Generator(device=next(model.parameters()).device).manual_seed(seed)
     for p in model.parameters():
         if p.requires_grad:
-            p.grad = torch.randn(
-                *p.shape, generator=g, dtype=torch.float32, device=p.device
-            ).to(p.dtype)
+            # DTK 2.9 randn has no scalar-size overload: draw (1,) then
+            # reshape for the production model's 0-D scalar params.
+            size = (1,) if p.ndim == 0 else tuple(p.shape)
+            x = torch.randn(
+                size, generator=g, dtype=torch.float32, device=p.device
+            )
+            if p.ndim == 0:
+                x = x.reshape(())
+            p.grad = x.to(p.dtype)
 
 
 def _fp(t: torch.Tensor) -> tuple[float, float]:
@@ -202,12 +208,28 @@ def main() -> None:
             (Path(args.ckpt) / "resolved_config.toml").read_text()
         )
         opt = _build_opt(module, rank, world_size, resolved)
-        # production ckpt layout: train_state/optimizer.pt (checkpoint/load.py)
+        # production ckpt layout: train_state/optimizer.pt (checkpoint/load.py).
+        # Production resume loads the optimizer state from CPU
+        # (map_location="cpu") and remaps the SR RNG from the saved rank-0
+        # device onto each loading rank's own device (_load_sr_rng,
+        # remapping_rank_zero); the SR RNG state tensor must stay a CPU uint8
+        # (StochasticRoundingRNG.load_state_dict contract).
         saved = torch.load(
             Path(args.ckpt) / "train_state" / "optimizer.pt",
-            map_location=device,
+            map_location="cpu",
             weights_only=False,
         )
+        sr_saved = saved["sr_rng"]
+        if int(sr_saved["device_index"]) != 0:
+            raise ValueError(
+                "saved SR RNG is not from device 0; the production remap "
+                "rule (rank-0 save) does not apply"
+            )
+        saved["sr_rng"] = {
+            "device_type": "cuda",
+            "device_index": device.index,
+            "state": sr_saved["state"],
+        }
         opt.load_state_dict(saved)
         report["A_load"] = "ok"
         report["B_state_after_load"] = _state_summary(opt, module)

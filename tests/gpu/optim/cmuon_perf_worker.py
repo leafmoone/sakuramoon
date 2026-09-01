@@ -70,9 +70,13 @@ def _grad_gen(seed_base: int, it: int, params: list[torch.nn.Parameter]) -> None
     g = torch.Generator().manual_seed(seed_base + it)
     for p in params:
         if p.requires_grad:
-            p.grad = torch.randn(
-                *p.shape, generator=g, dtype=torch.float32
-            ).to(device=p.device, dtype=p.dtype)
+            # DTK 2.9 randn has no scalar-size overload: draw (1,) then
+            # reshape for the production model's 0-D scalar params.
+            size = (1,) if p.ndim == 0 else tuple(p.shape)
+            x = torch.randn(size, generator=g, dtype=torch.float32)
+            if p.ndim == 0:
+                x = x.reshape(())
+            p.grad = x.to(device=p.device, dtype=p.dtype)
 
 
 def _bootstrap_refs(model) -> dict[str, float]:
