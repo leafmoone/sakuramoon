@@ -92,10 +92,10 @@ class _GlobalConditioner(torch.nn.Module):
     def __init__(self, hidden: int) -> None:
         super().__init__()
         self.shared_block_projection = torch.nn.Linear(
-            hidden // 4, 6 * hidden, bias=False
+            hidden // 4, 6 * hidden, bias=False, dtype=torch.bfloat16
         )
         self.final_projection = torch.nn.Linear(
-            hidden // 4, 2 * hidden, bias=True
+            hidden // 4, 2 * hidden, bias=True, dtype=torch.bfloat16
         )
 
 

@@ -100,7 +100,14 @@ def _build(cfg_name: str, module, rank: int, world_size: int):
     if cfg_name == "adamw8bit":
         from sakuramoon.optim.adamw8bit import build_adamw8bit
 
-        return build_adamw8bit(module=module, **COMMON)
+        # build_adamw8bit has no momentum_dtype / chunk_rescale_sqrt_n
+        # (CMuon-only knobs): pass only the shared policy args.
+        adamw_common = {
+            k: v
+            for k, v in COMMON.items()
+            if k not in ("momentum_dtype", "chunk_rescale_sqrt_n")
+        }
+        return build_adamw8bit(module=module, **adamw_common)
     from sakuramoon.optim.fp32_rescue import build_fp32_rescue
 
     return build_fp32_rescue(

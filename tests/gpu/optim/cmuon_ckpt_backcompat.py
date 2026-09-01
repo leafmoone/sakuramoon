@@ -187,8 +187,9 @@ def main() -> None:
         module = build_trainable_composite(config["architecture"], device=device)
         module.eval()
         opt = _build_opt(module, rank, world_size)
+        # production ckpt layout: train_state/optimizer.pt (checkpoint/load.py)
         saved = torch.load(
-            Path(args.ckpt) / "optimizer.pt",
+            Path(args.ckpt) / "train_state" / "optimizer.pt",
             map_location=device,
             weights_only=False,
         )
