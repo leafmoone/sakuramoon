@@ -434,6 +434,52 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
     # re-queued, or the service would see two concurrent leases for one
     # worker id ("already holds a lease" retry storm)
     inflight: set[int] = set()
+    # epoch-boundary retry counts per slot (stall diagnostics)
+    stall_notes: dict[int, int] = {}
+
+    def _recover_stale_lease(slot: int, rel: str, flat: str) -> bool:
+        """request() failed because worker `slot` already holds a lease —
+        typically a STALE lease left by a previous driver run (a crash or
+        restart never ACKs it; the new driver has no memory of it).
+        Recover through the protocol: lease(slot) idempotently returns the
+        held descriptor. Same path -> adopt it (no state change); different
+        path -> ACK it to unblock the worker (its row becomes completed in
+        the current cycle; if this run's stream still needs that shard
+        later in the cycle, the epoch-boundary branch below will wait — a
+        wait that can only end with a service restart, which the stall
+        log calls out explicitly). Returns True when the worker was
+        unblocked (or the job was satisfied)."""
+        try:
+            held = client.lease(slot)
+        except DataServiceUnavailable as error:
+            _log("pin", f"stale-lease recovery for slot {slot} failed: {error}")
+            return False
+        if held is None:
+            return False  # a race cleared it (or the queue drained); retry
+        if held.record.path == rel:
+            link = shard_dir / flat
+            if not link.exists():
+                try:
+                    os.link(held.local_path, link)
+                except OSError:
+                    pass
+            with wlock:
+                pending.pop(flat, None)
+                inflight.discard(slot)
+                pinned[flat] = (held, slot)
+            _log("pin", f"adopted held lease for {flat} (stale-lease recovery)")
+            return True
+        try:
+            client.acknowledge(held)
+        except DataServiceUnavailable as error:
+            _log("pin", f"stale-lease release failed for {held.record.path}: {error}")
+            return False
+        _log(
+            "pin",
+            f"released stale lease {held.record.path} from slot {slot}; "
+            f"retrying {flat}",
+        )
+        return True
 
     def lease_worker() -> None:
         name = "pin"
@@ -456,9 +502,17 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
                     pinned[flat] = (desc, slot)
                 _log(name, f"pinned {flat} (slot {slot})")
             except DataServiceUnavailable as error:
+                msg = str(error)
+                if "already holds a lease" in msg:
+                    if not _recover_stale_lease(slot, rel, flat):
+                        with wlock:
+                            pending.pop(flat, None)
+                        time.sleep(10.0)
+                        q.put((flat, slot))
+                    continue
                 with wlock:
                     pending.pop(flat, None)
-                _log(name, f"service unavailable while pinning {flat}: {error}")
+                _log(name, f"service unavailable while pinning {flat}: {msg}")
                 time.sleep(10.0)
                 q.put((flat, slot))
             except Exception as error:  # noqa: BLE001 - surface, retry, never die
@@ -467,8 +521,26 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
                 msg = str(error)
                 if "completed in this cycle" in msg:
                     # epoch boundary: the queue rolled over; retry after the
-                    # service has rebuilt the next cycle
-                    _log(name, f"epoch boundary at {flat}; retrying in 15s")
+                    # service has rebuilt the next cycle. A DEMAND-DRIVEN
+                    # cycle only rolls when EVERY row is completed, so a
+                    # stalled boundary means rows are stuck (e.g. a stale
+                    # lease just got ACKed for a shard this cycle still
+                    # needs) — the only recovery is a service restart,
+                    # which resets the queue to a fresh cycle.
+                    stall_notes[slot] = stall_notes.get(slot, 0) + 1
+                    note = ""
+                    if stall_notes[slot] >= 20:
+                        note = (
+                            " — STALL: the cycle cannot roll without a "
+                            "queue-order consumer; restart the data service "
+                            "to reset the queue"
+                        )
+                    if stall_notes[slot] in (1, 20) or stall_notes[slot] % 40 == 0:
+                        _log(
+                            name,
+                            f"epoch boundary at {flat} (x{stall_notes[slot]}); "
+                            f"retrying in 15s{note}",
+                        )
                     time.sleep(15.0)
                     q.put((flat, slot))
                 else:
