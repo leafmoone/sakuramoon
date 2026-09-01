@@ -113,8 +113,9 @@ def test_different_cycles_different_shard_order() -> None:
                 seen.append(shard)
         order.append(seen)
     assert order[0] != order[1], "cycle shard orders must differ"
+    all_names = [name for name, _ in blocks]
     for o in order:
-        assert sorted(o) == sorted(names), "every shard appears exactly once per cycle"
+        assert sorted(o) == sorted(all_names), "every shard appears exactly once per cycle"
 
 
 def test_ddp_disjoint_slots_disjoint_samples() -> None:
