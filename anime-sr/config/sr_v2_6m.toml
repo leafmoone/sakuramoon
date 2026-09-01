@@ -18,8 +18,11 @@
 #   * out_dir: the salt9 venue pins checkpoints on LOCAL disk (the CLI
 #     --out-dir overrides to /root/srv2-run/output/sr-v2-6m; NFS is the
 #     50G-quota persistence layer and never holds GB-scale run outputs)
-#   * wandb disabled on this venue (no WANDB_API_KEY on salt9 yet; console
-#     logging unchanged) — flip wandb_enabled + supply the key to enable
+#   * wandb enabled (2026-09-01): the key was file-channeled from salt7 to
+#     /root/private_data/anime-sr/sr-ds/.env.wandb (0600) and sourced by the
+#     venue watchdog; the ModelScope hub mirror (checkpoints/sr/) is fed by
+#     the sr_hub_publisher sidecar — train-state every 100 steps + every
+#     checkpoint on the save grid (survives pod rebuilds)
 #
 # Starting state (2026-09-01, user decision pending): the frozen M4-1024
 # --stage-transition source (Phase I-P latest.pt, sha256 9c22a6d8…) is
@@ -99,9 +102,9 @@ enabled = true
 strategy = "shard_seq"
 
 [logging]
-# Console logging unchanged; W&B off on this venue until the API key is
-# supplied (see header).
-wandb_enabled = false
+# W&B on: key sourced by the watchdog from the 0600 .env.wandb (file
+# channel from salt7, 2026-09-01). Console logging unchanged.
+wandb_enabled = true
 wandb_entity = "2574905817leaf-jinan-university"
 wandb_project = "anime-sr"
 wandb_run_name = "sr-v2-6m"
