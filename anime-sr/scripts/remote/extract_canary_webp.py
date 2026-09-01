@@ -15,12 +15,20 @@ Run (after the index pass and before tar_mode_canary.py):
     --shard-dir /root/srv2-run/pins \
     --webp-dir  /root/srv2-run/webp-canary \
     --code-src  /root/private_data/anime-sr/sakuramoon-dev/anime-sr/src \
+    --socket /run/sakuramoon/sr-data-service.sock \
     --bucket-hr 1024 --num 48
+
+With ``--socket`` (recommended: the index pass ACKs its leases and the LRU
+evicts the early shards), missing pinned tars are pulled on demand through
+the service ``request`` op (pin via hardlink) before extraction — the same
+primitive the training window driver uses.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import os
 import sys
 import tarfile
 from collections import OrderedDict
@@ -33,11 +41,14 @@ def main() -> int:
     ap.add_argument("--shard-dir", required=True, help="pinned flat shard tar dir")
     ap.add_argument("--webp-dir", required=True, help="output file-mode webp tree root")
     ap.add_argument("--code-src", required=True, help="anime-sr/src")
+    ap.add_argument("--socket", default=None, help="data-service socket; missing pins are pulled via request()")
     ap.add_argument("--bucket-hr", type=int, default=1024)
     ap.add_argument("--num", type=int, default=48)
     args = ap.parse_args()
 
+    repo_root = Path(__file__).resolve().parents[3]
     sys.path.insert(0, args.code_src)
+    sys.path.insert(0, str(repo_root / "src"))  # sakuramoon (service client)
     from anime_sr.config.loader import load_config
     from anime_sr.data.pipeline import SRDataset
 
@@ -60,15 +71,39 @@ def main() -> int:
 
     webp_root = Path(args.webp_dir)
     shard_dir = Path(args.shard_dir)
+    client = None
+    if args.socket is not None:
+        from sakuramoon.data.client import DataServiceClient
+
+        client = DataServiceClient(
+            Path(args.socket), worker_count=16, request_timeout_seconds=1800.0
+        )
     total_members = 0
     for shard, members in needed.items():
         tar_path = shard_dir / shard
         if not tar_path.is_file():
-            print(
-                f"[extract] FAIL: pinned tar missing (window driver not pinning yet?): {tar_path}",
-                flush=True,
-            )
-            return 2
+            if client is None:
+                print(
+                    f"[extract] FAIL: pinned tar missing (window driver not pinning yet?): {tar_path}",
+                    flush=True,
+                )
+                return 2
+            # Pull on demand through the service request op (the window
+            # driver primitive): lease -> ready -> hardlink pin -> ACK.
+            # Load the prep module from its file (single source of truth
+            # for the frozen flat<->repo naming convention).
+            prep_path = Path(__file__).resolve().parent / "sr_stream_prep.py"
+            spec = importlib.util.spec_from_file_location("sr_stream_prep", prep_path)
+            assert spec is not None and spec.loader is not None
+            prep = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(prep)
+            rel = prep.flat_to_relpath(shard)
+            print(f"[extract] pinning {shard} via service request ...", flush=True)
+            lease = client.request("extract-canary", rel, timeout_seconds=1800.0)
+            try:
+                os.link(lease.local_path, tar_path)
+            finally:
+                client.acknowledge("extract-canary", lease)
         out_dir = webp_root / shard
         out_dir.mkdir(parents=True, exist_ok=True)
         have = {p.name for p in out_dir.glob("*.webp")}
