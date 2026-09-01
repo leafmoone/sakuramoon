@@ -1141,6 +1141,16 @@ def _apply_init_trunk(
             f"{n_pix} pixel_encoder keys). It is a stage checkpoint, not a "
             "trunk-only source — use --resume for same-stage recovery."
         )
+    # Legacy Phase I checkpoints were saved from a bare UFlowSR before the
+    # trunk/pixel refactor nested the trunk under ``trunk.*``: their keys
+    # are flat (``gate_64`` …). Remap each flat key that resolves to
+    # ``trunk.<k>`` in the current model; keys that resolve neither way
+    # stay as-is and surface in the strict check below (fail-closed).
+    model_keys = set(model.state_dict().keys())
+    sd = {
+        (f"trunk.{k}" if k not in model_keys and f"trunk.{k}" in model_keys else k): v
+        for k, v in sd.items()
+    }
     res = model.load_state_dict(sd, strict=False)
     bad_missing = [k for k in res.missing_keys if not k.startswith(_PIXEL_KEY_PREFIX)]
     if bad_missing or res.unexpected_keys:

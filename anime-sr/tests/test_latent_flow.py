@@ -319,3 +319,84 @@ def test_heldout_val_stub_plumbing() -> None:
     )
     # fully fixed seed => per-call forward count is identical (reproducible)
     assert len(trunk2.outs) == first_calls
+
+
+class _StandInPixelModel(torch.nn.Module):
+    """Mirrors the production AnimeSRModel key layout at minimal size: the
+    trunk nested under ``trunk.*`` plus a ``pixel_encoder.*`` set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        from torch import nn
+
+        self.trunk = nn.Linear(4, 4)
+        self.pixel_encoder = nn.Linear(4, 4)
+
+
+def _write_trunk_ckpt(path, model_sd: dict) -> None:
+    torch.save({"step": 5000, "model": model_sd, "optimizer": {}}, path)
+
+
+def test_init_trunk_legacy_flat_keys(tmp_path) -> None:
+    """Legacy Phase I ckpts were saved from a bare UFlowSR (flat keys)
+    before the trunk/pixel refactor nested the trunk under ``trunk.*``:
+    --init-trunk must remap flat keys that resolve to ``trunk.<k>``."""
+    from anime_sr.train.latent_flow import _apply_init_trunk
+
+    model = _StandInPixelModel()
+    src_w = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    src_b = torch.arange(4, dtype=torch.float32)
+    ckpt = tmp_path / "trunk-legacy.pt"
+    _write_trunk_ckpt(ckpt, {"weight": src_w, "bias": src_b})
+
+    step = _apply_init_trunk(model, ckpt, Config(), torch.device("cpu"), 0)
+    assert step == 0  # fresh stage
+    assert torch.equal(model.trunk.weight.data, src_w)
+    assert torch.equal(model.trunk.bias.data, src_b)
+    # the pixel stage is absent by design and keeps its own init
+    for k in ("weight", "bias"):
+        assert k in dict(model.pixel_encoder.named_parameters())
+
+
+def test_init_trunk_current_prefixed_keys_unchanged(tmp_path) -> None:
+    """Ckpts saved with the current ``trunk.*`` layout load verbatim."""
+    from anime_sr.train.latent_flow import _apply_init_trunk
+
+    model = _StandInPixelModel()
+    src_w = torch.full((4, 4), 3.5)
+    src_b = torch.full((4,), -1.25)
+    ckpt = tmp_path / "trunk-prefixed.pt"
+    _write_trunk_ckpt(ckpt, {"trunk.weight": src_w, "trunk.bias": src_b})
+
+    _apply_init_trunk(model, ckpt, Config(), torch.device("cpu"), 0)
+    assert torch.equal(model.trunk.weight.data, src_w)
+    assert torch.equal(model.trunk.bias.data, src_b)
+
+
+def test_init_trunk_unknown_key_fails_closed(tmp_path) -> None:
+    """A flat key that resolves neither bare nor as ``trunk.<k>`` must not
+    be silently dropped — the strict check still raises."""
+    import pytest
+    from anime_sr.train.latent_flow import _apply_init_trunk
+
+    model = _StandInPixelModel()
+    ckpt = tmp_path / "trunk-bogus.pt"
+    _write_trunk_ckpt(ckpt, {"weight": torch.zeros(4, 4), "bogus.weight": torch.zeros(2)})
+
+    with pytest.raises(RuntimeError, match="--init-trunk mismatch"):
+        _apply_init_trunk(model, ckpt, Config(), torch.device("cpu"), 0)
+
+
+def test_init_trunk_rejects_full_pixel_checkpoint(tmp_path) -> None:
+    """A checkpoint containing pixel_encoder keys is a stage checkpoint —
+    --init-trunk must direct the operator to --resume."""
+    import pytest
+    from anime_sr.train.latent_flow import _apply_init_trunk
+
+    model = _StandInPixelModel()
+    sd = dict(model.state_dict())
+    ckpt = tmp_path / "trunk-full.pt"
+    _write_trunk_ckpt(ckpt, sd)
+
+    with pytest.raises(RuntimeError, match="FULL pixel checkpoint"):
+        _apply_init_trunk(model, ckpt, Config(), torch.device("cpu"), 0)
