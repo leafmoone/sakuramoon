@@ -9,7 +9,7 @@
 #                                                           canary already ran
 #
 # Identical to the frozen M4-1024 stage (model 122.67M trunk +
-# PixelConditionEncoder, 256->1024, onfly z_hr, process producer, frozen
+# PixelConditionEncoder, 256->1024, onfly z_hr, frozen
 # optimizer/schedule/EMA, 6M exposure budget) EXCEPT:
 #   * stream: sampling.strategy = "shard_seq" (2026-09-01 venue decision:
 #     per-cycle permutation OF TARS + intra-tar sequential streaming — the
@@ -75,8 +75,21 @@ half_life_samples = 500000
 batch_size = 8
 pixel_features = true
 zhr_source = "onfly"
-producer = "process"
-prefetch_depth = 4
+# 2026-09-01 salt9 root-cause fix: this pod class runs the HOST kernel in
+# strict overcommit (vm.overcommit_memory=2, CommitLimit ~453 GiB SHARED
+# with other tenants, whose Committed_AS swings 220-360+ GiB within
+# minutes). The M4 process producer forks depth*bs=32 DTK-importing worker
+# PROCESSES PER RANK (each reserves ~5-8 GiB committed VA at torch import);
+# 64 workers ~= +260-350 GiB commit on top of the host baseline -> the
+# kernel refuses mmaps (ENOMEM -> std::bad_alloc) and the trainer dies
+# SILENTLY every 5-13 min (observed 09-01 on salt9, pod
+# crdnotebook-...-44158). The thread producer runs the same worker COUNT
+# (depth*bs) inside the rank process: zero forked VA, identical stream
+# semantics (the M2 default backend, bit-exact contract unaffected).
+# depth 4 -> 8 is nearly free under the thread model (no per-worker VA):
+# 64 workers + a deeper ready queue maximizes producer headroom.
+producer = "thread"
+prefetch_depth = 8
 out_dir = "output_model/latent-flow-sr-v2-6m"
 # Production v2 checkpoints: every 250k GLOBAL exposures (worst-case
 # training loss <= 250k exposures on a ~3-day run at salt9 canary
