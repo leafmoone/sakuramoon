@@ -377,7 +377,14 @@ def main() -> None:
             f"rescues {total_rescued}: forced-mine {forced_mine}, "
             f"natural {natural} (implausible)"
         )
-        assert opt.fp32_rescue_failures == 0
+        # The final_failure scenario forces the FP32 path to fail on exactly
+        # one chunk (the forced one, owned by rank 0); production records the
+        # failure counter before raising CMuonSafetyError.
+        expected_failures = 1 if rank == 0 else 0
+        assert opt.fp32_rescue_failures == expected_failures, (
+            f"fp32_rescue_failures {opt.fp32_rescue_failures} "
+            f"!= expected {expected_failures}"
+        )
         report["forced_mine"] = forced_mine
         report["natural_rescues"] = natural
         report["scenarios"] = results

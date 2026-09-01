@@ -74,6 +74,27 @@ def _fp(t: torch.Tensor) -> tuple[float, float]:
     return (float(x.pow(2).mean().sqrt()), float(x.abs().max()))
 
 
+def _load_optimizer_state(path: Path, device: torch.device) -> dict[str, object]:
+    """Production resume contract (checkpoint/load.py): load the optimizer
+    state from CPU (map_location="cpu") and remap the SR RNG from the saved
+    rank-0 device onto this rank's own device (_load_sr_rng,
+    remapping_rank_zero); the SR RNG state tensor stays a CPU uint8
+    (StochasticRoundingRNG.load_state_dict contract)."""
+    saved = torch.load(path, map_location="cpu", weights_only=False)
+    sr_saved = saved["sr_rng"]
+    if int(sr_saved["device_index"]) != 0:
+        raise ValueError(
+            "saved SR RNG is not from device 0; the production remap "
+            "rule (rank-0 save) does not apply"
+        )
+    saved["sr_rng"] = {
+        "device_type": "cuda",
+        "device_index": device.index,
+        "state": sr_saved["state"],
+    }
+    return saved
+
+
 def _ns_canonical_map(ns_table: dict[str, object]) -> dict[str, int]:
     """CMuonNSConfig.canonical_map() reproduced from the resolved toml table."""
     base = int(ns_table["default"])
@@ -208,28 +229,10 @@ def main() -> None:
             (Path(args.ckpt) / "resolved_config.toml").read_text()
         )
         opt = _build_opt(module, rank, world_size, resolved)
-        # production ckpt layout: train_state/optimizer.pt (checkpoint/load.py).
-        # Production resume loads the optimizer state from CPU
-        # (map_location="cpu") and remaps the SR RNG from the saved rank-0
-        # device onto each loading rank's own device (_load_sr_rng,
-        # remapping_rank_zero); the SR RNG state tensor must stay a CPU uint8
-        # (StochasticRoundingRNG.load_state_dict contract).
-        saved = torch.load(
-            Path(args.ckpt) / "train_state" / "optimizer.pt",
-            map_location="cpu",
-            weights_only=False,
+        # production ckpt layout: train_state/optimizer.pt (checkpoint/load.py)
+        saved = _load_optimizer_state(
+            Path(args.ckpt) / "train_state" / "optimizer.pt", device
         )
-        sr_saved = saved["sr_rng"]
-        if int(sr_saved["device_index"]) != 0:
-            raise ValueError(
-                "saved SR RNG is not from device 0; the production remap "
-                "rule (rank-0 save) does not apply"
-            )
-        saved["sr_rng"] = {
-            "device_type": "cuda",
-            "device_index": device.index,
-            "state": sr_saved["state"],
-        }
         opt.load_state_dict(saved)
         report["A_load"] = "ok"
         report["B_state_after_load"] = _state_summary(opt, module)
@@ -259,10 +262,8 @@ def main() -> None:
         module2 = build_trainable_composite(config["architecture"], device=device)
         module2.eval()
         opt2 = _build_opt(module2, rank, world_size, resolved)
-        resumed = torch.load(
-            Path(args.artifacts) / "optimizer_after_1_update.pt",
-            map_location=device,
-            weights_only=False,
+        resumed = _load_optimizer_state(
+            Path(args.artifacts) / "optimizer_after_1_update.pt", device
         )
         opt2.load_state_dict(resumed)
         report["D_resume"] = "ok"
