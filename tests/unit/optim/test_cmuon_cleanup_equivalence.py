@@ -28,6 +28,8 @@ source is itself a bug (kept in one place on purpose).
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 from test_cmuon import LR, _MockComposite, _MockDiT, _seed_grads
@@ -71,12 +73,17 @@ def old_chunk_flag(delta: torch.Tensor, ceiling: float) -> int:
 
 def new_chunk_flag(delta: torch.Tensor, ceiling: float, device: torch.device) -> int:
     """Cleanup batched device-side decision, verbatim production semantics:
-    torch.where chain with the FP64 ceiling constant."""
+    torch.where chain with the FP64 ceiling constant, ceiling flag guarded
+    to fire only where the chunk is not already flagged (production
+    inf-guard): an inf delta has rms == inf (inf > ceiling is TRUE), so
+    without the guard _CEILING would clobber _NONFINITE."""
     flags = torch.zeros(1, dtype=torch.int64, device=device)
     ceiling_t = torch.tensor(ceiling, device=device, dtype=torch.float64)
     rms = delta.float().pow(2).mean().sqrt()
     flags[0] = torch.where(~torch.isfinite(delta).all(), _NONFINITE, flags[0])
-    flags[0] = torch.where(rms.double() > ceiling_t, _CEILING, flags[0])
+    flags[0] = torch.where(
+        (rms.double() > ceiling_t) & (flags[0] == 0), _CEILING, flags[0]
+    )
     return int(flags[0].item())
 
 
@@ -540,7 +547,12 @@ def test_E_rescue_verdict_readback_identical() -> None:
         verdict_new = (
             not bool(fin_new)
         ) or rms_new < rescue_floor or rms_new > CEILING
-        assert rms_old == rms_new, name
+        # NaN-aware: the "nan" case yields NaN from both readback styles and
+        # NaN is never == itself, so compare via isnan for that case.
+        if math.isnan(rms_old) or math.isnan(rms_new):
+            assert math.isnan(rms_old) and math.isnan(rms_new), name
+        else:
+            assert rms_old == rms_new, name
         assert verdict_old == verdict_new, name
 
 
@@ -559,13 +571,13 @@ def test_E_rescue_staging_bit_identical(
     contract that matters for the cleanup:
       (1) the rescue input is bit-identical to the PREPARE chain
           (fresh-momentum nesterov chunk) — no semantic drift;
-      (2) the committed bytes are exactly ((-alpha) * captured_output)
-          .bfloat16() — the single-rounding staging formula is intact.
+      (2) the committed bytes equal the production PHASE-2 reassembly: the
+          rescued chunk staged as ((-alpha) * captured_fp32_output).bfloat16()
+          (single-rounding formula intact) plus the sibling chunks' captured
+          bf16 staged deltas, cat'ed and applied with one add_.
     """
     model = single_rank_env
     target = 7
-    pattern = {target: "nan"}
-    monkeypatch.setattr(fr, "cmuon_zeroth_power_bf16", _forced_ns(pattern))
     routing = route_cmuon_parameters(
         model, matrix_weight_decay=0.0, sensitive_weight_decay=0.0
     )
@@ -578,6 +590,25 @@ def test_E_rescue_staging_bit_identical(
                 spec_t, ci_t = spec, ci
             flat += 1
     assert spec_t is not None
+
+    # Capture EVERY bf16 NS call (single rank: call order == flat-chunk
+    # order) so the sibling chunks' staged deltas can be reconstructed;
+    # force NaN only on the target chunk.
+    real_bf16 = fr.cmuon_zeroth_power_bf16
+    call_i = {"i": 0}
+    bf16_captured: dict[int, torch.Tensor] = {}
+
+    def spy_bf16(grad, ns_steps, ns_coefficients, eps):
+        i = call_i["i"]
+        call_i["i"] += 1
+        out = real_bf16(grad, ns_steps, ns_coefficients, eps)
+        bf16_captured[i] = out.detach().clone()
+        if i == target:
+            return out * float("nan")
+        return out
+
+    monkeypatch.setattr(fr, "cmuon_zeroth_power_bf16", spy_bf16)
+
     captured: list[tuple[torch.Tensor, torch.Tensor]] = []
     real32 = fr.cmuon_zeroth_power_fp32
 
@@ -608,35 +639,44 @@ def test_E_rescue_staging_bit_identical(
     nesterov = grad_md.lerp(buf0, mu)
     chunk_size = spec_t.chunk_size()
     if spec_t.chunk_count == 1:
+        chunks = (nesterov,)
         chunk = nesterov
     else:
-        chunk = nesterov.narrow(spec_t.chunk_dim, ci_t * chunk_size, chunk_size)
+        chunks = tuple(nesterov.split(chunk_size, dim=spec_t.chunk_dim))
+        chunk = chunks[ci_t]
     assert torch.equal(in32, chunk.float()), (
         "rescue input is not bit-identical to the prepare nesterov chunk"
     )
-    # (2) committed bytes == ((-alpha) * captured NS output).bfloat16(),
-    # applied through the same bf16 add path
-    alpha = cmuon_moonlight_alpha(
-        chunk.shape[0],
-        chunk.shape[1],
-        opt.cfg.lr,
-        spec_t.chunk_count if opt.cfg.chunk_rescale_sqrt_n else 1,
+    # (2) committed bytes: per-chunk staged deltas reassembled EXACTLY like
+    # production PHASE 2 (cat on chunk_dim + one parameter.add_). The
+    # rescued chunk goes through the single-rounding FP32 staging formula
+    # with the production-captured NS output; the sibling chunks (normal
+    # BF16 path of the same step) go through the production bf16 formula
+    # with their production-captured NS outputs. Pointwise scalar
+    # multiplies are deterministic on the same tensors, so this is a
+    # bit-exact reconstruction (no GEMM/reduction is re-run).
+    rescale = spec_t.chunk_count if opt.cfg.chunk_rescale_sqrt_n else 1
+    spec_flat_start = target - ci_t
+    delta_parts: list[torch.Tensor] = []
+    for ci, c in enumerate(chunks):
+        alpha_ci = cmuon_moonlight_alpha(c.shape[0], c.shape[1], opt.cfg.lr, rescale)
+        if ci == ci_t:
+            delta_parts.append(((-alpha_ci) * out32).bfloat16().contiguous())
+        else:
+            ns_bf16 = bf16_captured[spec_flat_start + ci]
+            delta_parts.append(((-alpha_ci) * ns_bf16).contiguous())
+    update_ortho = (
+        delta_parts[0]
+        if spec_t.chunk_count == 1
+        else torch.cat(delta_parts, dim=spec_t.chunk_dim)
     )
-    expected_delta = ((-alpha) * out32).bfloat16().contiguous()
     name = spec_t.name
     expected_param = before[name]
-    delta_full = torch.zeros_like(expected_param)
-    if spec_t.chunk_count == 1:
-        delta_full.copy_(expected_delta)
-    else:
-        delta_full.narrow(
-            spec_t.chunk_dim, ci_t * chunk_size, chunk_size
-        ).copy_(expected_delta)
-    expected_param.add_(delta_full)
+    expected_param.add_(update_ortho)
     actual = model.state_dict()[name]
     assert torch.equal(actual, expected_param), (
-        "committed rescue bytes differ from the production-captured "
-        "staging formula"
+        "committed bytes differ from the production-captured staging "
+        "formula (rescued chunk single-rounding + sibling bf16 deltas)"
     )
 
 
