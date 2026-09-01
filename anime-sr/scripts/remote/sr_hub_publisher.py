@@ -77,9 +77,14 @@ class _LogTail:
                 self.offset = size
         except FileNotFoundError:
             return []
-        self._buf += chunk.decode("utf-8", "replace")
-        lines = self._buf.splitlines()
-        self._buf = lines.pop() if lines else ""  # keep partial tail line
+        data = self._buf + chunk.decode("utf-8", "replace")
+        lines = data.splitlines()
+        # Only an unterminated tail is partial; a trailing newline means the
+        # last split element is a COMPLETE line (emit it, do not stash it).
+        if not data.endswith("\n"):
+            self._buf = lines.pop() if lines else ""
+        else:
+            self._buf = ""
         for raw in lines:
             m = STEP_LINE.search(raw)
             if m:
