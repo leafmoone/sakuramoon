@@ -422,13 +422,23 @@ class FilterSpec(_Frozen):
 
 
 class SamplingSpec(_Frozen):
-    """P1 pool sampler (M4-prep work order, 2026-08-29; M4-1024 semantics
-    frozen 2026-08-31): DIVERSITY-FIRST FULL-SET DETERMINISTIC PERMUTATION
-    of the eligible samples — every sample exactly once per cycle, so the
-    train stream's pool composition equals the data's NATURAL composition
-    (no 80/10/10 quota, no re-labeling; M4-1024 accepts ~19/60/21 as a
-    data statistic).
+    """Train-stream sampling strategies.
 
+    * ``strategy = "pool"`` (default; M4-1024 semantics frozen
+      2026-08-31): DIVERSITY-FIRST FULL-SET DETERMINISTIC PERMUTATION
+      of the eligible samples — every sample exactly once per cycle, so
+      the train stream's pool composition equals the data's NATURAL
+      composition (no 80/10/10 quota, no re-labeling; M4-1024 accepts
+      ~19/60/21 as a data statistic). NOTE: a 300-step window touches
+      ~every shard — incompatible with bounded tar-direct streaming;
+      use ``shard_seq`` for streaming venues.
+    * ``strategy = "shard_seq"`` (2026-09-01, SR_v2 streaming venue
+      decision): per-cycle PERMUTATION OF SHARDS (seeded by cycle + salt,
+      resume-safe), samples STREAMED INTRA-SHARD in index order — no
+      per-sample sampling. A step window touches ~window_samples/
+      shard_size shards (+2 boundaries), so the streaming pin window
+      stays bounded. Still a full-set permutation per cycle (every
+      sample exactly once).
     * ``core/regular/aux_fraction`` + ``[filter] aux_max_fraction`` are
       LEGACY QUOTA KNOBS, INACTIVE for M4-1024: the per-cycle allocation
       always resolves to the natural pool membership (the deficit
@@ -437,9 +447,10 @@ class SamplingSpec(_Frozen):
       any quota values.  Kept for schema/back-compat only; do not read
       them as achieved shares.
     * ``enabled = false`` restores the legacy stream (index / store order,
-      straight read) bit-for-bit."""
+      straight read) bit-for-bit (takes precedence over strategy)."""
 
     enabled: bool = True
+    strategy: Literal["pool", "shard_seq"] = "pool"
     core_fraction: float = 0.80
     regular_fraction: float = 0.10
     aux_fraction: float = 0.10

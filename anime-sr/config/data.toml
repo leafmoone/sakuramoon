@@ -49,17 +49,26 @@ clean_score_min = -1.0
 clean_score_candidates = [0.5, 0.6, 0.7]
 
 [sampling]
-# P1 pool sampler (M4-prep 2026-08-29; M4-1024 semantics frozen 2026-08-31):
-# DIVERSITY-FIRST FULL-SET DETERMINISTIC PERMUTATION — every eligible sample
-# exactly once per cycle, so the train stream's pool composition equals the
-# data's NATURAL composition (for M4-1024 ~19/60/21; accepted as a data
-# statistic, no 80/10/10 quota, no index re-labeling). enabled=false
-# restores the legacy straight-read stream (index/store order) bit-for-bit.
+# strategy = "pool" (M4-1024 frozen 2026-08-31): DIVERSITY-FIRST FULL-SET
+# DETERMINISTIC PERMUTATION — every eligible sample exactly once per cycle,
+# train stream's pool composition = the data's NATURAL composition (for
+# M4-1024 ~19/60/21; accepted as a data statistic, no 80/10/10 quota, no
+# index re-labeling). NOTE: incompatible with bounded tar-direct streaming
+# (a 300-step window touches ~every shard) — streaming venues must use
+# strategy = "shard_seq".
+# strategy = "shard_seq" (2026-09-01 SR_v2 venue decision): per-cycle
+# PERMUTATION OF SHARDS (seeded, resume-safe) + intra-shard sequential
+# streaming — no per-sample sampling; the step window touches only a few
+# shards, keeping the pin window bounded. Still a full-set permutation
+# per cycle (every sample exactly once).
+# enabled=false restores the legacy straight-read stream (index/store
+# order) bit-for-bit (precedence over strategy).
 # NOTE: core/regular/aux_fraction below are LEGACY QUOTA KNOBS and are
 # INACTIVE for M4-1024 — the per-cycle allocation always resolves to the
 # natural pool membership, so these values do not change the emitted
 # stream (kept for schema back-compat; do not read as achieved shares).
 enabled = true
+strategy = "pool"
 core_fraction = 0.80
 regular_fraction = 0.10
 aux_fraction = 0.10

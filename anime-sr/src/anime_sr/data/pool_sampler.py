@@ -132,8 +132,12 @@ def build_cycle_order(
 class SlotMap:
     """slot -> dataset index.
 
-    Enabled: the P1 pool stream (per-cycle permutation, pool-mixed).
-    Disabled / no membership: the legacy ``legacy_order[slot % n]`` read."""
+    Enabled + ``strategy="pool"``: the P1 pool stream (per-cycle
+    permutation, pool-mixed). Enabled + ``strategy="shard_seq"``:
+    per-cycle PERMUTATION OF SHARDS with intra-shard sequential streaming
+    (2026-09-01, streaming venues — a step window touches only a few
+    shards, so the tar-direct pin window stays bounded).
+    Disabled: the legacy ``legacy_order[slot % n]`` read."""
 
     def __init__(
         self,
@@ -142,6 +146,7 @@ class SlotMap:
         cfg: Config,
         legacy_order: list[int],
         salt: str = "",
+        shard_blocks: list[tuple[str, list[int]]] | None = None,
     ) -> None:
         if n <= 0:
             raise ValueError("SlotMap: n must be > 0")
@@ -149,22 +154,44 @@ class SlotMap:
         self.cfg = cfg
         self.salt = salt
         self.legacy_order = list(legacy_order)
-        if members is None:
-            self.enabled = False
-            self.members: dict[str, list[int]] = {}
-        else:
-            self.enabled = bool(cfg.sampling.enabled)
-            self.members = {p: sorted(members.get(p, ())) for p in _POOL_KEYS}
-            if sum(len(v) for v in self.members.values()) != n:
+        self.enabled = bool(cfg.sampling.enabled)
+        self.strategy = cfg.sampling.strategy
+        if self.enabled and self.strategy == "shard_seq":
+            if shard_blocks is None:
                 raise RuntimeError(
-                    f"SlotMap: pools cover {sum(len(v) for v in self.members.values())} "
-                    f"of {n} samples — every eligible sample must be in exactly one pool"
+                    "sampling.strategy=shard_seq requires shard_blocks "
+                    "(shard name + ascending row indices, first-appearance order)"
                 )
+            self.members: dict[str, list[int]] = {}
+            self.shard_blocks = [(shard, list(rows)) for shard, rows in shard_blocks]
+            covered = sum(len(rows) for _, rows in self.shard_blocks)
+            if covered != n:
+                raise RuntimeError(
+                    f"SlotMap: shard blocks cover {covered} of {n} samples — "
+                    "every eligible sample must belong to exactly one shard block"
+                )
+        else:
+            self.shard_blocks = []
+            if members is None:
+                self.enabled = False
+                self.members = {}
+            else:
+                self.members = {p: sorted(members.get(p, ())) for p in _POOL_KEYS}
+                if sum(len(v) for v in self.members.values()) != n:
+                    raise RuntimeError(
+                        f"SlotMap: pools cover {sum(len(v) for v in self.members.values())} "
+                        f"of {n} samples — every eligible sample must be in exactly one pool"
+                    )
         self._cache: dict[int, list[int]] = {}
+        # shard_seq per-cycle state: (shard-block permutation, cumulative
+        # sizes in permuted order). Cycles advance monotonically; keep tiny.
+        self._shard_seq_cache: dict[int, tuple[list[int], list[int]]] = {}
 
     def __getitem__(self, slot: int) -> int:
         if not self.enabled:
             return self.legacy_order[slot % self.n]
+        if self.strategy == "shard_seq":
+            return self._shard_seq_at(slot)
         cycle = slot // self.n
         order = self._cycle_order(cycle)
         return order[slot % self.n]
@@ -179,9 +206,40 @@ class SlotMap:
                 self._cache.pop(min(self._cache))
         return order
 
+    def _shard_seq_at(self, slot: int) -> int:
+        """shard_seq stream position: within cycle, walk the permuted
+        shard blocks top-to-bottom; inside a block, rows in ascending
+        (index) order. Pure function of (slot, cycle, salt, blocks)."""
+        import bisect
+
+        cycle = slot // self.n
+        pos = slot % self.n
+        state = self._shard_seq_cache.get(cycle)
+        if state is None:
+            n_blocks = len(self.shard_blocks)
+            perm = _seeded_permutation(
+                list(range(n_blocks)), f"shard-seq|{cycle}|{self.n}|{self.salt}"
+            )
+            sizes = [len(self.shard_blocks[k][1]) for k in perm]
+            cum: list[int] = []
+            total = 0
+            for size in sizes:
+                total += size
+                cum.append(total)
+            state = (perm, cum)
+            self._shard_seq_cache[cycle] = state
+            while len(self._shard_seq_cache) > 4:
+                self._shard_seq_cache.pop(min(self._shard_seq_cache))
+        perm, cum = state
+        k = bisect.bisect_right(cum, pos)
+        block_start = cum[k - 1] if k > 0 else 0
+        return self.shard_blocks[perm[k]][1][pos - block_start]
+
     def pool_report(self) -> dict[str, int]:
         """Effective per-cycle pool sizes (for startup telemetry + ckpt
         provenance)."""
         if not self.enabled:
             return {"legacy": self.n}
+        if self.strategy == "shard_seq":
+            return {"shard_seq": self.n, "shards": len(self.shard_blocks)}
         return pool_counts(self.n, {p: len(v) for p, v in self.members.items()}, self.cfg)

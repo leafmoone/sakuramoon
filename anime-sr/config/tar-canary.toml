@@ -12,14 +12,14 @@ exposure_min = 1000
 exposure_max = 10000
 
 [sampling]
-# The M4-1024-frozen pool sampler is a FULL-SET permutation per cycle:
-# any 300-step window touches ~all 986 SR_v2 shards (~806 GB resident
-# working set), which defeats bounded streaming on any single node.
-# The canary therefore uses the legacy straight-read stream (index
-# order): the window touches ~2-4 shards per 300 steps. Stream semantics
-# for the SR_v2 6M run is an open venue decision (see 2026-09-01
-# report) — this overlay only scopes the canary.
-enabled = false
+# SR_v2 venue stream (2026-09-01 user decision): shard_seq — per-cycle
+# PERMUTATION OF TARS (shuffled shard order, seeded by cycle), samples
+# streamed INTRA-SHARD in index order, no per-sample sampling. The pool
+# sampler (M4-1024 frozen) is a full-set permutation: a 300-step window
+# would touch ~all 986 shards (~806 GB resident), defeating bounded
+# streaming; shard_seq keeps the window to ~2-4 shards per 300 steps.
+enabled = true
+strategy = "shard_seq"
 
 [latent_flow]
 # SR_v2 has no precomputed latent store: z_hr comes from the on-the-fly

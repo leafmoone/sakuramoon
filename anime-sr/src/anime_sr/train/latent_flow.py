@@ -773,17 +773,38 @@ def _pp_worker_init() -> None:
 
 
 def _build_slot_map(ds: SRDataset, cfg: Config, legacy_order: list[int]) -> SlotMap:
-    """P1 pool sampler (2026-08-29): the train stream's slot->dataset-index
-    map. Pool membership comes from the index ``sampling_pool`` column on
-    each sample (priority/regular/aux, §10.4); unknown names defensively
-    fall into the regular pool. ``legacy_order`` is the pre-sampler stream
-    (index/store order) used when sampling is disabled, and kept as-is for
-    the val probe's separate contract."""
+    """The train stream's slot->dataset-index map (single construction
+    point — trainer, window driver and verifiers all go through this so
+    the demand oracle can never drift from the consumer).
+
+    * ``strategy="shard_seq"`` (streaming venues): per-cycle permutation
+      OF SHARDS with intra-shard sequential streaming (2026-09-01);
+      blocks = (shard, ascending row indices) in first-appearance order.
+    * ``strategy="pool"`` (default, M4-1024 frozen): pool membership comes
+      from the index ``sampling_pool`` column (priority/regular/aux,
+      §10.4); unknown names defensively fall into the regular pool.
+
+    ``legacy_order`` is the pre-sampler stream (index/store order) used
+    when sampling is disabled, and kept as-is for the val probe's
+    separate contract."""
+    n = len(legacy_order)
+    if cfg.sampling.enabled and cfg.sampling.strategy == "shard_seq":
+        rows_by_shard: dict[str, list[int]] = {}
+        blocks: list[tuple[str, list[int]]] = []
+        for i, m in enumerate(ds.samples):
+            rows = rows_by_shard.get(m.shard)
+            if rows is None:
+                rows = rows_by_shard[m.shard] = []
+                blocks.append((m.shard, rows))
+            rows.append(i)
+        return SlotMap(
+            n, None, cfg, legacy_order, salt=str(ds.global_seed), shard_blocks=blocks
+        )
     members: dict[str, list[int]] = {}
     for i, m in enumerate(ds.samples):
         pool = m.sampling_pool if m.sampling_pool in ("priority", "regular", "aux") else "regular"
         members.setdefault(pool, []).append(i)
-    return SlotMap(len(legacy_order), members, cfg, legacy_order, salt=str(ds.global_seed))
+    return SlotMap(n, members, cfg, legacy_order, salt=str(ds.global_seed))
 
 
 def _write_step_heartbeat(out: Path, step: int) -> None:
