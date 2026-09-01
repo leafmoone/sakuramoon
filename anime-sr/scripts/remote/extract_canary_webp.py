@@ -34,6 +34,11 @@ import tarfile
 from collections import OrderedDict
 from pathlib import Path
 
+# Dedicated worker id for the on-demand pin path (int, 0..worker_count-1;
+# the service validates type + range). High value so it never collides with
+# the prep/training worker ids in practice.
+PIN_WORKER_ID = 15
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -99,15 +104,21 @@ def main() -> int:
             spec.loader.exec_module(prep)
             rel = prep.flat_to_relpath(shard)
             print(f"[extract] pinning {shard} via service request ...", flush=True)
-            lease = client.request("extract-canary", rel, timeout_seconds=1800.0)
+            # dedicated worker id (0..worker_count-1 int; the service
+            # validates type+range) so the pin never collides with a
+            # training/prep worker's lease
+            lease = client.request(PIN_WORKER_ID, rel, timeout_seconds=1800.0)
             try:
                 os.link(lease.local_path, tar_path)
             finally:
-                client.acknowledge("extract-canary", lease)
+                client.acknowledge(lease)
         out_dir = webp_root / shard
         out_dir.mkdir(parents=True, exist_ok=True)
+        # The index rel_path IS the tar member name (nested
+        # danbooru/<ver>/<release>/<id>.webp); the extracted layout is flat
+        # under <shard>/ (pipeline _webp_path takes the basename).
         have = {p.name for p in out_dir.glob("*.webp")}
-        missing = {m.rsplit("/", 1)[-1] for m in members} - have
+        missing = {m for m in members if m.rsplit("/", 1)[-1] not in have}
         if not missing:
             print(f"[extract] {shard}: {len(members)} members already present", flush=True)
             continue
@@ -121,7 +132,7 @@ def main() -> int:
                         flush=True,
                     )
                     return 2
-                with open(out_dir / member_name, "wb") as out:
+                with open(out_dir / member_name.rsplit("/", 1)[-1], "wb") as out:
                     out.write(fh.read())
         total_members += len(missing)
         print(
