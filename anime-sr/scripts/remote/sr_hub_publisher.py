@@ -104,6 +104,7 @@ def _trainer_alive() -> bool:
         ["pgrep", "-f", "train_latent_flow"],
         capture_output=True,
         text=True,
+        check=False,
     )
     return r.returncode == 0
 
