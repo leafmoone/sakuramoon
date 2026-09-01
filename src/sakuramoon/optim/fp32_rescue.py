@@ -159,15 +159,16 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                     alphas=alphas,
                     ns_steps=self.cfg.ns_steps_for_role(spec.role),
                     sig=[c.pow(2).mean().sqrt() for c in cf_chunks],
-                    sigf=[c.norm() for c in cf_chunks],
+                    # sigf (D1 fro floor) is retired for this candidate: the
+                    # base step's low-signal skip is intentionally absent, so
+                    # no per-chunk L2 norm is computed or read back here.
+                    sigf=[],
                 )
             )
 
         n_inputs = sum(p.spec.chunk_count for p in prepared if p is not None)
         sig_flat = [s for p in prepared if p is not None for s in p.sig]
-        sigf_flat = [s for p in prepared if p is not None for s in p.sigf]
         sig_vals = torch.stack(sig_flat).tolist() if sig_flat else []
-        torch.stack(sigf_flat).tolist() if sigf_flat else []
 
         # Owner NS (BF16) + staged deltas + failure flags.
         fail_flags = torch.zeros(n_inputs, dtype=torch.int64, device=device)
