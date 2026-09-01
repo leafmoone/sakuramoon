@@ -72,7 +72,7 @@ def _grad_gen(seed_base: int, it: int, params: list[torch.nn.Parameter]) -> None
         if p.requires_grad:
             p.grad = torch.randn(
                 *p.shape, generator=g, dtype=torch.float32
-            ).to(p.dtype, device=p.device)
+            ).to(device=p.device, dtype=p.dtype)
 
 
 def _bootstrap_refs(model) -> dict[str, float]:

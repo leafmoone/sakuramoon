@@ -30,38 +30,28 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tomllib
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
 
 from sakuramoon.checkpoint.artifact import build_trainable_composite
-from sakuramoon.optim.cmuon import resolve_ns_map, route_cmuon_parameters
+from sakuramoon.optim.cmuon import route_cmuon_parameters
 from sakuramoon.optim.fp32_rescue import build_fp32_rescue
 from sakuramoon.optim.guarded_canonical import GuardedCanonicalGuardConfig
 
-LR = 0.00015625
-
-
-def _bootstrap_refs(model) -> dict[str, float]:
-    routing = route_cmuon_parameters(
-        model, matrix_weight_decay=0.0, sensitive_weight_decay=0.0
-    )
-    refs: dict[str, float] = {}
-    for spec in routing.cmuon_specs:
-        g = torch.randn_like(spec.parameter)
-        for ci in range(spec.chunk_count):
-            chunk_size = spec.chunk_size()
-            if spec.chunk_count == 1:
-                sig = g.float().pow(2).mean().sqrt().item()
-            else:
-                start = ci * chunk_size
-                end = start + chunk_size
-                sl = [slice(None)] * g.ndim
-                sl[spec.chunk_dim] = slice(start, end)
-                sig = g[tuple(sl)].float().pow(2).mean().sqrt().item()
-            refs[f"{spec.name}#chunk{ci}"] = max(sig * 1e-3, 1e-12)
-    return refs
+# CMuonNSConfig role fields (schema.py) — mirrors canonical_map()
+_NS_ROLE_FIELDS = (
+    "attention_q",
+    "attention_k",
+    "attention_v",
+    "attention_content_gate",
+    "attention_out",
+    "ffn_in",
+    "ffn_down",
+    "adaln_shared",
+)
 
 
 def _seed_grads(model, seed: int) -> None:
@@ -78,31 +68,53 @@ def _fp(t: torch.Tensor) -> tuple[float, float]:
     return (float(x.pow(2).mean().sqrt()), float(x.abs().max()))
 
 
-def _build_opt(model, rank: int, world_size: int):
+def _ns_canonical_map(ns_table: dict[str, object]) -> dict[str, int]:
+    """CMuonNSConfig.canonical_map() reproduced from the resolved toml table."""
+    base = int(ns_table["default"])
+    return {
+        role: (int(ns_table[role]) if ns_table.get(role) is not None else base)
+        for role in _NS_ROLE_FIELDS
+    }
+
+
+def _build_opt(model, rank: int, world_size: int, resolved: dict[str, object]):
+    """Build the optimizer from the CHECKPOINT'S resolved production config
+    (train/production.py build path): scaled lr, exact guard config and the
+    P3 calibration bootstrap references. Backcompat means the cleanup code
+    must load the state under the SAME production config it was saved with —
+    a hardcoded test config legitimately fails the guard-config check."""
+    opt_tbl = resolved["optimizer"]
+    guard_tbl = opt_tbl["cmuon_guard"]
+    stage_tbl = resolved["stage"]
+    lr = (
+        float(opt_tbl["base_lr"])
+        * int(stage_tbl["global_batch"])
+        / float(opt_tbl["reference_batch"])
+    )
     return build_fp32_rescue(
         model,
-        lr=LR,
-        betas=(0.9, 0.95),
-        eps=1e-8,
-        block_size=256,
-        bf16_stochastic_round=True,
-        matrix_weight_decay=0.0,
-        sensitive_weight_decay=0.0,
-        sr_seed=44,
-        ns_steps_by_role=resolve_ns_map(None, 4),
+        lr=lr,
+        betas=tuple(opt_tbl["betas"]),
+        eps=float(opt_tbl["eps"]),
+        block_size=int(opt_tbl["block_size"]),
+        bf16_stochastic_round=bool(opt_tbl["bf16_stochastic_round"]),
+        matrix_weight_decay=float(opt_tbl["matrix_weight_decay"]),
+        sensitive_weight_decay=float(opt_tbl["sensitive_weight_decay"]),
+        sr_seed=int(resolved["run"]["seed"]),
+        ns_steps_by_role=_ns_canonical_map(opt_tbl["cmuon_ns"]),
         guard_cfg=GuardedCanonicalGuardConfig(
-            guard_ratio=0.05,
-            reference_decay=0.999,
-            min_reference=1e-12,
-            numerical_floor=1e-20,
-            warmup_observations=0,
-            invariant_check=True,
+            guard_ratio=float(guard_tbl["guard_ratio"]),
+            reference_decay=float(guard_tbl["reference_decay"]),
+            min_reference=float(guard_tbl["min_reference"]),
+            numerical_floor=float(guard_tbl["numerical_floor"]),
+            warmup_observations=int(guard_tbl["warmup_observations"]),
+            invariant_check=bool(guard_tbl["invariant_check"]),
         ),
-        guard_bootstrap_refs=_bootstrap_refs(model),
+        guard_bootstrap_refs=dict(guard_tbl["references"]),
         rank=rank,
         world_size=world_size,
-        momentum_dtype="bfloat16",
-        chunk_rescale_sqrt_n=False,
+        momentum_dtype=str(opt_tbl["cmuon_momentum_dtype"]),
+        chunk_rescale_sqrt_n=bool(opt_tbl["cmuon_chunk_rescale_sqrt_n"]),
     )
 
 
@@ -186,7 +198,10 @@ def main() -> None:
         )
         module = build_trainable_composite(config["architecture"], device=device)
         module.eval()
-        opt = _build_opt(module, rank, world_size)
+        resolved = tomllib.loads(
+            (Path(args.ckpt) / "resolved_config.toml").read_text()
+        )
+        opt = _build_opt(module, rank, world_size, resolved)
         # production ckpt layout: train_state/optimizer.pt (checkpoint/load.py)
         saved = torch.load(
             Path(args.ckpt) / "train_state" / "optimizer.pt",
@@ -221,7 +236,7 @@ def main() -> None:
         torch.manual_seed(20260903)
         module2 = build_trainable_composite(config["architecture"], device=device)
         module2.eval()
-        opt2 = _build_opt(module2, rank, world_size)
+        opt2 = _build_opt(module2, rank, world_size, resolved)
         resumed = torch.load(
             Path(args.artifacts) / "optimizer_after_1_update.pt",
             map_location=device,

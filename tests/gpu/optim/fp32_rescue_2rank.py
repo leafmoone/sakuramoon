@@ -94,8 +94,13 @@ class _GlobalConditioner(torch.nn.Module):
         self.shared_block_projection = torch.nn.Linear(
             hidden // 4, 6 * hidden, bias=False, dtype=torch.bfloat16
         )
+        # production layout (audit: matrix weights bf16, 1-D params fp32):
+        # bf16 weight + fp32 bias
         self.final_projection = torch.nn.Linear(
             hidden // 4, 2 * hidden, bias=True, dtype=torch.bfloat16
+        )
+        self.final_projection.bias.data = self.final_projection.bias.data.to(
+            torch.float32
         )
 
 
