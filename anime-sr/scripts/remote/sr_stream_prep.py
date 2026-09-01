@@ -657,6 +657,23 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
                 with wlock:
                     if flat in pinned or flat in pending:
                         continue
+                    # restart recovery: a pin file left on disk by a
+                    # previous driver run IS the local in-cycle copy —
+                    # adopt it without a service round-trip. This also
+                    # covers shards the service's cycle ledger already
+                    # marks completed (self-ACKed via the stale-lease
+                    # recovery path): a fresh request for them would be
+                    # refused ("completed in this cycle"), but the file
+                    # on disk is exactly what the trainer needs
+                    # (2026-09-01 salt9 pre-ckpt restart deadlock, 2nd
+                    # form).
+                    if (shard_dir / flat).exists():
+                        pinned[flat] = (None, None)
+                        _log(
+                            "window",
+                            f"adopted on-disk pin for {flat} (restart recovery)",
+                        )
+                        continue
                     # a free slot: not carrying a pending pin AND not in
                     # flight on a worker (sleeping / re-queued job)
                     busy = set(pending.values()) | inflight
@@ -683,6 +700,11 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
                     os.unlink(shard_dir / flat)
                 except OSError as error:
                     _log("window", f"unlink {flat} failed: {error}")
+                if desc is None:
+                    # adopted from disk (no service lease was ever held
+                    # by this driver run): unlink alone releases it
+                    _log("window", f"released {flat} (adopted pin; no ack)")
+                    continue
                 try:
                     client.acknowledge(desc)
                     _log("window", f"released {flat}")

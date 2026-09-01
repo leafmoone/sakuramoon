@@ -86,10 +86,13 @@ zhr_source = "onfly"
 # crdnotebook-...-44158). The thread producer runs the same worker COUNT
 # (depth*bs) inside the rank process: zero forked VA, identical stream
 # semantics (the M2 default backend, bit-exact contract unaffected).
-# depth 4 -> 8 is nearly free under the thread model (no per-worker VA):
-# 64 workers + a deeper ready queue maximizes producer headroom.
+# Worker count is nearly free VA-wise under the thread model, but NOT
+# GIL-free: at 64 in-process workers (depth 8) the rank measured 0.7 it/s
+# / data_wait 25-27% (09-01 salt9) vs 1.5-1.6 it/s for the process
+# canary's 32 workers/rank — the Python glue of 64 threads serializes on
+# one GIL. Depth 4 -> 32 workers/rank matches the canary worker count.
 producer = "thread"
-prefetch_depth = 8
+prefetch_depth = 4
 out_dir = "output_model/latent-flow-sr-v2-6m"
 # Production v2 checkpoints: every 250k GLOBAL exposures (worst-case
 # training loss <= 250k exposures on a ~3-day run at salt9 canary
