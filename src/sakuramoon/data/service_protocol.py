@@ -10,7 +10,10 @@ from typing import Any, cast
 
 from sakuramoon.data.manifest import ShardRecord
 
-SERVICE_PROTOCOL_VERSION = 4
+# v5 (2026-09-01): the ack frame carries the shard path so a transport-
+# retried duplicate ack (the first copy landed after the client socket
+# timeout) is accepted as a no-op instead of "does not match".
+SERVICE_PROTOCOL_VERSION = 5
 MAX_SERVICE_FRAME_BYTES = 16 * 1024 * 1024
 
 

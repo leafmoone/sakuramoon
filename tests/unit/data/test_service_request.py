@@ -134,9 +134,39 @@ def test_request_downloads_then_leases(tmp_path: Path) -> None:
     assert service._worker_leases[0] == descriptor.lease_id
 
     # ACK releases the lease and completes the row
-    service.acknowledge(descriptor.lease_id, 0, descriptor.state_revision)
+    service.acknowledge(descriptor.lease_id, 0, descriptor.state_revision, rel)
     assert _row(rel).status == "completed"
     assert service._worker_leases == {}
+    service._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_request_duplicate_ack_after_lost_roundtrip_is_noop(tmp_path: Path) -> None:
+    """Protocol v5: a transport-retried ack whose first copy already
+    landed (lease gone, row completed) is accepted as a no-op — the
+    2026-09-01 salt9 index-pass incident (NFS state write exceeded the
+    client socket timeout; the blind retry was rejected and killed the
+    index worker thread)."""
+    service = _service(tmp_path)
+    _submit_fetch(service, tmp_path)
+
+    rel = "data/1_2024/shard-000000-p2-00.tar"
+    descriptor = service.request(worker_id=0, path=rel, timeout_seconds=30.0)
+    service.acknowledge(descriptor.lease_id, 0, descriptor.state_revision, rel)
+
+    # the duplicate: no lease to match, row already completed
+    service.acknowledge(descriptor.lease_id, 0, descriptor.state_revision, rel)
+    assert next(r.status for r in service.state.rows if r.path == rel) == "completed"
+    service._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_ack_unknown_lease_and_pending_row_is_rejected(tmp_path: Path) -> None:
+    """The no-op path is fail-closed: an unmatched ack for a row that is
+    NOT completed still raises (a genuine protocol error)."""
+    service = _service(tmp_path)
+    _submit_fetch(service, tmp_path)
+    rel = "data/1_2024/shard-000000-p2-00.tar"
+    with pytest.raises(DataServiceError, match="does not match an active lease"):
+        service.acknowledge("ghost-lease", 0, 0, rel)
     service._executor.shutdown(wait=False, cancel_futures=True)
 
 

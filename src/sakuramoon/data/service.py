@@ -368,6 +368,12 @@ class DataSupplyService:
         if not self._started or self._closed:
             raise DataServiceError("data service is not running")
 
+    def _row_status(self, path: str) -> str | None:
+        for row in self.state.rows:
+            if row.path == path:
+                return row.status
+        return None
+
     def _pending_paths(self) -> tuple[str, ...]:
         leased = {item.record.path for item in self._outstanding.values()}
         return tuple(
@@ -615,14 +621,31 @@ class DataSupplyService:
             return descriptor
 
     def acknowledge(
-        self, lease_id: str, worker_id: int, state_revision: int
+        self,
+        lease_id: str,
+        worker_id: int,
+        state_revision: int,
+        path: str,
     ) -> None:
         with self._lock:
             self._require_running()
             descriptor = self._outstanding.get(lease_id)
+            if descriptor is None:
+                # Duplicate / late ack: the client's transport layer retries
+                # a lost round-trip with the same frame. The first copy can
+                # have already landed (state commit + NFS write under the
+                # lock can exceed the client socket timeout under NFS load),
+                # leaving this copy with no lease to match. Accept it as a
+                # no-op when the shard is already completed; anything else
+                # is a genuine protocol error.
+                if self._row_status(path) != "completed":
+                    raise DataServiceError(
+                        "ACK does not match an active lease"
+                    )
+                _log(f"worker={worker_id} 重复ACK（已生效，忽略）: {path}")
+                return
             if (
-                descriptor is None
-                or descriptor.worker_id != worker_id
+                descriptor.worker_id != worker_id
                 or descriptor.state_revision != state_revision
                 or self._worker_leases.get(worker_id) != lease_id
             ):
@@ -875,6 +898,7 @@ class DataServiceServer:
             if set(request) != {
                 "lease_id",
                 "op",
+                "path",
                 "session_id",
                 "state_revision",
                 "worker_id",
@@ -883,7 +907,10 @@ class DataServiceServer:
             if request["session_id"] != self.service.identity.session_id:
                 raise DataServiceError("data service session changed")
             self.service.acknowledge(
-                request["lease_id"], request["worker_id"], request["state_revision"]
+                request["lease_id"],
+                request["worker_id"],
+                request["state_revision"],
+                request["path"],
             )
             return {"ok": True}
         if operation == "request":

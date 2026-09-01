@@ -181,6 +181,7 @@ def test_last_ack_persists_and_logs_completed_epoch(
         descriptor.lease_id,
         descriptor.worker_id,
         descriptor.state_revision,
+        training.path,
     )
 
     document = json.loads(store.path.read_bytes())
@@ -239,6 +240,7 @@ def test_epoch_log_is_not_emitted_when_metadata_commit_fails(
             descriptor.lease_id,
             descriptor.worker_id,
             descriptor.state_revision,
+            training.path,
         )
 
     assert service.state == state

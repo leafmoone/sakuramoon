@@ -168,10 +168,17 @@ class DataServiceClient:
         return descriptor
 
     def acknowledge(self, descriptor: ShardLeaseDescriptor) -> None:
+        # The transport layer retries a lost round-trip with the SAME frame.
+        # The ack therefore carries the shard path: when the first copy
+        # already landed (the service commits state + NFS-writes under its
+        # lock, which can exceed the client socket timeout under NFS load)
+        # the duplicate is recognized and accepted as a no-op instead of
+        # being rejected as "does not match an active lease".
         response = self._request(
             {
                 "lease_id": descriptor.lease_id,
                 "op": "ack",
+                "path": descriptor.record.path,
                 "session_id": self.identity.session_id,
                 "state_revision": descriptor.state_revision,
                 "worker_id": descriptor.worker_id,

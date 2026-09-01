@@ -251,6 +251,28 @@ def run_index_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
     parts_dir = Path(args.index_dir) / "partitions"
     parts_dir.mkdir(parents=True, exist_ok=True)
 
+    def ack_with_retry(name: str, desc: object) -> None:
+        """ACK must land before the worker leases the next shard.
+
+        The service commits state (NFS write) under its lock, so the ack
+        round-trip can exceed the client socket timeout; the client's
+        transport retry then delivers a duplicate, which the service
+        (protocol v5) accepts as a no-op. Retry until it lands; the
+        partition is already durable, so this loop can never lose work."""
+        attempt = 0
+        while not _stop.is_set():
+            try:
+                client.acknowledge(desc)
+                return
+            except DataServiceUnavailable as error:
+                attempt += 1
+                _log(
+                    name,
+                    f"ack not confirmed for {desc.local_path.name} "
+                    f"(attempt {attempt}: {error}); retrying",
+                )
+                time.sleep(5.0)
+
     def worker(worker_id: int) -> None:
         name = f"idx{worker_id:02d}"
         failures = 0
@@ -271,7 +293,7 @@ def run_index_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
             part = parts_dir / f"{flat}.jsonl"
             done = parts_dir / f"{flat}.jsonl.done"
             if done.is_file():
-                client.acknowledge(desc)
+                ack_with_retry(name, desc)
                 continue
             t0 = time.time()
             records, summary = scan_shard_full(desc.local_path, flat)
@@ -285,7 +307,7 @@ def run_index_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
                 json.dumps(dataclasses.asdict(summary)), encoding="utf-8"
             )
             done.touch()
-            client.acknowledge(desc)
+            ack_with_retry(name, desc)
             _log(
                 name,
                 f"{flat}: {summary.n_images} images in {time.time() - t0:.0f}s "
