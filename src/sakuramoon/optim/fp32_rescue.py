@@ -218,8 +218,13 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                         _NONFINITE,
                         fail_flags[fi - 1],
                     )
+                    # ceiling only where not already flagged: an inf delta has
+                    # rms == inf (inf > ceiling is TRUE), so without the guard
+                    # _CEILING would clobber _NONFINITE and the flag code would
+                    # drift from the pre-cleanup decision (the old code
+                    # `continue`d nonfinite chunks before any ceiling check).
                     fail_flags[fi - 1] = torch.where(
-                        rms.double() > ceiling_t,
+                        (rms.double() > ceiling_t) & (fail_flags[fi - 1] == 0),
                         _CEILING,
                         fail_flags[fi - 1],
                     )

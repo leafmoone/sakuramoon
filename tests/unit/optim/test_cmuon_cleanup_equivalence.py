@@ -14,7 +14,10 @@ the pre-cleanup per-chunk host-read implementation:
   A. atomicity: forced failure on the LAST chunk -> zero partial mutation
      (parameter bytes untouched, observations not advanced)
   E. FP32 rescue equivalence: fixed FP32 inputs -> bit-identical NS output,
-     identical verdict readback, identical BF16 staging (old vs new style)
+     identical verdict readback (same on-device scalars), production-
+     intercepted BF16 staging (cross-allocation NS calls are not
+     bit-reproducible on DTK, so the production output is captured, not
+     recomputed)
   G. AdamW default path: no CMuon hot-path state is created
 
 The "old" reference implementations below are verbatim transcriptions of
@@ -189,12 +192,17 @@ def test_P_full_vector_mask_identity() -> None:
     deltas = []
     for i in range(n_chunks):
         shape = (64 + (i % 5) * 32, 64 + ((i * 7) % 5) * 32)
-        x = torch.randn(*shape, generator=g, dtype=torch.bfloat16, device=device)
+        # healthy unit-rms draws scaled well below the ceiling (a raw randn
+        # delta has rms ~1.0 >> CEILING ~2e-4 and would trip the ceiling)
+        x = (
+            torch.randn(*shape, generator=g, dtype=torch.bfloat16, device=device)
+            * (0.1 * CEILING)
+        )
         # sprinkle forced defects every 17th chunk
         if i % 17 == 3:
             x[0, 0] = float("nan")
         elif i % 17 == 5:
-            x = x * 1e9  # finite but far above the ceiling
+            x = x * (1e9 / (0.1 * CEILING))  # finite but far above the ceiling
         deltas.append(x)
     old_mask = [old_chunk_flag(d, CEILING) for d in deltas]
     new_mask = [new_chunk_flag(d, CEILING, device) for d in deltas]
@@ -485,7 +493,15 @@ def test_E_fp32_ns_bit_deterministic() -> None:
 def test_E_rescue_verdict_readback_identical() -> None:
     """Old-style (float()/bool()) vs new-style (packed tolist) rescue
     verdict: identical values and identical decisions on a battery of FP32
-    deltas, including floor/ceiling edges."""
+    deltas, including floor/ceiling edges.
+
+    Both readback styles consume the SAME on-device scalars (one reduction
+    per case): the cleanup's claim under test is that the packed tolist()
+    readback yields exactly the Python floats the old float()/bool() calls
+    produced. Running the reduction twice (old vs new as independent calls)
+    is not valid on DTK: cross-allocation results are not bit-reproducible
+    (see the E-staging interception note).
+    """
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     g = torch.Generator(device=device).manual_seed(4)
     rescue_floor = 0.05 * 0.2 * LR
@@ -509,17 +525,17 @@ def test_E_rescue_verdict_readback_identical() -> None:
         "zero": torch.zeros_like(base),
     }
     for name, d32 in cases.items():
+        # one reduction per case; both readback styles consume it
+        rms_t = d32.pow(2).mean().sqrt()
+        fin_t = torch.isfinite(d32).all()
         # old style (37602e4 rescue verdict)
-        rms_old = float(d32.pow(2).mean().sqrt())
+        rms_old = float(rms_t)
         verdict_old = (
-            not bool(torch.isfinite(d32).all())
+            not bool(fin_t)
         ) or rms_old < rescue_floor or rms_old > CEILING
-        # new style (cleanup packed readback)
+        # new style (cleanup packed readback of the same scalars)
         rms_new, fin_new = torch.stack(
-            (
-                d32.pow(2).mean().sqrt(),
-                torch.isfinite(d32).all().to(torch.float32),
-            )
+            (rms_t, fin_t.to(torch.float32))
         ).tolist()
         verdict_new = (
             not bool(fin_new)
@@ -532,9 +548,20 @@ def test_E_rescue_staging_bit_identical(
     monkeypatch, single_rank_env
 ) -> None:
     """End-to-end: a forced-NaN chunk must commit exactly
-    (-alpha) * fp32_NS(nesterov_chunk) rounded once to BF16 — recomputed
-    independently here from the same inputs and applied through the same
-    bf16 add path."""
+    (-alpha) * fp32_NS(nesterov_chunk) rounded once to BF16, applied
+    through the same bf16 add path.
+
+    The FP32 NS output is INTERCEPTED from the production call rather than
+    recomputed in the test: DTK's FP32 GEMM is not bit-reproducible across
+    different memory allocations (allocator alignment can select a
+    different GEMM path), so a second NS call in the test may differ by
+    1 ulp even for bit-identical inputs. The interception verifies the
+    contract that matters for the cleanup:
+      (1) the rescue input is bit-identical to the PREPARE chain
+          (fresh-momentum nesterov chunk) — no semantic drift;
+      (2) the committed bytes are exactly ((-alpha) * captured_output)
+          .bfloat16() — the single-rounding staging formula is intact.
+    """
     model = single_rank_env
     target = 7
     pattern = {target: "nan"}
@@ -551,13 +578,27 @@ def test_E_rescue_staging_bit_identical(
                 spec_t, ci_t = spec, ci
             flat += 1
     assert spec_t is not None
+    captured: list[tuple[torch.Tensor, torch.Tensor]] = []
+    real32 = fr.cmuon_zeroth_power_fp32
+
+    def spy32(grad, ns_steps, ns_coefficients, eps):
+        out = real32(grad, ns_steps, ns_coefficients, eps)
+        captured.append((grad.detach().clone(), out.detach().clone()))
+        return out
+
+    monkeypatch.setattr(fr, "cmuon_zeroth_power_fp32", spy32)
     opt = _build_opt(model)
     _seed_grads(model, 31)
     # clone: state_dict tensors share parameter storage (in-place add_ would
     # corrupt a "before" view)
     before = {k: v.detach().clone() for k, v in model.state_dict().items()}
     opt.step()
-    # recompute the nesterov chunk exactly as PREPARE does (fresh momentum):
+    # exactly one FP32 NS call: the forced-NaN chunk, nothing else
+    assert len(captured) == 1, (
+        f"expected exactly one FP32 rescue call, got {len(captured)}"
+    )
+    in32, out32 = captured[0]
+    # (1) rescue input == PREPARE semantics (fresh momentum, first step):
     mu = opt.cfg.momentum
     grad = spec_t.parameter.grad
     assert grad is not None
@@ -570,19 +611,18 @@ def test_E_rescue_staging_bit_identical(
         chunk = nesterov
     else:
         chunk = nesterov.narrow(spec_t.chunk_dim, ci_t * chunk_size, chunk_size)
+    assert torch.equal(in32, chunk.float()), (
+        "rescue input is not bit-identical to the prepare nesterov chunk"
+    )
+    # (2) committed bytes == ((-alpha) * captured NS output).bfloat16(),
+    # applied through the same bf16 add path
     alpha = cmuon_moonlight_alpha(
         chunk.shape[0],
         chunk.shape[1],
         opt.cfg.lr,
         spec_t.chunk_count if opt.cfg.chunk_rescale_sqrt_n else 1,
     )
-    expected_delta = ((-alpha) * cmuon_zeroth_power_fp32(
-        chunk.float(),
-        opt.cfg.ns_steps_for_role(spec_t.role),
-        opt.cfg.ns_coefficients,
-        opt.cfg.eps,
-    )).bfloat16().contiguous()
-    # expected full parameter = before + zero-delta-with-chunk, same bf16 add
+    expected_delta = ((-alpha) * out32).bfloat16().contiguous()
     name = spec_t.name
     expected_param = before[name]
     delta_full = torch.zeros_like(expected_param)
@@ -595,8 +635,8 @@ def test_E_rescue_staging_bit_identical(
     expected_param.add_(delta_full)
     actual = model.state_dict()[name]
     assert torch.equal(actual, expected_param), (
-        "committed rescue delta is not bit-identical to the reference "
-        "FP32-rescue staging"
+        "committed rescue bytes differ from the production-captured "
+        "staging formula"
     )
 
 
