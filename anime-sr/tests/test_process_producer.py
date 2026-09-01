@@ -256,7 +256,10 @@ def test_worker_death_resubmit_exactly_once() -> None:
         deadline = time.time() + 90
         while not all(lf._fut_done(f) for f in batch2):
             assert time.time() < deadline, "batch2 never completed after death"
-            lf._pp_recover_lost_tasks(pp, batch2, ready, inflight, crash_state, seen)
+            lf._pp_recover_lost_tasks(
+                pp, batch2, ready, inflight, crash_state, seen,
+                lf._pp_fetch, lambda t: t,
+            )
             time.sleep(0.2)
         results2 = [lf._fut_result(f, timeout=60) for f in batch2]
         assert crash_state[0] == 1, f"expected exactly 1 death, saw {crash_state[0]}"

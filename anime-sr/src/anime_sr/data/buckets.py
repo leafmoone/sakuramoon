@@ -16,6 +16,15 @@ from anime_sr.data.index import eligible_buckets as _index_eligible_buckets
 
 # re-export: the canonical crop_box lives in the torch-free top-level module
 # (spawn workers import it without triggering the torch-heavy data package)
+from anime_sr.torchfree_fetch import crop_box
+
+__all__ = [
+    "Bucket",
+    "assert_aligned",
+    "check_buckets",
+    "crop_box",
+    "eligible_hr_buckets",
+]
 
 
 @dataclass(frozen=True)

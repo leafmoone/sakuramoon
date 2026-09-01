@@ -454,7 +454,11 @@ def apply_degradation(
     if p.banding_levels:
         lq = _posterize(lq, p.banding_levels)
         if p.dither:
-            d = torch.randint(0, 2, lq.shape, generator=torch.Generator().manual_seed(dither_seed))
+            # CPU generator (device-agnostic; 2026-09-01: apply_degradation
+            # also runs per-sample on the DCU for the spawn producer)
+            d = torch.randint(
+                0, 2, lq.shape, generator=torch.Generator().manual_seed(dither_seed)
+            ).to(lq.device, lq.dtype)
             lq = lq + (d - 0.5) * (2.0 / max(p.banding_levels, 2))
     if abs(p.gamma - 1.0) > 1e-3:
         lq = _gamma(lq, p.gamma)

@@ -2189,9 +2189,28 @@ def run_latent_flow(
                 # spawn pool hands back the uint8 HR crop + stage times;
                 # the consumer applies the EXACT decode_hr conversion
                 # (per-element uint8->fp32 linear map commutes with the
-                # slice: bit-exact hr_crop) and the seeded degradation
-                # (bit-exact lq) — only the process boundary moved.
-                prepared = []
+                # slice: bit-exact hr_crop) and the seeded degradation.
+                #
+                # The degrade runs on the DCU (2026-09-01 21:3x profile):
+                # the CPU degrade chain costs ~1 s/SAMPLE serial and a
+                # 16-sample batch floors at ~1.7-2.3 s wall here (thread
+                # pools at nt 1/2/4/8 and pool sizes 4/8/16 all land the
+                # same — CPU-bound, GIL-serialized glue; the fork-canary's
+                # 1.5 it/s got its parallelism from 32 separate DTK
+                # worker processes, which the host VA budget forbids).
+                # apply_degradation is device-agnostic by construction
+                # (noise comes from a CPU torch.Generator then .to(x.device);
+                # kernels are built on lq.device), so the EXACT same chain
+                # runs per-sample on the DCU — ~0.3-0.5 s/step vs ~2 s,
+                # on hardware that is idle during the data phase anyway.
+                # Determinism: per-call CPU Generator seeds -> identical
+                # noise draws; the deterministic conv/interpolate kernels
+                # reproduce within the same DTK build (resume recompute
+                # stays reproducible on the same host/build).
+                prepared: list[_Prepared] = []
+                convs = []
+                metas = []
+                sts = []
                 for i, f in enumerate(futs):
                     crop_np, st = _fut_result(f)
                     slot = latent_sample_index(step, rank, i, bs, world_size, n)
@@ -2205,19 +2224,39 @@ def run_latent_flow(
                         .sub(1.0)
                     ).contiguous()
                     st["crop"] += time.perf_counter() - t_c1
-                    t_d0 = time.perf_counter()
-                    lq_s, _ = degrade_hr(
-                        hr_crop,
+                    convs.append(hr_crop)
+                    metas.append(meta)
+                    sts.append(st)
+                t_d0 = time.perf_counter()
+                dc = step // _EXPOSURE_PER_CYCLE
+                ei = step % _EXPOSURE_PER_CYCLE
+                # one H2D for the whole batch, degrade per sample on the
+                # DCU (params are per-exposure, so the chain cannot be
+                # batch-folded into one conv)
+                hr_dev = torch.stack(convs).to(device, non_blocking=True)
+                dev_convs = [hr_dev[i] for i in range(bs)]
+                lqs = [
+                    degrade_hr(
+                        dev_convs[i],
                         cfg,
                         global_seed=ds.global_seed,
-                        sample_id=meta.sample_id,
-                        data_cycle=step // _EXPOSURE_PER_CYCLE,
-                        exposure_index=step % _EXPOSURE_PER_CYCLE,
-                    )
-                    st["degradation"] = time.perf_counter() - t_d0
-                    st["z_hr"] = 0.0  # on-fly mode: no store read
+                        sample_id=metas[i].sample_id,
+                        data_cycle=dc,
+                        exposure_index=ei,
+                    )[0]
+                    for i in range(bs)
+                ]
+                t_d1 = time.perf_counter()
+                # hr feeds the consumer-side VAE encode: hand the consumer
+                # the DCU batch (the H2D is already counted in degradation)
+                convs = [hr_dev[i] for i in range(bs)]
+                for i in range(bs):
+                    sts[i]["degradation"] = t_d1 - t_d0
+                    sts[i]["z_hr"] = 0.0  # on-fly mode: no store read
                     prepared.append(
-                        _Prepared(hr=hr_crop, lq=lq_s, z_hr=None, meta=meta, stages=st)
+                        _Prepared(
+                            hr=convs[i], lq=lqs[i], z_hr=None, meta=metas[i], stages=sts[i]
+                        )
                     )
             for f in futs:
                 inflight.pop(f, None)
@@ -2413,6 +2452,21 @@ def run_latent_flow(
                 else -1.0
             )
             extra = f" data_wait={wait_pct:.1f}%" if done >= 50 else ""
+            if done >= 100:
+                # per-sample stage breakdown (ms): shard/decode/crop run in
+                # the producer (threads or spawn workers); degrade/stack/H2D
+                # on the consumer — the split locates data_wait (2026-09-01
+                # salt9 speed forensics)
+                _ms = {
+                    s: 1000.0 * stage_cum[s] / max(1, n_produced)
+                    for s in ("shard", "decode", "crop", "degradation", "stack", "H2D")
+                }
+                extra += (
+                    f" stage_ms="
+                    f"shard:{_ms['shard']:.0f} decode:{_ms['decode']:.0f} "
+                    f"crop:{_ms['crop']:.1f} degrad:{_ms['degradation']:.0f} "
+                    f"stack:{_ms['stack']:.1f} h2d:{_ms['H2D']:.1f}"
+                )
             print(
                 f"[latent] step {step + 1}/{total} loss={loss.item():.4f} lr={lr:.2e} "
                 f"({(step + 1 - start_step) / max(1e-3, time.time() - t0):.1f} it/s){extra}",
