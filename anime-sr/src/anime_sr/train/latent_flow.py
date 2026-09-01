@@ -2092,6 +2092,7 @@ def run_latent_flow(
     t0 = time.time()
     t_data_cum = 0.0  # M1 #8 telemetry: data-wait fraction of step time
     t_comp_cum = 0.0
+    comp_cum: dict[str, float] = {"enclq": 0.0, "fwd": 0.0, "bwd": 0.0, "optim": 0.0}
     stage_cum: dict[str, float] = {
         s: 0.0
         for s in ("shard", "decode", "crop", "degradation", "z_hr", "zhr_enc", "stack", "H2D")
@@ -2297,6 +2298,11 @@ def run_latent_flow(
         t_data_cum += time.perf_counter() - tf
 
         tc = time.perf_counter()
+        # per-phase compute breakdown (2026-09-01 salt9 speed forensics):
+        # enclq = z_lr encode, fwd = flow targets + model forward, bwd =
+        # backward, optim = clip + step + EMA
+        comp_phase: dict[str, float] = {}
+        t_p0 = time.perf_counter()
         with autocast():
             # plan §4.3 anchor: z_lr = E_Mage(Bicubic4x(LQ)), frozen VAE
             lq_up = F.interpolate(
@@ -2312,6 +2318,8 @@ def run_latent_flow(
                 t_e0 = time.perf_counter()
                 z_hr = vae.encode(hr_b.to(dtype))
                 stage_cum["zhr_enc"] += time.perf_counter() - t_e0
+            t_p1 = time.perf_counter()
+            comp_phase["enclq"] = t_p1 - t_p0
             # M4-final (P0): stateless per-rank flow seed — pure function of
             # (global_seed, step, rank); the dedicated generator is never
             # mixed with the process-global RNG.
@@ -2326,8 +2334,12 @@ def run_latent_flow(
             else:
                 v_hat = model(rt, z_lr, _t, sigma)  # DDP syncs gradients on the backward
             loss = F.mse_loss(v_hat.float(), v_star.float())
+        t_p2 = time.perf_counter()
+        comp_phase["fwd"] = t_p2 - t_p1
         opt.zero_grad()
         loss.backward()
+        t_p3 = time.perf_counter()
+        comp_phase["bwd"] = t_p3 - t_p2
         lr = _cosine_lr(step, total, cfg.optimizer.lr, cfg)
         for g in opt.param_groups:
             g["lr"] = lr
@@ -2341,6 +2353,9 @@ def run_latent_flow(
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         t_comp_cum += time.perf_counter() - tc
+        comp_phase["optim"] = time.perf_counter() - (t_p3 if "bwd" in comp_phase else tc)
+        for _k, _v in comp_phase.items():
+            comp_cum[_k] += _v
 
         # W&B telemetry (no-op unless [logging].wandb_enabled)
         if (step + 1) % cfg.logging.log_every_steps == 0:
@@ -2467,6 +2482,15 @@ def run_latent_flow(
                     f"crop:{_ms['crop']:.1f} degrad:{_ms['degradation']:.0f} "
                     f"stack:{_ms['stack']:.1f} h2d:{_ms['H2D']:.1f}"
                 )
+                if done >= 150:
+                    _cp = {
+                        s: 1000.0 * comp_cum[s] / max(1, done) for s in comp_cum
+                    }
+                    extra += (
+                        f" comp_ms="
+                        f"enclq:{_cp['enclq']:.0f} fwd:{_cp['fwd']:.0f} "
+                        f"bwd:{_cp['bwd']:.0f} optim:{_cp['optim']:.0f}"
+                    )
             print(
                 f"[latent] step {step + 1}/{total} loss={loss.item():.4f} lr={lr:.2e} "
                 f"({(step + 1 - start_step) / max(1e-3, time.time() - t0):.1f} it/s){extra}",
