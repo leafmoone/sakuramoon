@@ -177,6 +177,12 @@ def _load_anime_sr_cfg(args: argparse.Namespace):
     sys.path.insert(0, args.code_src)
     from anime_sr.config.loader import load_config
 
+    # The window driver must see EXACTLY the trainer's config stack (the
+    # slot map, bucket table, gates and val split are pure functions of it);
+    # venue overlays (e.g. sampling.enabled for streaming) only work when
+    # both processes pass the same --config files.
+    if args.config:
+        return load_config(*[str(Path(c)) for c in args.config])
     return load_config(
         str(REPO_ROOT / "anime-sr/config/base.toml"),
         str(REPO_ROOT / "anime-sr/config/data.toml"),
@@ -604,6 +610,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--webp-dir", default=None, help="extract mode only")
     ap.add_argument("--index-dir", required=True)
     ap.add_argument("--code-src", required=True)
+    ap.add_argument(
+        "--config",
+        nargs="+",
+        default=None,
+        help="anime-sr config stack (the SAME files the trainer passes via "
+        "--config); window mode must see the trainer's exact overlays. "
+        "Default: base.toml + data.toml",
+    )
     ap.add_argument("--rebuild-every", type=int, default=250)
     ap.add_argument("--rebuild-interval", type=int, default=1800)
     ap.add_argument("--size-scan-workers", type=int, default=8)
