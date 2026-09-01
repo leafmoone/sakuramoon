@@ -18,7 +18,6 @@ training with a multi-exposure schedule calls :meth:`fetch` with explicit
 
 from __future__ import annotations
 
-import hashlib
 import io
 import time
 from dataclasses import dataclass
@@ -34,6 +33,7 @@ from anime_sr.data import index as index_mod
 from anime_sr.data.buckets import check_buckets, crop_box
 from anime_sr.data.codec_bank import CodecBank
 from anime_sr.data.degradation import degrade_hr, exposure_seed
+from anime_sr.data.torchfree_fetch import box_seed  # re-export (see __all__)
 
 _EXPOSURE_PER_CYCLE = 25  # exposures per image before the data cycle advances (§11.5)
 
@@ -45,16 +45,6 @@ def find_eligibility(index_dir: str | Path) -> str:
         if (d / name).is_file():
             return str(d / name)
     raise FileNotFoundError(f"no eligibility table in {d} (run cli/index_dataset.py first)")
-
-
-def _blake2b_u64(s: str) -> int:
-    """Stable 64-bit hash (platform-independent, stdlib only)."""
-    return int.from_bytes(hashlib.blake2b(s.encode("utf-8"), digest_size=8).digest(), "little")
-
-
-def box_seed(sample_id: str, data_cycle: int, exposure_index: int) -> int:
-    """Crop-box stream: independent from the degradation exposure seed."""
-    return _blake2b_u64(f"box|{sample_id}|{data_cycle}|{exposure_index}")
 
 
 @dataclass(frozen=True)

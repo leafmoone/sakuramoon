@@ -590,13 +590,26 @@ class LatentFlowSpec(_Frozen):
     # bucket size; the producer then only prepares hr + lq).
     zhr_source: Literal["store", "onfly"] = "store"
     # CPU prefetch producer backend. "thread" (default) runs depth*bs worker
-    # threads in this process (GIL-bound). "process" forks depth*bs worker
-    # PROCESSES before any HCU context exists: the dataset/store context is
-    # inherited copy-on-write, each worker re-tunes its own torch intra-op
-    # pool from OMP_NUM_THREADS, and the per-sample fetch stays a pure
-    # function of (step, slot) — the bit-exact §11.5 stream is unchanged,
-    # only the transport differs (fork start method required, i.e. Linux).
-    producer: Literal["thread", "process"] = "thread"
+    # threads in this process (GIL-bound — on a 2026-09-01 salt9 128-core
+    # host the thread backend measured 0.6-0.7 it/s / data_wait 25-29%
+    # vs 1.5-1.6 it/s for the process backends: the rank's GIL is shared
+    # with the training loop). "process" forks depth*bs worker PROCESSES
+    # before any HCU context exists: the dataset/store context is inherited
+    # copy-on-write, each worker re-tunes its own torch intra-op pool from
+    # OMP_NUM_THREADS, and the per-sample fetch stays a pure function of
+    # (step, slot) — the bit-exact §11.5 stream is unchanged, only the
+    # transport differs (fork start method required, i.e. Linux). "spawn"
+    # (2026-09-01): depth*bs FRESH torch-free worker processes (spawn start
+    # method): each worker imports only numpy/PIL/stdlib (~200-300 MiB
+    # committed, no DTK) and returns the uint8 HR crop; the consumer runs
+    # the exact decode_hr conversion + the seeded degrade, so the batch is
+    # bit-identical to the other producers. Spawn is the only process
+    # backend that stays inside a strict-overcommit host's shared commit
+    # budget (fork counts the parent's torch commit per worker; on the
+    # 09-01 salt9 host — vm.overcommit_memory=2, ~453 GiB shared
+    # CommitLimit — that is what killed the process backend). on-fly zhr
+    # only (no latent store).
+    producer: Literal["thread", "process", "spawn"] = "thread"
     # producer_intra_op_threads: torch intra-op thread cap PER producer
     # process (process backend only). 0 = legacy behavior (re-tune each
     # worker from OMP_NUM_THREADS). With depth*bs workers per rank, 4

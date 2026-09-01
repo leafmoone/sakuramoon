@@ -118,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         # workers never inherit accelerator runtime state (inheriting it
         # makes forked workers SIGSEGV on their first CPU op; observed in
         # the 2-rank smoke: SIGSEGV in torch.randn inside _noise_like).
+        # (spawn needs no pre-fork: fresh interpreters inherit nothing.)
         if cfg.latent_flow.producer == "process":
             prepare_producer_prefork(
                 cfg,

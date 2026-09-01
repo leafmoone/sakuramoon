@@ -86,12 +86,19 @@ zhr_source = "onfly"
 # crdnotebook-...-44158). The thread producer runs the same worker COUNT
 # (depth*bs) inside the rank process: zero forked VA, identical stream
 # semantics (the M2 default backend, bit-exact contract unaffected).
-# Worker count is nearly free VA-wise under the thread model, but NOT
-# GIL-free: at 64 in-process workers (depth 8) the rank measured 0.7 it/s
-# / data_wait 25-27% (09-01 salt9) vs 1.5-1.6 it/s for the process
-# canary's 32 workers/rank — the Python glue of 64 threads serializes on
-# one GIL. Depth 4 -> 32 workers/rank matches the canary worker count.
-producer = "thread"
+# 2026-09-01 producer backend history (salt9, 2x BW DCU, 128 cores):
+#   process (fork, 32/rank)  1.5-1.6 it/s — but each forked worker counts
+#     the parent's torch commit on the strict-overcommit host (shared
+#     453 GiB CommitLimit): the whole stack dies silently every 5-13 min.
+#   thread (64 or 32/rank)   0.6-0.7 it/s / data_wait 25-29%: the rank's
+#     GIL is shared with the training loop (op-launch stalls); the
+#     measured GPU compute time itself inflated 2.3x vs the canary.
+#   spawn (32/rank)          fresh torch-free worker processes (numpy/PIL
+#     only, ~200-300 MiB committed each, no DTK): process-level parallelism
+#     WITHOUT the fork's commit inheritance, and no GIL shared with the
+#     consumer; bit-exact with the other producers (uint8 crop out, exact
+#     decode_hr conversion + seeded degrade on the consumer).
+producer = "spawn"
 prefetch_depth = 4
 out_dir = "output_model/latent-flow-sr-v2-6m"
 # Production v2 checkpoints: every 250k GLOBAL exposures (worst-case

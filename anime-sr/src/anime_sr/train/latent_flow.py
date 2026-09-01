@@ -83,6 +83,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from anime_sr.config.loader import dump_resolved
 from anime_sr.config.schema import Config
+from anime_sr.data import torchfree_fetch as tf_fetch
 from anime_sr.data.clean_score import (
     CleanScoreCache,
     build_clean_score_report,
@@ -941,6 +942,8 @@ def _pp_recover_lost_tasks(
     inflight: dict[Any, tuple[int, int]],
     crash_state: list[int],
     seen_workers: set,
+    task_func: Callable,
+    make_args: Callable[[tuple[int, int]], tuple],
 ) -> None:
     """Resubmit in-flight tasks after a worker death (in-place replacement).
 
@@ -987,7 +990,10 @@ def _pp_recover_lost_tasks(
     for f, task in list(inflight.items()):
         if _fut_done(f):
             continue
-        nf = ppool.apply_async(_pp_fetch, (task,))
+        # task_func/make_args are the submitting backend's (fork pool =
+        # _pp_fetch with the raw (slot, step) pair; spawn pool = the
+        # torch-free fetch_crop_numpy with a main-resolved meta payload)
+        nf = ppool.apply_async(task_func, (make_args(task),))
         replaced[f] = nf
         inflight[nf] = task
     for f in replaced:
@@ -1994,25 +2000,66 @@ def run_latent_flow(
         pool = ThreadPoolExecutor(
             max_workers=max(1, (depth or 1) * bs), thread_name_prefix="lfetch"
         )
-    assert pool is not None, "producer pool must be created (thread here, process above)"
+    elif lf.producer == "spawn":
+        if store is not None:
+            raise RuntimeError(
+                "producer=spawn supports on-fly zhr only (no latent store); "
+                "use producer=thread or producer=process for store mode"
+            )
+        # SPAWN (not fork) process pool (2026-09-01): fresh interpreters,
+        # torch-free workers. The fork backend counted the parent's torch
+        # commit in every worker (the 09-01 salt9 host-overcommit death:
+        # 32-64 DTK-holding workers/rank exhausted the shared 453 GiB
+        # CommitLimit); the thread backend shares the rank's GIL with the
+        # training loop (0.6-0.7 it/s, data_wait 25-29% on salt9). Spawn
+        # workers import only numpy/PIL/stdlib (~200-300 MiB committed
+        # each, no DTK, no GIL shared with the consumer) — process-level
+        # parallelism back inside the VA budget. The worker returns the
+        # uint8 HR crop; the consumer runs the exact decode_hr conversion
+        # + the seeded degrade (bit-exact with the other producers).
+        pool = multiprocessing.get_context("spawn").Pool(
+            max(1, (depth or 1) * bs),
+            initializer=tf_fetch.init_worker,
+            initargs=(
+                str(tar_dir) if tar_dir is not None else None,
+                str(webp_dir) if webp_dir is not None else None,
+                bucket_hr,
+            ),
+        )
+    assert pool is not None, (
+        "producer pool must be created (thread/spawn here, process above)"
+    )
 
     _is_proc = lf.producer == "process"
+    _is_spawn = lf.producer == "spawn"
 
     def _submit_batch(step: int) -> list[Future | _MPAsyncResult]:
         pairs = [
             (latent_sample_index(step, rank, i, bs, world_size, n), step)
             for i in range(bs)
         ]
-        if _is_proc:
+        if _is_proc or _is_spawn:
             ppool = cast("_MPPool", pool)
             # apply_async(func, args): args is the tuple of positional args,
             # so the single-tuple payload ((slot, st),) binds to
             # _pp_fetch(args) exactly once (p1formal P1-PRODUCER-PORT-V2
             # verified form; a flattened (slot, st) raises TypeError in the
             # worker and the batch is lost).
-            futs: list[Future | _MPAsyncResult] = [
-                ppool.apply_async(_pp_fetch, ((slot, st),)) for slot, st in pairs
-            ]
+            if _is_proc:
+                futs: list[Future | _MPAsyncResult] = [
+                    ppool.apply_async(_pp_fetch, ((slot, st),)) for slot, st in pairs
+                ]
+            else:
+                # spawn workers carry no dataset context: the main thread
+                # resolves slot -> meta and ships it (SampleMeta is a
+                # frozen dataclass of primitives — pickles small)
+                futs = [
+                    ppool.apply_async(
+                        tf_fetch.fetch_crop_numpy,
+                        ((ds.samples[slot_map[slot]], st, _EXPOSURE_PER_CYCLE),),
+                    )
+                    for slot, st in pairs
+                ]
             for f, task in zip(futs, pairs):
                 inflight[f] = task  # P1-WORKER-RECOVERY: track for resubmit
             return futs
@@ -2025,7 +2072,7 @@ def run_latent_flow(
     inflight: dict[Any, tuple[int, int]] = {}  # P1-WORKER-RECOVERY: future -> (slot, step)
     crash_state = [0]  # P1-WORKER-RECOVERY: worker deaths seen by this rank
     seen_workers: set = set()  # P1-WORKER-RECOVERY r2: live worker Process objects
-    if _is_proc:
+    if _is_proc or _is_spawn:
         seen_workers.update(cast(Any, pool)._pool)  # Pool impl detail (typeshed-undeclared)
     for k in range(depth):
         if start_step + k < total:
@@ -2103,22 +2150,64 @@ def run_latent_flow(
                 n_wait += 1
 
         tf = time.perf_counter()
-        if _is_proc:
+        if _is_proc or _is_spawn:
             # P1-WORKER-RECOVERY: poll with worker-liveness checks so a dead
             # worker (lost in-flight task) is detected and its task
             # resubmitted instead of blocking forever.
+            if _is_proc:
+                _task_func, _make_args = _pp_fetch, (lambda t: t)
+            else:
+                _task_func = tf_fetch.fetch_crop_numpy
+
+                def _make_args(t: tuple[int, int]) -> tuple:
+                    return (ds.samples[slot_map[t[0]]], t[1], _EXPOSURE_PER_CYCLE)
             while not all(_fut_done(f) for f in futs):
                 _pp_recover_lost_tasks(
                     cast("_MPPool", pool), futs, ready, inflight, crash_state,
-                    seen_workers,
+                    seen_workers, _task_func, _make_args,
                 )
                 time.sleep(_PP_RECOVER_POLL_S)
-            # process pool hands back the (hr, lq, z_hr, meta, stages) tuple;
-            # rewrap into _Prepared (hr is None in store mode)
-            prepared = [
-                _Prepared(hr=r[0], lq=r[1], z_hr=r[2], meta=r[3], stages=r[4])
-                for r in (_fut_result(f) for f in futs)
-            ]
+            if _is_proc:
+                # process pool hands back the (hr, lq, z_hr, meta, stages)
+                # tuple; rewrap into _Prepared (hr is None in store mode)
+                prepared = [
+                    _Prepared(hr=r[0], lq=r[1], z_hr=r[2], meta=r[3], stages=r[4])
+                    for r in (_fut_result(f) for f in futs)
+                ]
+            else:
+                # spawn pool hands back the uint8 HR crop + stage times;
+                # the consumer applies the EXACT decode_hr conversion
+                # (per-element uint8->fp32 linear map commutes with the
+                # slice: bit-exact hr_crop) and the seeded degradation
+                # (bit-exact lq) — only the process boundary moved.
+                prepared = []
+                for i, f in enumerate(futs):
+                    crop_np, st = _fut_result(f)
+                    slot = latent_sample_index(step, rank, i, bs, world_size, n)
+                    meta = ds.samples[slot_map[slot]]
+                    t_c1 = time.perf_counter()
+                    hr_crop = (
+                        torch.from_numpy(crop_np)
+                        .permute(2, 0, 1)
+                        .float()
+                        .mul(2.0 / 255.0)
+                        .sub(1.0)
+                    ).contiguous()
+                    st["crop"] += time.perf_counter() - t_c1
+                    t_d0 = time.perf_counter()
+                    lq_s, _ = degrade_hr(
+                        hr_crop,
+                        cfg,
+                        global_seed=ds.global_seed,
+                        sample_id=meta.sample_id,
+                        data_cycle=step // _EXPOSURE_PER_CYCLE,
+                        exposure_index=step % _EXPOSURE_PER_CYCLE,
+                    )
+                    st["degradation"] = time.perf_counter() - t_d0
+                    st["z_hr"] = 0.0  # on-fly mode: no store read
+                    prepared.append(
+                        _Prepared(hr=hr_crop, lq=lq_s, z_hr=None, meta=meta, stages=st)
+                    )
             for f in futs:
                 inflight.pop(f, None)
         else:
