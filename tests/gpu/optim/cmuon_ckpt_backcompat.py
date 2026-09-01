@@ -28,6 +28,7 @@ ANY mismatch => raise => torchrun exits non-zero (no retry, no tolerance).
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import tomllib
@@ -256,6 +257,13 @@ def main() -> None:
         dist.barrier()
         report["C_update_and_save"] = "ok"
         report["C_state_after_1"] = _state_summary(opt, module)
+
+        # Free the first generation before the exact-resume rebuild: two
+        # full model+optimizer generations exceed the 64 GiB HCU budget
+        # (observed HIP OOM in phase E on DTK 26.04, 2x renderD133/135).
+        del module, opt
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # ---- D. fresh optimizer + exact resume ----------------------------
         torch.manual_seed(20260903)
