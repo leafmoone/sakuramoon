@@ -10,3 +10,13 @@
 exposure_target = 3200
 exposure_min = 1000
 exposure_max = 10000
+
+[sampling]
+# The M4-1024-frozen pool sampler is a FULL-SET permutation per cycle:
+# any 300-step window touches ~all 986 SR_v2 shards (~806 GB resident
+# working set), which defeats bounded streaming on any single node.
+# The canary therefore uses the legacy straight-read stream (index
+# order): the window touches ~2-4 shards per 300 steps. Stream semantics
+# for the SR_v2 6M run is an open venue decision (see 2026-09-01
+# report) — this overlay only scopes the canary.
+enabled = false
