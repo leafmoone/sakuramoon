@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import io
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -85,52 +86,90 @@ def crop_box(width: int, height: int, hr: int, seed: int) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
+# the worker payload (PICKLE-IMPORT-SAFE, 2026-09-01 salt9 live-run fix)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SampleTask:
+    """What a spawn worker needs to fetch one sample — pure primitives.
+
+    The spawn worker unpickles the task payload BY REFERENCE: shipping an
+    ``SRDataset`` ``SampleMeta`` made the worker import
+    ``anime_sr.data.pipeline`` (package init -> degradation -> torch in
+    every worker — the exact VA death this producer avoids; caught on the
+    09-01 salt9 live run: 0.1-0.3 it/s, data_wait 60-66%,
+    TORCH_LOADED=True in every worker). ``SampleTask`` lives in THIS
+    module, so unpickling imports only this torch-free module."""
+
+    sample_id: str
+    shard: str
+    rel_path: str
+    width: int
+    height: int
+    offset: int  # tar-direct byte offset (0 = extracted-webp path)
+    size: int  # tar-direct member size
+
+    @classmethod
+    def from_meta(cls, meta: SampleMeta) -> SampleTask:
+        return cls(
+            sample_id=meta.sample_id,
+            shard=meta.shard,
+            rel_path=meta.rel_path,
+            width=meta.width,
+            height=meta.height,
+            offset=meta.offset,
+            size=meta.size,
+        )
+
+
+# ---------------------------------------------------------------------------
 # raw webp -> numpy (bit-exact source of SRDataset.decode_hr)
 # ---------------------------------------------------------------------------
 
 
 def load_hr_numpy(
-    meta: SampleMeta,
+    task: SampleTask,
     tar_dir: str | Path | None,
     webp_dir: str | Path | None,
 ) -> tuple[np.ndarray, dict[str, float]]:
-    """meta -> (H, W, 3) uint8 RGB array + stage times {"shard", "decode"}.
+    """task -> (H, W, 3) uint8 RGB array + stage times {"shard", "decode"}.
 
     Stage split mirrors ``SRDataset.decode_hr_timed``: ``shard`` = the webp
     open/read (file open on the extracted path, or open+seek+member-read on
     the tar-direct path — the lazy PIL read is NOT in it), ``decode`` =
     convert + size check + asarray (the lazy file read lands in it)."""
     if tar_dir is None:
-        img_id = meta.rel_path.rsplit("/", 1)[-1]
-        p = Path(webp_dir) / meta.shard / img_id
+        img_id = task.rel_path.rsplit("/", 1)[-1]
+        p = Path(webp_dir) / task.shard / img_id
         if not p.is_file():
             raise FileNotFoundError(f"webp missing (extract shards first): {p}")
         t_open = time.perf_counter()
         img = Image.open(p)
         t_shard = time.perf_counter() - t_open
     else:
-        p = Path(tar_dir) / meta.shard
+        p = Path(tar_dir) / task.shard
         if not p.is_file():
             raise FileNotFoundError(
                 f"tar shard missing (the window driver did not pin it): {p}"
             )
         t_open = time.perf_counter()
         with p.open("rb") as fh:
-            fh.seek(meta.offset)
-            data = fh.read(meta.size)
+            fh.seek(task.offset)
+            data = fh.read(task.size)
         t_shard = time.perf_counter() - t_open
-        if len(data) != meta.size:
+        if len(data) != task.size:
             raise RuntimeError(
-                f"truncated webp member for {meta.sample_id} in {p}: "
-                f"got {len(data)} bytes, want {meta.size}"
+                f"truncated webp member for {task.sample_id} in {p}: "
+                f"got {len(data)} bytes, want {task.size}"
             )
         img = Image.open(io.BytesIO(data))
     t_dec0 = time.perf_counter()
     img = img.convert("RGB")
-    if (img.width, img.height) != (meta.width, meta.height):
+    if (img.width, img.height) != (task.width, task.height):
         raise RuntimeError(
-            f"size mismatch for {meta.sample_id}: {img.size} "
-            f"vs ({meta.width}, {meta.height})"
+            f"size mismatch for {task.sample_id}: {img.size} "
+            f"vs ({task.width}, {task.height})"
         )
     arr = np.asarray(img, dtype=np.uint8).copy()
     t_decode = time.perf_counter() - t_dec0
@@ -155,7 +194,7 @@ def init_worker(
 
 
 def fetch_crop_numpy_worker(
-    meta: SampleMeta,
+    task: SampleTask,
     step: int,
     exposure_per_cycle: int,
     *,
@@ -163,7 +202,7 @@ def fetch_crop_numpy_worker(
     webp_dir: str | Path | None,
     bucket_hr: int,
 ) -> tuple[np.ndarray, dict[str, float]]:
-    """Pure core: (meta, step, epc) -> (hr_crop uint8 HWC [B, B, 3],
+    """Pure core: (task, step, epc) -> (hr_crop uint8 HWC [B, B, 3],
     stage times).
 
     The crop box is the trainer's exact deterministic rule
@@ -174,16 +213,16 @@ def fetch_crop_numpy_worker(
     stays on the consumer so the lq is bit-identical to the other
     producers."""
     st: dict[str, float] = {}
-    arr, dec = load_hr_numpy(meta, tar_dir, webp_dir)
+    arr, dec = load_hr_numpy(task, tar_dir, webp_dir)
     st["shard"] = dec["shard"]
     st["decode"] = dec["decode"]
     t_c0 = time.perf_counter()
     b = int(bucket_hr)
     x, y = crop_box(
-        meta.width,
-        meta.height,
+        task.width,
+        task.height,
         b,
-        box_seed(meta.sample_id, step // exposure_per_cycle, step % exposure_per_cycle),
+        box_seed(task.sample_id, step // exposure_per_cycle, step % exposure_per_cycle),
     )
     crop = np.ascontiguousarray(arr[y : y + b, x : x + b])
     st["crop"] = time.perf_counter() - t_c0
@@ -191,14 +230,16 @@ def fetch_crop_numpy_worker(
 
 
 def fetch_crop_numpy(
-    args: tuple[SampleMeta, int, int],
+    args: tuple[SampleTask, int, int],
 ) -> tuple[np.ndarray, dict[str, float]]:
     """Spawn-pool worker body (module-level: picklable by reference for
     spawn); delegates to :func:`fetch_crop_numpy_worker` with the
-    pool-initializer state."""
-    meta, step, epc = args
+    pool-initializer state. The payload is a ``SampleTask`` (this
+    module), NEVER an ``SRDataset.SampleMeta`` — see the class docstring
+    for the torch-leak it avoids."""
+    task, step, epc = args
     return fetch_crop_numpy_worker(
-        meta,
+        task,
         step,
         epc,
         tar_dir=_W["tar_dir"],
@@ -216,6 +257,7 @@ def _probe_modules() -> list[str]:
 
 
 __all__ = [
+    "SampleTask",
     "box_seed",
     "crop_box",
     "fetch_crop_numpy",

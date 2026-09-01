@@ -2051,12 +2051,23 @@ def run_latent_flow(
                 ]
             else:
                 # spawn workers carry no dataset context: the main thread
-                # resolves slot -> meta and ships it (SampleMeta is a
-                # frozen dataclass of primitives — pickles small)
+                # resolves slot -> meta and ships it. The payload is a
+                # SampleTask (torchfree_fetch) — NEVER the dataset's
+                # SampleMeta: unpickling it by reference would import
+                # anime_sr.data.pipeline (package init -> torch in every
+                # worker, the exact VA death this producer avoids).
                 futs = [
                     ppool.apply_async(
                         tf_fetch.fetch_crop_numpy,
-                        ((ds.samples[slot_map[slot]], st, _EXPOSURE_PER_CYCLE),),
+                        (
+                            (
+                                tf_fetch.SampleTask.from_meta(
+                                    ds.samples[slot_map[slot]]
+                                ),
+                                st,
+                                _EXPOSURE_PER_CYCLE,
+                            ),
+                        ),
                     )
                     for slot, st in pairs
                 ]

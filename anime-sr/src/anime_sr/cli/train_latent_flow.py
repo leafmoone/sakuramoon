@@ -21,13 +21,15 @@ import argparse
 import os
 import sys
 
-import torch.distributed as dist
-
 from anime_sr.config.loader import load_config
-from anime_sr.train.latent_flow import (
-    prepare_producer_prefork,
-    run_latent_flow,
-)
+
+# LOAD ORDER IS LOAD-BEARING (2026-09-01 salt9 VA fix): this module is the
+# torchrun ENTRY and therefore the SPAWN main module — every spawn worker
+# re-imports it (`_fixup_main_from_name`), so its top level must stay
+# torch-free or each of the 32-64 workers commits ~5 GiB of torch VA (the
+# host-overcommit death). The torch-heavy imports happen inside main(),
+# AFTER the rank process has started and the (torch-free) worker pool is
+# up. anime_sr.config.loader is pydantic-only (torch-free).
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,6 +97,16 @@ def main(argv: list[str] | None = None) -> int:
         help="override [latent_flow].prefetch_depth (2=double, 4=quad)",
     )
     args = ap.parse_args(argv)
+
+    # torch-heavy imports AFTER arg parsing: keeps the module top level
+    # torch-free for the spawn workers that re-import this main module
+    # (see the load-order note above).
+    import torch.distributed as dist
+
+    from anime_sr.train.latent_flow import (
+        prepare_producer_prefork,
+        run_latent_flow,
+    )
 
     cfg = load_config(*args.config)
     if args.no_prefetch:

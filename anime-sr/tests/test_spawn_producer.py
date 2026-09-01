@@ -112,18 +112,33 @@ def test_worker_module_source_is_torch_free() -> None:
 
 def test_worker_probe_in_fresh_interpreter(tmp_path: Path) -> None:
     """Authoritative VA-budget probe: a FRESH python (spawn worker's real
-    environment) runs the worker's own module probe and must not have
-    torch loaded (the probe lives in the torchfree module, so the worker
-    never imports this test module and its torch imports)."""
+    environment) must not have torch loaded — checked both bare and after
+    unpickling + running a REAL task payload (the 09-01 salt9 live run
+    leaked torch through the SampleMeta payload import; the fix is the
+    SampleTask payload from the torch-free module). One worker so the
+    probe runs in the SAME process that ran the task (FIFO task queue).
+    The probe lives in the torchfree module — defining it in this test
+    module would make the worker import this file and its torch imports."""
     import multiprocessing
 
-    ctx = multiprocessing.get_context("spawn")
-    with ctx.Pool(
-        processes=1, initializer=tf.init_worker, initargs=(None, None, 512)
+    ds, pinned = _dataset(tmp_path)
+    task = tf.SampleTask.from_meta(ds.samples[0])
+    with multiprocessing.get_context("spawn").Pool(
+        processes=1,
+        initializer=tf.init_worker,
+        initargs=(str(pinned), None, 512),
     ) as pool:
-        mods = pool.apply(tf._probe_modules, ())
-    assert "torch" not in mods, f"torch loaded in torch-free worker: {mods}"
-    assert "numpy" in mods and "PIL" in mods
+        mods_bare = pool.apply(tf._probe_modules, ())
+        assert "torch" not in mods_bare, (
+            f"torch loaded in bare torch-free worker: {mods_bare}"
+        )
+        crop, st = pool.apply(tf.fetch_crop_numpy, ((task, 3, 25),))
+        mods_task = pool.apply(tf._probe_modules, ())
+    assert "numpy" in mods_bare and "PIL" in mods_bare
+    assert "torch" not in mods_task, (
+        f"torch loaded after unpickling/running the task payload: {mods_task}"
+    )
+    assert crop.shape == (512, 512, 3) and set(st) == {"shard", "decode", "crop"}
 
 
 def _convert(crop: np.ndarray) -> torch.Tensor:
@@ -138,7 +153,7 @@ def test_load_hr_numpy_bitexact_with_decode_hr(tmp_path: Path) -> None:
     ds, pinned = _dataset(tmp_path)
     for meta in ds.samples:
         t_full, _st = ds.decode_hr_timed(meta)
-        arr, st = tf.load_hr_numpy(meta, pinned, None)
+        arr, st = tf.load_hr_numpy(tf.SampleTask.from_meta(meta), pinned, None)
         assert set(st) == {"shard", "decode"}
         t_np = (
             torch.from_numpy(arr).permute(2, 0, 1).float().mul(2.0 / 255.0).sub(1.0)
@@ -161,7 +176,8 @@ def test_crop_path_bitexact_with_trainer_crop(tmp_path: Path) -> None:
             )
             ref = t_full[..., y : y + 512, x : x + 512].contiguous()
             crop_np, st = tf.fetch_crop_numpy_worker(
-                meta, step, epc, tar_dir=pinned, webp_dir=None, bucket_hr=512
+                tf.SampleTask.from_meta(meta), step, epc,
+                tar_dir=pinned, webp_dir=None, bucket_hr=512,
             )
             assert crop_np.shape == (512, 512, 3) and crop_np.dtype == np.uint8
             assert set(st) == {"shard", "decode", "crop"}
@@ -184,7 +200,8 @@ def test_degradation_bitexact_consumer_side(tmp_path: Path) -> None:
             )
             hr_ref = t_full[..., y : y + 512, x : x + 512].contiguous()
             crop_np, _ = tf.fetch_crop_numpy_worker(
-                meta, step, epc, tar_dir=pinned, webp_dir=None, bucket_hr=512
+                tf.SampleTask.from_meta(meta), step, epc,
+                tar_dir=pinned, webp_dir=None, bucket_hr=512,
             )
             lq_ref, _ = degrade_hr(
                 hr_ref, CFG, global_seed=ds.global_seed, sample_id=meta.sample_id,
@@ -212,7 +229,8 @@ def test_spawn_pool_roundtrip(tmp_path: Path) -> None:
     ) as pool:
         futs = [
             pool.apply_async(
-                tf.fetch_crop_numpy, ((meta, step, epc),)
+                tf.fetch_crop_numpy,
+                ((tf.SampleTask.from_meta(meta), step, epc),),
             )
             for meta, step in zip(ds.samples, (0, 3))
         ]
