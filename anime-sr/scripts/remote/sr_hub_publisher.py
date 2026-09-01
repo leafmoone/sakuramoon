@@ -27,7 +27,7 @@ from pathlib import Path
 
 STEP_LINE = re.compile(
     r"\[latent\] step (\d+)/(\d+) loss=([\d.]+) lr=([\d.e+-]+) "
-    r"\( ?([\d.]+) it/s \) data_wait=([\d.]+)%"
+    r"\(?([\d.]+) it/s\)? data_wait=([\d.]+)%"
 )
 
 
