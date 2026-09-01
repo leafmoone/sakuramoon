@@ -426,9 +426,15 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
     ) -> PipelineSample | None:
         raw_metadata = _metadata(sample)
         sample_url = sample.get("__url__")
-        if not isinstance(sample_url, str) or sample_url not in records_by_url:
+        sample_key = sample.get("__key__")
+        if (
+            not isinstance(sample_url, str)
+            or sample_url not in records_by_url
+            or not isinstance(sample_key, str)
+            or not sample_key
+        ):
             raise PipelineSampleError(
-                "WebDataset sample source is absent from trusted shard records"
+                "WebDataset sample source/key is absent from trusted shard records"
             )
         adapted_metadata = cast(object, self.metadata_adapter(raw_metadata))
         if not isinstance(adapted_metadata, Mapping):
@@ -441,6 +447,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         metadata: OperationalMetadataRecord = parse_shard_metadata(
             mapped_metadata,
             fields=self.metadata_fields,
+            sample_key=f"{sample_url}\0{sample_key}",
         )
         identity = rng_identity(
             base_seed=self.base_seed,

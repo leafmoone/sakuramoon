@@ -30,7 +30,10 @@ log() {
 }
 
 load_environment() {
-  if [[ -f /root/private_data/.ai_user_info/ai_proxy ]]; then
+  # 2026-08-30 fix: only fall back to ai_proxy when no proxy is already configured.
+  # ai_proxy went stale (pinned dead pool 10.13.17.166) and silently broke every
+  # hub upload while the stack-injected proxy (10.16.1.51) was alive.
+  if [[ -f /root/private_data/.ai_user_info/ai_proxy ]] && [[ -z "${http_proxy:-}${HTTP_PROXY:-}" ]]; then
     # shellcheck disable=SC1091
     source /root/private_data/.ai_user_info/ai_proxy
   fi

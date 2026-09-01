@@ -7,6 +7,7 @@ import pytest
 
 import sakuramoon.data.production as production_module
 from sakuramoon.data.collate import TrainingBatch
+from sakuramoon.data.metadata import MetadataFieldMapping, parse_shard_metadata
 from sakuramoon.data.production import (
     ConfiguredDataLoader,
     ProductionBatchStreamIdentity,
@@ -132,7 +133,7 @@ def test_modelscope_parser_accepts_null_nsfw_when_character_records_are_missing(
     assert parse_modelscope_caption_fields(raw).nsfw == ()
 
 
-@pytest.mark.parametrize("value", [None, "", "safe", 2])
+@pytest.mark.parametrize("value", [None, "safe", 2])
 def test_governed_modelscope_parser_rejects_invalid_nsfw(value: object) -> None:
     raw = _real_row()
     raw["nsfw"] = value
@@ -162,7 +163,7 @@ def test_governed_modelscope_parser_splits_year_tags(
 
 @pytest.mark.parametrize(
     "value",
-    [None, "", "2026", "year 26", "year 2026,newest", "year 2026, middle"],
+    [None, "2026", "year 26", "year 2026,newest", "year 2026, middle"],
 )
 def test_governed_modelscope_parser_rejects_invalid_year(value: object) -> None:
     raw = _real_row()
@@ -170,6 +171,74 @@ def test_governed_modelscope_parser_rejects_invalid_year(value: object) -> None:
 
     with pytest.raises(ProductionDataError, match="year"):
         parse_modelscope_caption_fields(raw)
+
+
+def test_governed_modelscope_parser_accepts_blank_nsfw_and_year() -> None:
+    raw = _real_row()
+    raw["nsfw"] = ""
+    raw["year"] = ""
+
+    fields = parse_modelscope_caption_fields(raw)
+
+    assert fields.nsfw == ()
+    assert fields.year == ()
+
+
+def _a2_row() -> dict[str, object]:
+    # Mirrors the published artstation-2D (a2) annotation rows: schema v1
+    # source with blank release/original_path and a blank string id.
+    return {
+        "schema_version": 1,
+        "id": "",
+        "source": {
+            "dataset": "artstation-2D",
+            "dataset_version": "1",
+            "release": "",
+            "original_path": "",
+        },
+        "image": {"format": "jpeg", "width": 1916, "height": 1916},
+        "nsfw": "",
+        "tags": {
+            "general": ["artstation", "1girl"],
+            "artist": [],
+            "character": [],
+            "copyright": [],
+        },
+        "captions": {"nl2": "", "nl3": ""},
+        "multicaptions": {},
+        "dropout": {},
+        "join": {},
+        "rating": "",
+        "year": "",
+        "aesthetic": "",
+        "quality": "low",
+        "anime_completeness": "monochrome",
+        "anime_classification": "illustration",
+    }
+
+
+def test_governed_modelscope_parser_accepts_2d_annotation_row() -> None:
+    raw = _a2_row()
+
+    record = adapt_modelscope_metadata(raw)
+    fields = parse_modelscope_caption_fields(raw)
+
+    assert record == {"id": ""}
+    assert fields.nsfw == ()
+    assert fields.year == ()
+
+
+def test_shard_metadata_derives_id_for_blank_2d_id() -> None:
+    raw = _a2_row()
+    fields = MetadataFieldMapping(id_field="id")
+
+    record = parse_shard_metadata(raw, fields=fields, sample_key="a2_filter_4429173")
+    assert record.id == 4429173
+
+    fallback = parse_shard_metadata(raw, fields=fields, sample_key="a2_filter_blank")
+    assert 0 < fallback.id < 2**53
+    again = parse_shard_metadata(raw, fields=fields, sample_key="a2_filter_blank")
+    assert again.id == fallback.id
 
 
 def test_governed_modelscope_parser_rejects_schema_drift() -> None:

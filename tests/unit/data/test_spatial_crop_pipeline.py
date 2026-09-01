@@ -111,6 +111,7 @@ def _process_sample(
 ) -> PipelineSample:
     sample = {
         "__url__": _SHARD,
+        "__key__": f"synthetic/{sample_id:06d}",
         "json": b'{"id": ' + str(sample_id).encode("ascii") + b"}",
         "png": image_bytes,
     }

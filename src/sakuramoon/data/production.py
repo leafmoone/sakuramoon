@@ -115,6 +115,53 @@ def _require_exact_keys(
         )
 
 
+def _validate_source_contract(raw: Mapping[str, object]) -> str:
+    """Validate the dataset-specific source identity and return its dataset."""
+
+    source = _nested_mapping(raw, "source")
+    _require_exact_keys(
+        source,
+        frozenset({"dataset", "dataset_version", "release", "original_path"}),
+        group="source",
+    )
+    dataset = source["dataset"]
+    version = source["dataset_version"]
+    if type(dataset) is not str or type(version) is not str:
+        raise ProductionDataError("ModelScope metadata source contract is invalid")
+    if dataset == "danbooru":
+        valid = version == "5.9" and all(
+            type(source[key]) is str
+            and bool(cast(str, source[key]))
+            and cast(str, source[key]) == cast(str, source[key]).strip()
+            for key in ("release", "original_path")
+        )
+    elif dataset in {"artstation-2D", "background-2D"}:
+        # The 2D publisher uses schema v1 and may leave release/path blank
+        # (the WebDataset __key__ is the operational sample identity).
+        valid = version == "1" and all(
+            type(source[key]) is str
+            and cast(str, source[key]) == cast(str, source[key]).strip()
+            and "\n" not in cast(str, source[key])
+            for key in ("release", "original_path")
+        )
+    else:
+        valid = False
+    if not valid:
+        raise ProductionDataError("ModelScope metadata source contract is invalid")
+    return dataset
+
+
+def _optional_tag_from_value(
+    raw: Mapping[str, object], key: str, *, allowed: frozenset[str] | None = None
+) -> tuple[Tag, ...]:
+    """Map an explicitly blank optional metadata scalar to no tags."""
+
+    value = raw[key]
+    if value is None or value == "":
+        return ()
+    return _tag_from_value(raw, key, allowed=allowed)
+
+
 def _required_text(raw: Mapping[str, object], key: str) -> str:
     if key not in raw:
         raise ProductionDataError(f"ModelScope metadata {key} is required")
@@ -146,9 +193,11 @@ def _modelscope_nsfw_tags(
     raw: Mapping[str, object],
 ) -> tuple[Tag, ...]:
     value = raw["nsfw"]
+    if value == "":
+        return ()
     if value is None:
         join = _nested_mapping(raw, "join")
-        if join["character_records"] == "missing":
+        if join.get("character_records") == "missing":
             return ()
         raise ProductionDataError(
             "ModelScope metadata nsfw may be null only when character records are missing"
@@ -169,26 +218,17 @@ def _validate_v2_contract(raw: Mapping[str, object]) -> None:
         )
     if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
         raise ProductionDataError("ModelScope metadata schema_version must be 1")
-    if type(raw["id"]) is not int or cast(int, raw["id"]) <= 0:
-        raise ProductionDataError("ModelScope metadata id must be a positive integer")
-
-    source = _nested_mapping(raw, "source")
-    _require_exact_keys(
-        source,
-        frozenset({"dataset", "dataset_version", "release", "original_path"}),
-        group="source",
-    )
-    if (
-        source["dataset"] != "danbooru"
-        or source["dataset_version"] != "5.9"
-        or any(
-            type(source[key]) is not str
-            or not cast(str, source[key])
-            or cast(str, source[key]) != cast(str, source[key]).strip()
-            for key in ("release", "original_path")
+    _id = raw["id"]
+    # 2026-08-31 Option-B: empty string id is accepted for the 2D annotation
+    # shards (a2/bg); the stable positive integer identity is derived from
+    # the sample key in metadata.parse_shard_metadata. Danbooru samples keep
+    # their real integer id and are unaffected.
+    if _id != "" and (type(_id) is not int or _id <= 0):
+        raise ProductionDataError(
+            "ModelScope metadata id must be a positive integer or empty"
         )
-    ):
-        raise ProductionDataError("ModelScope metadata source contract is invalid")
+
+    dataset = _validate_source_contract(raw)
 
     image = _nested_mapping(raw, "image")
     _require_exact_keys(
@@ -225,24 +265,28 @@ def _validate_v2_contract(raw: Mapping[str, object]) -> None:
             f"extra={sorted(unknown_multicaptions)!r}"
         )
     join = _nested_mapping(raw, "join")
-    _require_exact_keys(
-        join,
-        frozenset({"multicaptions", "character_records"}),
-        group="join",
-    )
-    if any(value not in {"matched", "missing"} for value in join.values()):
-        raise ProductionDataError("ModelScope metadata join values are invalid")
     dropout = _nested_mapping(raw, "dropout")
-    _require_exact_keys(
-        dropout,
-        frozenset({"candidate_tags", "candidate_source", "policy_version"}),
-        group="dropout",
-    )
-    if (
-        dropout["candidate_source"] != "popular_tags_intersection"
-        or dropout["policy_version"] != "dropout_v1"
-    ):
-        raise ProductionDataError("ModelScope metadata dropout policy is invalid")
+    if dataset == "danbooru":
+        _require_exact_keys(
+            join,
+            frozenset({"multicaptions", "character_records"}),
+            group="join",
+        )
+        if any(value not in {"matched", "missing"} for value in join.values()):
+            raise ProductionDataError("ModelScope metadata join values are invalid")
+        _require_exact_keys(
+            dropout,
+            frozenset({"candidate_tags", "candidate_source", "policy_version"}),
+            group="dropout",
+        )
+        if (
+            dropout["candidate_source"] != "popular_tags_intersection"
+            or dropout["policy_version"] != "dropout_v1"
+        ):
+            raise ProductionDataError("ModelScope metadata dropout policy is invalid")
+    else:
+        _require_exact_keys(join, frozenset(), group="join")
+        _require_exact_keys(dropout, frozenset(), group="dropout")
 
     if "ai_image_corrupted" in raw:
         if raw["ai_image_corrupted"] != "corrupted":
@@ -303,7 +347,7 @@ def parse_modelscope_caption_fields(
     captions = _nested_mapping(raw, "captions")
     multicaptions = _nested_mapping(raw, "multicaptions")
     dropout = _nested_mapping(raw, "dropout")
-    candidate_tags = dropout.get("candidate_tags")
+    candidate_tags = dropout.get("candidate_tags", [])
     if type(candidate_tags) is not list:
         raise ProductionDataError(
             "ModelScope metadata dropout.candidate_tags must be a list"
@@ -313,12 +357,16 @@ def parse_modelscope_caption_fields(
         raise ProductionDataError(
             "ModelScope metadata dropout.candidate_tags must contain only strings"
         )
-    year = _required_text(raw, "year")
-    if _YEAR_PATTERN.fullmatch(year) is None:
-        raise ProductionDataError("ModelScope metadata year has an invalid value")
-    year_tags = tuple(
-        Tag(text=component, canonical=component) for component in year.split(", ")
-    )
+    year_value = raw["year"]
+    if year_value == "":
+        year_tags: tuple[Tag, ...] = ()
+    else:
+        year = _required_text(raw, "year")
+        if _YEAR_PATTERN.fullmatch(year) is None:
+            raise ProductionDataError("ModelScope metadata year has an invalid value")
+        year_tags = tuple(
+            Tag(text=component, canonical=component) for component in year.split(", ")
+        )
     return CaptionFields(
         nsfw=_modelscope_nsfw_tags(raw),
         character=_modelscope_tags(raw, "character"),
@@ -333,11 +381,11 @@ def parse_modelscope_caption_fields(
             _optional_text(captions, "nl2", group="captions"),
             _optional_text(captions, "nl3", group="captions"),
         ),
-        rating=_tag_from_value(raw, "rating", allowed=_RATINGS),
+        rating=_optional_tag_from_value(raw, "rating", allowed=_RATINGS),
         year=year_tags,
         aesthetic=(
             ()
-            if raw["aesthetic"] == " "
+            if raw["aesthetic"] == "" or raw["aesthetic"] == " "
             else _tag_from_value(raw, "aesthetic")
         ),
         quality=_tag_from_value(raw, "quality", allowed=_QUALITY_VALUES),

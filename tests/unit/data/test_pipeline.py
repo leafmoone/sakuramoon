@@ -66,6 +66,7 @@ def test_pipeline_skips_corrupt_image_and_reports_rejection() -> None:
     shard = "data/synthetic/shard-000000.tar"
     sample = {
         "__url__": shard,
+        "__key__": "synthetic/000000",
         "json": b'{"id": 1, "release": "synthetic", "width": 512, "height": 512, "caption_available": false}',
         "jpg": b"not an image",
     }
@@ -100,6 +101,7 @@ def test_pipeline_skips_policy_rejected_sample_before_image_decode() -> None:
     shard = "data/synthetic/shard-000000.tar"
     sample = {
         "__url__": shard,
+        "__key__": "synthetic/000001",
         "json": b'{"id": 1}',
     }
     result = pipeline._process(

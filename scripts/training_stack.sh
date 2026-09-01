@@ -439,13 +439,14 @@ start_publisher() {
   fi
 
   : >"${PUBLISH_LOG}"
+  # 2026-08-30: MS_HUB_BIN respects a wrapper override (venv ms-hub shebang is stale: points at /root/private_data/sakuramoon-dtk-venv/bin/python)
   nohup env \
     SOURCE_ROOT="${CHECKPOINT_ROOT}" \
     PROJECT_ROOT="${PROJECT_ROOT}" \
     STATE_ROOT="${PUBLISH_STATE_ROOT}" \
     LOG_FILE="${PUBLISH_LOG}" \
       LAST_PUBLISHED="${PUBLISH_LAST_PUBLISHED}" \
-    MS_HUB_BIN="${VENV_ROOT}/bin/ms-hub" \
+    MS_HUB_BIN="${MS_HUB_BIN:-${VENV_ROOT}/bin/ms-hub}" \
     /usr/bin/bash "${PROJECT_ROOT}/scripts/publish_train_state.sh" loop \
     >/dev/null 2>&1 </dev/null 9>&- &
   RESOLVED_PID=$!

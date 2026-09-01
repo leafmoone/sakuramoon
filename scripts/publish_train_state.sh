@@ -26,7 +26,14 @@ fi
 
 mkdir -p "${STATE_ROOT}"
 exec 9>"${STATE_ROOT}/publisher.lock"
-if ! flock -n 9; then
+# 2026-08-30: bounded retry instead of one-shot: a stop/start race (previous instance's
+# SIGTERM trap not yet reaped) can transiently hold the lock right after a stack restart.
+_lock_ok=0
+for _i in $(seq 1 30); do
+  if flock -n 9; then _lock_ok=1; break; fi
+  sleep 1
+done
+if [[ "${_lock_ok}" != "1" ]]; then
   printf 'another train-state publisher is already running\n' >&2
   exit 2
 fi
@@ -38,7 +45,10 @@ log() {
 load_environment() {
   # Vendor/profile scripts are not guaranteed to be nounset-clean.
   set +u
-  if [[ -f /root/private_data/.ai_user_info/ai_proxy ]]; then
+  # 2026-08-30 fix: only fall back to ai_proxy when no proxy is already configured.
+  # ai_proxy went stale (pinned dead pool 10.13.17.166) and silently broke every
+  # hub upload while the stack-injected proxy (10.16.1.51) was alive.
+  if [[ -f /root/private_data/.ai_user_info/ai_proxy ]] && [[ -z "${http_proxy:-}${HTTP_PROXY:-}" ]]; then
     # shellcheck disable=SC1091
     source /root/private_data/.ai_user_info/ai_proxy
   fi
@@ -136,7 +146,7 @@ tree_identity() {
 ensure_private_repo() {
   "${MS_HUB_BIN}" create "${REPO_ID}" \
     --repo-type "${REPO_TYPE}" --visibility private --exist-ok \
-    >>"${LOG_FILE}" 2>&1
+    >>"${LOG_FILE}" 2>&1 9>&-
 }
 
 verify_remote_checkpoints() {
@@ -151,7 +161,7 @@ verify_remote_checkpoints() {
   verify_dir="$(mktemp -d "${STATE_ROOT}/.verify.XXXXXX")"
   if ! "${MS_HUB_BIN}" download \
     --repo-type "${REPO_TYPE}" --local-dir "${verify_dir}" --force \
-    "${REPO_ID}" "${remote_files[@]}" >>"${LOG_FILE}" 2>&1; then
+    "${REPO_ID}" "${remote_files[@]}" >>"${LOG_FILE}" 2>&1 9>&-; then
     remove_workdir "${verify_dir}"
     return 1
   fi
@@ -205,7 +215,7 @@ publish_if_changed() {
     --max-workers "${UPLOAD_WORKERS}" --disable-tqdm \
     --exclude '.ms_upload_cache/**' \
     --commit-message "training state tree ${identity:0:12}" \
-    >"${upload_log}" 2>&1; then
+    >"${upload_log}" 2>&1 9>&-; then
     cat "${upload_log}" >>"${LOG_FILE}"
     rm -f -- "${upload_log}"
     remove_workdir "${candidate}"

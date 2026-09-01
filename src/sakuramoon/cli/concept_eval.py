@@ -247,6 +247,7 @@ def load_reference_images(
 ) -> torch.Tensor:
     """Decode reference posts through the online real-image preprocessing."""
 
+    import numpy as np
     import torch
     from PIL import Image
     from torch.nn import functional
@@ -256,7 +257,7 @@ def load_reference_images(
         for path in paths:
             try:
                 with Image.open(path) as image:
-                    tensor = functional.pil_to_tensor(image.convert("RGB"))
+                    tensor = torch.from_numpy(np.asarray(image.convert("RGB"))).permute(2, 0, 1).contiguous()
             except (OSError, ValueError) as error:
                 raise RuntimeError(
                     f"reference image cannot be decoded: {path}"
