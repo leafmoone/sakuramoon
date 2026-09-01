@@ -20,3 +20,11 @@ exposure_max = 10000
 # for the SR_v2 6M run is an open venue decision (see 2026-09-01
 # report) — this overlay only scopes the canary.
 enabled = false
+
+[latent_flow]
+# SR_v2 has no precomputed latent store: z_hr comes from the on-the-fly
+# VAE encode (P1 ④). producer=process + depth 4 mirror the M4-1024
+# verified combination and exercise the pre-NCCL fork wedge fix.
+zhr_source = "onfly"
+producer = "process"
+prefetch_depth = 4
