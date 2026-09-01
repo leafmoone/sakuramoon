@@ -369,6 +369,39 @@ def run_index_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
 # ---------------------------------------------------------------------------
 # mode: window — the training-time demand driver (pin/lease/ack)
 # ---------------------------------------------------------------------------
+_CKPT_STEP_CACHE: dict[str, tuple[float, int]] = {}
+
+
+def _ckpt_step(path: str | Path) -> int:
+    """The trainer step stored in a checkpoint (v2 meta["step"] or v1
+    "step"), cached by (path, mtime). Returns 0 when the file is missing or
+    unreadable — the conservative release gate (nothing may be released)
+    on any read failure."""
+    key = str(path)
+    try:
+        mtime = Path(path).stat().st_mtime
+    except OSError:
+        return 0
+    hit = _CKPT_STEP_CACHE.get(key)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    step = 0
+    try:
+        import torch  # lazy: keep this script importable without DTK
+
+        doc = torch.load(path, map_location="cpu", weights_only=False)
+        if isinstance(doc, dict):
+            meta = doc.get("meta")
+            if isinstance(meta, dict) and "step" in meta:
+                step = int(meta["step"])
+            elif "step" in doc:
+                step = int(doc["step"])
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+        step = 0
+    _CKPT_STEP_CACHE[key] = (mtime, step)
+    return step
+
+
 def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
     """Keep the shards the trainer's next --window-steps touch pinned.
 
@@ -578,6 +611,47 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
                 )
             )
             last_step = step
+            # Release gate (2026-09-01, salt9 death-loop fix): a pinned shard
+            # is the ONLY in-cycle copy — the data service refuses same-cycle
+            # re-serves ("completed in this cycle"). Before the first
+            # checkpoint a death restarts the trainer at step 0 (no ckpt to
+            # seed the heartbeat), so the window rolls back and re-requests
+            # exactly the shards the dead run already released; with the pins
+            # unlinked the service hard-refuses -> missing pin -> trainer
+            # death -> restart -> the same refusal, forever. A shard may
+            # therefore be released only when the trainer can never re-read
+            # it: the resume origin O (latest ckpt step; 0 = no ckpt yet)
+            # has passed it. The re-read region is [O, current sample-cycle
+            # boundary) in step units: O sits at most one checkpoint grid
+            # (15625 steps) + one window behind `step`, so the region — and
+            # the retained pin set — stays bounded (~one grid + window,
+            # ~260 GiB on the venue's local disk) and drains as O advances.
+            # Pre-checkpoint O=0 makes the region the whole current cycle:
+            # nothing is released until the first ckpt exists (bounded by
+            # the first-grid step count).
+            resume_origin = (
+                _ckpt_step(args.resume_ckpt) if args.resume_ckpt else 0
+            )
+            cycle_pos = step * args.bs * args.world
+            cycle_end_pos = (cycle_pos // n + 1) * n
+            re_read_end = (cycle_end_pos + args.bs * args.world - 1) // (
+                args.bs * args.world
+            )  # ceil: keep the boundary-straddling step conservative
+            re_read = (
+                set(
+                    window_shards(
+                        resume_origin,
+                        re_read_end,
+                        bs=args.bs,
+                        world=args.world,
+                        n=n,
+                        slot_map=slot_map,
+                        shards=shards,
+                    )
+                )
+                if 0 < resume_origin < re_read_end
+                else (set(shards) if 0 < n else set())
+            )
             # pin: everything the window (or val) needs
             for flat in sorted(window | val_shards):
                 with wlock:
@@ -597,7 +671,10 @@ def run_window_mode(args: argparse.Namespace, client: DataServiceClient) -> int:
             released: list[tuple[str, object, int]] = []
             with wlock:
                 for flat in list(pinned):
-                    if flat in val_shards or flat in window:
+                    # val stays pinned; the live window stays pinned; the
+                    # restart re-read region (release gate above) stays
+                    # pinned — releasing it is the salt9 death loop.
+                    if flat in val_shards or flat in window or flat in re_read:
                         continue
                     desc, slot = pinned.pop(flat)
                     released.append((flat, desc, slot))
@@ -702,6 +779,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--window-steps", type=int, default=300)
     ap.add_argument("--request-timeout", type=float, default=1800.0)
     ap.add_argument("--lease-slots", type=int, default=4)
+    ap.add_argument(
+        "--resume-ckpt",
+        default=None,
+        help=(
+            "window mode: the latest.pt the trainer resumes from. Release "
+            "gate: a pinned shard is the ONLY in-cycle copy (the service "
+            "refuses same-cycle re-serves), so a shard is released only "
+            "when the trainer can never re-read it — i.e. the resume "
+            "origin (ckpt step; 0 = no checkpoint yet) has passed it. "
+            "Pre-checkpoint: nothing is ever released."
+        ),
+    )
     args = ap.parse_args()
 
     if args.mode == "extract" and not args.webp_dir:
