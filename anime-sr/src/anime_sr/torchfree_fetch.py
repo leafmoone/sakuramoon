@@ -17,6 +17,16 @@ unit test pins bit-exactness against the torch path, and the crop stage
 reuses the exact ``crop_box``/``box_seed`` the trainer uses, so a
 ``producer="spawn"`` batch is bit-identical to the thread/process
 producer for the same (sample, step) — only the process boundary moved.
+
+MODULE LOCATION IS LOAD-BEARING (2026-09-01, salt9 probe test): this
+module lives at the ``anime_sr`` TOP LEVEL, not in ``anime_sr.data``,
+because ``anime_sr.data.__init__`` eagerly imports its submodules
+(degradation, pipeline — torch). A spawn worker importing
+``anime_sr.data.torchfree_fetch`` would run that package ``__init__``
+and load torch in every worker (~5 GiB committed each — the exact VA
+death this producer exists to avoid). Only ``anime_sr/__init__.py``
+(clean: docstring + ``__version__``) may sit above this module. This
+module therefore imports NOTHING from ``anime_sr`` at runtime.
 """
 
 from __future__ import annotations
@@ -30,19 +40,15 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from PIL import Image
 
-from anime_sr.data.buckets import crop_box
-
 if TYPE_CHECKING:
-    # typing only: a runtime import here would make pipeline <->
-    # torchfree_fetch circular (pipeline re-exports box_seed from this
-    # module); annotations are strings under `from __future__ import
-    # annotations`
+    # typing only (never executed): SampleMeta for the annotations
     from anime_sr.data.pipeline import SampleMeta
 
 # ---------------------------------------------------------------------------
-# crop-box stream (moved here from pipeline.py so spawn workers can build
-# the deterministic box without importing the torch-heavy pipeline module;
-# pipeline re-exports it — the hash format is FROZEN, resume-safe)
+# crop-box stream (moved here from pipeline.py, then from data/buckets.py:
+# spawn workers must build the deterministic box without importing the
+# torch-heavy ``anime_sr.data`` package; pipeline/buckets re-export — the
+# hash formats are FROZEN, resume-safe)
 # ---------------------------------------------------------------------------
 
 
@@ -54,6 +60,28 @@ def _blake2b_u64(s: str) -> int:
 def box_seed(sample_id: str, data_cycle: int, exposure_index: int) -> int:
     """Crop-box stream: independent from the degradation exposure seed."""
     return _blake2b_u64(f"box|{sample_id}|{data_cycle}|{exposure_index}")
+
+
+def crop_box(width: int, height: int, hr: int, seed: int) -> tuple[int, int]:
+    """Deterministic crop top-left for an HR square of edge ``hr``.
+
+    Center-anchored with a seeded jitter clipped to the valid range, so
+    (width, height, hr, seed) reproduces the exact box across resumes.
+    x and y use independent hash streams (a single 64-bit value cannot
+    supply two unbiased coordinates after one modulo).
+
+    (Canonical home: this torch-free module; ``anime_sr.data.buckets``
+    re-exports it — the hash format is FROZEN, resume-safe.)"""
+    if width < hr or height < hr:
+        raise ValueError(f"image {width}x{height} cannot crop HR {hr}")
+    if width == hr and height == hr:
+        return 0, 0
+    hx = hashlib.blake2b(f"crop-x|{seed}|{width}|{height}|{hr}".encode(), digest_size=8).digest()
+    hy = hashlib.blake2b(f"crop-y|{seed}|{width}|{height}|{hr}".encode(), digest_size=8).digest()
+    x_max, y_max = width - hr, height - hr
+    x = int.from_bytes(hx, "little") % (x_max + 1)
+    y = int.from_bytes(hy, "little") % (y_max + 1)
+    return x, y
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +217,7 @@ def _probe_modules() -> list[str]:
 
 __all__ = [
     "box_seed",
+    "crop_box",
     "fetch_crop_numpy",
     "fetch_crop_numpy_worker",
     "init_worker",

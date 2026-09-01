@@ -26,8 +26,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from anime_sr import torchfree_fetch as tf
 from anime_sr.config.schema import Config
-from anime_sr.data import torchfree_fetch as tf
 from anime_sr.data.buckets import crop_box
 from anime_sr.data.index import build_index, scan_shard_full
 from anime_sr.data.pipeline import (
@@ -121,7 +121,7 @@ def test_worker_probe_in_fresh_interpreter(tmp_path: Path) -> None:
     with ctx.Pool(
         processes=1, initializer=tf.init_worker, initargs=(None, None, 512)
     ) as pool:
-        mods = pool.apply(tf._probe_modules, ()).get()
+        mods = pool.apply(tf._probe_modules, ())
     assert "torch" not in mods, f"torch loaded in torch-free worker: {mods}"
     assert "numpy" in mods and "PIL" in mods
 

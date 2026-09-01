@@ -33,7 +33,7 @@ from anime_sr.data import index as index_mod
 from anime_sr.data.buckets import check_buckets, crop_box
 from anime_sr.data.codec_bank import CodecBank
 from anime_sr.data.degradation import degrade_hr, exposure_seed
-from anime_sr.data.torchfree_fetch import box_seed  # re-export (see __all__)
+from anime_sr.torchfree_fetch import box_seed  # re-export (see __all__)
 
 _EXPOSURE_PER_CYCLE = 25  # exposures per image before the data cycle advances (§11.5)
 

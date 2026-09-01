@@ -8,12 +8,14 @@ given (sample, seed) always yields the same crop (resume-safe).
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 
 from anime_sr.config.schema import Config
 from anime_sr.data.index import MetaRecord
 from anime_sr.data.index import eligible_buckets as _index_eligible_buckets
+
+# re-export: the canonical crop_box lives in the torch-free top-level module
+# (spawn workers import it without triggering the torch-heavy data package)
 
 
 @dataclass(frozen=True)
@@ -49,26 +51,6 @@ def eligible_hr_buckets(rec: MetaRecord, cfg: Config) -> list[Bucket]:
     the size check; this returns the aligned Bucket objects)."""
     sizes = _index_eligible_buckets(rec, cfg)
     return [b for b in check_buckets(cfg) if b.hr in sizes]
-
-
-def crop_box(width: int, height: int, hr: int, seed: int) -> tuple[int, int]:
-    """Deterministic crop top-left for an HR square of edge ``hr``.
-
-    Center-anchored with a seeded jitter clipped to the valid range, so
-    (width, height, hr, seed) reproduces the exact box across resumes.
-    x and y use independent hash streams (a single 64-bit value cannot
-    supply two unbiased coordinates after one modulo).
-    """
-    if width < hr or height < hr:
-        raise ValueError(f"image {width}x{height} cannot crop HR {hr}")
-    if width == hr and height == hr:
-        return 0, 0
-    hx = hashlib.blake2b(f"crop-x|{seed}|{width}|{height}|{hr}".encode(), digest_size=8).digest()
-    hy = hashlib.blake2b(f"crop-y|{seed}|{width}|{height}|{hr}".encode(), digest_size=8).digest()
-    x_max, y_max = width - hr, height - hr
-    x = int.from_bytes(hx, "little") % (x_max + 1)
-    y = int.from_bytes(hy, "little") % (y_max + 1)
-    return x, y
 
 
 def assert_aligned(h: int, w: int, lq_h: int, lq_w: int) -> None:

@@ -243,7 +243,10 @@ def test_worker_death_resubmit_exactly_once() -> None:
         deadline = time.time() + 90
         while not all(lf._fut_done(f) for f in batch):
             assert time.time() < deadline, "batch never completed after death"
-            lf._pp_recover_lost_tasks(pp, batch, ready, inflight, crash_state, seen)
+            lf._pp_recover_lost_tasks(
+                pp, batch, ready, inflight, crash_state, seen,
+                lf._pp_fetch, lambda t: t,
+            )
             time.sleep(0.2)
         results = [lf._fut_result(f, timeout=60) for f in batch]
         for f in batch:
@@ -310,7 +313,8 @@ def test_crash_loop_guard_aborts() -> None:
             while not all(lf._fut_done(f) for f in batch):
                 assert time.time() < deadline, "crash-loop guard never fired"
                 lf._pp_recover_lost_tasks(
-                    pp, batch, deque(), inflight, crash_state, seen
+                    pp, batch, deque(), inflight, crash_state, seen,
+                    lf._pp_fetch, lambda t: t,
                 )
                 time.sleep(0.2)
         assert crash_state[0] >= lf._PP_MAX_WORKER_CRASHES

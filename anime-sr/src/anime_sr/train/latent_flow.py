@@ -81,9 +81,9 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from anime_sr import torchfree_fetch as tf_fetch
 from anime_sr.config.loader import dump_resolved
 from anime_sr.config.schema import Config
-from anime_sr.data import torchfree_fetch as tf_fetch
 from anime_sr.data.clean_score import (
     CleanScoreCache,
     build_clean_score_report,
