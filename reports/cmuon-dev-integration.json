@@ -1,0 +1,130 @@
+{
+  "report": "cmuon-dev-integration",
+  "generated": "2026-09-02T14:10:00+08:00",
+  "integration_commit": "e6db9c5",
+  "integration_fix": "023c057",
+  "final_head": "023c057",
+  "branch": "cmuon-integration",
+  "parents": {
+    "dev": "9fcb67a",
+    "cmoun": "def9ac4"
+  },
+  "anchors": {
+    "dev": "9fcb67a",
+    "cmoun": "def9ac4",
+    "cmoun_guarded": "fd1131e",
+    "merge_base": "f179ff0",
+    "all_exact": true
+  },
+  "host": "salt10 (2x HCU 64GiB, DTK 26.04, torch 2.9.0, venv sakuramoon-dtk-venv)",
+  "test_root": "/sakuramoon-runtime/cmuon-dev-integration-test/{adamw,cmuon}",
+  "remote_writes": 0,
+  "verdict": "PASS",
+  "gates": {
+    "s0_anchors": {
+      "result": "PASS",
+      "note": "4/4 exact (local clone refspec incident fixed via --replace-all fetch; three-way verified with ls-remote origin and direct GitHub)"
+    },
+    "s2_merge": {
+      "result": "PASS",
+      "conflicts": 0,
+      "dual_parent": true
+    },
+    "s3_semantic_union": {
+      "result": "PASS",
+      "dual_modified_files": ["scripts/publish_train_state.sh"],
+      "dual_modified_audit": "dev bounded-lock retry (30x1s) + stale-ai_proxy guard + 3x fd closes (L157/172/226) AND cmoun parse-fail tolerance all present; other 10 dev files byte-identical to dev"
+    },
+    "s4_optim_diff_vs_f875ee9": {
+      "result": "PASS",
+      "files_diff": 0
+    },
+    "s5_default_optimizer": {
+      "result": "PASS",
+      "value": "torchao_adamw8bit (base.toml, identical to dev)"
+    },
+    "s8_cpu": {
+      "result": "PASS",
+      "ruff": "0.16.1 all checks passed (after mode-only fix 023c057)",
+      "pytest": "763 passed / 0 failed / 0 skipped (pre-existing onnxruntime env gap identical on frozen tree; 1.29.0 installed in test venv)",
+      "pyright": "1.1.411 NEW=0 (merged 3389 unique subset of dev 1444 union cmoun 3395; FIXED=159)"
+    },
+    "s9_gpu_2rank": {
+      "result": "PASS",
+      "p1_forced_rescue": "5/5 scenarios outcome=ok, max_param_rank_diff=0.0, fp32_rescue_failures=0, final_failure raises CMuonSafetyError zero-commit",
+      "p2_backcompat_ckpt_103700": "D4_CHECKPOINT_BACKCOMPAT=YES (observations 1201, 166 refs, rescue 818/818/0, A->E ok)",
+      "p3_perf": "median optimizer phase 0.6443s vs 0.7624s ref (-15.5%), host_syncs/step 6.8"
+    },
+    "s10_backcompat_g1": {
+      "result": "PASS",
+      "note": "ckpt_105000 (6.0G, manifest 12/12) read-only copy; resume path exercised live in Arm A; CMuon-state backcompat via s9 p2"
+    },
+    "s11_20_isolation_train": {
+      "result": "PASS",
+      "arm_a": {
+        "optimizer": "torchao_adamw8bit (production default)",
+        "anchor": "ckpt_105000 (isolated copy)",
+        "window": "105001-105040 (20u target 105020 reached; run overshot before reactive stop)",
+        "loss": {"min": 0.543399, "max": 0.602351},
+        "steady_s_per_update": "14.4-16.6 (678s first = compile)",
+        "nonfinite": 0,
+        "clip_fraction": 0,
+        "fresh_resume_from": "ckpt_105020",
+        "fresh_resume_window": "105021-105039 (19 updates)",
+        "fresh_resume_loss_continuity": "105020: 0.5713 -> 105021: 0.5656",
+        "disclosed_artifact": "both resume runs re-reached the 105040 cadence already published by run1's clean-exit save -> FileExistsError (no-overwrite protection working as designed under artificial stop/re-run; not a defect)"
+      },
+      "arm_b": {
+        "optimizer": "hybrid_cmuon_canonical_ns4_fp32_rescue (effective frozen chain: cmuon_ns default=4, ns_steps=5, momentum bf16, chunk_rescale=false, guard 166 refs, telemetry disabled)",
+        "optimizer_match": "EXACT-MATCH roundtrip vs frozen chain effective config",
+        "anchor": "ckpt_105000 (same as Arm A; AdamW-state checkpoint resumed under CMuon optimizer with fresh guard calibration)",
+        "window": "105001-105100 (100/100 exact; run overshot to 105109 before reactive stop, disclosed)",
+        "loss": {"min": 0.533734, "max": 0.598228, "median": 0.565761, "max_consecutive_delta": 0.0523},
+        "steady_s_per_update": "15.3-16.9 (612s first = compile)",
+        "nonfinite": 0,
+        "clip_fraction": 0,
+        "guard": {
+          "json_records": 79,
+          "observations_final": 108,
+          "fp32_rescues_final": 92,
+          "fp32_rescue_failures_max": 0,
+          "rescue_by_role": {"attention_q": 47, "attention_content_gate": 38, "attention_k": 7},
+          "max_delta_rank_spread_max": 0.0,
+          "max_param_rank_diff_max": 0.0,
+          "note": "early-warmup rescue transient (bf16 safety trips -> safe fp32 rescue) in line with 200u-run band (0.665/obs at D4 exit); 0 failures throughout"
+        },
+        "optimizer_phase_seconds": {"median": 0.5578, "min_excl_compile": 0.5433, "vs_ref_0.7624": -0.2046},
+        "fresh_resume_from": "ckpt_105100",
+        "fresh_resume_window": "105101-105105 (+5 all successful; run overshot to 105111 before stop, disclosed)",
+        "fresh_resume_loss_continuity": "105100: 0.5647 -> 105101: 0.5525",
+        "guard_state_continuity": "observations 108 -> 109-110, rescues 92 -> 93, failures 0 (optimizer+guard state carried exactly)"
+      }
+    },
+    "s16_perf_sanity": {
+      "result": "PASS",
+      "note": "no >10% regression: P3 -15.5%; live Arm B optimizer phase median 0.5578s (-26.7% vs 0.7624s ref); full-step ~15.5-16.9 s/u consistent with G1 production 15.5 s/u"
+    },
+    "s21_no_quality_gate": {
+      "result": "PASS",
+      "note": "no FID/concept-120 this round; sampling every 1000 and evaluation every 5000 cannot fire in 20/100-update arms; W&B disabled in both arms"
+    },
+    "isolation": {
+      "salt7_control": "read-only (md5-verified copies)",
+      "hub": "read-only (download only)",
+      "publishers": "not started",
+      "formal_paths": "untouched",
+      "arms_sequential": true,
+      "socket_lock": "schema literals shared; arms ran strictly sequentially with independent data-state/cache/output roots"
+    }
+  },
+  "fix_commits": [
+    {"commit": "e6db9c5", "type": "merge", "content": "merge origin/cmoun into dev line (--no-ff --no-commit, dual parent verified)"},
+    {"commit": "023c057", "type": "fix-mode-only", "content": "chmod +x on scripts/analyze_structural_calibration.py + scripts/audit_pi_vs_svd.py (ruff EXE001; pre-existing on frozen tree)"}
+  ],
+  "environment_notes": [
+    "salt10 validation-selection.json restored byte-identical from salt7 production copy (md5 5299a402)",
+    "isolated mainset copies carry schema_version=2 (salt7 production file predates the field, untouched)",
+    "data service refuses symlink-escaping paths and only accepts connections after 16-shard warm-up (training launch gated on warm-up)",
+    "SCNet shared egress proxy ~20min transient throttle 11:25-11:40 (0.4-1.6 MiB/s/stream, intermittent failures) while same proxy served salt7 G1 at 48-54 MiB/s; recovered 25-42 MiB/s/shard; known platform behavior, retry logic absorbed the dip with no data loss"
+  ]
+}
