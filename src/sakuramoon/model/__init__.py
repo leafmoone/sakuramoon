@@ -14,6 +14,7 @@ from sakuramoon.model.dit import (
     PackedDiTFeatures,
 )
 from sakuramoon.model.growth import active_slot_ids, new_slot_ids, slot_name
+from sakuramoon.model.mixed_precision_conv import MixedPrecisionConv2d
 from sakuramoon.model.mlp import SwiGLU
 from sakuramoon.model.norm import RMSNorm
 from sakuramoon.model.output_head import FinalOutputHead
@@ -25,6 +26,7 @@ __all__ = [
     "DiTBlock",
     "FA4VarlenGQAAttention",
     "FinalOutputHead",
+    "MixedPrecisionConv2d",
     "PackedDiT",
     "PackedDiTBlock",
     "PackedDiTFeatures",

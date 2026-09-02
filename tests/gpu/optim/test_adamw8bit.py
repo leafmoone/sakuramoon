@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch import nn
 
+from sakuramoon.model.mixed_precision_conv import MixedPrecisionConv2d
 from sakuramoon.optim.adamw8bit import build_adamw8bit
 
 pytestmark = pytest.mark.skipif(
@@ -200,6 +201,76 @@ def test_small_bf16_matrix_cannot_fall_back_to_unquantized_state() -> None:
 
     with pytest.raises(ValueError, match="non-quantized"):
         _optimizer(module, seed=906)
+
+
+def test_ineligible_conv_weight_cannot_fall_back_to_unquantized_state() -> None:
+    # Conv weights join the matrix_decay policy, so the production
+    # AdamW8bit quantization eligibility rule (numel >= 4096 and
+    # numel % 256 == 0) applies to them unchanged. 16*16*3*3 = 2304.
+    module = nn.Conv2d(
+        16,
+        16,
+        3,
+        bias=False,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+
+    with pytest.raises(ValueError, match="non-quantized"):
+        _optimizer(module, seed=909)
+
+
+def test_eligible_conv_weight_uses_quantized_state() -> None:
+    # 32*32*3*3 = 9216: numel >= 4096 and numel % 256 == 0.
+    torch.manual_seed(910)  # pyright: ignore[reportUnknownMemberType]
+    module = nn.Conv2d(
+        32,
+        32,
+        3,
+        bias=False,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    optimizer = _optimizer(module, seed=911)
+
+    inputs = torch.randn(
+        2, 32, 8, 8, device="cuda", dtype=torch.bfloat16
+    )
+    module(inputs).float().sum().backward()
+    optimizer.step()
+
+    states = {spec.name: spec for spec in optimizer.audit_state()}
+    assert states["weight"].state_class == "OptimState8bit"
+    assert states["weight"].block_size == 256
+    assert states["weight"].initialized
+
+
+def test_mixed_precision_conv2d_eligible_weight_uses_quantized_state() -> None:
+    torch.manual_seed(912)  # pyright: ignore[reportUnknownMemberType]
+    conv = MixedPrecisionConv2d(32, 32, 3)
+    module = nn.Module()
+    module.conv = conv.to("cuda")
+    module.sensitive = nn.Parameter(torch.ones(16, device="cuda"))
+    optimizer = _optimizer(module, seed=913)
+
+    inputs = torch.randn(
+        2, 32, 8, 8, device="cuda", dtype=torch.bfloat16
+    )
+    module.conv(inputs).float().sum().backward()
+    assert module.conv.bias is not None
+    assert module.conv.bias.grad is not None
+    assert module.conv.bias.grad.dtype is torch.float32
+    optimizer.step()
+
+    states = {spec.name: spec for spec in optimizer.audit_state()}
+    assert states["conv.weight"].state_class == "OptimState8bit"
+    assert states["conv.weight"].block_size == 256
+    audit_groups = {
+        spec.name: spec.group for spec in optimizer.audit.specs
+    }
+    assert audit_groups["conv.weight"] == "matrix_decay"
+    assert audit_groups["conv.bias"] == "sensitive_no_decay"
+    assert states["conv.bias"].initialized
 
 
 def test_one_thousand_step_mixed_sr_canary_tracks_validation_ema() -> None:

@@ -96,6 +96,9 @@ def audit_trainable_parameters(
         ) or (
             isinstance(owner, nn.MultiheadAttention)
             and local_name == "in_proj_weight"
+        ) or (
+            isinstance(owner, (nn.Conv1d, nn.Conv2d, nn.Conv3d))
+            and local_name == "weight"
         )
         is_sensitive = (
             parameter.ndim <= 1
