@@ -107,8 +107,21 @@ out_dir = "output_model/latent-flow-sr-v2-6m"
 # (+ run-end latest.pt at 6M). 250000 / global-batch-16 = 15625 steps.
 # 24 periodic x ~1.23 GiB ~= 30 GiB on the LOCAL venue disk (verified:
 # 543 GiB free at launch).
+#
+# EARLY FINE GRID (2026-09-02, salt9 host-pressure forensics): the shared
+# host (overcommit=2, 453 GiB CommitLimit, 6M + G1 + tenants) SIGABRTs the
+# DTK rank under memory pressure (mmap refusals -> spawn-worker
+# "failed to map segment" + DTK Go core "runtime: out of memory") every
+# 40-80 min. With the first save at 6250 steps no run ever reached a save
+# (11 crashes 09-02, zero retained progress). 8k exposures = 500 steps ~=
+# 9 min at 0.9 it/s: each crash now loses <= ~500 steps. 12 early saves x
+# ~1.23 GiB ~= 15 GiB, one-time (the production grid resumes at 250k).
 save_every_steps = 15625
-save_at_exposures = [100000, 250000, 500000, 1000000, 2000000, 4000000]
+save_at_exposures = [
+    8000, 16000, 24000, 32000, 40000, 48000,
+    56000, 64000, 72000, 80000, 88000, 96000,
+    100000, 250000, 500000, 1000000, 2000000, 4000000,
+]
 # Held-out probe grid (no-op on this train-only corpus: 0 validation
 # samples -> the probe returns {} by construction); in-stream val runs on
 # the same milestone grid from the train index.
