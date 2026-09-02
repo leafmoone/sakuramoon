@@ -1,0 +1,9 @@
+{
+ "n_inputs": 166,
+ "cumulative_bf16_first_gb": 9.5733642578125,
+ "cumulative_always_fp32_gb": 16.1468505859375,
+ "delta_gb": 6.573486328125,
+ "peak_chunk_bf16_gb": 0.123291015625,
+ "peak_chunk_fp32_gb": 0.22216796875,
+ "note": "NS workspaces are sequential per chunk (freed between chunks), so the steady-state delta is the peak-chunk delta; cumulative = traffic, not residency. Momentum state stays BF16 in both candidates (spec)."
+}

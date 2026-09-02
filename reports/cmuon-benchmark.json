@@ -1,0 +1,186 @@
+{
+ "config": {
+  "lr": 0.00015625,
+  "depth": 20,
+  "global_batch": 800,
+  "n_warmup": 5,
+  "n_iters": 25
+ },
+ "results": {
+  "adamw8bit": {
+   "name": "adamw8bit",
+   "avg_step_s": 2.3774920654296876,
+   "min_step_s": 2.3627827167510986,
+   "max_step_s": 2.3832459449768066,
+   "state_bytes": 3191808660,
+   "peak_alloc_gb": 11.641,
+   "peak_res_gb": 12.109,
+   "update_rms_per_group": {
+    "adamw_fallback": 0.000163,
+    "adaln": 0.000156,
+    "attention": 0.000165,
+    "ffn": 0.000165
+   },
+   "grad_norm": 39631.6992
+  },
+  "cmuon_bfloat16_ns5": {
+   "name": "cmuon_bfloat16_ns5",
+   "avg_step_s": 0.7627400493621826,
+   "min_step_s": 0.7475810050964355,
+   "max_step_s": 0.7869346141815186,
+   "state_bytes": 3348994512,
+   "peak_alloc_gb": 9.902,
+   "peak_res_gb": 10.274,
+   "update_rms_per_group": {
+    "adamw_fallback": 0.000163,
+    "adaln": 0.00146,
+    "attention": 0.003899,
+    "ffn": 2.8e-05
+   },
+   "note": "08-28 RMS audit: attention=3.9e-3 & adaln=1.46e-3 are QUINTIC-NS DIVERGENCE artifacts (k/v[640,2560] & adaln[2560,1024] leave the NS convergence basin at iteration 5), NOT 'Moonlight intrinsic' and NOT a CMuon bug (native torch.optim.Muon diverges identically). ffn=2.8e-5 is the true converged value (~0.2*lr). ns5 is UNSAFE; use ns4 (all shapes ~0.2*lr). See rms_audit.",
+   "grad_norm": 39631.6992
+  },
+  "cmuon_bfloat16_ns6": {
+   "name": "cmuon_bfloat16_ns6",
+   "avg_step_s": 0.8450046253204345,
+   "min_step_s": 0.8334310054779053,
+   "max_step_s": 0.8571252822875977,
+   "state_bytes": 3348994512,
+   "peak_alloc_gb": 9.895,
+   "peak_res_gb": 10.356,
+   "update_rms_per_group": {
+    "adamw_fallback": 0.000163,
+    "adaln": 15597775.093303,
+    "attention": 797907874174.7582,
+    "ffn": 0.000338
+   },
+   "note": "08-28 RMS audit: ns6 DIVERGES for ALL shapes (even q/ffn are 10x too large). Do NOT use ns6.",
+   "grad_norm": 39631.6992
+  },
+  "cmuon_float32_ns5": {
+   "name": "cmuon_float32_ns5",
+   "avg_step_s": 0.7997170829772949,
+   "min_step_s": 0.7934911251068115,
+   "max_step_s": 0.8431923389434814,
+   "state_bytes": 6421322192,
+   "peak_alloc_gb": 13.174,
+   "peak_res_gb": 13.933,
+   "update_rms_per_group": {
+    "adamw_fallback": 0.000163,
+    "adaln": 0.001441,
+    "attention": 0.003968,
+    "ffn": 2.8e-05
+   },
+   "note": "08-28 RMS audit: same NS-divergence pattern as BF16 ns5 (NS always runs BF16 regardless of momentum dtype); attention/adaLN inflated by NS divergence, ffn true. ns5 UNSAFE; use ns4.",
+   "grad_norm": 39631.6992
+  },
+  "cmuon_float32_ns6": {
+   "name": "cmuon_float32_ns6",
+   "avg_step_s": 0.891839542388916,
+   "min_step_s": 0.8768832683563232,
+   "max_step_s": 0.8958590030670166,
+   "state_bytes": 6421322192,
+   "peak_alloc_gb": 13.226,
+   "peak_res_gb": 13.726,
+   "update_rms_per_group": {
+    "adamw_fallback": 0.000163,
+    "adaln": 15637035.860506,
+    "attention": 2442298125365.9404,
+    "ffn": 0.000333
+   },
+   "note": "08-28 RMS audit: ns6 DIVERGES for ALL shapes. Do NOT use ns6.",
+   "grad_norm": 39631.6992
+  }
+ },
+ "rescale_comparison": {
+  "core_off": {
+   "adamw_fallback": 0.000163,
+   "adaln": 0.001451,
+   "attention": 0.004054,
+   "ffn": 2.8e-05
+  },
+  "paper_rescale_on": {
+   "adamw_fallback": 0.000163,
+   "adaln": 0.003554,
+   "attention": 0.004105,
+   "ffn": 3.8e-05
+  },
+  "rms_ratio_paper_over_core": {
+   "ffn": 1.3696,
+   "attention": 1.0125,
+   "adamw_fallback": 1.0,
+   "adaln": 2.4501
+  },
+  "note": "rescale ratios (sqrt2/sqrt6) still exact; the adaln/attention absolute values contain the ns5 NS-divergence artifact (see rms_audit)."
+ },
+ "rms_audit": {
+  "date": "2026-08-28",
+  "device": "salt1 HCU cuda:0, BF16 NS, lr=1.5625e-4, momentum=0.95, fixed grad snapshot",
+  "metric_definition": {
+   "old": "update_rms_per_group = single-step actual parameter-delta RMS = RMS(p_after - p_before), momentum from 0, 1st step, element-weighted within group (sqrt(sum(d^2)/n)).",
+   "verdict": "definition is CONSISTENT and CORRECT (not relative RMS, not momentum RMS, not mixed across groups). The non-uniformity was real (NS divergence), not a telemetry/aggregation bug."
+  },
+  "moonlight_invariant": {
+   "theory": "Moonlight factor 0.2*sqrt(max(d_in,d_out)) cancels the 1/sqrt(max(dim)) RMS of the semi-orthogonal (polar) NS output, so scaled_pre_lr_rms ~= 0.2 (shape-independent) and applied delta RMS ~= 0.2*lr.",
+   "expected_scaled_pre_lr_rms": 0.2,
+   "observed_scaled_pre_lr_rms_ns5": {
+    "q": 0.2205,
+    "content_gate": 0.2181,
+    "attn_out": 0.2177,
+    "ffn_gate": 0.1915,
+    "ffn_up": 0.1867,
+    "ffn_down": 0.1888,
+    "k": 69.44,
+    "v": 73.19,
+    "adaln": 9.12
+   },
+   "invariant_pass": "HOLDS for all shapes where NS converges (q/content_gate/attn_out/ffn = 0.19-0.22). BROKEN only where NS diverges (k/v=69-73, adaln=9.1) because the NS output is no longer orthogonalized. Confirms the math is correct; the non-uniformity is NS divergence, not Moonlight."
+  },
+  "per_shape_ns5": {
+   "q": {"shape": [2560, 2560], "ns_rms": 0.02179, "scaled_pre_lr_rms": 0.2205, "expected_delta_rms": 3.125e-05, "actual_delta_rms": 3.359e-05, "native_muon_delta_rms": 3.352e-05, "match": true},
+   "k": {"shape": [640, 2560], "ns_rms": 6.863, "scaled_pre_lr_rms": 69.44, "expected_delta_rms": 3.125e-05, "actual_delta_rms": 1.085e-02, "native_muon_delta_rms": 1.215e-02, "match": "diverges (same direction)"},
+   "v": {"shape": [640, 2560], "ns_rms": 7.233, "scaled_pre_lr_rms": 73.19, "expected_delta_rms": 3.125e-05, "actual_delta_rms": 1.144e-02, "native_muon_delta_rms": 1.115e-02, "match": "diverges (same direction)"},
+   "content_gate": {"shape": [2560, 2560], "ns_rms": 0.02156, "scaled_pre_lr_rms": 0.2181, "expected_delta_rms": 3.125e-05, "actual_delta_rms": 3.313e-05, "native_muon_delta_rms": 3.321e-05, "match": true},
+   "attn_out": {"shape": [2560, 2560], "ns_rms": 0.02152, "scaled_pre_lr_rms": 0.2177, "expected_delta_rms": 3.125e-05, "actual_delta_rms": 3.309e-05, "native_muon_delta_rms": 3.267e-05, "match": true},
+   "ffn_gate": {"shape": [6912, 2560], "ns_rms": 0.01152, "scaled_pre_lr_rms": 0.1915, "expected_delta_rms": 3.125e-05, "actual_delta_rms": 2.806e-05, "native_muon_delta_rms": 2.795e-05, "match": true},
+   "ffn_up": {"shape": [6912, 2560], "ns_rms": 0.01123, "scaled_pre_lr_rms": 0.1867, "expected_delta_rms": 3.125e-05, "actual_delta_rms": 2.715e-05, "native_muon_delta_rms": 2.830e-05, "match": "close (BF16 matmul non-determinism)"},
+   "ffn_down": {"shape": [2560, 6912], "ns_rms": 0.01136, "scaled_pre_lr_rms": 0.1888, "expected_delta_rms": 3.125e-05, "actual_delta_rms": 2.754e-05, "native_muon_delta_rms": 2.758e-05, "match": true},
+   "adaln_x6": {"shape": [2560, 1024], "ns_rms": 0.91, "scaled_pre_lr_rms": 9.12, "expected_delta_rms": 3.125e-05, "actual_delta_rms": 1.42e-03, "native_muon_delta_rms": 1.42e-03, "match": "diverges (same direction)"}
+  },
+  "chunked_concat_verification": {
+    "note": "custom CMuon chunked (split->per-chunk NS->concat) vs concat of INDEPENDENT native Muon per chunk. RMS rel-diff <2% on all cases (same order as single-shape BF16 matmul non-determinism) -> chunking logic CORRECT. max_abs_diff~2.4e-4 is NS-iteration amplification of BF16 matmul non-determinism at outlier elements, NOT a chunking bug.",
+    "ffn_in_proj_13824x2560_chunk2": {"ns4": {"custom_rms": 3.177e-05, "native_concat_rms": 3.192e-05}, "ns5": {"custom_rms": 2.727e-05, "native_concat_rms": 2.783e-05}},
+    "adaln_shared_15360x1024_chunk6": {"ns4": {"custom_rms": 3.406e-05, "native_concat_rms": 3.397e-05}, "ns5": {"custom_rms": 1.419e-03, "native_concat_rms": 1.427e-03}},
+    "ffn_down_2560x6912_chunk1": {"ns4": {"custom_rms": 3.181e-05, "native_concat_rms": 3.188e-05}, "ns5": {"custom_rms": 2.895e-05, "native_concat_rms": 2.850e-05}}
+  },
+  "ns_convergence_window": {
+    "note": "per-iteration NS output RMS (polar = 1/sqrt(max) is the converged target). The 5th iteration leaves the convergence basin for small-short-edge shapes.",
+    "q": {"polar": 0.01976, "iter4": 0.0188, "iter5": 0.0216, "iter6": 0.152, "diverge_at": 6},
+    "k": {"polar": 0.01976, "iter4": 0.0304, "iter5": 6.61, "iter6": 1.18e14, "diverge_at": 5},
+    "adaln": {"polar": 0.01976, "iter4": 0.0221, "iter5": 0.928, "iter6": 9.94e9, "diverge_at": 5},
+    "ffn_gate": {"polar": 0.01203, "iter4": 0.0127, "iter5": 0.0113, "iter6": 0.0805, "diverge_at": 6},
+    "ffn_down": {"polar": 0.01203, "iter4": 0.0128, "iter5": 0.0115, "iter6": 0.203, "diverge_at": 6}
+  },
+  "delta_rms_per_ns_steps": {
+    "target": 3.125e-05,
+    "q": {"ns3": 1.82e-05, "ns4": 2.78e-05, "ns5": 3.31e-05, "ns6": 3.33e-04},
+    "k": {"ns3": 3.3e-05, "ns4": 4.87e-05, "ns5": 1.04e-02, "ns6": 1.93e11},
+    "adaln": {"ns3": 2.85e-05, "ns4": 3.42e-05, "ns5": 1.43e-03, "ns6": 1.57e7},
+    "ffn_gate": {"ns3": 1.93e-05, "ns4": 3.17e-05, "ns5": 2.79e-05, "ns6": 3.07e-04},
+    "ffn_down": {"ns3": 1.93e-05, "ns4": 3.16e-05, "ns5": 2.85e-05, "ns6": 2.82e-04}
+  },
+  "ns5_vs_ns6_classification": {
+    "task5_A_or_B": "A (native AND custom both diverge) -> HCU/BF16/shape numerical phenomenon of the quintic NS, NOT a CMuon implementation bug (task5-B would be native-stable/custom-divergent).",
+    "note": "ns5 already diverges for k/v[640,2560] & adaln[2560,1024] (not only ns6). The old report's 'ns5 stable, ns6 diverges' was wrong."
+  },
+  "root_cause": "The quintic Newton-Schulz iteration has a shape-dependent convergence window that depends on the largest singular value after Frobenius pre-normalization (~ 1/sqrt(c) + 1/sqrt(r) for wide [r,c]). Shapes with a small short edge (k/v short=640, adaln short=1024) have a larger max singular value (>~0.045) and leave the convergence basin at iteration 5; larger-short-edge shapes (q/ffn short>=2560) converge at iteration 5 and only diverge at iteration 6. This is identical in native torch.optim.Muon (NS function is line-identical, Moonlight == adjust_lr_fn='match_rms_adamw').",
+  "ns4_is_safe": "ns4 lands inside the convergence window for ALL production shapes: delta RMS ~= 0.2*lr (q 2.78e-5 / k 4.87e-5 / adaln 3.42e-5 / ffn 3.17e-5). Recommended: switch cmuon_ns_steps 5->4 and re-measure.",
+  "verdict": {
+   "CMUON_MATH_CORRECT": "PASS (Moonlight invariant holds where NS converges; custom==native per shape)",
+   "UPDATE_SCALE_CORRECT": "PASS at ns4 (all groups ~=0.2*lr); FAIL at ns5 for k/v & adaln (NS divergence)",
+   "NS5_SAFE": "NO (diverges for k/v[640,2560] & adaln[2560,1024])",
+   "NS6_STATUS": "DIVERGES for all shapes (worse than ns5)",
+   "READY_FOR_REAL_AB_TEST": "NO -- must first switch cmuon_ns_steps 5->4 and re-measure update RMS (expect ~=0.2*lr on all groups); then long-run quality validation"
+  }
+ }
+}

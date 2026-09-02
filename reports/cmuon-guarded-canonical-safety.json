@@ -1,0 +1,126 @@
+{
+  "candidate": "hybrid_cmuon_guarded_canonical_ns4",
+  "goal": "goal-35390cd0-8734-467e-8aad-87b3849815bf",
+  "verdict": "S1_FAIL",
+  "verdict_date": "2026-08-30",
+  "protocol_compliance": {
+    "fork_anchor": "ckpt_97100_raw-97100-update-cadence (sha dd0a913c215d3e474a33febea2eb9aa4822c60d657e3304592d9e35e2cde7862, 12/12 files size-exact)",
+    "ranks": 2,
+    "budget_updates": 200,
+    "restart_on_violation": false,
+    "online_tuning": false,
+    "run_naming": "g1_cmuon_guarded_canonical_s1",
+    "data_network_during_run": "none (248/248 shards preloaded, pure cache serving)",
+    "guard_telemetry_logging": "disabled by design (decisions in-memory); forensic dump added fail-closed (commit 8d86834)"
+  },
+  "runs": [
+    {
+      "run": 1,
+      "host_pod": "crdnotebook-...-salt6-35245 (old pod, wiped by platform restart 08-30 20:0x)",
+      "launched": "2026-08-30T18:04+08",
+      "crash_update": 97113,
+      "crash_observations": 13,
+      "violating_tensors": ["unknown (train.log wiped with old pod; failure.json carries error_type only)"],
+      "check": "delta_rms ceiling (CMuonSafetyError @optimizer)",
+      "evidence": "diagnostics/rank-0/optimizer-97113/failure.json (attempted 97113, successful 97112)"
+    },
+    {
+      "run": 2,
+      "host_pod": "crdnotebook-2093779006254743554-salt6-22057 (host UUID 2a5a886e-025d-11f1-9997-e8611ab02d86, not on anime-sr bad-host list)",
+      "launched": "2026-08-30T21:38+08",
+      "crash_update": 97102,
+      "crash_observations": 2,
+      "violating_tensors": [
+        "dit.blocks.slot_07.attention.q_proj.weight#chunk0",
+        "dit.blocks.slot_08.attention.q_proj.weight#chunk0"
+      ],
+      "check": "delta_rms ceiling",
+      "evidence": "diagnostics/rank-{0,1}/optimizer-97102/failure.json"
+    },
+    {
+      "run": 3,
+      "host_pod": "crdnotebook-2093779006254743554-salt6-22057",
+      "launched": "2026-08-30T22:02+08",
+      "crash_update": 97107,
+      "crash_observations": 7,
+      "violating_tensors": [
+        "dit.blocks.slot_07.attention.q_proj.weight#chunk0",
+        "dit.blocks.slot_08.attention.q_proj.weight#chunk0"
+      ],
+      "check": "delta_rms ceiling",
+      "evidence": "train.log traceback"
+    },
+    {
+      "run": 4,
+      "host_pod": "crdnotebook-2093779006254743554-salt6-22057",
+      "launched": "2026-08-30T22:16+08",
+      "crash_update": 97103,
+      "crash_observations": 3,
+      "violating_tensors": ["dit.blocks.slot_08.attention.q_proj.weight#chunk0"],
+      "check": "delta_rms ceiling",
+      "evidence": "guard-forensic-rank{0,1}.json (instrumented dump, commit 8d86834)"
+    },
+    {
+      "run": "S1-b",
+      "candidate_revision": "A'+B' fix (commit eae895c): skip decision active from observation 1 + elementwise-rms min_reference floor (3.096e-08, smallest P3 ref)",
+      "host_pod": "crdnotebook-2093779006254743554-salt6-22057",
+      "launched": "2026-08-30T23:10+08",
+      "crash_update": 97116,
+      "crash_observations": 15,
+      "violating_tensors": ["dit.blocks.slot_07.attention.k_proj.weight#chunk0"],
+      "check": "delta_rms ceiling",
+      "evidence": "guard-forensic-rank{0,1}.json: u_t_rms=7.602e-08, u_t_fro=9.731e-05, ref=1.135e-07 (decayed from toml 1.15217e-07 at 0.999^15), ratio_line=1.135e-08, min_reference=3.096e-08, delta_rms(rank1 owner)=4.854e-04 = 1.55x ceiling 3.125e-04, shape [640,2560]",
+      "note": "A' verified working: slot_08 q_proj (sig 5.0e-09, below floor) no longer violates. NEW tensor: slot_07 k_proj with sig ABOVE all three threshold lines (active by design) still hit the NS4 catastrophic branch => the hazard cohort extends above min_reference."
+    }
+  ],
+  "ref_distribution_analysis_2026_08_31": {
+    "source": "S1 toml [optimizer.cmuon_guard.references] (P3 calibration, 166 per-(FQN,chunk) refs)",
+    "decade_counts": {"1e-08": 93, "1e-07": 61, "1e-06": 12},
+    "spread": "continuous 3.10e-08 .. 4.69e-06, NO bimodal gap in ref values",
+    "hazard_tensor_ref_ranks": {
+      "slot_08 q_proj (4x crash, S1 runs 1-4)": "ref 7.046e-08, rank 63/166",
+      "slot_07 k_proj (1x crash, S1-b)": "ref 1.152e-07, rank 105/166"
+    },
+    "cohort_boundary": "refs are dense around the hazard refs (ranks 104-110: slot_09 out_proj 1.123e-07, slot_07 k_proj 1.152e-07 [HAZARD], slot_19 mlp 1.159e-07, slot_02 k_proj 1.204e-07, slot_08 k_proj 1.204e-07, slot_07 out_proj 1.209e-07) — slots 07/08 form a structurally weak cohort; no amplitude cut separates hazard from safe within the band",
+    "skip_rates_at_cuts": {"<1.2e-07": "106/166 = 63.9%", "<1.5e-07": "122/166 = 73.5%", "<2.0e-07": "136/166 = 81.9%"},
+    "feasibility_conclusion": "NO threshold within the v1 amplitude-guard design (ratio line / min_reference / fro floor) can both (a) close the hazard cohort (extends to ~ranks 105-120, i.e. ~65-72% of inputs) and (b) keep the skip rate <= 50% (design Section 14.4 'guard too tight' guideline). The hazard is amplitude-CONCENTRATED in the low band (both events at ranks 63 and 105; zero events from higher refs over ~3400 input-steps) but the band itself is the majority of inputs. Empirical hazard rate ~1 catastrophic event per ~15 updates => P(200u clean) ~= 0 under any v1 threshold with skip <= 50%."
+  },
+  "forensic_capture_run4": {
+    "fqn": "dit.blocks.slot_08.attention.q_proj.weight",
+    "chunk": 0,
+    "owner": 0,
+    "shape": [2560, 2560],
+    "numel": 6553600,
+    "u_t_rms": 5.0045749766525205e-09,
+    "u_t_fro": 1.2811711712856777e-05,
+    "ref": 7.031669468915425e-08,
+    "guard_ratio": 0.1,
+    "ratio_line": 7.031669468915425e-09,
+    "numerical_floor": 6.575e-07,
+    "warmup_active": true,
+    "observations": 2,
+    "warmup_observations": 50,
+    "would_skip_after_warmup": true,
+    "delta_rms": 0.1535254567861557,
+    "lr": 0.00015624999650754035,
+    "target_delta_rms": 3.124999930150807e-05,
+    "ceiling": 0.0003124999930150807,
+    "delta_rms_over_ceiling": 491.3,
+    "cross_rank": "sig/fro/ref identical on both ranks; delta_rms present on owner rank only (as designed)"
+  },
+  "diagnosis": {
+    "primary": "Structural design gap: the low-signal guard is INACTIVE for the first warmup_observations=50 updates ('bootstrap window: observe, do not skip'), but the near-zero-signal pathology is present from update 1 (momentum restored from ckpt_97100 + persistently near-zero live gradients of slot_07/08 attention q_proj). During the window every update feeds the ~5e-9 Nesterov matrix into NS4, whose chaotic-bit amplification (forensic: ~20% catastrophic branch per application) produces a stochastic O(0.1) delta. P(crash within 50 observations) ~ 1 - 0.8^50 ~= 99.9%. Observed crash observations across 4 runs: 13, 2, 7, 3.",
+    "guard_calibration_is_not_the_fault": "would_skip_after_warmup=true: the calibrated ratio line (u_t_rms 5.0e-9 < 0.1*ref 7.0e-9) correctly classifies this tensor as low-signal. If the warmup gate were not suppressing the skip decision, the crash would not have occurred.",
+    "secondary_risk_reference_decay": "refs update as max(sig, ref*0.999) per active observation: for a persistently near-zero tensor the ref decays toward the ~5e-9 level, dragging ratio_line below the actual signal over time; the ratio test then becomes self-referential and the skip protection erodes even after warmup. Flagged for the next iteration (needs a data-driven recalibration, not an arbitrary threshold).",
+    "secondary_risk_floor_units": "numerical_floor (6.575e-07) applies to the whole-chunk Frobenius norm, which scales with sqrt(numel): for a 6.55M-element chunk the floor only catches rms < ~8e-11. It never fires for large chunks; the elementwise-rms backstop implied by the spec's 'absolute numerical floor' second line is not what is implemented.",
+    "fail_closed_verification": "The two-phase design behaved as intended in all 4 runs: no parameter write on violation (PHASE1 fail-closed), rank-consistent verdict (same tensors flagged on both ranks), clean stop with diagnostics, ckpt_97100 remains pristine (no new checkpoint written before crash; cadence 100)."
+  },
+  "fix_directions_implemented_and_results": [
+    "A (IMPL eae895c): skip decision active from observation 1 — VERIFIED EFFECTIVE for slot_08 q_proj (no longer violates) but S1-b still FAILED.",
+    "B (IMPL eae895c): elementwise-rms min_reference floor (3.096e-08) — did NOT catch slot_07 k_proj (sig 7.6e-08 above floor).",
+    "C (DATA NOW AVAILABLE): the S1/S1-b evidence IS the fork-point regime measurement — see ref_distribution_analysis_2026_08_31: the hazard cohort extends to ~ranks 105-120 (~65-72% of inputs); no v1 amplitude threshold closes it within the 50% skip budget."
+  ],
+  "s2": "NOT RUN (S1 gate failed; protocol: no restart, no S2 on failed S1)",
+  "next_action": "USER DECISION (2026-08-31) — after A'+B' (S1-b) FAILED on a second tensor (slot_07 k_proj, ref rank 105/166), with the quantified no-feasible-v1-threshold result:\n  D1 (structural guard, v2): pre-NS discriminator of the NS4 boundary-chaos CLASS from the forensic mechanism — rank-1-dominance / top-1 singular energy of the normalized input (power-iteration, ~10ms/step for 166 inputs), calibrated offline on a shadow run measuring top-1 sigma^2 across all 166 inputs (forensic: hazard q_proj top-1 sigma^2 = 88.9%). Attacks the mechanism, not amplitude; skip rate stays low. Most work (new guard line + calibration + S1-c), best long-term.\n  D3 (band floor, v1): min_reference raised to ~1.2-1.35e-07 (just above the hazard cohort boundary rank ~105-115) => 64-70% skip, closes the hazard CLASS (all low-band refs skipped, not just the 2 observed instances), S1-c likely passes; violates the 50% skip guideline (design Section 14.4) — CMuon would optimize only ~30-35% of DiT matrices. Fast (~30min, infra all in place).\n  D2 (targeted cohort, v1): static skip list = observed hazard tensors + neighboring same-slot refs (slots 07/08, ~8-15 specs, ~8% skip). Fragile: a 3rd hazard tensor with p~0.02 would need ~50+ steps to manifest and would crash S1-c mid-run; fits the threshold to observed crashes.\n  D4 (close FAIL): candidate architecture (canonical NS + two-phase commit + ceiling) verified; v1 amplitude guard design INSUFFICIENT for this data regime; redesign (D1) in a new dev round.",
+  "recommended": "D1 as the correct mechanism-level fix; if the user wants a fast architecture end-to-end proof first, D3 -> S1-c (documented as a stopgap with the 64-70% skip tradeoff), then D1 for the production guard. D2 not recommended (fit-to-crash fragility)."
+}

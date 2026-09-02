@@ -1,0 +1,137 @@
+{
+  "report": "cmuon-root-cause",
+  "date": "2026-08-29",
+  "host": {"alias": "salt1", "ip": "172.31.73.15", "hcus": 2, "dtk": "26.04"},
+  "candidate": {
+    "branch": "Cmoun",
+    "commit": "f27fde9",
+    "code_commit": "3967ade",
+    "tree_verified": "salt1 original tree byte-verified, untouched",
+    "fork_ckpt": "/sakuramoon-runtime/output_model/g1/ckpt_97100_raw-97100-update-cadence",
+    "original_candidate_safe": false
+  },
+  "forensic_branch": {"name": "cmoun-forensic", "commit": "bff14ab", "merged_into_candidate": false},
+  "verdict": {
+    "original_candidate_safe": false,
+    "basis": "mechanism confirmed at first post-fork update (97101), not merely reproduced",
+    "case_f_nonreproducing": false
+  },
+  "root_cause": {
+    "summary": "Frobenius normalization (nesterov / nesterov.norm().clamp(min=1e-7)) erases the small magnitude of near-zero-signal specs (denominator = TRUE norm 4.828e-6, 78x eps, clamp NOT engaged); the resulting normalized rank-1-dominated matrix (top-1 sigma^2 = 88.9%) sits on the CONVERGENCE BOUNDARY of the 4-iteration quintic NS: iterations 1-3 stable (fro 1.0->1.37->3.78->8.80 CPU-deterministic), the 4th iteration is chaotic in the Gram bits - same input bits, 5-8% HCU bf16 GEMM noise picks the branch: x1.95 (fro 17.2, CPU) / x1.98 (fro 17.6, HCU rank1) / x57.9 (fro 510.4, HCU rank0) -> 29x rank-uncorrelated NS outputs; delta up to 1395x its own rms on one rank, 10x the Moonlight target; the uninstrumented candidate writes them silently; drift accumulates to nonfinite global gradient norm / loss divergence within ~31-78 updates. Correction of the first draft: the '~1.5e-7 Frobenius just above eps' and 'x~66,000 noise amplification' statements were dimensionally wrong; exact chain = x2.0766e5 (normalize) x x510.1 (NS4 bad branch) x 1.5811e-3 (alpha) = x1.675e5 nesterov->delta",
+    "unit_audit_2026_08_31": {
+      "source": "cmuon-forensic-crash-97101-dit_blocks_slot_08_attention_q_proj_weight.pt (F1 rank0 dump)",
+      "shape": [2560, 2560], "numel": 6553600,
+      "grad": {"element_rms": 1.9294e-08, "fro_norm": 4.9365e-05, "max_abs": 1.2577e-05, "zero_frac": 0.00091, "subnormal": 0},
+      "momentum": {"element_rms": 9.6489e-10, "fro_norm": 2.4687e-06, "max_abs": 6.2957e-07, "zero_frac": 0.00091, "subnormal": 0},
+      "nesterov": {"element_rms": 1.8821e-09, "fro_norm": 4.8155e-06, "max_abs": 1.2293e-06, "zero_frac": 0.00091, "subnormal": 0, "exp_median": -33, "ulp_at_median": 4.55e-13, "ulp_count_median": 400},
+      "ns_output": {"element_rms": 1.9937e-01, "fro_norm": 5.1026e+02, "max_abs": 2.78e+02},
+      "delta": {"element_rms": 3.1518e-04, "fro_norm": 8.0672e-01, "max_abs": 4.3945e-01},
+      "normalization_denominator": 4.8280e-06,
+      "denominator_is_eps_clamp": false,
+      "eps": 1e-07,
+      "amplification_chain": {"normalize": 2.0766e+05, "ns4_rank0_branch": 510.1, "alpha": 1.5811e-03, "total_nesterov_to_delta": 1.675e+05},
+      "ns_trace_fro_rank0_hcu": [1.4267, 3.9221, 9.4299, 510.3766],
+      "ns_trace_fro_cpu_deterministic": [1.3688, 3.7800, 8.8048, 17.2235],
+      "ns_trace_fro_rank1_hcu_final": 17.64,
+      "spectrum": {"top1_sigma2_frac": 0.8889, "top10_sigma2_frac": 0.9473, "sigma_top": 4.5427e-06, "sigma_last": 3.227e-13},
+      "identity_checks": {"nesterov_equals_0.05g_plus_0.95m": true, "delta_equals_alpha_x_ns": true},
+      "hcu_branch_repro_2026_08_31": {
+        "tensors": "F2b event same spec (nesterov fro 6.35e-6); DTK bf16 .norm() exact & deterministic (err -0.06%), no clamp",
+        "realizations_final_fro": [125234.92, 16.29, 15.92, 15.92, 15.88],
+        "devices": ["cuda:0", "cuda:0", "cuda:0", "cuda:1", "cuda:1"],
+        "branch_probability_catastrophic": 0.2,
+        "small_branch_matches": "CPU deterministic 17.22 and F1 rank1 17.64",
+        "amplitude_modalities": "small ~16 / medium ~1e2-1e3 / large ~1e5"
+      }
+    },
+    "role_dependence": "role-independent (Q role proven by F2b; K/V/adaln excluded in F2 did not prevent the trip)",
+    "fork_artifact": false,
+    "momentum_ema_persists": true
+  },
+  "hardware_finding": {
+    "dtk_bf16_gemm_nondeterministic": true,
+    "evidence": {
+      "shape": [2560, 2560],
+      "within_device_repeats_rel_rms": [0.062, 0.074, 0.051, 0.080],
+      "elements_differing_pct": [2.4, 2.6, 1.9, 2.6],
+      "norm_deterministic": true,
+      "small_shape_2560x8_bit_identical": true
+    },
+    "implication": "per-rank independent NS breaks the DDP identical-model invariant from update 1; cross-rank drift recorded per step (rank_drift)"
+  },
+  "events": [
+    {
+      "run": "F1",
+      "config": "train_g1_hybrid_cmuon_ns4_forensic_f1.toml",
+      "routing_exclude": [],
+      "update": 97101,
+      "type": "local_failure",
+      "kind": "delta_rms_ceiling",
+      "spec": "dit.blocks.slot_08.attention.q_proj.weight",
+      "role": "attention_q",
+      "ranks": [0],
+      "values": {"rank0": {"ns_rms": 0.199, "ns_max": 278.0, "d_rms": 3.15e-04, "d_max": 0.439}, "rank1": {"ns_rms": 6.89e-03, "ns_max": 0.676, "d_rms": 1.09e-05, "d_max": 1.07e-03}},
+      "ceiling": 3.12e-04,
+      "rank_drift": 16.8,
+      "artifact": "cmuon-forensic-crash-97101.json (+ slot_08 q_proj phase1 tensors .pt)"
+    },
+    {
+      "run": "F2-first",
+      "config": "train_g1_hybrid_cmuon_safe_routing_forensic.toml",
+      "routing_exclude": ["attention_k", "attention_v", "adaln_shared"],
+      "update": 97101,
+      "type": "instrumentation_calibration_event",
+      "kind": "rank_divergence_sum_column",
+      "spec": "dit.blocks.slot_00.attention.q_proj.weight",
+      "role": "attention_q",
+      "detail": "ns_sum rel 0.143 (trip under uniform-tol rules); worst pair spec51 ns_sum rel 347.9 with ns_rms rel 0.0017 and healthy delta -> sum column ill-conditioned on near-zero-gradient specs; comparison rules re-scoped (rms/max + probe-absolute only), no candidate defect",
+      "rank_drift": 347.87
+    },
+    {
+      "run": "F2b",
+      "config": "train_g1_hybrid_cmuon_safe_routing_forensic.toml",
+      "routing_exclude": ["attention_k", "attention_v", "adaln_shared"],
+      "update": 97101,
+      "type": "local_failure",
+      "kind": "delta_rms_ceiling",
+      "spec": "dit.blocks.slot_08.attention.q_proj.weight",
+      "role": "attention_q",
+      "ranks": [0, 1],
+      "values": {"rank0": {"ns_rms": 0.418, "ns_max": 644.0, "d_rms": 6.60e-04, "d_max": 1.016}, "rank1": {"ns_rms": 0.244, "ns_max": 408.0, "d_rms": 3.86e-04, "d_max": 0.644}},
+      "ceiling": 3.12e-04,
+      "rank_drift": 25.17,
+      "note": "dual-rank real ceiling violation on a Q-role spec -> F2 (K/V+adaln routing) does not remove the defect"
+    }
+  ],
+  "crash_history": [
+    {"host": "salt1", "update": 97131, "form": "sudden nonfinite global grad norm, rank1, clip.py:48"},
+    {"host": "salt1", "update": 97178, "form": "sudden nonfinite + per-sample inf, rank1, clip.py:48"},
+    {"host": "salt2 (pristine healthy host, experiment A)", "update": 97147, "form": "loss 0.559->2.544 single step, 10u sustained divergence, nonfinite ~97157"}
+  ],
+  "control": {"host": "salt3", "optimizer": "torchao_adamw8bit", "crashes": 0, "updates": "17,143+", "data_region": "97620-97633 preclip 0.037-0.072 normal"},
+  "crash_rate": {"count": 3, "window_updates": 165, "rate": 0.018, "mtt_updates": 55},
+  "decision_tree": {
+    "F1": "triggered @97101 (first update) - reproduced + mechanism captured",
+    "F2": "unstable @97101 (dual-rank ceiling, Q role) - safe routing insufficient",
+    "F3": "not run (only if F2 stable)",
+    "case_f_nonreproducing": false
+  },
+  "disclosures": {
+    "data_offset": "ckpt@97100 + data queue head shard 605-606/2099 (cycle1/epoch2); identical to the original crashed run within +/-1 shard (~6u); all trips at 97101 (first batch), 97131/97178 data window not re-traversed",
+    "control_miskill": "broad pkill during experiment-A prep interrupted CONTROL; restarted 08-29 13:50 on salt3 via /root/start-g1.sh after salt2->salt3 migration; update continuity verified; crash-exclusion window intact",
+    "invalidated_audit": "pre-forensics role-level 3.53x ratio (K/V motivation for F2) invalidated; mechanism proven role-independent",
+    "deploy_pitfalls": ["stale CONFIG_NAME in /root/mig-workload-env snapshot overrode inherited env (first F1 launch ran the uninstrumented core config; caught via resolved.toml run_id; key removed)", "fixed-mtime tar + 1-byte change revived stale .pyc (pycache now cleaned on every deploy; deploy files SHA-verified against git blobs)", "DTK process group has no CPU backend -> all forensic collectives device-side"],
+    "local_env_caveats": ["local Windows torch has no triton: 12 pre-existing hybrid CUDA test failures (environmental); salt1 DTK venv is the authoritative gate (43/43 PASS 94.8s)", "local pyright env cannot be strict-clean (baseline cmuon.py 52 errors environmental); structural issues cleared", "Hygon CPU bf16 matmul ~1.4 GFLOP/s + cgroup 30-core oversubscription -> NS tests run on HCU per user direction; OMP_NUM_THREADS=8"]
+  },
+  "artifacts": {
+    "salt1": "/sakuramoon-runtime/artifacts/g1/forensic/ (crash-97101.json per run + phase1 tensor .pt files)",
+    "local_mirror": "D:\\sakruamoon\\tmp\\cmuon-forensic-crash-97101.json (F1), *-f2.json (F2 first), *-f2b.json (F2b), *-slot08-qproj.pt",
+    "unit_tests": "salt1 43/43 PASS; local 31 logic PASS + 12 triton-env failures"
+  },
+  "fix_directions_recorded_not_implemented": [
+    "near-zero-gradient guard: skip NS update (keep momentum) when NS input norm below a floor calibrated to the parameter's typical gradient scale (momentum history / role quantile) instead of absolute 1e-7",
+    "cross-rank consistency of the applied update (pre-write check or single-rank NS + broadcast)",
+    "platform-level deterministic bf16 GEMM via DTK vendor (changes candidate math -> full re-validation)"
+  ],
+  "stop_after_report": true
+}

@@ -1,0 +1,35 @@
+# EXPERIMENTAL — Hybrid CMuon config B (paper rescale, chunk_rescale ON).
+#
+# DO NOT DEPLOY. Identical to config A (train_g1_hybrid_cmuon_core.toml) EXCEPT
+# cmuon_chunk_rescale_sqrt_n = true, which applies a per-chunk sqrt(N_chunk)
+# Moonlight rescale to the chunked specs:
+#   - mlp.in_proj (chunk=2 gate/up)  -> x sqrt(2)
+#   - shared_block_projection (chunk=6) -> x sqrt(6)
+#   - all chunk=1 specs (q/k/v/content_gate/out_proj/down_proj) -> x sqrt(1) = no-op
+# There is NO QKV sqrt(3): Q/K/V are physically separate tensors (GQA), each
+# chunk=1 (see reports/cmuon-design-audit.md §3.3).
+#
+# The HCU chunk-rescale bench (reports/cmuon-benchmark.json rescale_comparison)
+# measured the resulting update-RMS ratios: FFN x1.37 (target sqrt2=1.41),
+# AdaLN x2.45 (target sqrt6=2.45), attention x1.01 (no rescale) — exact match.
+#
+# DO NOT DEPLOY. Generation-quality validation (long-run loss/FID) is REQUIRED
+# before adoption. Same batch/LR/model/data as config A and the base run.
+
+extends = ["train_g1_transparent_white_crop_800_s0.toml"]
+
+[optimizer]
+name = "hybrid_cmuon"
+base_lr = 0.00005
+reference_batch = 256
+lr_scaling = "linear_global_batch"
+betas = [0.9, 0.95]
+eps = 0.00000001
+block_size = 256
+bf16_stochastic_round = true
+matrix_weight_decay = 0.0
+sensitive_weight_decay = 0.0
+# --- Hybrid CMuon (config B: paper rescale) ---
+cmuon_ns_steps = 5
+cmuon_momentum_dtype = "bfloat16"
+cmuon_chunk_rescale_sqrt_n = true

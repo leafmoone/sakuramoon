@@ -1,0 +1,100 @@
+{
+  "candidate": "hybrid_cmuon_canonical_ns4_fp32_rescue (production cleanup)",
+  "verdict": "IMPLEMENTATION_REGRESSION_200U=PASS",
+  "host": {
+    "name": "salt10",
+    "accelerator": "2xHCU renderD133/135, 64 GiB each",
+    "dtk": "26.04",
+    "torch": "2.9.0",
+    "venv": "sakuramoon-dtk-venv"
+  },
+  "code": {
+    "branch": "cmoun",
+    "frozen_head": "f875ee9",
+    "fix_chain": ["e0c8720", "95166ae", "824f08d", "9efe640", "75782ad", "1488042", "24147aa", "589092f", "f875ee9"],
+    "baseline_frozen_tree": "37602e4"
+  },
+  "gpu_phases": {
+    "p1_2rank_forced_rescue": {
+      "verdict": "PASS",
+      "artifact": "/sakuramoon-runtime/artifacts/g1/cmuon-cleanup/2rank-regression.json",
+      "n_inputs": 22,
+      "owned_per_rank": [11, 11],
+      "forced_mine_rank0": 4,
+      "natural_rescues": 0,
+      "scenarios_ok": 5,
+      "max_delta_rank_spread": 0.0,
+      "max_param_rank_diff": 0.0,
+      "param_fingerprint_spread": 0.0,
+      "final_failure": "CMuonSafetyError: nonfinite NS delta: dit.conditioner.shared_block_projection.weight#chunk5 (zero commit; failures recorded before raise: rank0=1, rank1=0)"
+    },
+    "p2_ckpt_backcompat_d4_103500": {
+      "verdict": "D4_CHECKPOINT_BACKCOMPAT=YES",
+      "artifact": "/sakuramoon-runtime/artifacts/g1/cmuon-cleanup/backcompat.json",
+      "A_load": "ok",
+      "C_update_and_save": "ok",
+      "D_resume": "ok",
+      "E_continuity": {
+        "observations_delta": 1,
+        "bf16_attempts_delta": 83,
+        "fp32_attempts_delta": 0,
+        "fp32_rescues_delta": 0,
+        "n_references_stable": true
+      }
+    },
+    "p3_perf_ab": {
+      "verdict": "PASS",
+      "artifact": "/sakuramoon-runtime/artifacts/g1/cmuon-cleanup/perf-merged.json",
+      "warmup": 6,
+      "iters": 40,
+      "baseline_37602e4": {"mean_s": 0.8894, "host_syncs_per_step_mean": 175.2},
+      "cleanup_f875ee9": {"mean_s": 0.7624, "host_syncs_per_step_mean": 6.8},
+      "adamw8bit_reference": {"mean_s": 0.4037, "host_syncs_per_step_mean": 4.2},
+      "host_syncs_delta_percent": -96.1,
+      "step_time_delta_percent": -14.28
+    }
+  },
+  "regression_200u": {
+    "window": [103501, 103700],
+    "successful_updates": 200,
+    "stop": "WATCHDOG-STOPPED-DONE (watchdog target 103700, exact stop at 103700)",
+    "time_s_per_update": {"min": 15.39, "max": 16.44},
+    "loss": {"min": 0.525703, "mean": 0.554610, "max": 0.583701, "d4_steady_state": "0.556±0.001"},
+    "cmuon_safety_errors": 0,
+    "nonfinite_total": 0,
+    "final_counters_from_ckpt_103700_optimizer_state": {
+      "fp32_rescue_observations": 1200,
+      "bf16_attempts": 99600,
+      "bf16_safety_failures": 818,
+      "fp32_attempts": 818,
+      "fp32_rescues": 818,
+      "fp32_rescue_failures": 0
+    },
+    "rescue_continuity": {
+      "d4_final": {"observations": 1000, "rescues": 685, "failures": 0, "rate_per_obs": 0.685},
+      "this_window": {"observations_added": 200, "rescues_added": 133, "failures_added": 0, "rate_per_obs": 0.665},
+      "note": "band flat/slightly below D4 exit rate; guard-reference convergence transient decaying; every trip rescued"
+    },
+    "checkpoints": [
+      {"dir": "ckpt_103600_raw-103600-update-cadence", "complete": true, "manifest": true, "files": 5},
+      {"dir": "ckpt_103700_raw-103700-update-cadence", "complete": true, "manifest": true, "files": 5}
+    ],
+    "hub": {
+      "repo": "leafmoone/sm_train_state",
+      "path": "cmoun/",
+      "uploaded_at": "2026-09-02T02:12:08+08:00",
+      "chain": [102500, 102600, 102700, 102800, 102900, 103000, 103100, 103200, 103300, 103400, 103500, 103600, 103700]
+    },
+    "data_service": {"cold_cache_refill_gib": 67, "streams": 8, "mi_b_s_per_stream": [17, 79], "starvation": false, "ready_queue_depth": 8}
+  },
+  "disclosures": [
+    "no 1000-cadence sample in window (next 104000); quality gate + deployment remain user decisions",
+    "120-concept suite files still missing locally (staged tar ~0.6 G)",
+    "wandb disabled in frozen toml (disclosed in D4 report)",
+    "implementation regression only; optimizer math frozen since D2 R1; config frozen"
+  ],
+  "rollback": {
+    "salt6": "pre-cleanup tree @37602e4 + D4 forensic mirror (172.31.59.244)",
+    "salt7": "G1 CONTROL untouched"
+  }
+}

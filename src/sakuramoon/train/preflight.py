@@ -41,6 +41,7 @@ from sakuramoon.train.stage import canonical_growth_alpha
 
 if TYPE_CHECKING:
     from sakuramoon.config.schema import RuntimeConfig
+    from sakuramoon.optim.cmuon import HybridCMuon
     from sakuramoon.train.runtime import SingleGpuBatchRuntime
     from sakuramoon.train.step import SingleGpuUpdateState
 
@@ -248,7 +249,7 @@ class RestoredSingleGpuCheckpoint:
     state: RawCheckpointState
     payload_bytes: int
     module: nn.Module = field(repr=False)
-    optimizer: IsolatedAdamW8bit = field(repr=False)
+    optimizer: IsolatedAdamW8bit | HybridCMuon = field(repr=False)
 
 
 def _require_restored_checkpoint(
@@ -268,7 +269,7 @@ def _require_restored_checkpoint(
 def restore_single_gpu_checkpoint(
     checkpoint: Path,
     module: nn.Module,
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
     expected: CheckpointIdentity,
 ) -> RestoredSingleGpuCheckpoint:
     """Load a raw checkpoint into the supplied model and optimizer."""
@@ -309,7 +310,7 @@ class ProductionSingleGpuCheckpointPublisher:
         checkpoint_root: Path,
         resolved_config: bytes,
         module: nn.Module,
-        optimizer: IsolatedAdamW8bit,
+        optimizer: IsolatedAdamW8bit | HybridCMuon,
         restored_checkpoint: RestoredSingleGpuCheckpoint,
         accepted_checkpoint_ids: frozenset[str],
         retention_slots: int,
@@ -577,9 +578,12 @@ def build_single_gpu_preflight_checks(
 
     def optimizer_parameters() -> None:
         from sakuramoon.checkpoint.artifact import validate_optimizer_coverage
+        from sakuramoon.optim.cmuon import HybridCMuon
 
-        if not isinstance(optimizer, IsolatedAdamW8bit):
-            raise TypeError("training requires the configured AdamW8 optimizer")
+        if not isinstance(optimizer, (IsolatedAdamW8bit, HybridCMuon)):
+            raise TypeError(
+                "training requires the configured AdamW8 or Hybrid CMuon optimizer"
+            )
         validate_optimizer_coverage(
             trainable_module,
             tuple((spec.name, spec.parameter) for spec in optimizer.audit.specs),

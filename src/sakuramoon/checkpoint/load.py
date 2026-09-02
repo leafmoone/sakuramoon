@@ -35,7 +35,8 @@ from sakuramoon.checkpoint.schema import (
     raw_state_from_dicts,
 )
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
-from sakuramoon.optim.groups import ParameterSpec
+from sakuramoon.optim.cmuon import HybridCMuon
+from sakuramoon.optim.groups import ParameterAudit, ParameterSpec
 
 _TORCH_TO_SAFE_DTYPE = {
     torch.bool: "BOOL",
@@ -523,7 +524,9 @@ def _validate_optimizer_state(
         )
 
 
-def _load_sr_rng(path: Path, optimizer: IsolatedAdamW8bit) -> dict[str, object]:
+def _load_sr_rng(
+    path: Path, optimizer: IsolatedAdamW8bit | HybridCMuon
+) -> dict[str, object]:
     try:
         tensors = load_file(path, device="cpu")
     except Exception:  # noqa: BLE001 - normalize Safetensors loader errors
@@ -547,6 +550,355 @@ def _load_sr_rng(path: Path, optimizer: IsolatedAdamW8bit) -> dict[str, object]:
     if state.shape != optimizer.sr_rng.state.shape:
         raise CheckpointError("optimizer SR RNG shape does not match")
     return {"device_type": "cuda", "device_index": current_index, "state": state}
+
+
+def _hybrid_momentum_dtype(name: object) -> torch.dtype | None:
+    if name == "bfloat16":
+        return torch.bfloat16
+    if name == "float32":
+        return torch.float32
+    return None
+
+
+def _hybrid_ns_map(value: object) -> dict[str, int] | None:
+    """Normalize a saved per-role NS map (canonical dict or legacy scalar)."""
+    if isinstance(value, int):
+        return {role: value for role in ("attention_q", "attention_k", "attention_v", "attention_content_gate", "attention_out", "ffn_in", "ffn_down", "adaln_shared")}
+    if isinstance(value, dict):
+        return {str(key): int(item) for key, item in value.items()}
+    return None
+
+
+def _validate_hybrid_optimizer_schema(
+    value: object, optimizer: HybridCMuon
+) -> None:
+    """Schema v2: inner AdamW groups + the CMuon algorithm contract."""
+    from sakuramoon.optim.guarded_canonical import (
+        GUARD_SCHEMA_VERSION,
+        OWNER_MAPPING_VERSION,
+        HybridCMuonGuardedCanonical,
+    )
+
+    document = _mapping(value, "optimizer schema")
+    if type(document.get("schema_version")) is not int or document["schema_version"] != 2:
+        raise CheckpointError("hybrid optimizer schema version is invalid")
+    keys = {"schema_version", "groups", "hybrid_cmuon"}
+    if "guarded_canonical" in document:
+        keys.add("guarded_canonical")
+    _exact_keys(document, keys, "hybrid optimizer schema")
+    if (
+        isinstance(optimizer, HybridCMuonGuardedCanonical)
+        and "guarded_canonical" not in document
+    ):
+        # The guarded candidate only resumes from guarded checkpoints
+        # (state-exact); the unguarded block is rejected by its own
+        # load_state_dict contract.
+        raise CheckpointError(
+            "guarded canonical optimizer requires a guarded checkpoint "
+            "(unguarded CMuon checkpoints cannot resume directly)"
+        )
+    if not isinstance(optimizer, HybridCMuonGuardedCanonical) and (
+        "guarded_canonical" in document
+    ):
+        # A guarded checkpoint cannot be downgraded into the unguarded
+        # candidate via the schema sidecar either.
+        raise CheckpointError(
+            "guarded canonical checkpoint cannot resume into the unguarded "
+            "hybrid CMuon (no silent downgrade)"
+        )
+    if isinstance(optimizer, HybridCMuonGuardedCanonical):
+        block = _mapping(
+            document["guarded_canonical"], "guarded_canonical schema block"
+        )
+        _exact_keys(
+            block,
+            {
+                "schema_version",
+                "config",
+                "owner_mapping_version",
+                "world_size",
+                "ns_mode",
+                "ns_steps",
+            },
+            "guarded_canonical schema block",
+        )
+        if block["schema_version"] != GUARD_SCHEMA_VERSION:
+            raise CheckpointError("guarded canonical schema version is invalid")
+        if block["owner_mapping_version"] != OWNER_MAPPING_VERSION:
+            raise CheckpointError("guarded canonical owner mapping version differs")
+        if block["world_size"] != optimizer.world_size:
+            raise CheckpointError(
+                "guarded canonical world_size differs (owner mapping changed)"
+            )
+        if block["ns_mode"] != "canonical_owner_rank":
+            raise CheckpointError("guarded canonical NS mode differs")
+        saved_ns = _hybrid_ns_map(block["ns_steps"])
+        if saved_ns is None or saved_ns != optimizer.cfg.canonical_ns_map():
+            raise CheckpointError("guarded canonical per-role ns_steps map differs")
+    groups = document["groups"]
+    if not isinstance(groups, list):
+        raise CheckpointError("hybrid optimizer groups must be an array")
+    saved: list[tuple[str, tuple[str, ...]]] = []
+    for raw_group in cast(list[object], groups):
+        group = _mapping(raw_group, "optimizer group")
+        _exact_keys(group, {"group_name", "param_names"}, "optimizer group")
+        names = group["param_names"]
+        if not isinstance(group["group_name"], str) or not isinstance(names, list) or not all(
+            isinstance(name, str) for name in cast(list[object], names)
+        ):
+            raise CheckpointError("optimizer group is invalid")
+        saved.append((group["group_name"], tuple(cast(list[str], names))))
+    current: list[tuple[str, tuple[str, ...]]] = []
+    for group in optimizer.adamw.optimizer.param_groups:
+        group_name = group.get("group_name")
+        names = group.get("param_names")
+        if not isinstance(group_name, str) or not isinstance(names, list):
+            raise CheckpointError("current optimizer lacks canonical parameter names")
+        current.append((group_name, tuple(cast(list[str], names))))
+    if saved != current:
+        raise CheckpointError("hybrid inner optimizer parameter groups do not match")
+    block = _mapping(document["hybrid_cmuon"], "hybrid_cmuon schema block")
+    _exact_keys(
+        block,
+        {
+            "momentum",
+            "nesterov",
+            "eps",
+            "momentum_dtype",
+            "chunk_rescale_sqrt_n",
+            "qkv_group_rescale",
+            "ns_steps",
+        },
+        "hybrid_cmuon schema block",
+    )
+    cfg = optimizer.cfg
+    if (
+        block["momentum"] != cfg.momentum
+        or block["nesterov"] != cfg.nesterov
+        or block["eps"] != cfg.eps
+    ):
+        raise CheckpointError("hybrid CMuon algorithm scalars differ")
+    if block["momentum_dtype"] != cfg.momentum_dtype:
+        raise CheckpointError("hybrid CMuon momentum dtype differs")
+    if (
+        block["chunk_rescale_sqrt_n"] != cfg.chunk_rescale_sqrt_n
+        or block["qkv_group_rescale"] != cfg.qkv_group_rescale
+    ):
+        raise CheckpointError("hybrid CMuon rescale flags differ")
+    saved_ns = _hybrid_ns_map(block["ns_steps"])
+    if saved_ns is None or saved_ns != cfg.canonical_ns_map():
+        raise CheckpointError("hybrid CMuon per-role ns_steps map differs")
+
+
+def _load_hybrid_optimizer_state(path: Path) -> dict[str, object]:
+    try:
+        value = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:  # noqa: BLE001 - normalize torch safe-loader errors
+        raise CheckpointError("optimizer state is not safe-loadable") from None
+    if not isinstance(value, dict):
+        raise CheckpointError("hybrid optimizer state has invalid top-level fields")
+    document = cast(dict[str, object], value)
+    keys = {
+        "optimizer",
+        "sr_rng",
+        "cmuon",
+        "routing",
+        "transition",
+        "hybrid_cmuon_schema_version",
+    }
+    # Guarded canonical candidate (schema v1 guard block) adds two optional
+    # keys; unguarded checkpoints carry neither.
+    if "guard" in document:
+        keys |= {"guard", "guarded_canonical_schema_version"}
+    _exact_keys(document, keys, "hybrid optimizer state")
+    if (
+        type(document["hybrid_cmuon_schema_version"]) is not int
+        or document["hybrid_cmuon_schema_version"] != 1
+    ):
+        raise CheckpointError("hybrid optimizer state schema version is invalid")
+    if (
+        "guard" in document
+        and (
+            type(document.get("guarded_canonical_schema_version")) is not int
+            or document["guarded_canonical_schema_version"] != 1
+        )
+    ):
+        raise CheckpointError("guarded canonical schema version is invalid")
+    return document
+
+
+def _validate_hybrid_cmuon_state(cmuon_state: object, optimizer: HybridCMuon) -> None:
+    """State-exact check of the CMuon block against the runtime routing/cfg."""
+    block = _mapping(cmuon_state, "cmuon state")
+    meta_keys = (
+        "ns_steps",
+        "ns_coefficients",
+        "momentum",
+        "nesterov",
+        "eps",
+        "momentum_dtype",
+        "chunk_rescale_sqrt_n",
+        "qkv_group_rescale",
+    )
+    for key in meta_keys:
+        if key not in block:
+            raise CheckpointError(f"hybrid CMuon state missing metadata key: {key}")
+    cfg = optimizer.cfg
+    if block["momentum_dtype"] != cfg.momentum_dtype:
+        raise CheckpointError("hybrid CMuon momentum dtype mismatch")
+    saved_ns = _hybrid_ns_map(block["ns_steps"])
+    if saved_ns is None or saved_ns != cfg.canonical_ns_map():
+        raise CheckpointError(
+            "hybrid CMuon per-role ns_steps mismatch (semantic incompatibility)"
+        )
+    if list(block["ns_coefficients"]) != list(cfg.ns_coefficients):
+        raise CheckpointError("hybrid CMuon ns coefficients differ")
+    if (
+        block["momentum"] != cfg.momentum
+        or block["nesterov"] != cfg.nesterov
+        or block["eps"] != cfg.eps
+    ):
+        raise CheckpointError("hybrid CMuon algorithm scalars differ")
+    if (
+        block["chunk_rescale_sqrt_n"] != cfg.chunk_rescale_sqrt_n
+        or block["qkv_group_rescale"] != cfg.qkv_group_rescale
+    ):
+        raise CheckpointError("hybrid CMuon rescale flags differ")
+    expected_dtype = _hybrid_momentum_dtype(cfg.momentum_dtype)
+    momenta = block.get("momenta")
+    if not isinstance(momenta, dict):
+        raise CheckpointError("hybrid CMuon momenta must be a mapping")
+    seen: set[str] = set()
+    for spec in optimizer.routing.cmuon_specs:
+        tensor = momenta.get(spec.name)
+        if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cpu":
+            raise CheckpointError(f"hybrid CMuon momentum missing/invalid for {spec.name}")
+        if tuple(tensor.shape) != tuple(spec.parameter.shape):
+            raise CheckpointError(f"hybrid CMuon momentum shape mismatch for {spec.name}")
+        if tensor.dtype != expected_dtype:
+            raise CheckpointError(f"hybrid CMuon momentum dtype mismatch for {spec.name}")
+        if not bool(torch.isfinite(tensor.to(torch.float32)).all().item()):
+            raise CheckpointError(f"hybrid CMuon momentum has nonfinite values: {spec.name}")
+        seen.add(spec.name)
+    if set(momenta) != seen:
+        raise CheckpointError("hybrid CMuon momenta set differs from routing")
+
+
+def _validate_transition_optimizer_schema(value: object, audit: ParameterAudit) -> None:
+    """v1 schema whose groups are the FULL audit (the source checkpoint was a
+    pure full-parameter AdamW8bit run); the hybrid will keep the AdamW subset
+    and fork the CMuon allowlist from it."""
+    document = _mapping(value, "optimizer schema")
+    if type(document.get("schema_version")) is not int or document["schema_version"] != 1:
+        raise CheckpointError("optimizer parameter schema version is invalid")
+    groups = document["groups"]
+    if not isinstance(groups, list):
+        raise CheckpointError("optimizer groups must be an array")
+    saved: list[tuple[str, tuple[str, ...]]] = []
+    for raw_group in cast(list[object], groups):
+        group = _mapping(raw_group, "optimizer group")
+        _exact_keys(group, {"group_name", "param_names"}, "optimizer group")
+        names = group["param_names"]
+        if not isinstance(group["group_name"], str) or not isinstance(names, list) or not all(
+            isinstance(name, str) for name in cast(list[object], names)
+        ):
+            raise CheckpointError("optimizer group is invalid")
+        saved.append((group["group_name"], tuple(cast(list[str], names))))
+    expected = [
+        ("matrix_decay", tuple(spec.name for spec in audit.decay)),
+        ("sensitive_no_decay", tuple(spec.name for spec in audit.sensitive)),
+    ]
+    if saved != expected:
+        raise CheckpointError(
+            "transition source optimizer groups differ from the full parameter audit"
+        )
+
+
+def _validate_transition_optimizer_state(
+    document: dict[str, object], audit: ParameterAudit, successful_updates: int
+) -> None:
+    """Validate a pure-AdamW (v1) optimizer state against the full audit.
+
+    Mirrors _validate_optimizer_state, but the current-side groups come from
+    the audit (the source run covered every trainable parameter), because the
+    hybrid's inner optimizer only covers the AdamW subset.
+    """
+    saved_groups = document["param_groups"]
+    saved_state = document["state"]
+    if not isinstance(saved_groups, list) or not isinstance(saved_state, dict):
+        raise CheckpointError("optimizer state groups or state mapping is invalid")
+    saved_group_items = cast(list[object], saved_groups)
+    saved_state_items = cast(dict[object, object], saved_state)
+    if len(saved_group_items) != 2:
+        raise CheckpointError("transition optimizer state requires the two canonical groups")
+    audit_by_name = {spec.name: spec for spec in audit.specs}
+    # Expected torch state ids: the baseline (build_adamw8bit) param_groups are
+    # [matrix_decay, sensitive_no_decay] in name-sorted order, so the flattened
+    # ids run decay 0..len(decay)-1 then sensitive len(decay)..N-1.
+    expected_id_by_name: dict[str, int] = {}
+    for rank, spec in enumerate(audit.decay):
+        expected_id_by_name[spec.name] = rank
+    offset = len(audit.decay)
+    for rank, spec in enumerate(audit.sensitive):
+        expected_id_by_name[spec.name] = offset + rank
+    expected_by_id: dict[int, ParameterSpec] = {}
+    for saved_raw in saved_group_items:
+        if not isinstance(saved_raw, dict):
+            raise CheckpointError("transition optimizer group is invalid")
+        saved_group = cast(dict[str, object], saved_raw)
+        raw_ids = saved_group.get("params")
+        raw_names = saved_group.get("param_names")
+        if not isinstance(raw_ids, list) or not isinstance(raw_names, list):
+            raise CheckpointError("transition optimizer canonical parameter IDs are invalid")
+        id_items = cast(list[object], raw_ids)
+        name_items = cast(list[object], raw_names)
+        if (
+            not all(type(item) is int for item in id_items)
+            or not all(isinstance(name, str) for name in name_items)
+            or len(id_items) != len(name_items)
+        ):
+            raise CheckpointError("transition optimizer canonical parameter IDs are invalid")
+        for parameter_id, name in zip(
+            cast(list[int], id_items), cast(list[str], name_items), strict=True
+        ):
+            if expected_id_by_name.get(name) != parameter_id:
+                raise CheckpointError("transition optimizer parameter identity is invalid")
+            if parameter_id in expected_by_id:
+                raise CheckpointError("transition optimizer parameter identity is duplicated")
+            expected_by_id[parameter_id] = audit_by_name[name]
+    if set(expected_id_by_name) != {spec.name for spec in expected_by_id.values()}:
+        raise CheckpointError("transition optimizer state omits canonical parameters")
+    state_ids = set(saved_state_items)
+    if not state_ids <= set(expected_by_id) or (successful_updates == 0 and state_ids):
+        raise CheckpointError(
+            "transition optimizer initialized state set does not match update"
+        )
+    for parameter_id, raw_parameter_state in saved_state_items.items():
+        if type(parameter_id) is not int or not isinstance(raw_parameter_state, dict):
+            raise CheckpointError("transition per-parameter state is invalid")
+        parameter_state = cast(dict[str, object], raw_parameter_state)
+        if set(parameter_state) != {"step", "exp_avg", "exp_avg_sq"}:
+            raise CheckpointError("transition per-parameter state fields are invalid")
+        step = parameter_state["step"]
+        if (
+            type(step) is not torch.Tensor
+            or step.device.type != "cpu"
+            or step.shape != ()
+            or step.dtype != torch.float32
+            or not math.isfinite(float(step.item()))
+            or not float(step.item()).is_integer()
+            or not 1 <= int(step.item()) <= successful_updates
+        ):
+            raise CheckpointError("transition optimizer step is outside successful update history")
+        spec = expected_by_id[parameter_id]
+        parameter = spec.parameter
+        quantized = parameter.numel() >= 4096 and parameter.numel() % 256 == 0
+        _validate_optimizer_moment(
+            parameter_state["exp_avg"], parameter, quantized=quantized, signed=True
+        )
+        _validate_optimizer_moment(
+            parameter_state["exp_avg_sq"], parameter, quantized=quantized, signed=False
+        )
 
 
 def _model_manifest_records(model_dir: Path) -> tuple[FileRecord, ...]:
@@ -684,10 +1036,21 @@ def load_inference_artifact(
 def load_raw_checkpoint(
     checkpoint: Path,
     module: nn.Module,
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
     expected: CheckpointIdentity,
 ) -> RawCheckpointState:
-    """Restore a RAW checkpoint into the supplied model and optimizer."""
+    """Restore a RAW checkpoint into the supplied model and optimizer.
+
+    Accepted (checkpoint, optimizer) combinations:
+      - schema v1 + IsolatedAdamW8bit  same-optimizer resume (bit-compatible)
+      - schema v2 + HybridCMuon        hybrid -> hybrid resume (state-exact)
+      - schema v1 + HybridCMuon        AdamW -> hybrid FORK: the source
+        checkpoint is a pure full-parameter AdamW8bit run; the AdamW state is
+        preserved per-FQN for the fallback params, the CMuon momentum stays
+        fresh zero, and the transition is recorded on the optimizer.
+    Schema v2 + IsolatedAdamW8bit is rejected (an AdamW optimizer cannot
+    consume a hybrid checkpoint).
+    """
     manifest = read_checkpoint_manifest(checkpoint)
     _validate_identity(manifest, expected, CheckpointKind.RAW)
     _validate_raw_sidecars(checkpoint, manifest)
@@ -702,12 +1065,8 @@ def load_raw_checkpoint(
         checkpoint / "model", module, expected, CheckpointKind.RAW
     )
     train_state = checkpoint / "train_state"
-    _validate_optimizer_schema(
-        _read_json(train_state / "optimizer_schema.json", "optimizer schema"),
-        optimizer,
-        expected,
-    )
-    optimizer_state = _load_optimizer_state(train_state / "optimizer.pt")
+    schema = _read_json(train_state / "optimizer_schema.json", "optimizer schema")
+    schema_version = _mapping(schema, "optimizer schema").get("schema_version")
     state = raw_state_from_dicts(
         _read_json(train_state / "trainer_state.json", "trainer state"),
         _read_json(train_state / "growth_state.json", "growth state"),
@@ -716,9 +1075,6 @@ def load_raw_checkpoint(
         raise CheckpointError("checkpoint update differs from trainer successful updates")
     if state.growth.active_slot_ids != active_slot_ids_from_module(module):
         raise CheckpointError("checkpoint growth state differs from model active slots")
-    _validate_optimizer_state(
-        optimizer_state, optimizer, state.trainer.successful_updates
-    )
     try:
         rank_rng = load_file(train_state / "rng" / "rank-0.safetensors", device="cpu")
     except Exception:  # noqa: BLE001 - normalize Safetensors loader errors
@@ -731,36 +1087,135 @@ def load_raw_checkpoint(
         )
     validate_rank_rng(rank_rng)
     sr_rng = _load_sr_rng(train_state / "rng" / "optimizer_sr.safetensors", optimizer)
+    successful_updates = state.trainer.successful_updates
 
     _apply_model(checkpoint / "model", weight_map, current_model)
+    if isinstance(optimizer, HybridCMuon):
+        if type(schema_version) is int and schema_version == 2:
+            _load_hybrid_state_exact(
+                train_state, schema, optimizer, sr_rng, successful_updates
+            )
+        elif type(schema_version) is int and schema_version == 1:
+            _load_adamw_transition_state(
+                train_state, schema, optimizer, sr_rng, successful_updates
+            )
+        else:
+            raise CheckpointError("hybrid optimizer requires schema v1 or v2")
+    else:
+        if type(schema_version) is not int or schema_version != 1:
+            raise CheckpointError(
+                "schema v2 checkpoint requires the hybrid CMuon optimizer"
+            )
+        _validate_optimizer_schema(schema, optimizer, expected)
+        optimizer_state = _load_optimizer_state(train_state / "optimizer.pt")
+        _validate_optimizer_state(
+            optimizer_state, optimizer, successful_updates
+        )
+        current_groups = cast(
+            list[object],
+            cast(dict[str, object], optimizer.optimizer.state_dict())["param_groups"],
+        )
+        saved_groups = cast(list[object], optimizer_state["param_groups"])
+        if len(saved_groups) != len(current_groups):
+            raise CheckpointError("optimizer state group count does not match")
+        runtime_optimizer_state = dict(optimizer_state)
+        runtime_optimizer_state["param_groups"] = [
+            {
+                **cast(dict[str, object], saved_group),
+                "lr": cast(dict[str, object], current_group)["lr"],
+                "weight_decay": cast(dict[str, object], current_group)[
+                    "weight_decay"
+                ],
+            }
+            for saved_group, current_group in zip(
+                saved_groups, current_groups, strict=True
+            )
+        ]
+        optimizer.load_state_dict(
+            {
+                "optimizer": runtime_optimizer_state,
+                "sr_rng": sr_rng,
+            }
+        )
+    restore_rank_rng(rank_rng)
+    return state
+
+
+def _load_hybrid_state_exact(
+    train_state: Path,
+    schema: object,
+    optimizer: HybridCMuon,
+    sr_rng: dict[str, object],
+    successful_updates: int,
+) -> None:
+    """Hybrid -> hybrid resume: outer state dict, state-exact on both parts."""
+    from sakuramoon.optim.guarded_canonical import HybridCMuonGuardedCanonical
+
+    _validate_hybrid_optimizer_schema(schema, optimizer)
+    outer = _load_hybrid_optimizer_state(train_state / "optimizer.pt")
+    if "guard" in outer and not isinstance(optimizer, HybridCMuonGuardedCanonical):
+        raise CheckpointError(
+            "guarded optimizer state cannot be loaded into the unguarded "
+            "hybrid optimizer (silent downgrade refused)"
+        )
+    _validate_hybrid_cmuon_state(outer["cmuon"], optimizer)
+    if outer["routing"] != optimizer.routing.routing_manifest():
+        raise CheckpointError("hybrid CMuon routing manifest differs")
+    inner = cast(dict[str, object], outer["optimizer"])
+    if not isinstance(inner, dict):
+        raise CheckpointError("hybrid inner optimizer state is invalid")
+    _validate_optimizer_state(inner, optimizer.adamw, successful_updates)
+    # Learning rate and weight decay are runtime-controlled: replace the
+    # saved per-group values with the current configuration values (same
+    # contract as the v1 path).
+    inner_groups = cast(list[object], inner.get("param_groups"))
+    if not isinstance(inner_groups, list):
+        raise CheckpointError("hybrid inner optimizer groups are invalid")
     current_groups = cast(
         list[object],
-        cast(dict[str, object], optimizer.optimizer.state_dict())["param_groups"],
+        cast(dict[str, object], optimizer.adamw.optimizer.state_dict())["param_groups"],
     )
-    saved_groups = cast(list[object], optimizer_state["param_groups"])
-    if len(saved_groups) != len(current_groups):
-        raise CheckpointError("optimizer state group count does not match")
-    runtime_optimizer_state = dict(optimizer_state)
-    runtime_optimizer_state["param_groups"] = [
+    if len(inner_groups) != len(current_groups):
+        raise CheckpointError("hybrid inner optimizer group count does not match")
+    runtime_inner = dict(inner)
+    runtime_inner["param_groups"] = [
         {
             **cast(dict[str, object], saved_group),
             "lr": cast(dict[str, object], current_group)["lr"],
-            "weight_decay": cast(dict[str, object], current_group)[
-                "weight_decay"
-            ],
+            "weight_decay": cast(dict[str, object], current_group)["weight_decay"],
         }
-        for saved_group, current_group in zip(
-            saved_groups, current_groups, strict=True
-        )
+        for saved_group, current_group in zip(inner_groups, current_groups, strict=True)
     ]
     optimizer.load_state_dict(
         {
-            "optimizer": runtime_optimizer_state,
+            **outer,
+            "optimizer": runtime_inner,
             "sr_rng": sr_rng,
         }
     )
-    restore_rank_rng(rank_rng)
-    return state
+
+
+def _load_adamw_transition_state(
+    train_state: Path,
+    schema: object,
+    optimizer: HybridCMuon,
+    sr_rng: dict[str, object],
+    successful_updates: int,
+) -> None:
+    """AdamW8bit -> Hybrid fork: preserve the AdamW state per-FQN for the
+    fallback params, keep the CMuon momentum fresh zero, record the
+    transition. The source state covers the full parameter audit."""
+    _validate_transition_optimizer_schema(schema, optimizer.audit)
+    optimizer_state = _load_optimizer_state(train_state / "optimizer.pt")
+    _validate_transition_optimizer_state(
+        optimizer_state, optimizer.audit, successful_updates
+    )
+    optimizer.load_state_dict(
+        {
+            "optimizer": optimizer_state,
+            "sr_rng": sr_rng,
+        }
+    )
 
 
 def discover_complete_checkpoints(root: Path) -> tuple[Path, ...]:

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
-from typing import NoReturn, Self, cast
+from typing import TYPE_CHECKING, NoReturn, Self, cast
 
 import torch
 from accelerate import Accelerator
@@ -53,6 +54,18 @@ from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
 from sakuramoon.model.growth import active_slot_ids, growth_ramp_updates
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
 from sakuramoon.optim.dtk import configure_tunableop
+from sakuramoon.optim.guard_calibration import (
+    GuardCalibration,
+    GuardCalibrationComplete,
+    install_guard_calibration,
+)
+from sakuramoon.optim.structural_calibration import (
+    StructuralCalibrationComplete,
+    install_structural_calibration,
+)
+
+if TYPE_CHECKING:
+    from sakuramoon.optim.cmuon import HybridCMuon
 from sakuramoon.storage import repository_directory
 from sakuramoon.telemetry.observer import UpdateMetricContext
 from sakuramoon.telemetry.timers import PhaseTimer
@@ -248,9 +261,7 @@ def _publish_resolved_config(loaded: LoadedConfig, repository_root: Path) -> Pat
         if previous != loaded.resolved_toml:
             changed = diff_resolved_toml_paths(previous, loaded.resolved_toml)
             record_data_policy_transition(
-                repository_directory(
-                    repository_root, loaded.config.paths.artifact_dir
-                )
+                repository_directory(repository_root, loaded.config.paths.artifact_dir)
                 / "data_policy_transition.json",
                 {
                     "kind": "resolved-config-diff",
@@ -261,6 +272,49 @@ def _publish_resolved_config(loaded: LoadedConfig, repository_root: Path) -> Pat
             )
     write_resolved_config(loaded.config, destination)
     return destination.resolve(strict=True)
+
+
+def _record_optimizer_transition(
+    loaded: LoadedConfig,
+    repository_root: Path,
+    resume: Path,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
+    source_update: int,
+) -> None:
+    """Record the AdamW8bit -> Hybrid CMuon transition manifest (main rank).
+
+    Written when the restored optimizer actually performed the AdamW8bit ->
+    Hybrid transition (a pure-AdamW source checkpoint loaded into a hybrid
+    optimizer). It records exactly what was preserved, what was dropped, and
+    the canonical per-role NS map, so a fork point is auditable from the
+    artifact alone. A native hybrid -> hybrid resume records nothing (there
+    is no optimizer-semantics change).
+    """
+    if not isinstance(optimizer, _hybrid_cmuon_class()):
+        return
+    if not optimizer.transition_from_adamw8bit:
+        return
+    record_data_policy_transition(
+        repository_directory(repository_root, loaded.config.paths.artifact_dir)
+        / "optimizer_transition.json",
+        {
+            "kind": "optimizer-adamw8bit-to-hybrid-cmuon",
+            "policy_class": "optimizer",
+            "source_optimizer": "torchao_adamw8bit",
+            "source_checkpoint": str(resume),
+            "source_update": source_update,
+            "fresh_cmuon_momentum": True,
+            "preserved_adamw_fallback_params": (
+                optimizer.transition_preserved_adamw_params
+            ),
+            "dropped_adamw_state_cmuon_params": (
+                optimizer.transition_dropped_cmuon_params
+            ),
+            "canonical_ns_map": optimizer.cfg.canonical_ns_map(),
+            "recorded_at_unix_ns": time.time_ns(),
+        },
+        skip_if_duplicate_of_last=("kind", "source_checkpoint", "source_update"),
+    )
 
 
 def _record_data_policy_resume_transition(
@@ -321,24 +375,146 @@ def _record_data_policy_resume_transition(
 
 
 def _build_optimizer(
-    config: RuntimeConfig, module: TrainableComposite
-) -> IsolatedAdamW8bit:
+    config: RuntimeConfig,
+    module: TrainableComposite,
+    *,
+    telemetry_logger: Callable[[str], None] | None = None,
+    rank: int = 0,
+    world_size: int = 1,
+) -> IsolatedAdamW8bit | HybridCMuon:
     optimizer = config.optimizer
-    return build_adamw8bit(
-        module,
-        lr=config.scaled_learning_rate(),
-        betas=optimizer.betas,
-        eps=optimizer.eps,
-        block_size=optimizer.block_size,
-        bf16_stochastic_round=optimizer.bf16_stochastic_round,
-        matrix_weight_decay=optimizer.matrix_weight_decay,
-        sensitive_weight_decay=optimizer.sensitive_weight_decay,
-        sr_seed=config.run.seed,
-    )
+    common = {
+        "lr": config.scaled_learning_rate(),
+        "betas": optimizer.betas,
+        "eps": optimizer.eps,
+        "block_size": optimizer.block_size,
+        "bf16_stochastic_round": optimizer.bf16_stochastic_round,
+        "matrix_weight_decay": optimizer.matrix_weight_decay,
+        "sensitive_weight_decay": optimizer.sensitive_weight_decay,
+        "sr_seed": config.run.seed,
+    }
+    if optimizer.name == "hybrid_cmuon":
+        from sakuramoon.optim.cmuon import build_hybrid_cmuon
+
+        telemetry = optimizer.cmuon_ns_telemetry
+        telemetry_kwargs = {
+            "ns_telemetry_enabled": bool(telemetry.enabled) if telemetry else False,
+            "ns_telemetry_log_every_n": telemetry.log_every_n if telemetry else 100,
+            "ns_telemetry_logger": telemetry_logger,
+            "ns_telemetry_update_offset": 0,
+        }
+        if telemetry is not None and telemetry.roles:
+            telemetry_kwargs["ns_telemetry_roles"] = tuple(telemetry.roles)
+        # Forensic routing ablation (empty for the candidate under test): the
+        # excluded roles route to the AdamW8bit fallback, split stays complete.
+        telemetry_kwargs["exclude_roles"] = optimizer.cmuon_routing_exclude
+        if optimizer.cmuon_forensic is not None and optimizer.cmuon_forensic.enabled:
+            from sakuramoon.optim.cmuon_forensic import ForensicConfig
+
+            # Built on EVERY rank (the rank comparison needs all ranks); the
+            # logger is main-rank only so the log lines are not duplicated.
+            telemetry_kwargs["forensic"] = ForensicConfig(
+                enabled=True,
+                ring_size=optimizer.cmuon_forensic.ring_size,
+                ceiling_multiplier=optimizer.cmuon_forensic.ceiling_multiplier,
+                max_abs_learn_steps=optimizer.cmuon_forensic.max_abs_learn_steps,
+                max_abs_alarm_mult=optimizer.cmuon_forensic.max_abs_alarm_mult,
+                dump_dir=optimizer.cmuon_forensic.dump_dir,
+                divergence_rel_tol=optimizer.cmuon_forensic.divergence_rel_tol,
+            )
+        if optimizer.cmuon_ns is not None:
+            # Per-role (per-spec) NS depth: canonical role->depth map.
+            return build_hybrid_cmuon(
+                module,
+                ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
+                momentum_dtype=optimizer.cmuon_momentum_dtype,
+                chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
+                **telemetry_kwargs,
+                **common,
+            )
+        # Legacy scalar NS depth (every role identical).
+        return build_hybrid_cmuon(
+            module,
+            ns_steps=optimizer.cmuon_ns_steps,
+            momentum_dtype=optimizer.cmuon_momentum_dtype,
+            chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
+            **telemetry_kwargs,
+            **common,
+        )
+    if optimizer.name in (
+        "hybrid_cmuon_guarded_canonical",
+        "hybrid_cmuon_canonical_ns4_fp32_rescue",
+    ):
+        from sakuramoon.optim.guarded_canonical import (
+            GuardedCanonicalGuardConfig,
+            build_guarded_canonical,
+        )
+
+        guard = optimizer.cmuon_guard
+        assert guard is not None and guard.enabled  # enforced by the schema
+        if optimizer.cmuon_forensic is not None and optimizer.cmuon_forensic.enabled:
+            raise ValueError(
+                "the guarded canonical candidate is two-phase fail-closed by "
+                "construction; [optimizer.cmuon_forensic] is for the retired "
+                "original candidate and must stay disabled"
+            )
+        if optimizer.cmuon_ns_telemetry is not None and optimizer.cmuon_ns_telemetry.enabled:
+            raise ValueError(
+                "the guarded canonical candidate has its own per-step safety "
+                "checks; [optimizer.cmuon_ns_telemetry] must stay disabled"
+            )
+        if optimizer.cmuon_ns is None:
+            raise ValueError(
+                f"{optimizer.name} requires an explicit [optimizer.cmuon_ns] "
+                "per-role NS map (no legacy scalar fallback)"
+            )
+        stats_logger = telemetry_logger if rank == 0 else None
+        if optimizer.name == "hybrid_cmuon_canonical_ns4_fp32_rescue":
+            from sakuramoon.optim.fp32_rescue import build_fp32_rescue
+
+            return build_fp32_rescue(
+                module,
+                ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
+                guard_cfg=GuardedCanonicalGuardConfig(
+                    guard_ratio=guard.guard_ratio,
+                    reference_decay=guard.reference_decay,
+                    min_reference=guard.min_reference,
+                    numerical_floor=guard.numerical_floor,
+                    warmup_observations=guard.warmup_observations,
+                    invariant_check=guard.invariant_check,
+                ),
+                guard_bootstrap_refs=dict(guard.references),
+                rank=rank,
+                world_size=world_size,
+                momentum_dtype=optimizer.cmuon_momentum_dtype,
+                chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
+                stats_logger=stats_logger,
+                **common,
+            )
+        return build_guarded_canonical(
+            module,
+            ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
+            guard_cfg=GuardedCanonicalGuardConfig(
+                guard_ratio=guard.guard_ratio,
+                reference_decay=guard.reference_decay,
+                min_reference=guard.min_reference,
+                numerical_floor=guard.numerical_floor,
+                warmup_observations=guard.warmup_observations,
+                invariant_check=guard.invariant_check,
+            ),
+            guard_bootstrap_refs=dict(guard.references),
+            rank=rank,
+            world_size=world_size,
+            momentum_dtype=optimizer.cmuon_momentum_dtype,
+            chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
+            stats_logger=stats_logger,
+            **common,
+        )
+    return build_adamw8bit(module, **common)
 
 
 def _optimizer_learning_rate_scalars(
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
 ) -> tuple[float | torch.Tensor, ...]:
     groups = optimizer.optimizer.param_groups
     if not groups:
@@ -374,7 +550,7 @@ def _optimizer_learning_rate_scalars(
 
 
 def _optimizer_learning_rate_matches(
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
     expected: float,
 ) -> bool:
     if type(expected) is not float or not math.isfinite(expected) or expected < 0.0:
@@ -397,7 +573,7 @@ def _optimizer_learning_rate_matches(
 
 
 def _set_optimizer_learning_rate(
-    optimizer: IsolatedAdamW8bit, learning_rate: float
+    optimizer: IsolatedAdamW8bit | HybridCMuon, learning_rate: float
 ) -> None:
     if (
         type(learning_rate) is not float
@@ -445,7 +621,7 @@ class _SuccessfulUpdateLrScheduler:
     def __init__(
         self,
         config: RuntimeConfig,
-        optimizer: IsolatedAdamW8bit,
+        optimizer: IsolatedAdamW8bit | HybridCMuon,
         learning_rate_for_update: LearningRateForUpdate,
         *,
         restored_successful_update: int,
@@ -615,7 +791,7 @@ def _restore_checkpoint(
     *,
     checkpoint: Path,
     module: TrainableComposite,
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
     learning_rate_for_update: LearningRateForUpdate,
 ) -> RestoredSingleGpuCheckpoint:
     manifest, state = read_raw_checkpoint_state(checkpoint)
@@ -638,7 +814,22 @@ def _restore_checkpoint(
     _set_optimizer_learning_rate(optimizer, expected_rate)
     restored = restore_single_gpu_checkpoint(checkpoint, module, optimizer, identity)
     resumed_state = _resume_state_for_config(loaded.config, restored.state)
+    # Keep the opt-in NS safety telemetry reporting absolute update numbers
+    # across a resume (it was constructed with offset 0).
+    if (
+        isinstance(optimizer, _hybrid_cmuon_class())
+        and optimizer.ns_telemetry is not None
+    ):
+        optimizer.ns_telemetry.update_offset = restored.state.trainer.successful_updates
     return replace(restored, state=resumed_state)
+
+
+def _hybrid_cmuon_class() -> type:
+    """Runtime access to HybridCMuon (imported lazily; the default path,
+    torchao_adamw8bit, never pays for the experimental module)."""
+    from sakuramoon.optim.cmuon import HybridCMuon
+
+    return HybridCMuon
 
 
 def _runtime(
@@ -753,18 +944,13 @@ class _AccelerateCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
         reason: CheckpointReason,
         cadence: CheckpointCadence,
     ) -> Path:
-        stage = (
-            f"checkpoint/update-{state.successful_updates}/"
-            f"publish-{reason.value}"
-        )
+        stage = f"checkpoint/update-{state.successful_updates}/publish-{reason.value}"
         published = self._progress.run_on_rank(
             stage,
             0,
             lambda: self._delegate.publish_update(state, reason, cadence),
         )
-        value = [
-            str(published) if self._accelerator.is_main_process else ""
-        ]
+        value = [str(published) if self._accelerator.is_main_process else ""]
         torch.distributed.broadcast_object_list(value, src=0)
         if not value[0]:
             raise RuntimeError("rank zero did not publish a checkpoint path")
@@ -785,6 +971,40 @@ class _AccelerateCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
                 state,
             ),
         )
+
+
+class _GuardCalibrationCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
+    """Fail-closed publisher for guard shadow calibration runs.
+
+    Calibration must never write a checkpoint (no optimizer transition
+    state, no guard reference state exists yet). If the cadence ever fires
+    inside the calibration window, fail loudly instead of saving.
+    """
+
+    def __init__(self) -> None:
+        # Intentionally skips the base binding: nothing may be published.
+        self._published = False
+
+    def publish_update(
+        self,
+        state: SingleGpuUpdateState,
+        reason: CheckpointReason,
+        cadence: CheckpointCadence,
+    ) -> Path:
+        raise RuntimeError(
+            "guard shadow calibration must not publish checkpoints "
+            f"(cadence fired at update {state.successful_updates}, "
+            f"reason {reason.value}); shrink the calibration window or move "
+            "the cadence point"
+        )
+
+    def apply_verified_retention(
+        self,
+        checkpoint: Path,
+        manifest: object,
+        state: RawCheckpointState,
+    ) -> None:
+        raise RuntimeError("guard shadow calibration must not apply retention")
 
 
 def _reject_sample(_reason: str) -> None:
@@ -896,7 +1116,15 @@ def _run_accepted_lifecycle(
     _log(f"构建 {config.stage.depth} 层 DiT")
     module = build_trainable_composite_from_config(config, device=device)
     _log("构建优化器")
-    optimizer = _build_optimizer(config, module)
+    optimizer = _build_optimizer(
+        config,
+        module,
+        # Telemetry log lines only on the main rank (every rank sees the same
+        # all-reduced gradients, so the samples would be duplicates).
+        telemetry_logger=_log if is_main_process else None,
+        rank=rank,
+        world_size=world_size,
+    )
     if resume is None:
         _log("创建全新训练状态")
         scheduler = _SuccessfulUpdateLrScheduler(
@@ -930,6 +1158,102 @@ def _run_accepted_lifecycle(
             fresh=False,
         )
 
+    # Guard shadow calibration (Guarded Canonical candidate development):
+    # SAKURAMOON_GUARD_CALIBRATION_STEPS>0 swaps the optimizer step for a
+    # gradient/momentum shadow observation (no parameter update, no NS, no
+    # AdamW step) and neutralizes W&B / checkpoint / sampling side effects.
+    # Fail-closed: calibration is only legal on the hybrid CMuon optimizer.
+    calibration: GuardCalibration | None = None
+    calibration_steps = int(os.environ.get("SAKURAMOON_GUARD_CALIBRATION_STEPS", "0") or 0)
+    if calibration_steps > 0:
+        if not isinstance(optimizer, _hybrid_cmuon_class()):
+            raise ValueError(
+                "SAKURAMOON_GUARD_CALIBRATION_STEPS requires the hybrid CMuon "
+                f"optimizer, got {type(optimizer)!r}"
+            )
+        calibration = install_guard_calibration(
+            optimizer,
+            steps=calibration_steps,
+            output_path=artifact_root / "guard-calibration-rank0.jsonl",
+            rank=rank,
+            world_size=world_size,
+            update_offset=restored.state.trainer.successful_updates,
+        )
+        if is_main_process:
+            _log(
+                f"[guard-calibration] shadow step 已安装: "
+                f"steps={calibration_steps} out={calibration.output_path}"
+            )
+
+    # Structural/SNR pre-NS classifier calibration (D1 round, 08-31):
+    # SAKURAMOON_STRUCTURAL_CALIBRATION_STEPS>0 swaps the optimizer step for
+    # the structural shadow observation (pre-NS features + K production NS4
+    # label runs + HCU cost accounting; NO parameter update, NO AdamW step)
+    # and neutralizes the same side effects as the guard calibration.
+    # Fail-closed: only legal on the hybrid CMuon optimizer.
+    structural: object | None = None
+    structural_steps = int(
+        os.environ.get("SAKURAMOON_STRUCTURAL_CALIBRATION_STEPS", "0") or 0
+    )
+    if structural_steps > 0:
+        if not isinstance(optimizer, _hybrid_cmuon_class()):
+            raise ValueError(
+                "SAKURAMOON_STRUCTURAL_CALIBRATION_STEPS requires the hybrid "
+                f"CMuon optimizer, got {type(optimizer)!r}"
+            )
+        refs_path = os.environ.get("SAKURAMOON_STRUCTURAL_REFS_JSON", "")
+        refs = None
+        if refs_path:
+            import json as _json
+
+            _raw = _json.loads(Path(refs_path).read_text(encoding="utf-8"))
+            refs = {
+                (k.rpartition("#chunk")[0], int(k.rpartition("#chunk")[2])): float(v)
+                for k, v in _raw.items()
+            }
+        structural = install_structural_calibration(
+            optimizer,
+            observations=structural_steps,
+            ns_repeat=int(
+                os.environ.get("SAKURAMOON_STRUCTURAL_NS_REPEAT", "5") or 5
+            ),
+            pi_iters=int(
+                os.environ.get("SAKURAMOON_STRUCTURAL_PI_ITERS", "20") or 20
+            ),
+            sigma_method=os.environ.get("SAKURAMOON_STRUCTURAL_SIGMA_METHOD", "pi")
+            or "pi",
+            output_path=artifact_root / f"structural-calibration-rank{rank}.jsonl",
+            artifact_dir=artifact_root / "structural-calibration",
+            rank=rank,
+            world_size=world_size,
+            update_offset=restored.state.trainer.successful_updates,
+            refs=refs,
+            full_sample_obs=int(
+                os.environ.get(
+                    "SAKURAMOON_STRUCTURAL_FULL_SAMPLE_OBS", "5"
+                )
+                or 5
+            ),
+        )
+        if is_main_process:
+            _log(
+                f"[structural-calibration] shadow step 已安装: "
+                f"steps={structural_steps} refs={refs_path or '-'} "
+                f"out={structural.output_path}"  # type: ignore[union-attr]
+            )
+    in_calibration = calibration is not None or structural is not None
+
+    if isinstance(optimizer, _hybrid_cmuon_class()) and optimizer.forensic is not None:
+        # The forensic run is forked from a live checkpoint: anchor the
+        # monitor's update numbering to the restored trainer count so the
+        # ring buffer / crash dumps carry the real update numbers.
+        optimizer.forensic.update_offset = restored.state.trainer.successful_updates
+        if is_main_process:
+            _log(
+                f"[cmuon-forensic] 监控就绪: update_offset="
+                f"{optimizer.forensic.update_offset} dump_dir="
+                f"{optimizer.forensic.fcfg.dump_dir}"
+            )
     require_single_gpu_checkpoint_binding(
         config,
         restored.state,
@@ -937,6 +1261,13 @@ def _run_accepted_lifecycle(
     )
     if is_main_process and resume is not None:
         _record_data_policy_resume_transition(loaded, repository_root, resume)
+        _record_optimizer_transition(
+            loaded,
+            repository_root,
+            resume,
+            optimizer,
+            restored.state.trainer.successful_updates,
+        )
     if accelerator is not None and rank > 0:
         resumed_seed = (
             config.run.seed
@@ -1023,24 +1354,29 @@ def _run_accepted_lifecycle(
             restored=restored,
             device=device,
         )
-        base_publisher = ProductionSingleGpuCheckpointPublisher(
-            checkpoint_root=checkpoint_root,
-            resolved_config=loaded.resolved_toml.encode("utf-8"),
-            module=module,
-            optimizer=optimizer,
-            restored_checkpoint=restored,
-            accepted_checkpoint_ids=frozenset(),
-            retention_slots=config.checkpoint.slots,
-        )
-        publisher = (
-            base_publisher
-            if accelerator is None
-            else _AccelerateCheckpointPublisher(
-                base_publisher,
-                accelerator,
-                progress,
+        if in_calibration:
+            publisher: (
+                ProductionSingleGpuCheckpointPublisher
+            ) = _GuardCalibrationCheckpointPublisher()
+        else:
+            base_publisher = ProductionSingleGpuCheckpointPublisher(
+                checkpoint_root=checkpoint_root,
+                resolved_config=loaded.resolved_toml.encode("utf-8"),
+                module=module,
+                optimizer=optimizer,
+                restored_checkpoint=restored,
+                accepted_checkpoint_ids=frozenset(),
+                retention_slots=config.checkpoint.slots,
             )
-        )
+            publisher = (
+                base_publisher
+                if accelerator is None
+                else _AccelerateCheckpointPublisher(
+                    base_publisher,
+                    accelerator,
+                    progress,
+                )
+            )
         plan = build_single_gpu_preflight_checks(
             loaded,
             repository_root=repository_root,
@@ -1082,7 +1418,10 @@ def _run_accepted_lifecycle(
                     transparent_rejection_totals=batches.transparent_rejection_totals,
                 )
                 telemetry = (
-                    build_training_telemetry_from_config(
+                    # Calibration: no W&B run at all (design constraint).
+                    _NoopTelemetry(device)
+                    if in_calibration
+                    else build_training_telemetry_from_config(
                         config,
                         repository_root=repository_root,
                         device=device,
@@ -1217,10 +1556,16 @@ def _run_accepted_lifecycle(
                                     },
                                     successful_update=update,
                                 )
-                    progress.synchronize(
-                        f"observer/update-{update}/complete"
-                    )
+                    progress.synchronize(f"observer/update-{update}/complete")
 
+                # Calibration: the per-update observer (sampling / W&B /
+                # evaluation / named barrier) is fully bypassed; both ranks
+                # skip it, so no barrier is lost.
+                calibration_observer = (
+                    (lambda observation: None)
+                    if in_calibration
+                    else observe_successful_update
+                )
                 with telemetry:
                     _log(
                         f"开始训练: update {initial_update + 1} -> "
@@ -1243,7 +1588,7 @@ def _run_accepted_lifecycle(
                         ),
                         restored_checkpoint=restored,
                         phase_timer=telemetry.phase_timer,
-                        successful_update_observer=observe_successful_update,
+                        successful_update_observer=calibration_observer,
                         forced_checkpoint=(
                             lambda update: _forced_production_checkpoint_reason(
                                 restored.state,
@@ -1262,22 +1607,42 @@ def _run_accepted_lifecycle(
                         ),
                         log_updates=is_main_process,
                     )
-                if not verified_checkpoints:
+                if not verified_checkpoints and not in_calibration:
                     raise RuntimeError(
                         "production training completed without a durable checkpoint"
+                    )
+                result = ProductionTrainingResult(
+                    resolved_config_path,
+                    preflight_report.resolve(strict=True),
+                    verified_checkpoints[-1],
+                    initial_update,
+                    loop_result.state.successful_updates,
+                    False,
+                )
+            except (GuardCalibrationComplete, StructuralCalibrationComplete) as done:
+                # Clean calibration stop (no failure, no checkpoint).
+                result = ProductionTrainingResult(
+                    resolved_config_path,
+                    preflight_report.resolve(strict=True),
+                    resume if resume is not None else checkpoint_root,
+                    initial_update,
+                    initial_update + done.observations,
+                    False,
+                )
+                if is_main_process:
+                    _cal_out = (
+                        calibration.output_path
+                        if calibration is not None
+                        else getattr(structural, "output_path", "-")
+                    )
+                    _log(
+                        f"[calibration] 完成: {done.observations} 次观察 "
+                        f"({type(done).__name__}), 记录={_cal_out}"
                     )
             except Exception as error:
                 raise ProductionTrainingError(
                     "accepted production training failed"
                 ) from error
-            result = ProductionTrainingResult(
-                resolved_config_path,
-                preflight_report.resolve(strict=True),
-                verified_checkpoints[-1],
-                initial_update,
-                loop_result.state.successful_updates,
-                False,
-            )
     except BaseException as error:  # noqa: BLE001 - preserve cleanup failures
         primary = error
     cleanup: BaseException | None = None
@@ -1458,9 +1823,7 @@ def run_production_evaluation(
         growth_alpha=state.growth.alpha,
         accelerator=accelerator,
     )
-    result = _evaluate_and_release_process_group(
-        evaluator, update, accelerator
-    )
+    result = _evaluate_and_release_process_group(evaluator, update, accelerator)
     if accelerator is None and result is None:
         raise RuntimeError("native evaluation returned no result")
     return result

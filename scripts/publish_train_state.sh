@@ -43,22 +43,30 @@ log() {
 }
 
 load_environment() {
-  # Vendor/profile scripts are not guaranteed to be nounset-clean.
+  # Vendor/profile scripts are not guaranteed to be nounset-clean NOR
+  # parse-clean: the SCNet platform ai_proxy file starts with human-readable
+  # header lines (用户：... / 设备：... / IP端口：...) that fail as commands
+  # and, under set -e, abort the whole publisher (observed on salt10,
+  # exit 127). A failed source must be non-fatal: the proxy variables also
+  # arrive via the training stack's workload env.
   set +u
   # 2026-08-30 fix: only fall back to ai_proxy when no proxy is already configured.
   # ai_proxy went stale (pinned dead pool 10.13.17.166) and silently broke every
   # hub upload while the stack-injected proxy (10.16.1.51) was alive.
   if [[ -f /root/private_data/.ai_user_info/ai_proxy ]] && [[ -z "${http_proxy:-}${HTTP_PROXY:-}" ]]; then
     # shellcheck disable=SC1091
-    source /root/private_data/.ai_user_info/ai_proxy
+    source /root/private_data/.ai_user_info/ai_proxy 2>/dev/null \
+      || log "WARNING: ai_proxy source failed (continuing; proxy comes from the workload env)"
   fi
   if [[ -f /opt/dtk-26.04/env.sh ]]; then
     # shellcheck disable=SC1091
-    source /opt/dtk-26.04/env.sh >/dev/null 2>&1
+    source /opt/dtk-26.04/env.sh >/dev/null 2>&1 \
+      || log "WARNING: DTK env source failed (continuing)"
   fi
   if [[ -f /etc/profile.d/model-tokens.sh ]]; then
     # shellcheck disable=SC1091
-    source /etc/profile.d/model-tokens.sh
+    source /etc/profile.d/model-tokens.sh 2>/dev/null \
+      || log "WARNING: model-tokens source failed (continuing)"
   fi
   set -u
   : "${MODELSCOPE_API_TOKEN:?MODELSCOPE_API_TOKEN is not set}"

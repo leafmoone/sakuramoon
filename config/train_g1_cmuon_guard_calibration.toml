@@ -1,0 +1,28 @@
+# GUARD SHADOW CALIBRATION — signal distribution observation for
+# Guarded Canonical CMuon v1 (design Section 3).
+#
+# DO NOT DEPLOY. From a healthy COMPLETE checkpoint (salt1
+# ckpt_97100_raw-97100-update-cadence) run a bounded number (<=100) of
+# production forward/backward updates on an ISOLATED host (salt1) and
+# observe the per (FQN, chunk) Nesterov-signal distribution:
+#   * the optimizer step is swapped for a shadow observation
+#     (production-identical momentum EMA + Nesterov; NO parameter update,
+#     NO Newton-Schulz, NO AdamW step) — guard_calibration.py;
+#   * no W&B (no-op telemetry on every rank), no checkpoint publishing
+#     (fail-closed publisher), no sampling/eval per-update observer;
+#   * rank 0 writes guard-calibration-rank0.jsonl into the run artifact
+#     dir: per update, per (FQN, chunk) grad_rms / nesterov_rms /
+#     nesterov_fro + cross-rank nesterov-rms consistency (hard fail on any
+#     spread — momentum recursion must be rank-exact);
+#   * SAKURAMOON_GUARD_CALIBRATION_STEPS env var selects the window
+#     (0 disables; the production path is untouched).
+#
+# Optimizer / model / data / batch semantics are IDENTICAL to
+# train_g1_hybrid_cmuon_ns4_core.toml (the retired original candidate
+# tree, kept only as the calibration vehicle: the guard must be calibrated
+# on exactly the signal the new candidate will see).
+
+extends = ["train_g1_hybrid_cmuon_ns4_core.toml"]
+
+[run]
+run_id = "g1_cmuon_guard_calibration"

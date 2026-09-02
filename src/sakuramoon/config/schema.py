@@ -675,8 +675,129 @@ class CfgConfig(StrictModel):
     conversion_order: Literal["each_x_to_v_then_cfg"]
 
 
+class CMuonNSConfig(StrictModel):
+    """Per-role Newton-Schulz depth for the hybrid CMuon optimizer.
+
+    ``default`` applies to every semantic role; the optional per-role fields
+    override it. ``canonical_map()`` resolves the full role -> depth map (one
+    key per CMuon semantic role). Only used when optimizer.name ==
+    "hybrid_cmuon"; ignored for the default torchao_adamw8bit path.
+
+    The role field names mirror sakuramoon.optim.cmuon.CMUON_ROLES exactly.
+    """
+
+    default: Literal[2, 3, 4, 5, 6] = 5
+    attention_q: Literal[2, 3, 4, 5, 6] | None = None
+    attention_k: Literal[2, 3, 4, 5, 6] | None = None
+    attention_v: Literal[2, 3, 4, 5, 6] | None = None
+    attention_content_gate: Literal[2, 3, 4, 5, 6] | None = None
+    attention_out: Literal[2, 3, 4, 5, 6] | None = None
+    ffn_in: Literal[2, 3, 4, 5, 6] | None = None
+    ffn_down: Literal[2, 3, 4, 5, 6] | None = None
+    adaln_shared: Literal[2, 3, 4, 5, 6] | None = None
+
+    def canonical_map(self) -> dict[str, int]:
+        data = self.model_dump()
+        base = data.pop("default")
+        return {
+            role: (value if value is not None else base) for role, value in data.items()
+        }
+
+
+# Mirrors sakuramoon.optim.cmuon.CMUON_ROLES (the canonical semantic-role
+# vocabulary for the hybrid CMuon optimizer).
+_CMUON_TELEMETRY_ROLES = (
+    "attention_q",
+    "attention_k",
+    "attention_v",
+    "attention_content_gate",
+    "attention_out",
+    "ffn_in",
+    "ffn_down",
+    "adaln_shared",
+)
+
+
+class CMuonNSTelemetryConfig(StrictModel):
+    """Opt-in NS safety telemetry for the hybrid CMuon optimizer.
+
+    Samples one representative parameter per semantic role and accumulates
+    NS-output / applied-delta statistics on-device; the CPU sync happens once
+    every ``log_every_n`` successful updates. Disabled by default so the
+    default AdamW8bit path (and uninstrumented hybrid runs) stay unchanged.
+    Only used when optimizer.name == "hybrid_cmuon".
+    """
+
+    enabled: bool = False
+    log_every_n: PositiveInt = 100
+    roles: Annotated[tuple[str, ...], BeforeValidator(_toml_array_to_tuple)] = ()
+
+    @model_validator(mode="after")
+    def validate_roles(self) -> CMuonNSTelemetryConfig:
+        unknown = set(self.roles) - set(_CMUON_TELEMETRY_ROLES)
+        if unknown:
+            raise ValueError(f"unknown cmuon telemetry roles: {sorted(unknown)}")
+        if len(set(self.roles)) != len(self.roles):
+            raise ValueError("cmuon telemetry roles must be unique")
+        return self
+
+
+class CMuonForensicConfig(StrictModel):
+    """Fail-closed forensic instrumentation for the hybrid CMuon optimizer
+    (root-cause round). Diagnostics only: full per-spec safety telemetry,
+    cross-rank fingerprint comparison, and a detection->stop->dump guard. It
+    never clamps or continues. Only used when optimizer.name ==
+    "hybrid_cmuon"; absent/None/disabled keeps the uninstrumented path."""
+
+    enabled: bool = False
+    ring_size: PositiveInt = 10
+    # Catastrophic-abnormal ceiling for the applied-delta RMS:
+    # ceiling_multiplier * (0.2 * lr) — a safety threshold, not a clip.
+    ceiling_multiplier: PositiveFloat = 10.0
+    # max_abs alarm: learned from the median of the first
+    # max_abs_learn_steps healthy steps; trips above
+    # max_abs_alarm_mult * baseline.
+    max_abs_learn_steps: PositiveInt = 50
+    max_abs_alarm_mult: PositiveFloat = 20.0
+    dump_dir: str | None = None
+    # Cross-rank divergence tolerance (relative). The DTK/HCU bf16 GEMM is
+    # nondeterministic (measured ~5-8% rel_rms between identical repeated
+    # calls on one device), so the ranks' NS outputs legitimately differ at
+    # that floor; a true defect (a rank's NS/param exploding) is >=100x and
+    # trips with margin. Drift below tol is recorded, not tripped.
+    divergence_rel_tol: PositiveFloat = 1e-1
+
+
+class CMuonGuardConfig(StrictModel):
+    """Pre-NS low-signal guard for the guarded canonical CMuon candidate.
+
+    Only used when optimizer.name == "hybrid_cmuon_guarded_canonical".
+    All values are calibration-derived (there are NO preset defaults): see
+    reports/cmuon-guarded-canonical-design.md §5.4 and the P3 shadow-
+    gradient calibration artifact. ``references`` holds the per-NS-input
+    (FQN#chunk, with an optional FQN-level fallback) calibration bootstrap
+    values for the signal reference.
+    """
+
+    enabled: bool = True
+    guard_ratio: PositiveFloat
+    reference_decay: Annotated[ExactFloat, Field(gt=0.0, le=1.0)]
+    min_reference: PositiveFloat
+    numerical_floor: PositiveFloat
+    warmup_observations: NonNegativeInt
+    # Per-step cross-rank parameter fingerprint invariant (on for S1/S2).
+    invariant_check: bool = True
+    # Calibration bootstrap references, keyed "fqn#chunk<i>" (or bare fqn).
+    references: dict[str, float] = {}
+
+
 class OptimizerConfig(StrictModel):
-    name: Literal["torchao_adamw8bit"]
+    name: Literal[
+        "torchao_adamw8bit",
+        "hybrid_cmuon",
+        "hybrid_cmuon_guarded_canonical",
+        "hybrid_cmuon_canonical_ns4_fp32_rescue",
+    ]
     base_lr: PositiveFloat
     reference_batch: PositiveInt
     lr_scaling: Literal["linear_global_batch"]
@@ -688,11 +809,76 @@ class OptimizerConfig(StrictModel):
     bf16_stochastic_round: Literal[True]
     matrix_weight_decay: WeightDecay
     sensitive_weight_decay: WeightDecay
+    # --- Hybrid CMuon (experimental; used only when name="hybrid_cmuon") ---------
+    # Defaults keep the field set valid for existing configs; the values are
+    # ignored when name="torchao_adamw8bit" (the default, bit-compatible path).
+    # Legacy scalar NS depth (every role == this). Kept for back-compat with
+    # existing configs; when cmuon_ns is present it takes precedence.
+    cmuon_ns_steps: Literal[5, 6] = 5
+    # Per-role (per-spec) Newton-Schulz depth. When set, it overrides
+    # cmuon_ns_steps and yields a canonical role->depth map. See CMuonNSConfig.
+    cmuon_ns: CMuonNSConfig | None = None
+    cmuon_momentum_dtype: Literal["bfloat16", "float32"] = "bfloat16"
+    cmuon_chunk_rescale_sqrt_n: bool = False
+    # Opt-in NS safety telemetry (see CMuonNSTelemetryConfig). Absent/None
+    # disables it; the default optimizer never instantiates telemetry.
+    cmuon_ns_telemetry: CMuonNSTelemetryConfig | None = None
+    # Fail-closed forensic instrumentation (see CMuonForensicConfig). Absent/
+    # None/disabled keeps the uninstrumented single-phase update path.
+    cmuon_forensic: CMuonForensicConfig | None = None
+    # Forensic routing ablation: canonical CMuon roles routed back to the
+    # AdamW8bit fallback (disjoint+complete split is preserved). Empty = the
+    # full allowlist (the candidate under test).
+    cmuon_routing_exclude: Annotated[
+        tuple[str, ...], BeforeValidator(_toml_array_to_tuple)
+    ] = ()
+    # Pre-NS low-signal guard (see CMuonGuardConfig). Required when
+    # name="hybrid_cmuon_guarded_canonical"; must be absent for the other
+    # optimizer names.
+    cmuon_guard: CMuonGuardConfig | None = None
 
     @model_validator(mode="after")
     def validate_betas(self) -> OptimizerConfig:
         if self.betas != (0.9, 0.95):
             raise ValueError("optimizer betas differ from the approved values")
+        return self
+
+    @model_validator(mode="after")
+    def validate_cmuon_guard(self) -> OptimizerConfig:
+        # Both guarded candidates require the [optimizer.cmuon_guard]
+        # section: the guarded canonical uses it for the pre-NS low-signal
+        # skip; the FP32-rescue candidate does NOT skip (the retired
+        # structural guard) but keeps the per-input reference table in the
+        # checkpoint contract inherited from the guarded canonical base.
+        if self.name in (
+            "hybrid_cmuon_guarded_canonical",
+            "hybrid_cmuon_canonical_ns4_fp32_rescue",
+        ):
+            if self.cmuon_guard is None or not self.cmuon_guard.enabled:
+                raise ValueError(
+                    f"{self.name} requires an enabled [optimizer.cmuon_guard] "
+                    "section"
+                )
+            if not self.cmuon_guard.references:
+                raise ValueError(
+                    "[optimizer.cmuon_guard] references must hold the "
+                    "calibration bootstrap table (P3 artifact)"
+                )
+        elif self.cmuon_guard is not None:
+            raise ValueError(
+                "[optimizer.cmuon_guard] is only valid for optimizer.name = "
+                '"hybrid_cmuon_guarded_canonical" or '
+                '"hybrid_cmuon_canonical_ns4_fp32_rescue"'
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_cmuon_routing_exclude(self) -> OptimizerConfig:
+        unknown = set(self.cmuon_routing_exclude) - set(_CMUON_TELEMETRY_ROLES)
+        if unknown:
+            raise ValueError(f"unknown cmuon routing exclude roles: {sorted(unknown)}")
+        if len(set(self.cmuon_routing_exclude)) != len(self.cmuon_routing_exclude):
+            raise ValueError("cmuon routing exclude roles must be unique")
         return self
 
 
@@ -853,7 +1039,9 @@ class EvaluationEnabledConfig(StrictModel):
     concept_suite_manifest: Annotated[str, StringConstraints(min_length=1)] = (
         "data/concept-benchmarks/concept-120-v1/manifest-120-v1-refs341b.json"
     )
-    concept_suite_refs_root: Annotated[str, StringConstraints(min_length=1)] | None = None
+    concept_suite_refs_root: Annotated[str, StringConstraints(min_length=1)] | None = (
+        None
+    )
 
     @model_validator(mode="before")
     @classmethod

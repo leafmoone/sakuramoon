@@ -1,0 +1,44 @@
+# EXPERIMENTAL — Hybrid CMuon config A (core, chunk_rescale OFF).
+#
+# RETIRED AS A PRODUCTION CANDIDATE (kept as the ns5 reference). The UPDATE-RMS
+# audit found global ns5 is UNSAFE for the k/v [640,2560] and AdaLN [2560,1024]
+# production shapes (quintic NS leaves its stable window at iter 5 for the small
+# short edge; delta RMS amplified 46x-1000x). Use
+# train_g1_hybrid_cmuon_ns4_core.toml (per-spec NS, default = 4) instead.
+# See reports/cmuon-ns-depth-audit.md and reports/cmuon-design-audit.md §7.5.
+#
+# DO NOT DEPLOY. This is an experimental optimizer-backend variant of the G1
+# transparent-white-crop run. It differs from
+# train_g1_transparent_white_crop_800_s0.toml ONLY in the [optimizer] section:
+#   - name = "hybrid_cmuon" (vs "torchao_adamw8bit")
+#   - cmuon_ns_steps = 5 (stable; ns6 diverges — see reports/cmuon-design-audit.md §7.3)
+#   - cmuon_momentum_dtype = "bfloat16" (recommended: least memory, ~4.5% faster than fp32)
+#   - cmuon_chunk_rescale_sqrt_n = false (core: Moonlight without per-chunk sqrt(N))
+#
+# Unchanged from the base run (inherited): same global batch 800, same
+# S0 base_lr 5e-5 (JLT -> 1.5625e-4), same model/depth/spatial/data policies,
+# same betas/eps/block_size/stochastic-round/weight-decay.
+#
+# The CMuon routing is fixed by the code allowlist (141 matrix params -> CMuon,
+# 148 -> AdamW8bit). 16 unit tests verify bit-alignment with native
+# torch.optim.Muon; the HCU smoke benchmark (reports/cmuon-benchmark.json) shows
+# the optimizer step is 3.1x faster than AdamW8bit with equal/less memory.
+# Generation-quality validation (long-run loss/FID) is REQUIRED before adoption.
+
+extends = ["train_g1_transparent_white_crop_800_s0.toml"]
+
+[optimizer]
+name = "hybrid_cmuon"
+base_lr = 0.00005
+reference_batch = 256
+lr_scaling = "linear_global_batch"
+betas = [0.9, 0.95]
+eps = 0.00000001
+block_size = 256
+bf16_stochastic_round = true
+matrix_weight_decay = 0.0
+sensitive_weight_decay = 0.0
+# --- Hybrid CMuon (config A: core) ---
+cmuon_ns_steps = 5
+cmuon_momentum_dtype = "bfloat16"
+cmuon_chunk_rescale_sqrt_n = false

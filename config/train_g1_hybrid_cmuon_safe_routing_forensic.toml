@@ -1,0 +1,21 @@
+# FORENSIC F2 — safe-routing ablation candidate (localization only).
+#
+# DO NOT DEPLOY. Identical to F1 EXCEPT the routing: the highest-leverage NS
+# shapes are routed back to the AdamW8bit fallback (split stays disjoint +
+# complete; everything else — LR, NS4, BF16 momentum, batch — unchanged):
+#   * attention_k / attention_v: [640,2560] extreme rectangle, NS4 delta RMS
+#     ~1.54x target, historically the shapes most prone to NS blow-up;
+#   * adaln_shared: [2560,1024] single shared projection feeding all 20
+#     active blocks (architectural leverage above per-block AdaLN).
+# If F2 is stable where F1 crashes, the fault localizes to one of these
+# groups; F3 then splits K/V vs AdaLN (one group at a time).
+#
+# run_id: own W&B run, forked from the same checkpoint as F1.
+
+extends = ["train_g1_hybrid_cmuon_ns4_forensic_f1.toml"]
+
+[run]
+run_id = "g1_cmuon_safe_routing_forensic_f2"
+
+[optimizer]
+cmuon_routing_exclude = ["attention_k", "attention_v", "adaln_shared"]
