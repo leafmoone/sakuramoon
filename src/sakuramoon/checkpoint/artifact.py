@@ -10,12 +10,31 @@ from torch import nn
 from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import DenseDiT, PackedDiT
+from sakuramoon.model.irepa import IRepaAlignment
 from sakuramoon.train.step import TrainableComposite
 
 _DTYPES = {"bfloat16": torch.bfloat16, "float32": torch.float32}
 _ARCHITECTURE_SCHEMA_VERSION = 3
+# v4 is the iREPA-enabled training-auxiliary track; v3 stays the permanent
+# legacy no-iREPA contract.
+_ARCHITECTURE_SCHEMA_VERSION_V4 = 4
 _ROOT_KEYS = {"schema_version", "class", "dit", "text", "condition_tokens"}
+_ROOT_KEYS_V4 = _ROOT_KEYS | {"training_auxiliaries"}
 _DIT_META_KEYS = {"active_slot_ids", "attention_backend"}
+_IREPA_META_KEYS = {
+    "class",
+    "schema_version",
+    "in_channels",
+    "out_channels",
+    "kernel_size",
+    "stride",
+    "padding",
+    "dilation",
+    "groups",
+    "bias",
+    "weight_dtype",
+    "bias_dtype",
+}
 _STATE_COMPATIBLE_ATTENTION_BACKENDS = {
     "dense_sdpa",
     "fa4_varlen",
@@ -43,39 +62,61 @@ def export_trainable_composite(module: nn.Module) -> dict[str, object]:
     if type(module) is not TrainableComposite:
         raise TypeError("checkpoint module must be an unwrapped TrainableComposite")
     composite = module
+    irepa = composite.irepa_alignment
+    has_irepa = irepa is not None
+    if has_irepa and type(irepa) is not IRepaAlignment:
+        raise TypeError(
+            "checkpoint composite training auxiliary must be an IRepaAlignment"
+        )
+    expected_children = {"dit", "text", "condition_tokens"}
+    allowed_roots = {"dit", "text", "condition_tokens"}
+    if has_irepa:
+        expected_children = expected_children | {"irepa_alignment"}
+        allowed_roots = allowed_roots | {"irepa_alignment"}
     if (
         type(composite.dit) not in {DenseDiT, PackedDiT}
         or type(composite.text) is not TextConditioner
         or type(composite.condition_tokens) is not ConditionTokenEncoder
-        or set(dict(composite.named_children()))
-        != {"dit", "text", "condition_tokens"}
+        or (has_irepa and type(irepa) is not IRepaAlignment)
+        or set(dict(composite.named_children())) != expected_children
     ):
         raise TypeError(
             "checkpoint composite must contain only a supported DiT, text and "
             "condition-token encoder"
+            + (" plus the iREPA alignment auxiliary" if has_irepa else "")
         )
     if composite.dit.condition_token_count != composite.condition_tokens.token_count:
         raise ValueError("DiT and condition-token encoder counts differ")
     if composite.dit.hidden_size != composite.condition_tokens.output_size:
         raise ValueError("DiT and condition-token encoder widths differ")
+    if has_irepa and irepa.projector.in_channels != composite.dit.hidden_size:
+        raise ValueError(
+            "DiT hidden width and iREPA projector input width differ"
+        )
     parameters = tuple(composite.named_parameters(remove_duplicate=False))
     if not parameters or any(not parameter.requires_grad for _, parameter in parameters):
         raise ValueError("checkpoint composite parameters must all be trainable")
     if any(
-        name.split(".", 1)[0] not in {"dit", "text", "condition_tokens"}
-        for name, _ in parameters
+        name.split(".", 1)[0] not in allowed_roots for name, _ in parameters
     ):
         raise ValueError("checkpoint parameter is outside the trainable composite")
     metadata = composite.dit.model_metadata()
     if metadata.get("prediction_type") != "x" or metadata.get("out_channels") != 128:
         raise ValueError("checkpoint model must use the locked x-prediction head")
-    return {
-        "schema_version": _ARCHITECTURE_SCHEMA_VERSION,
+    document: dict[str, object] = {
+        "schema_version": (
+            _ARCHITECTURE_SCHEMA_VERSION_V4
+            if has_irepa
+            else _ARCHITECTURE_SCHEMA_VERSION
+        ),
         "class": "TrainableComposite",
         "dit": composite.dit.artifact_config(),
         "condition_tokens": composite.condition_tokens.artifact_config(),
         "text": composite.text.artifact_config(),
     }
+    if has_irepa:
+        document["training_auxiliaries"] = {"irepa": irepa.artifact_config()}
+    return document
 
 
 def validate_optimizer_coverage(
@@ -105,18 +146,68 @@ def active_slot_ids_from_module(module: nn.Module) -> tuple[int, ...]:
     return slots
 
 
+def _decode_irepa_auxiliary(value: object) -> IRepaAlignment:
+    """Strictly decode and construct the locked iREPA v1 auxiliary document."""
+
+    auxiliaries = _mapping(value, "training auxiliaries")
+    if set(auxiliaries) != {"irepa"}:
+        raise ValueError("model architecture has an unknown training auxiliary")
+    meta = _mapping(auxiliaries["irepa"], "irepa auxiliary metadata")
+    if set(meta) != _IREPA_META_KEYS:
+        raise ValueError(
+            "irepa auxiliary metadata has unknown or missing fields"
+        )
+    if (
+        meta["class"] != "IRepaAlignment"
+        or meta["schema_version"] != 1
+        or meta["out_channels"] != 768
+        or meta["kernel_size"] != 3
+        or meta["stride"] != 1
+        or meta["padding"] != 1
+        or meta["dilation"] != 1
+        or meta["groups"] != 1
+        or meta["bias"] is not True
+        or meta["weight_dtype"] != "bfloat16"
+        or meta["bias_dtype"] != "float32"
+    ):
+        raise ValueError(
+            "irepa auxiliary metadata is not the locked v1 projector contract"
+        )
+    if type(meta["in_channels"]) is not int or meta["in_channels"] <= 0:
+        raise ValueError("irepa auxiliary input width is invalid")
+    try:
+        return IRepaAlignment(meta["in_channels"])
+    except (TypeError, ValueError):
+        raise ValueError(
+            "irepa auxiliary metadata cannot construct the locked projector"
+        ) from None
+
+
 def build_trainable_composite(
     value: object,
     *,
     device: torch.device | str,
 ) -> TrainableComposite:
     document = _mapping(value, "model architecture")
-    if (
-        set(document) != _ROOT_KEYS
-        or document.get("schema_version") != _ARCHITECTURE_SCHEMA_VERSION
-        or document.get("class") != "TrainableComposite"
-    ):
-        raise ValueError("model architecture has unknown or missing fields")
+    version = document.get("schema_version")
+    irepa_alignment: IRepaAlignment | None = None
+    if version == _ARCHITECTURE_SCHEMA_VERSION:
+        if (
+            set(document) != _ROOT_KEYS
+            or document.get("class") != "TrainableComposite"
+        ):
+            raise ValueError("model architecture has unknown or missing fields")
+    elif version == _ARCHITECTURE_SCHEMA_VERSION_V4:
+        if (
+            set(document) != _ROOT_KEYS_V4
+            or document.get("class") != "TrainableComposite"
+        ):
+            raise ValueError(
+                "v4 model architecture has unknown or missing fields"
+            )
+        irepa_alignment = _decode_irepa_auxiliary(document["training_auxiliaries"])
+    else:
+        raise ValueError("model architecture schema version is unsupported")
     dit_config = _mapping(document["dit"], "DiT architecture")
     recorded_slots = dit_config.get("active_slot_ids")
     if not isinstance(recorded_slots, list) or not all(
@@ -148,6 +239,7 @@ def build_trainable_composite(
                 dit=dit_class(**dit_arguments),  # pyright: ignore[reportArgumentType]
                 text=TextConditioner(**text_arguments),
                 condition_tokens=ConditionTokenEncoder(**condition_token_arguments),
+                irepa_alignment=irepa_alignment,
             )
     except (TypeError, ValueError):
         raise ValueError("model architecture cannot construct the locked composite") from None

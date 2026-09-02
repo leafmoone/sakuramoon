@@ -17,6 +17,7 @@ from sakuramoon.conditioning.condition_tokens import (
 from sakuramoon.conditioning.text_mixer import TextConditioner, TextConditioningOutput
 from sakuramoon.model.dit import DenseDiT, PackedDiT
 from sakuramoon.model.growth import new_slot_fqn_prefixes
+from sakuramoon.model.irepa import IRepaAlignment
 from sakuramoon.optim.clip import ClipResult, clip_grad_norm_fp32
 from sakuramoon.telemetry.timers import PhaseTimer
 
@@ -82,11 +83,17 @@ class TrainableComposite(nn.Module):
         dit: DenseDiT | PackedDiT,
         text: TextConditioner,
         condition_tokens: ConditionTokenEncoder,
+        irepa_alignment: IRepaAlignment | None = None,
     ) -> None:
         super().__init__()
         self.dit = dit
         self.text = text
         self.condition_tokens = condition_tokens
+        # None stays a plain attribute (invisible to named_children /
+        # named_parameters / state_dict), keeping the legacy v3 contract
+        # byte-for-byte.  A real IRepaAlignment becomes the canonical
+        # trainable child ``irepa_alignment.*``.
+        self.irepa_alignment = irepa_alignment
 
     def forward_conditioning(
         self, inputs: TrainableCompositeInputs

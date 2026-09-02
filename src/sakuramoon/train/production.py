@@ -114,6 +114,24 @@ class ProductionReadinessError(RuntimeError):
         super().__init__("production runtime has unresolved governed bindings")
 
 
+def require_production_irepa_readiness(config: RuntimeConfig) -> None:
+    """Phase 2 safety gate for the iREPA auxiliary.
+
+    ``[irepa] enabled = true`` parses and its schema v4 architecture artifact
+    constructs, but the runtime teacher/tap/loss integration is not installed
+    yet.  Production must fail closed BEFORE optimizer build, data-service
+    connection, and the training loop — never start a run where the projector
+    exists but no loss consumes it.  Unlocked in the runtime-integration
+    phase.
+    """
+
+    irepa = config.irepa
+    if irepa is not None and irepa.enabled:
+        raise ProductionReadinessError(
+            ("iREPA enabled but runtime teacher/tap/loss integration is not installed",)
+        )
+
+
 class ProductionPreflightError(RuntimeError):
     """Resource assembly or mandatory production preflight failed."""
 
@@ -1021,6 +1039,10 @@ def _run_accepted_lifecycle(
     wall_clock: Callable[[], float],
 ) -> ProductionTrainingResult:
     config = loaded.config
+    # iREPA Phase 2 gate: fail before accelerator setup, static preflight,
+    # resolved-config publish, encoder loading, module/optimizer build,
+    # data-service connection, and the training loop.
+    require_production_irepa_readiness(config)
     accelerator = (
         Accelerator(
             mixed_precision="no",
@@ -1834,6 +1856,7 @@ __all__ = [
     "ProductionReadinessError",
     "ProductionTrainingError",
     "ProductionTrainingResult",
+    "require_production_irepa_readiness",
     "run_production_evaluation",
     "run_production_single_gpu",
 ]

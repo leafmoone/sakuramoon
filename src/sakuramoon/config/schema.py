@@ -92,6 +92,7 @@ FixedThousand = Annotated[ExactFloat, Field(ge=1000.0, le=1000.0)]
 FixedNormEps = Annotated[ExactFloat, Field(ge=0.000001, le=0.000001)]
 FixedNegativePointEight = Annotated[ExactFloat, Field(ge=-0.8, le=-0.8)]
 FixedPointZeroFive = Annotated[ExactFloat, Field(ge=0.05, le=0.05)]
+FixedPointSix = Annotated[ExactFloat, Field(ge=0.6, le=0.6)]
 FixedTwoPointNine = Annotated[ExactFloat, Field(ge=2.9, le=2.9)]
 FixedOptimizerEps = Annotated[ExactFloat, Field(ge=0.00000001, le=0.00000001)]
 WeightDecay = Annotated[ExactFloat, Field(ge=0.0, le=1.0)]
@@ -1088,6 +1089,63 @@ EvaluationConfig = Annotated[
 ]
 
 
+class IRepaConfig(StrictModel):
+    """SakuraMoon iREPA v1 training-only auxiliary alignment contract.
+
+    An absent ``[irepa]`` table (``RuntimeConfig.irepa is None``) means the
+    feature is absent: no projector, no optimizer or model change, and the
+    architecture artifact stays schema v3.  An explicit ``enabled = false``
+    table parses but also creates no training parameters.  ``enabled = true``
+    is only parseable in Phase 2: production training fails closed until the
+    runtime teacher/tap/loss integration is installed.
+    """
+
+    enabled: bool
+    teacher_id: Literal["facebook/PE-Spatial-B16-512"]
+    teacher_local_path: Annotated[str, StringConstraints(min_length=1)] = (
+        "model/pe_spatial_b16_512"
+    )
+    tap_slot: Literal[8]
+    projector_kernel_size: Literal[3]
+    spatial_norm: Literal["zscore"]
+    spatial_norm_gamma: FixedPointSix = 0.6
+    spatial_norm_eps: FixedNormEps = 0.000001
+    loss: Literal["cosine"]
+    weight: NonNegativeFloat = 0.5
+    ramp_in_updates: PositiveInt = 1000
+    ramp_out_after_updates: PositiveInt | None = None
+    ramp_out_updates: PositiveInt = 1000
+
+    @model_validator(mode="after")
+    def validate_teacher_path(self) -> IRepaConfig:
+        path = PurePosixPath(self.teacher_local_path)
+        if (
+            self.teacher_local_path != self.teacher_local_path.strip()
+            or "\\" in self.teacher_local_path
+            or path.is_absolute()
+            or ".." in path.parts
+            or path.as_posix() != self.teacher_local_path
+            or not path.name
+        ):
+            raise ValueError(
+                "irepa teacher_local_path must be a normalized "
+                "repository-relative directory"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_ramp_schedule(self) -> IRepaConfig:
+        if (
+            self.ramp_out_after_updates is not None
+            and self.ramp_out_after_updates <= self.ramp_in_updates
+        ):
+            raise ValueError(
+                "irepa ramp_out_after_updates must be greater than "
+                "ramp_in_updates"
+            )
+        return self
+
+
 class RuntimeConfig(StrictModel):
     schema_version: Literal[1]
     run: RunConfig
@@ -1115,6 +1173,9 @@ class RuntimeConfig(StrictModel):
     wandb: WandbConfig
     timing: TimingConfig
     evaluation: EvaluationConfig
+    # iREPA auxiliary: None = feature absent (legacy contract, unchanged
+    # resolved TOML via exclude_none serialization).
+    irepa: IRepaConfig | None = None
 
     def scaled_learning_rate(self) -> float:
         """Return the JLT-style LR for the configured effective global batch."""

@@ -14,6 +14,7 @@ from sakuramoon.checkpoint.artifact import (
 )
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.model.growth import active_slot_ids
+from sakuramoon.model.irepa import irepa_alignment_metadata
 from sakuramoon.storage import repository_directory, repository_file_parent
 from sakuramoon.telemetry.metrics import (
     CORE_TIMING_PHASES,
@@ -408,8 +409,10 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
         if config.kernels.attention_backend == "das_fa2_varlen"
         else "dense_sdpa"
     )
+    irepa = config.irepa
+    irepa_enabled = irepa is not None and irepa.enabled
     document: dict[str, object] = {
-        "schema_version": 3,
+        "schema_version": 4 if irepa_enabled else 3,
         "class": "TrainableComposite",
         "dit": {
             "active_slot_ids": list(active_slot_ids(config.stage.depth)),
@@ -472,6 +475,12 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
             "token_count": condition_tokens.token_count,
         },
     }
+    if irepa_enabled:
+        # v1 projector input width is the configured DiT hidden width
+        # (resolves to 2560 for the current SakuraMoon model).
+        document["training_auxiliaries"] = {
+            "irepa": irepa_alignment_metadata(dit.hidden_size),
+        }
     return document
 
 

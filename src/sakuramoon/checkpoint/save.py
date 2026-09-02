@@ -35,6 +35,7 @@ from sakuramoon.checkpoint.schema import (
 )
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
 from sakuramoon.optim.cmuon import HybridCMuon
+from sakuramoon.train.step import TrainableComposite
 
 _SAFETENSORS_HEADER_RESERVE_BYTES = 1024 * 1024
 
@@ -280,6 +281,24 @@ def _payload_records(temporary: Path) -> tuple[FileRecord, ...]:
     return tuple(records)
 
 
+def _require_checkpoint_lifecycle_unlocked(module: nn.Module) -> None:
+    """Fail closed on iREPA-enabled (schema v4) composites.
+
+    Phase 2 establishes the v4 artifact vocabulary only; the iREPA
+    checkpoint lifecycle (no-iREPA -> iREPA migration, projector stripping
+    for MODEL_ONLY/RELEASE, teacher fingerprint, iREPA optimizer-state
+    migration) is not implemented yet.  A half-finished v4 checkpoint must
+    not be published by the production RAW/MODEL_ONLY path.  v3 modules are
+    unaffected.
+    """
+
+    if type(module) is TrainableComposite and module.irepa_alignment is not None:
+        raise CheckpointError(
+            "iREPA-enabled (architecture schema v4) checkpoint lifecycle is "
+            "not unlocked yet; production RAW/MODEL_ONLY save is rejected"
+        )
+
+
 def _save(
     destination_root: Path,
     identity: CheckpointIdentity,
@@ -306,6 +325,7 @@ def _save(
             raise ValueError("resolved config must be nonempty")
     elif resolved_config is not None:
         raise ValueError("non-raw artifacts cannot contain resolved config sidecars")
+    _require_checkpoint_lifecycle_unlocked(module)
     export_trainable_composite(module)
     if state is not None and identity.update != state.trainer.successful_updates:
         raise ValueError("checkpoint update must equal successful optimizer updates")
