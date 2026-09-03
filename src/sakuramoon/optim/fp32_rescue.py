@@ -44,6 +44,7 @@ import json
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -59,6 +60,16 @@ from sakuramoon.optim.cmuon import (
     route_cmuon_parameters,
 )
 from sakuramoon.optim.cmuon_forensic import CMuonSafetyError
+from sakuramoon.optim.cmuon_hardfail import (
+    DEFAULT_HARD_FAIL_ROOT,
+    HardFailArtifactError,
+    build_hard_fail_metadata,
+    classify_fp32_verdict,
+    publish_hard_fail_artifact,
+    tensor_format_name,
+    tensor_sha256,
+)
+from sakuramoon.optim.cmuon_ns_trace import replay_result_to_json, trace_ns_replay
 from sakuramoon.optim.guarded_canonical import (
     _CEILING,
     _FAILURE_NAMES,
@@ -82,6 +93,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # validated criterion, NOT tunable parameters.
 _RESCUE_SANITY_LOW = 0.05
 
+# Production location of the LEGACY per-rank forensic JSON (the analysis-only
+# failure dump that predates F1). F1 keeps this path by default and only
+# redirects it (``legacy_forensic_dir``) so isolated tests never touch the
+# live artifacts tree. Telemetry-only; never feeds the safety verdict.
+LEGACY_FORENSIC_DIR_DEFAULT = "/sakuramoon-runtime/artifacts/g1"
+
 
 @dataclass
 class _RescueMeta:
@@ -95,6 +112,21 @@ class _RescueMeta:
     chunk_idx: int
 
 
+@dataclass(frozen=True)
+class _FP32Verdict:
+    """F1 telemetry: the ORIGINAL FP32 rescue verdict values for one failed
+    input (owner rank only). Captured strictly after the verdict branch;
+    consumed by the forensic record and the hard-fail artifact. Never feeds
+    the verdict itself."""
+
+    original_fp32_delta_rms: float
+    original_fp32_finite: bool
+    # ``str | None``: the classifier's contract allows None (the "ok" case);
+    # the capture site is only reachable on a failed verdict, where it is a
+    # reason string — an assert here would risk masking the safety error.
+    fp32_failure_reason: str | None
+
+
 class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
     """BF16-first canonical NS4 + owner-rank FP32 rescue (D2).
 
@@ -105,6 +137,10 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
     """
 
     def __init__(self, **kwargs: object) -> None:
+        # F1 telemetry parameter (telemetry-only: never feeds the verdict).
+        # Popped BEFORE super() because the base __init__ is explicit.
+        hard_fail_root = kwargs.pop("hard_fail_artifact_root", None)
+        legacy_forensic_dir = kwargs.pop("legacy_forensic_dir", None)
         super().__init__(**kwargs)  # pyright: ignore[reportArgumentType]
         self.bf16_attempts = 0
         self.bf16_safety_failures = 0
@@ -112,6 +148,19 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
         self.fp32_rescues = 0
         self.fp32_rescue_failures = 0
         self.rescue_by_role: dict[str, int] = {}
+        self.hard_fail_artifact_root = (
+            Path(str(hard_fail_root))
+            if hard_fail_root is not None and str(hard_fail_root)
+            else Path(DEFAULT_HARD_FAIL_ROOT)
+        )
+        # F1: redirect the LEGACY per-rank forensic JSON (analysis-only dump)
+        # for isolated test environments; None keeps the production path.
+        # Never feeds the safety verdict.
+        self.legacy_forensic_dir = (
+            Path(str(legacy_forensic_dir))
+            if legacy_forensic_dir is not None and str(legacy_forensic_dir)
+            else Path(LEGACY_FORENSIC_DIR_DEFAULT)
+        )
 
     # -- step: BF16 first, FP32 rescue, two-phase atomic ---------------------
 
@@ -247,6 +296,10 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
         # loop called .item() per chunk on every rank); non-owner ranks skip
         # the read entirely and reach the same all_reduce below.
         rescued_this_step = 0
+        # F1 telemetry: the ORIGINAL FP32 verdict values per failed input
+        # (owner rank only). Captured strictly after the verdict branch;
+        # consumed by the forensic record and the hard-fail artifact.
+        fp32_verdicts: dict[int, _FP32Verdict] = {}
         if any(owner == self.rank for owner in owners):
             flags_host = fail_flags.tolist()
             for idx, flag in enumerate(flags_host):
@@ -279,6 +332,19 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                 ):
                     # FP32 also failed: keep the flag -> hard fail-closed below.
                     self.fp32_rescue_failures += 1
+                    # F1 telemetry: persist the ORIGINAL FP32 verdict values
+                    # (rms32/finite32 are locals of this loop and would
+                    # otherwise be lost). The failure reason follows the
+                    # verdict's condition order exactly (nonfinite ->
+                    # below_floor -> above_ceiling); it only ever appears in
+                    # report fields and never feeds the verdict.
+                    fp32_verdicts[idx] = _FP32Verdict(
+                        original_fp32_delta_rms=float(rms32),
+                        original_fp32_finite=bool(finite32),
+                        fp32_failure_reason=classify_fp32_verdict(
+                            bool(finite32), float(rms32), rescue_floor, ceiling
+                        ),
+                    )
                     continue
                 staged[idx] = delta32.bfloat16().contiguous()
                 fail_flags[idx] = 0
@@ -364,18 +430,21 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                     )
 
         if failure_msgs:
+            # F1: owner-local BF16 delta rms by input (pure readback, no
+            # I/O) — hoisted out of the dump try so the exact-input
+            # artifact publish below can use it even if the legacy JSON
+            # write fails.
+            d_rms_vals = torch.stack(d_rms_list).tolist() if d_rms_list else []
+            d_rms_by_idx = dict(zip(d_rms_owner_idx, d_rms_vals))
             # ---- forensic dump (analysis-only; fail-closed unchanged) ----
             try:
-                d_rms_vals = (
-                    torch.stack(d_rms_list).tolist() if d_rms_list else []
-                )
-                d_rms_by_idx = dict(zip(d_rms_owner_idx, d_rms_vals))
                 recs = []
                 for idx, flag in enumerate(fail_flags.tolist()):
                     if flag <= 0:
                         continue
                     fqn, cix = self._input_key(idx)
                     shape = self._chunk_shape(idx)
+                    verdict = fp32_verdicts.get(idx)
                     recs.append(
                         {
                             "failure": _FAILURE_NAMES.get(int(flag), str(flag)),
@@ -389,7 +458,31 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                             "lr": lr,
                             "target_delta_rms": target_delta_rms,
                             "ceiling": ceiling,
+                            # F1: explicit BF16 field; `delta_rms` is kept as
+                            # a DEPRECATED alias (old consumers) — both are
+                            # the ORIGINAL BF16 NS attempt delta rms (null on
+                            # non-owner ranks, which never run the BF16 NS).
+                            "bf16_delta_rms": d_rms_by_idx.get(idx),
                             "delta_rms": d_rms_by_idx.get(idx),
+                            # F1: the ORIGINAL FP32 rescue verdict values
+                            # (owner rank only; null on non-owner ranks).
+                            "fp32_delta_rms": (
+                                None
+                                if verdict is None
+                                else verdict.original_fp32_delta_rms
+                            ),
+                            "fp32_finite": (
+                                None
+                                if verdict is None
+                                else verdict.original_fp32_finite
+                            ),
+                            "fp32_failure_reason": (
+                                None
+                                if verdict is None
+                                else verdict.fp32_failure_reason
+                            ),
+                            "fp32_rescue_floor": rescue_floor,
+                            "fp32_ceiling": ceiling,
                             "fp32_attempts": self.fp32_attempts,
                             "fp32_rescues": self.fp32_rescues,
                             "fp32_rescue_failures": self.fp32_rescue_failures,
@@ -397,7 +490,7 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                     )
                 import os as _os
 
-                out_dir = "/sakuramoon-runtime/artifacts/g1"
+                out_dir = str(self.legacy_forensic_dir)
                 _os.makedirs(out_dir, exist_ok=True)
                 out_path = f"{out_dir}/guard-forensic-rank{self.rank}.json"
                 with open(out_path, "w") as _f:
@@ -416,6 +509,39 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                     import sys as _sys
 
                     print(f"[guard-forensic] log failed: {exc!r}", file=_sys.stderr)
+            # ---- F1: exact-input hard-fail artifacts (owner rank only) ----
+            # Published strictly after the rank-consistent failure verdict.
+            # Telemetry-only: nothing here feeds the flag, staged delta,
+            # momentum, parameters, owner broadcast, or commit. A publish
+            # failure is logged; the original CMuonSafetyError below still
+            # raises (telemetry I/O can never replace the root cause).
+            for idx, flag in enumerate(fail_flags.tolist()):
+                if flag <= 0 or owners[idx] != self.rank:
+                    continue
+                meta = rescue_meta.get(idx)
+                if meta is None:
+                    continue
+                try:
+                    self._publish_hard_fail_artifact(
+                        idx=idx,
+                        meta=meta,
+                        flag=int(flag),
+                        verdict=fp32_verdicts.get(idx),
+                        bf16_delta_rms=d_rms_by_idx.get(idx),
+                        failure_message=" | ".join(failure_msgs),
+                        ceiling=ceiling,
+                        rescue_floor=rescue_floor,
+                        lr=lr,
+                        target_delta_rms=target_delta_rms,
+                    )
+                except HardFailArtifactError as exc:
+                    try:
+                        if self.stats_logger is not None:
+                            self.stats_logger(f"[hard-fail-artifact] {exc!r}")
+                    except Exception:  # noqa: BLE001
+                        import sys as _sys
+
+                        print(f"[hard-fail-artifact] {exc!r}", file=_sys.stderr)
             raise CMuonSafetyError(
                 "fp32-rescue safety violation (BF16 and FP32 both failed): "
                 + " | ".join(failure_msgs)
@@ -514,6 +640,147 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                 )
             )
 
+    # -- F1: exact-input hard-fail artifact (owner rank, post-verdict) ------
+
+    def _publish_hard_fail_artifact(
+        self,
+        *,
+        idx: int,
+        meta: _RescueMeta,
+        flag: int,
+        verdict: _FP32Verdict | None,
+        bf16_delta_rms: float | None,
+        failure_message: str,
+        ceiling: float,
+        rescue_floor: float,
+        lr: float,
+        target_delta_rms: float,
+    ) -> None:
+        """Owner-only exact-input hard-fail artifact (F1 telemetry).
+
+        Runs strictly AFTER the rank-consistent failure verdict is settled:
+        it cannot change the fail flag, staged delta, momentum, parameters,
+        owner broadcast, or commit. The CPU copy of the NS input happens
+        only here, after the hard-fail decision; the hot path is untouched.
+        A diagnostic NS replay (second pass over the clone, via
+        ``cmuon_ns_trace``) is stored alongside the ORIGINAL production
+        verdict values so a nondeterministic HCU GEMM can never be
+        confused with the value the verdict compared. ANY failure in this
+        method (tensor clone, statistics, serialization, I/O) is converted
+        to ``HardFailArtifactError``; the caller logs it and the original
+        ``CMuonSafetyError`` is still raised (spec §9: telemetry can never
+        replace the root cause).
+        """
+        try:
+            return self._publish_hard_fail_artifact_inner(
+                idx=idx,
+                meta=meta,
+                flag=flag,
+                verdict=verdict,
+                bf16_delta_rms=bf16_delta_rms,
+                failure_message=failure_message,
+                ceiling=ceiling,
+                rescue_floor=rescue_floor,
+                lr=lr,
+                target_delta_rms=target_delta_rms,
+            )
+        except HardFailArtifactError:
+            raise
+        except Exception as exc:
+            raise HardFailArtifactError(
+                f"hard-fail artifact preparation failed for "
+                f"{meta.spec_name}#chunk{meta.chunk_idx}: {exc!r}"
+            ) from exc
+
+    def _publish_hard_fail_artifact_inner(
+        self,
+        *,
+        idx: int,
+        meta: _RescueMeta,
+        flag: int,
+        verdict: _FP32Verdict | None,
+        bf16_delta_rms: float | None,
+        failure_message: str,
+        ceiling: float,
+        rescue_floor: float,
+        lr: float,
+        target_delta_rms: float,
+    ) -> None:
+        input_tensor = meta.chunk.contiguous().clone().cpu()
+        trace_error: str | None = None
+        diag_bf16: dict[str, object] | None = None
+        diag_fp32: dict[str, object] | None = None
+        try:
+            diag_bf16 = replay_result_to_json(
+                trace_ns_replay(
+                    input_tensor,
+                    ns_steps=meta.ns_steps,
+                    coefficients=self.cfg.ns_coefficients,
+                    eps=self.cfg.eps,
+                    alpha=meta.alpha,
+                    working_dtype="bfloat16",
+                )
+            )
+            diag_fp32 = replay_result_to_json(
+                trace_ns_replay(
+                    input_tensor,
+                    ns_steps=meta.ns_steps,
+                    coefficients=self.cfg.ns_coefficients,
+                    eps=self.cfg.eps,
+                    alpha=meta.alpha,
+                    working_dtype="float32",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - analysis failure never masks the safety failure
+            trace_error = repr(exc)
+        metadata = build_hard_fail_metadata(
+            observations=self.observations,
+            this_rank=self.rank,
+            world_size=self.world_size,
+            fqn=meta.spec_name,
+            chunk_idx=meta.chunk_idx,
+            role=meta.role,
+            owner=self.rank,
+            input_tensor=input_tensor,
+            alpha=meta.alpha,
+            ns_steps=meta.ns_steps,
+            ns_coefficients=self.cfg.ns_coefficients,
+            eps=self.cfg.eps,
+            lr=lr,
+            target_delta_rms=target_delta_rms,
+            ceiling=ceiling,
+            rescue_floor=rescue_floor,
+            bf16_delta_rms=bf16_delta_rms,
+            original_fp32_delta_rms=(
+                None if verdict is None else verdict.original_fp32_delta_rms
+            ),
+            original_fp32_finite=(
+                None if verdict is None else verdict.original_fp32_finite
+            ),
+            fp32_failure_reason=(
+                None if verdict is None else verdict.fp32_failure_reason
+            ),
+            bf16_failure_name=_FAILURE_NAMES.get(flag, str(flag)),
+            failure_message=failure_message,
+            tensor_sha256=tensor_sha256(input_tensor),
+            tensor_format=tensor_format_name(),
+            diagnostic_bf16=diag_bf16,
+            diagnostic_fp32=diag_fp32,
+            forensic_trace_error=trace_error,
+        )
+        publish_hard_fail_artifact(
+            root=self.hard_fail_artifact_root,
+            observations=self.observations,
+            rank=self.rank,
+            world_size=self.world_size,
+            fqn=meta.spec_name,
+            chunk_idx=meta.chunk_idx,
+            role=meta.role,
+            owner=self.rank,
+            input_tensor=input_tensor,
+            metadata=metadata,
+        )
+
     # -- state (rescue counters ride inside the inherited guard block) -------
 
     def _guard_state(self) -> dict[str, object]:
@@ -569,9 +836,22 @@ def build_fp32_rescue(
     chunk_rescale_sqrt_n: bool = False,
     stats_logger: Callable[[str], None] | None = None,
     stats_log_every_n: int = 10,
+    hard_fail_artifact_root: str | None = None,
+    legacy_forensic_dir: str | None = None,
 ) -> HybridCMuonCanonicalNS4FP32Rescue:
     """Build the FP32-rescue candidate (same routing/AdamW policy as the
-    guarded canonical base; BF16-first NS + owner-rank FP32 rescue)."""
+    guarded canonical base; BF16-first NS + owner-rank FP32 rescue).
+
+    ``hard_fail_artifact_root`` (F1 telemetry only): where the exact-input
+    hard-fail artifacts are published; None keeps the production default
+    (``/sakuramoon-runtime/artifacts/g1/cmuon-hard-fail``). It never feeds
+    the safety verdict.
+
+    ``legacy_forensic_dir`` (F1 telemetry only): redirect the legacy
+    per-rank forensic JSON (the analysis-only failure dump) for isolated
+    test environments; None keeps the production default (``/sakuramoon-
+    runtime/artifacts/g1``). It never feeds the safety verdict.
+    """
     routing = route_cmuon_parameters(
         module,
         matrix_weight_decay=matrix_weight_decay,
@@ -606,6 +886,8 @@ def build_fp32_rescue(
         guard_bootstrap_refs=guard_bootstrap_refs,
         stats_logger=stats_logger,
         stats_log_every_n=stats_log_every_n,
+        hard_fail_artifact_root=hard_fail_artifact_root,
+        legacy_forensic_dir=legacy_forensic_dir,
     )
 
 
