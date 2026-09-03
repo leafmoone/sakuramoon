@@ -210,6 +210,12 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                         time.perf_counter_ns() - started
                     ) / 1_000_000_000.0
 
+            # The iREPA grad-norm diagnostic is enabled exactly when the
+            # trainable boundary carries the projector child; DDP is
+            # transparent (its .module is the composite itself).
+            inner_module = (
+                self.module.module if hasattr(self.module, "module") else self.module
+            )
             step = SingleGpuStep(
                 self.module,
                 self.optimizer,
@@ -224,6 +230,10 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                     )
                 ),
                 backward=self.backward,
+                irepa_projector=getattr(
+                    inner_module, "irepa_alignment", None
+                )
+                is not None,
             )
             active_detection_boundary = "data"
             try:

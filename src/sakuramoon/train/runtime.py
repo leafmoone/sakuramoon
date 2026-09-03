@@ -42,6 +42,7 @@ from sakuramoon.data.serialize import SerializedCaption
 from sakuramoon.data.spatial_crop import SpatialCropCounts
 from sakuramoon.data.transparent_white import TransparentWhiteCounts
 from sakuramoon.encoders.mage_vae import FrozenMageVAE
+from sakuramoon.encoders.pe_spatial import FrozenPESpatialEncoder
 from sakuramoon.encoders.qwen import FrozenQwenEncoder
 from sakuramoon.model.attention import (
     DenseGQAAttention,
@@ -57,6 +58,11 @@ from sakuramoon.objective.flow import (
     sample_jlt_timesteps,
     sample_noise,
 )
+from sakuramoon.objective.irepa import (
+    IRepaLambdaSchedule,
+    irepa_alignment_loss,
+    spatial_zscore_target,
+)
 from sakuramoon.telemetry.timers import PhaseTimer
 from sakuramoon.train.loop import (
     LoopResult,
@@ -69,6 +75,7 @@ from sakuramoon.train.step import (
     StepOptimizer,
     TrainableComposite,
     TrainableCompositeInputs,
+    TrainableCompositeIRepaOutput,
 )
 
 if TYPE_CHECKING:
@@ -377,6 +384,11 @@ class PreparedTrainingBatch:
     inputs: TrainableCompositeInputs
     clean_latents: tuple[torch.Tensor, ...]
     states: tuple[torch.Tensor, ...]
+    # Frozen-teacher z-scored patch features [B, T, 768] FP32, detached.
+    # None when iREPA is absent/disabled.  Deliberately NOT part of
+    # TrainableCompositeInputs: the teacher target never enters the trainable
+    # module, the optimizer, or the checkpoint.
+    irepa_targets: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +412,16 @@ class RuntimeMeasurement:
     caption_plans: tuple[CaptionPlan, ...]
     spatial_crop: SpatialCropCounts
     transparent: TransparentWhiteCounts
+    # Phase-4 iREPA split of the per-sample losses (all FP32, shape [B]).
+    # ``per_sample_loss`` is the actual backward objective:
+    # main + lambda * irepa when enabled, plain main otherwise.  The high/low
+    # noise buckets and the t-bin telemetry stay strictly MAIN-JLT-only via
+    # ``main_per_sample_loss`` / the FlowLossOutput bucket sums.
+    main_per_sample_loss: torch.Tensor
+    irepa_per_sample_loss: torch.Tensor
+    irepa_weighted_per_sample_loss: torch.Tensor
+    irepa_cosine: torch.Tensor
+    irepa_lambda: float
 
     def detached(self) -> RuntimeMeasurement:
         """Drop the autograd graph before handing facts to an async observer."""
@@ -422,6 +444,11 @@ class RuntimeMeasurement:
             caption_plans=self.caption_plans,
             spatial_crop=self.spatial_crop,
             transparent=self.transparent,
+            main_per_sample_loss=self.main_per_sample_loss.detach(),
+            irepa_per_sample_loss=self.irepa_per_sample_loss.detach(),
+            irepa_weighted_per_sample_loss=self.irepa_weighted_per_sample_loss.detach(),
+            irepa_cosine=self.irepa_cosine.detach(),
+            irepa_lambda=self.irepa_lambda,
         )
 
 
@@ -454,6 +481,10 @@ class SuccessfulTrainingObservation:
                 item.low_noise_loss_sum,
                 item.low_noise_sample_count,
                 item.timesteps,
+                item.main_per_sample_loss,
+                item.irepa_per_sample_loss,
+                item.irepa_weighted_per_sample_loss,
+                item.irepa_cosine,
             )
         ):
             raise ValueError("observation tensors must be detached from autograd")
@@ -477,6 +508,11 @@ class _RuntimeLoss:
     high_noise_sample_count: torch.Tensor
     low_noise_loss_sum: torch.Tensor
     low_noise_sample_count: torch.Tensor
+    main_per_sample: torch.Tensor
+    irepa_per_sample: torch.Tensor
+    irepa_weighted_per_sample: torch.Tensor
+    irepa_cosine: torch.Tensor
+    irepa_lambda: float
 
 
 def _require_batch(batch: TrainingBatch) -> None:
@@ -579,6 +615,10 @@ class SingleGpuBatchRuntime:
         torch_compile_backend: str = "inductor",
         torch_compile_mode: str = "default",
         torch_compile_dynamic: bool = False,
+        irepa_teacher: FrozenPESpatialEncoder | None = None,
+        irepa_gamma: float = 0.6,
+        irepa_eps: float = 1e-6,
+        irepa_schedule: IRepaLambdaSchedule | None = None,
     ) -> None:
         if device.type != "cuda" or not torch.cuda.is_available():
             raise ValueError("single-GPU production runtime requires CUDA")
@@ -644,6 +684,37 @@ class SingleGpuBatchRuntime:
         self.noise_observation_boundary = noise_observation_boundary
         self.growth_alpha = growth_alpha
         self.dit_flop_counter = ActualDitFlopCounter(composite.dit)
+        # Phase-4 iREPA wiring: the frozen teacher stays OUTSIDE the composite
+        # (per-rank, eval, no_grad, never DDP-wrapped, never optimized, never
+        # checkpointed).  Teacher presence must match the composite projector
+        # exactly — both absent/disabled or both installed.
+        has_projector = composite.irepa_alignment is not None
+        if has_projector != (irepa_teacher is not None):
+            raise ValueError(
+                "iREPA teacher and composite projector must both be present "
+                "or both be absent"
+            )
+        if irepa_teacher is not None:
+            if type(irepa_gamma) is not float or not 0.0 <= irepa_gamma <= 1.0:
+                raise ValueError("irepa_gamma must be a float in [0,1]")
+            if type(irepa_eps) is not float or not irepa_eps > 0.0:
+                raise ValueError("irepa_eps must be a positive float")
+            if irepa_schedule is None:
+                raise ValueError(
+                    "an installed iREPA runtime requires a lambda schedule"
+                )
+        elif irepa_schedule is not None:
+            raise ValueError(
+                "an iREPA lambda schedule requires an installed teacher"
+            )
+        self.irepa_teacher = irepa_teacher
+        self.irepa_gamma = irepa_gamma
+        self.irepa_eps = irepa_eps
+        self.irepa_schedule = irepa_schedule
+        # Bound once per successful update by set_irepa_weight (mirrors
+        # set_growth_alpha); 0.0 until the first binding.  A lambda of 0.0
+        # still runs the FULL teacher/capture/projector/z-score/cosine path.
+        self.irepa_weight = 0.0
 
     def set_growth_alpha(self, value: float) -> None:
         """Select the canonical alpha before starting one successful update."""
@@ -651,6 +722,20 @@ class SingleGpuBatchRuntime:
         if type(value) is not float or not 0.0 <= value <= 1.0:
             raise ValueError("growth_alpha must be a float in [0,1]")
         self.growth_alpha = value
+
+    def set_irepa_weight(self, value: float) -> None:
+        """Bind the iREPA lambda before starting one successful update.
+
+        Mirrors ``set_growth_alpha``: the value is a pure function of the
+        successful-update number the in-flight update will produce, so a
+        failed update retries with the same lambda.
+        """
+
+        if self.irepa_teacher is None:
+            raise ValueError("iREPA weight binding requires an installed teacher")
+        if type(value) is not float or not math.isfinite(value) or value < 0.0:
+            raise ValueError("irepa weight must be a finite nonnegative float")
+        self.irepa_weight = value
 
     def _encode_qwen(
         self,
@@ -764,6 +849,26 @@ class SingleGpuBatchRuntime:
         )
         if tuple(clean.shape) != expected or clean.dtype != torch.bfloat16:
             raise ValueError("Mage-VAE returned an unexpected latent contract")
+        # iREPA teacher target: consumes the EXACT final GPU RGB tensor
+        # (same bf16 [-1,1] tensor the VAE encoded — no second H2D, no
+        # resize), runs per rank outside the composite/DDP, no_grad.
+        irepa_targets: torch.Tensor | None = None
+        if self.irepa_teacher is not None:
+            if phase_timer is None:
+                teacher_output = self.irepa_teacher(images)
+            else:
+                with phase_timer.record("irepa_teacher"):
+                    teacher_output = self.irepa_teacher(images)
+            if tuple(teacher_output.patch_features.shape[:2]) != (
+                batch.images.shape[0],
+                (batch.target_height // 16) * (batch.target_width // 16),
+            ):
+                raise ValueError("iREPA teacher returned an unexpected grid")
+            irepa_targets = spatial_zscore_target(
+                teacher_output.patch_features,
+                gamma=self.irepa_gamma,
+                eps=self.irepa_eps,
+            ).detach()
         image_coordinates = _full_canvas_coordinate_maps(
             batch,
             token_height=clean.shape[-2],
@@ -805,6 +910,7 @@ class SingleGpuBatchRuntime:
             inputs=inputs,
             clean_latents=tuple(item for item in clean.unbind(0)),
             states=tuple(item for item in state.unbind(0)),
+            irepa_targets=irepa_targets,
         )
 
     def measure(
@@ -812,17 +918,35 @@ class SingleGpuBatchRuntime:
     ) -> RuntimeMeasurement:
         prepared = self.prepare(batch, phase_timer=phase_timer)
         dit_flops = self.dit_flop_counter.count(prepared.inputs)
-        predictions = self.forward_module(
+        # The DDP-wrapped module is the composite itself, so the projector
+        # runs INSIDE this forward (never on forward_module.module from the
+        # outside) and its parameters are part of the distributed graph.
+        forward_output = self.forward_module(
             prepared.inputs,
             phase_timer=phase_timer,
         )
+        if isinstance(forward_output, TrainableCompositeIRepaOutput):
+            predictions = forward_output.predictions
+            projected = forward_output.projected_student_features
+            if prepared.irepa_targets is None:
+                raise RuntimeError(
+                    "iREPA composite output arrived without a teacher target"
+                )
+        else:
+            predictions = forward_output
+            projected = None
+            if self.irepa_teacher is not None:
+                raise RuntimeError(
+                    "iREPA teacher was configured but the composite has no "
+                    "projector"
+                )
         if len(predictions) != len(prepared.clean_latents):
             raise ValueError("DiT prediction count differs from latent batch")
         if phase_timer is None:
-            loss = self._loss(predictions, prepared)
+            loss = self._loss(predictions, prepared, projected)
         else:
             with phase_timer.record("loss"):
-                loss = self._loss(predictions, prepared)
+                loss = self._loss(predictions, prepared, projected)
         image_tokens = (
             batch.images.shape[0]
             * (batch.target_height // 16)
@@ -852,13 +976,33 @@ class SingleGpuBatchRuntime:
             caption_plans=tuple(caption.plan for caption in batch.captions),
             spatial_crop=batch.spatial_crop,
             transparent=batch.transparent,
+            main_per_sample_loss=loss.main_per_sample,
+            irepa_per_sample_loss=loss.irepa_per_sample,
+            irepa_weighted_per_sample_loss=loss.irepa_weighted_per_sample,
+            irepa_cosine=loss.irepa_cosine,
+            irepa_lambda=loss.irepa_lambda,
         )
 
     def _loss(
         self,
         predictions: tuple[torch.Tensor, ...],
         prepared: PreparedTrainingBatch,
+        projected: torch.Tensor | None,
     ) -> _RuntimeLoss:
+        if projected is not None and prepared.irepa_targets is None:
+            raise RuntimeError("iREPA projected features arrived without a target")
+        if projected is not None and prepared.irepa_targets is not None:
+            alignment = irepa_alignment_loss(projected, prepared.irepa_targets)
+            irepa_per_sample = alignment.per_sample
+            irepa_cosine = alignment.cosine_per_sample
+            irepa_weighted = self.irepa_weight * irepa_per_sample
+            irepa_lambda = self.irepa_weight
+        else:
+            irepa_per_sample = None
+            irepa_cosine = None
+            irepa_weighted = None
+            irepa_lambda = 0.0
+
         if len({tuple(value.shape) for value in predictions}) == 1:
             prediction_batch = torch.stack(predictions)
             clean_batch = torch.stack(prepared.clean_latents)
@@ -871,38 +1015,72 @@ class SingleGpuBatchRuntime:
                 t_eps=self.t_eps,
                 noise_observation_boundary=self.noise_observation_boundary,
             )
+            main_per_sample = result.per_sample
+            high_sum = result.high_noise_loss_sum
+            high_count = result.high_noise_sample_count
+            low_sum = result.low_noise_loss_sum
+            low_count = result.low_noise_sample_count
+        else:
+            values: list[torch.Tensor] = []
+            high_loss: list[torch.Tensor] = []
+            high_count_parts: list[torch.Tensor] = []
+            low_loss: list[torch.Tensor] = []
+            low_count_parts: list[torch.Tensor] = []
+            for index, prediction in enumerate(predictions):
+                per_sample_result = flow_matching_loss(
+                    prediction.unsqueeze(0),
+                    prepared.states[index].unsqueeze(0),
+                    prepared.clean_latents[index].unsqueeze(0),
+                    prepared.inputs.timestep[index : index + 1],
+                    t_eps=self.t_eps,
+                    noise_observation_boundary=self.noise_observation_boundary,
+                )
+                values.append(per_sample_result.per_sample[0])
+                high_loss.append(per_sample_result.high_noise_loss_sum)
+                high_count_parts.append(per_sample_result.high_noise_sample_count)
+                low_loss.append(per_sample_result.low_noise_loss_sum)
+                low_count_parts.append(per_sample_result.low_noise_sample_count)
+            main_per_sample = torch.stack(values)
+            high_sum = torch.stack(high_loss).sum()
+            high_count = torch.stack(high_count_parts).sum()
+            low_sum = torch.stack(low_loss).sum()
+            low_count = torch.stack(low_count_parts).sum()
+
+        if (
+            irepa_per_sample is None
+            or irepa_cosine is None
+            or irepa_weighted is None
+        ):
+            # iREPA absent/disabled: the backward objective is EXACTLY the
+            # legacy main per-sample vector (byte-identical path); the split
+            # fields are strict zeros (no NaN sentinels).
+            zero_irepa = main_per_sample.new_zeros(main_per_sample.shape)
             return _RuntimeLoss(
-                result.per_sample,
-                result.high_noise_loss_sum,
-                result.high_noise_sample_count,
-                result.low_noise_loss_sum,
-                result.low_noise_sample_count,
+                main_per_sample,
+                high_sum,
+                high_count,
+                low_sum,
+                low_count,
+                main_per_sample=main_per_sample,
+                irepa_per_sample=zero_irepa,
+                irepa_weighted_per_sample=zero_irepa,
+                irepa_cosine=zero_irepa,
+                irepa_lambda=0.0,
             )
-        values: list[torch.Tensor] = []
-        high_loss: list[torch.Tensor] = []
-        high_count: list[torch.Tensor] = []
-        low_loss: list[torch.Tensor] = []
-        low_count: list[torch.Tensor] = []
-        for index, prediction in enumerate(predictions):
-            result = flow_matching_loss(
-                prediction.unsqueeze(0),
-                prepared.states[index].unsqueeze(0),
-                prepared.clean_latents[index].unsqueeze(0),
-                prepared.inputs.timestep[index : index + 1],
-                t_eps=self.t_eps,
-                noise_observation_boundary=self.noise_observation_boundary,
-            )
-            values.append(result.per_sample[0])
-            high_loss.append(result.high_noise_loss_sum)
-            high_count.append(result.high_noise_sample_count)
-            low_loss.append(result.low_noise_loss_sum)
-            low_count.append(result.low_noise_sample_count)
+        # Enabled: the iREPA path is ALWAYS in the backward graph
+        # (spec: no "if lambda == 0: skip"); at lambda=0 its contribution is
+        # an exact zero, so every legacy gradient stays bit-identical.
         return _RuntimeLoss(
-            torch.stack(values),
-            torch.stack(high_loss).sum(),
-            torch.stack(high_count).sum(),
-            torch.stack(low_loss).sum(),
-            torch.stack(low_count).sum(),
+            main_per_sample + irepa_weighted,
+            high_sum,
+            high_count,
+            low_sum,
+            low_count,
+            main_per_sample=main_per_sample,
+            irepa_per_sample=irepa_per_sample,
+            irepa_weighted_per_sample=irepa_weighted,
+            irepa_cosine=irepa_cosine,
+            irepa_lambda=irepa_lambda,
         )
 
 
@@ -1107,6 +1285,16 @@ def _run_single_gpu_training(
                     next_growth_update,
                 )
             )
+            # iREPA lambda binding mirrors growth: a pure function of the
+            # successful-update number this in-flight update will produce.
+            # A failed update does not advance it, so the retry rebinds the
+            # same value.  Production keeps this dormant: Phase 5 provides
+            # the persisted start anchor; until then the production
+            # enabled path stays fail-closed at the readiness gate.
+            if runtime.irepa_schedule is not None:
+                runtime.set_irepa_weight(
+                    runtime.irepa_schedule.weight_for_update(next_growth_update)
+                )
 
         def measure_batch(batch: TrainingBatch) -> torch.Tensor:
             if active_phase_timer is None:

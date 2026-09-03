@@ -1,4 +1,4 @@
-"""P9 schema-9 telemetry tests for the fixed spatial-crop fields.
+"""Schema-11 telemetry tests for the fixed spatial-crop fields.
 
 Covers the strict zero semantics of ``TrainingMetric``, the fallback-sum and
 zoom-histogram invariants enforced by ``__post_init__``, and the JSON/W&B
@@ -103,12 +103,12 @@ def _applied_metric() -> TrainingMetric:
 
 
 class TestSchema:
-    def test_schema_version_is_ten(self) -> None:
-        assert TRAINING_METRIC_SCHEMA_VERSION == 10
+    def test_schema_version_is_eleven(self) -> None:
+        assert TRAINING_METRIC_SCHEMA_VERSION == 11
 
     def test_json_payload_exposes_nested_spatial_tables(self) -> None:
         payload = _applied_metric().as_json_mapping()
-        assert payload["schema_version"] == 10
+        assert payload["schema_version"] == 11
         assert payload["spatial_crop_selected"] == 5
         assert payload["spatial_crop_applied"] == 4
         assert payload["spatial_both_axes_count"] == 2

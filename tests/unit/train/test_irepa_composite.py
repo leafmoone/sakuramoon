@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
@@ -11,10 +12,10 @@ from sakuramoon.train.step import TrainableComposite
 HIDDEN_SIZE = 2560
 
 
-def _production_dit() -> PackedDiT:
+def _production_dit(depth: int = 16) -> PackedDiT:
     with torch.device("meta"):
         return PackedDiT(
-            depth=16,
+            depth=depth,
             input_channels=128,
             hidden_size=HIDDEN_SIZE,
             intermediate_size=6912,
@@ -143,3 +144,86 @@ def test_no_parameter_aliasing_with_auxiliary() -> None:
     parameters = tuple(module.named_parameters(remove_duplicate=False))
     identities = [id(parameter) for _, parameter in parameters]
     assert len(set(identities)) == len(identities)
+
+
+def test_tap_slot_requires_an_installed_alignment() -> None:
+    with pytest.raises(ValueError, match="requires an installed irepa_alignment"):
+        _composite_tapped(irepa=None, tap=8)
+
+
+def test_tap_slot_must_be_active_at_the_current_depth() -> None:
+    # depth 16 has no slot 8 (G1 growth slot); depth 20 does
+    with (
+        pytest.raises(ValueError, match="not an active stable slot"),
+        torch.device("meta"),
+    ):
+        TrainableComposite(
+            dit=_production_dit(depth=16),
+            text=_production_text(),
+            condition_tokens=_production_condition_tokens(),
+            irepa_alignment=_irepa(),
+            irepa_tap_slot_id=8,
+        )
+    module = _composite_tapped(irepa=_irepa(), tap=8, depth=20)
+    assert module.irepa_tap_slot_id == 8
+    # an active but different slot is accepted verbatim
+    module = _composite_tapped(irepa=_irepa(), tap=0, depth=16)
+    assert module.irepa_tap_slot_id == 0
+    with pytest.raises(ValueError, match="not an active stable slot"):
+        _composite_tapped(irepa=_irepa(), tap=11, depth=16)
+    with pytest.raises(ValueError, match="must be an int"):
+        _composite_tapped(irepa=_irepa(), tap="8", depth=20)
+
+
+def test_tap_slot_is_a_plain_runtime_attribute() -> None:
+    module = _composite_tapped(irepa=_irepa(), tap=8, depth=20)
+
+    assert module.irepa_tap_slot_id == 8
+    assert type(module.irepa_tap_slot_id) is int
+    # runtime binding only: never a child module, never checkpointed
+    assert "irepa_tap_slot_id" not in dict(module.named_children())
+    assert all(not name.startswith("irepa_tap") for name in module.state_dict())
+
+
+def _composite_tapped(
+    *,
+    irepa: IRepaAlignment | None,
+    tap: object,
+    depth: int = 16,
+) -> TrainableComposite:
+    with torch.device("meta"):
+        return TrainableComposite(
+            dit=_production_dit(depth=depth),
+            text=_production_text(),
+            condition_tokens=_production_condition_tokens(),
+            irepa_alignment=irepa,
+            irepa_tap_slot_id=tap,  # type: ignore[arg-type]
+        )
+
+
+def test_bind_irepa_tap_slot_artifact_first_contract() -> None:
+    # artifact-first construction leaves the tap unbound
+    module = _composite(_irepa())
+    assert module.irepa_tap_slot_id is None
+
+    # binding an inactive slot is rejected before any mutation
+    with pytest.raises(ValueError, match="not an active stable slot"):
+        module.bind_irepa_tap_slot(8)  # depth 16: slot 8 inactive
+    assert module.irepa_tap_slot_id is None
+
+    # an active slot binds; rebinding is explicit and idempotent
+    module.bind_irepa_tap_slot(0)
+    assert module.irepa_tap_slot_id == 0
+    module.bind_irepa_tap_slot(0)
+    assert module.irepa_tap_slot_id == 0
+    module.bind_irepa_tap_slot(16)
+    assert module.irepa_tap_slot_id == 16
+    # the tap stays outside the checkpoint contract after binding
+    assert all(not name.startswith("irepa_tap") for name in module.state_dict())
+
+    # no projector -> binding fails closed
+    bare = _composite()
+    with pytest.raises(ValueError, match="requires an installed projector"):
+        bare.bind_irepa_tap_slot(0)
+    with pytest.raises(ValueError, match="must be an int"):
+        module.bind_irepa_tap_slot(0.0)  # type: ignore[arg-type]

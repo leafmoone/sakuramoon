@@ -115,23 +115,29 @@ class ProductionReadinessError(RuntimeError):
 
 
 def require_production_irepa_readiness(config: RuntimeConfig) -> None:
-    """Phase 3 safety gate for the iREPA auxiliary.
+    """Phase 4 safety gate for the iREPA auxiliary.
 
     ``[irepa] enabled = true`` parses, its schema v4 architecture artifact
-    constructs, and the frozen PE-Spatial teacher asset contract + encoder
-    are installed (Phase 3).  The student tap (slot capture), projector
-    invocation, spatial z-score, cosine loss, and lambda schedule are NOT
-    installed yet.  Production must fail closed BEFORE optimizer build,
-    data-service connection, and the training loop — never start a run
-    where the teacher and projector exist but no loss consumes them.
-    Unlocked in Phase 4 (runtime integration).
+    constructs, the frozen PE-Spatial teacher asset contract + encoder are
+    installed (Phase 3), and the full runtime graph is implemented (Phase 4):
+    stable slot_08 capture inside the eager outer loop, the projector as the
+    canonical ``irepa_alignment.*`` trainable child, FP32 spatial z-score,
+    FP32 per-sample cosine alignment loss, and the successful-update-based
+    lambda schedule.  What is NOT installed is the no-iREPA (v3) → iREPA
+    (v4) checkpoint/optimizer migration: the production mainline still holds
+    a v3 checkpoint whose state dict has no ``irepa_alignment.*`` tensors,
+    and Phase 5 owns the migration + the persisted start anchor.  Production
+    therefore stays fail-closed BEFORE optimizer build, data-service
+    connection, and the training loop.
     """
 
     irepa = config.irepa
     if irepa is not None and irepa.enabled:
-        raise ProductionReadinessError(
-            ("iREPA teacher is available but student tap/loss integration is not installed",)
+        blocker = (
+            "iREPA runtime graph is implemented, but no-iREPA→iREPA "
+            "checkpoint/optimizer migration is not installed"
         )
+        raise ProductionReadinessError((blocker,))
 
 
 class ProductionPreflightError(RuntimeError):

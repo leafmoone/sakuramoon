@@ -57,6 +57,21 @@ def _parameter_grad_norm(
 
 
 @dataclass(frozen=True, slots=True)
+class TrainableCompositeIRepaOutput:
+    """Phase-4 composite output when the iREPA projector is installed.
+
+    ``predictions`` is exactly the legacy per-sample tuple; ``projected_student_features``
+    is the projector's ``[B, T, 768]`` output computed INSIDE the (possibly
+    DDP-wrapped) composite forward, so the projector participates in the
+    distributed training graph.  It is consumed by the trainer for the cosine
+    alignment loss; it is not part of the checkpoint contract.
+    """
+
+    predictions: tuple[torch.Tensor, ...]
+    projected_student_features: torch.Tensor
+
+
+@dataclass(frozen=True, slots=True)
 class TrainableCompositeInputs:
     qwen_states: torch.Tensor
     main_token_indices: torch.Tensor
@@ -84,6 +99,7 @@ class TrainableComposite(nn.Module):
         text: TextConditioner,
         condition_tokens: ConditionTokenEncoder,
         irepa_alignment: IRepaAlignment | None = None,
+        irepa_tap_slot_id: int | None = None,
     ) -> None:
         super().__init__()
         self.dit = dit
@@ -94,6 +110,48 @@ class TrainableComposite(nn.Module):
         # byte-for-byte.  A real IRepaAlignment becomes the canonical
         # trainable child ``irepa_alignment.*``.
         self.irepa_alignment = irepa_alignment
+        # The stable slot id captured for iREPA (config-locked to 8 in
+        # production).  Plain int attribute: it is a runtime binding, not a
+        # module, so it never enters named_children / state_dict.  The
+        # projector may be constructed artifact-first without a bound tap
+        # (the v4 artifact document carries no tap); bind_irepa_tap_slot
+        # supplies it, and forward fails closed until then.
+        if irepa_tap_slot_id is not None:
+            if irepa_alignment is None:
+                raise ValueError(
+                    "irepa_tap_slot_id requires an installed irepa_alignment"
+                )
+            if type(irepa_tap_slot_id) is not int:
+                raise ValueError("irepa_tap_slot_id must be an int")
+            if irepa_tap_slot_id not in dit.active_slot_ids:
+                raise ValueError(
+                    "irepa_tap_slot_id is not an active stable slot at the "
+                    f"current depth ({irepa_tap_slot_id} not in "
+                    f"{dit.active_slot_ids})"
+                )
+        self.irepa_tap_slot_id = irepa_tap_slot_id
+
+    def bind_irepa_tap_slot(self, slot_id: int) -> None:
+        """Bind the config-locked capture slot after artifact construction.
+
+        The v4 artifact document is tap-free (the tap is a runtime binding,
+        not a checkpointable parameter), so artifact-first construction
+        leaves the slot unbound; the config-bound assembly binds it here.
+        Idempotent for the same slot, explicit for any other slot.
+        """
+
+        if self.irepa_alignment is None:
+            raise ValueError(
+                "binding an iREPA tap slot requires an installed projector"
+            )
+        if type(slot_id) is not int:
+            raise ValueError("irepa tap slot must be an int")
+        if slot_id not in self.dit.active_slot_ids:
+            raise ValueError(
+                "irepa tap slot is not an active stable slot at the current "
+                f"depth ({slot_id} not in {self.dit.active_slot_ids})"
+            )
+        self.irepa_tap_slot_id = slot_id
 
     def forward_conditioning(
         self, inputs: TrainableCompositeInputs
@@ -146,16 +204,123 @@ class TrainableComposite(nn.Module):
             growth_alpha=inputs.growth_alpha,
         )
 
+    def forward_dit_tapped(
+        self,
+        inputs: TrainableCompositeInputs,
+        conditioning: tuple[TextConditioningOutput, ConditionTokenOutput],
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        text, condition = conditioning
+        tap_slot_id = self.irepa_tap_slot_id
+        if tap_slot_id is None:
+            raise RuntimeError("tapped forward requires a bound irepa tap slot")
+        if type(self.dit) is DenseDiT:
+            dense_predictions, capture = self.dit.forward_tapped(
+                torch.stack(inputs.latents),
+                text.tokens,
+                text.mask,
+                condition.tokens,
+                condition.active_mask,
+                inputs.timestep,
+                inputs.size_scale,
+                inputs.aspect,
+                image_coordinates=torch.stack(inputs.image_coordinates),
+                growth_alpha=inputs.growth_alpha,
+                tap_slot_id=tap_slot_id,
+            )
+            return tuple(dense_predictions.unbind(0)), capture
+        packed_dit = self.dit
+        if type(packed_dit) is not PackedDiT:
+            raise TypeError("tapped forward requires a DenseDiT or PackedDiT")
+        packed = packed_dit.prepare_packed_sequences(
+            inputs.latents,
+            text.tokens,
+            text.mask,
+            inputs.main_token_lengths,
+            condition.tokens,
+        )
+        return packed_dit.forward_packed_tapped(
+            packed,
+            condition.tokens,
+            condition.active_mask,
+            inputs.timestep,
+            inputs.size_scale,
+            inputs.aspect,
+            image_coordinates=inputs.image_coordinates,
+            growth_alpha=inputs.growth_alpha,
+            tap_slot_id=tap_slot_id,
+        )
+
     def forward(
         self,
         inputs: TrainableCompositeInputs,
         *,
         phase_timer: PhaseTimer | None = None,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> tuple[torch.Tensor, ...] | TrainableCompositeIRepaOutput:
         with _record_phase(phase_timer, "conditioning"):
             conditioning = self.forward_conditioning(inputs)
+        if self.irepa_alignment is None:
+            # Legacy contract: iREPA absent or disabled — identical return
+            # type and computation to before Phase 4.
+            with _record_phase(phase_timer, "dit_forward"):
+                return self.forward_dit(inputs, conditioning)
         with _record_phase(phase_timer, "dit_forward"):
-            return self.forward_dit(inputs, conditioning)
+            predictions, capture = self.forward_dit_tapped(inputs, conditioning)
+        with _record_phase(phase_timer, "irepa_projector"):
+            projected = self._project_student_capture(inputs, capture)
+        return TrainableCompositeIRepaOutput(
+            predictions=predictions,
+            projected_student_features=projected,
+        )
+
+    def _project_student_capture(
+        self,
+        inputs: TrainableCompositeInputs,
+        capture: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project the stable-slot capture onto the teacher grid.
+
+        Dense capture arrives batched as ``[B, T, D]``; the packed capture is
+        flat ``[total_image_tokens, D]`` in per-sample row-major order and is
+        stacked only after verifying a homogeneous image grid (per-sample
+        ``T_i == H_i * W_i`` and one shared grid for the whole batch).  No
+        padding and no feature interpolation: a non-homogeneous batch is a
+        Phase-4 contract violation and fails closed.
+        """
+
+        grids = tuple(latent.shape[-2:] for latent in inputs.latents)
+        batch = len(inputs.latents)
+        if batch == 0:
+            raise ValueError("iREPA training batch must not be empty")
+        if any(grid != grids[0] for grid in grids):
+            raise ValueError(
+                "iREPA requires a homogeneous image grid across the training "
+                "batch, got "
+                f"{grids}"
+            )
+        grid_height, grid_width = grids[0]
+        if capture.ndim == 3:
+            if capture.shape[0] != batch:
+                raise ValueError("dense iREPA capture batch mismatch")
+            image_hidden = capture
+        else:
+            if capture.ndim != 2:
+                raise ValueError(
+                    "packed iREPA capture must be flat [T_total, D]"
+                )
+            image_tokens = grid_height * grid_width
+            if capture.shape[0] != image_tokens * batch:
+                raise ValueError(
+                    "packed iREPA capture token count does not match the "
+                    "image grid: "
+                    f"{capture.shape[0]} != {image_tokens * batch}"
+                )
+            image_hidden = capture.reshape(
+                batch, image_tokens, capture.shape[1]
+            )
+        alignment = self.irepa_alignment
+        if alignment is None:
+            raise RuntimeError("iREPA capture arrived without a projector")
+        return alignment(image_hidden, (grid_height, grid_width))
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +356,10 @@ class SingleGpuUpdateResult:
     growth_new_block_grad_norm: torch.Tensor | None = None
     growth_new_conditioner_grad_norm: torch.Tensor | None = None
     growth_new_slot_grad_norm: torch.Tensor | None = None
+    # Scaled pre-clip grad norm over ``irepa_alignment.*`` (0.0 when the
+    # projector is absent, disabled, or produced no gradient — at lambda=0
+    # the projector grad is an exact zero tensor).
+    irepa_projector_grad_norm: float = 0.0
 
 
 class StepOptimizer(Protocol):
@@ -212,6 +381,7 @@ class SingleGpuStep:
         effective_sample_multiplier: int = 1,
         growth_alpha: float = 1.0,
         backward: Callable[[torch.Tensor], None] | None = None,
+        irepa_projector: bool = False,
     ) -> None:
         if type(accumulation_steps) is not int or accumulation_steps <= 0:
             raise ValueError("accumulation_steps must be a positive integer")
@@ -225,11 +395,14 @@ class SingleGpuStep:
             raise ValueError("distributed step controls are invalid")
         if type(growth_alpha) is not float or not 0.0 <= growth_alpha <= 1.0:
             raise ValueError("growth_alpha must be a float in [0,1]")
+        if type(irepa_projector) is not bool:
+            raise ValueError("irepa_projector must be a bool")
         self.module = module
         self.optimizer = optimizer
         self.accumulation_steps = accumulation_steps
         self.effective_sample_multiplier = effective_sample_multiplier
         self.growth_alpha = growth_alpha
+        self.irepa_projector = irepa_projector
         self._backward = backward
         self._state: SingleGpuUpdateState = state
         self._microbatches = 0
@@ -407,6 +580,27 @@ class SingleGpuStep:
                     growth_new_block_grad_norm.square()
                     + growth_new_conditioner_grad_norm.square()
                 )
+                # At this point at least one microbatch backward has run, so
+                # the device bound during backward is non-None.  Narrow once
+                # so the iREPA diagnostic does not widen the error surface.
+                irepa_device = self._device
+                if irepa_device is None:
+                    raise RuntimeError(
+                        "iREPA projector grad norm requires a bound device"
+                    )
+                irepa_projector_grad_norm = (
+                    float(
+                        _parameter_grad_norm(
+                            self.module,
+                            predicate=lambda name, _parameter: (
+                                name.startswith("irepa_alignment.")
+                            ),
+                            device=irepa_device,
+                        ).item()
+                    )
+                    if self.irepa_projector
+                    else 0.0
+                )
                 clip = clip_grad_norm_fp32(parameters, max_norm=1.0)
         except BaseException as error:
             self._detection_phase = "clip"
@@ -484,6 +678,7 @@ class SingleGpuStep:
             growth_new_block_grad_norm=growth_new_block_grad_norm,
             growth_new_conditioner_grad_norm=growth_new_conditioner_grad_norm,
             growth_new_slot_grad_norm=growth_new_slot_grad_norm,
+            irepa_projector_grad_norm=irepa_projector_grad_norm,
         )
         self._state = result.state
         self._microbatches = 0
@@ -500,5 +695,6 @@ __all__ = [
     "SingleGpuUpdateState",
     "StepOptimizer",
     "TrainableComposite",
+    "TrainableCompositeIRepaOutput",
     "TrainableCompositeInputs",
 ]

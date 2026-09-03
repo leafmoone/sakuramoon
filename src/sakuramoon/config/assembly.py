@@ -496,6 +496,18 @@ def build_trainable_composite_from_config(
     observed: dict[str, Any] = export_trainable_composite(module)
     if observed != document:
         raise ValueError("assembled trainable composite differs from resolved config")
+    irepa = config.irepa
+    if irepa is not None and irepa.enabled:
+        # The artifact document is tap-free; the config locks the capture
+        # slot (Literal[8]) as a runtime binding after the round-trip check.
+        if module.irepa_tap_slot_id is None:
+            module.bind_irepa_tap_slot(irepa.tap_slot)
+        elif module.irepa_tap_slot_id != irepa.tap_slot:
+            raise ValueError(
+                "assembled iREPA tap slot differs from the resolved config"
+            )
+    elif module.irepa_tap_slot_id is not None:
+        raise ValueError("tap is bound while iREPA is absent or disabled")
     module.dit.set_activation_checkpoint_mode(config.stage.activation_checkpoint_mode)
     return module
 

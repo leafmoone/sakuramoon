@@ -134,16 +134,18 @@ def _noise_bucket(
 def _timestep_bin_stats(
     observation: SuccessfulTrainingObservation,
 ) -> tuple[tuple[float, ...], tuple[int, ...]]:
-    """Aggregate the existing per-sample losses into fixed 0.05-wide t bins.
+    """Aggregate the MAIN-JLT-only per-sample losses into fixed 0.05 t bins.
 
     This is telemetry-only: it consumes the detached loss vector already
-    produced for the update and never runs another model operation.
+    produced for the update and never runs another model operation.  The
+    iREPA term never enters the t-bin histogram: the bins keep their
+    pre-Phase-4 meaning (pure JLT main loss) via ``main_per_sample_loss``.
     """
 
     loss_sums = torch.zeros(NOISE_T_BIN_COUNT, dtype=torch.float64)
     sample_counts = torch.zeros(NOISE_T_BIN_COUNT, dtype=torch.int64)
     for index, measurement in enumerate(observation.microbatches):
-        losses = measurement.per_sample_loss.detach().to(
+        losses = measurement.main_per_sample_loss.detach().to(
             device="cpu", dtype=torch.float64
         )
         timesteps = measurement.timesteps.detach().to(
@@ -159,9 +161,13 @@ def _timestep_bin_stats(
                 f"microbatches[{index}] loss/timestep vectors are inconsistent"
             )
         if not bool(torch.isfinite(losses).all().item()):
-            raise ValueError(f"microbatches[{index}].per_sample_loss must be finite")
+            raise ValueError(
+                f"microbatches[{index}].main_per_sample_loss must be finite"
+            )
         if bool((losses < 0.0).any().item()):
-            raise ValueError(f"microbatches[{index}].per_sample_loss must be nonnegative")
+            raise ValueError(
+                f"microbatches[{index}].main_per_sample_loss must be nonnegative"
+            )
         if not bool(torch.isfinite(timesteps).all().item()):
             raise ValueError(f"microbatches[{index}].timesteps must be finite")
         if bool(((timesteps < 0.0) | (timesteps > 1.0)).any().item()):
@@ -393,6 +399,101 @@ def _phase_seconds(
     return phases
 
 
+def _irepa_metric_splits(
+    observation: SuccessfulTrainingObservation,
+) -> tuple[float, float, float, float, float]:
+    """Aggregate the iREPA loss split with strict consistency checks.
+
+    Returns ``(main_loss, irepa_loss, irepa_weighted_loss,
+    irepa_cosine_mean, irepa_lambda)``.  All per-sample terms use one-sample-
+    one-weight aggregation (token count never reweights a sample),
+    accumulated in float64.  The combined backward objective is re-derived in
+    the production float32 and required to match the stored per-sample loss
+    bit-exactly, so any wiring mistake fails closed.
+    """
+
+    main_sum = torch.zeros((), dtype=torch.float64)
+    irepa_sum = torch.zeros((), dtype=torch.float64)
+    weighted_sum = torch.zeros((), dtype=torch.float64)
+    cosine_sum = torch.zeros((), dtype=torch.float64)
+    total = 0
+    lamda: float | None = None
+    for index, measurement in enumerate(observation.microbatches):
+        main = measurement.main_per_sample_loss.detach().to(
+            device="cpu", dtype=torch.float64
+        )
+        irepa = measurement.irepa_per_sample_loss.detach().to(
+            device="cpu", dtype=torch.float64
+        )
+        weighted = measurement.irepa_weighted_per_sample_loss.detach().to(
+            device="cpu", dtype=torch.float64
+        )
+        cosine = measurement.irepa_cosine.detach().to(
+            device="cpu", dtype=torch.float64
+        )
+        combined = measurement.per_sample_loss.detach().to(
+            device="cpu", dtype=torch.float64
+        )
+        shapes = {main.shape, irepa.shape, weighted.shape, cosine.shape}
+        if len(shapes) != 1 or main.ndim != 1 or main.numel() == 0:
+            raise ValueError(
+                f"microbatches[{index}] iREPA loss split shapes are inconsistent"
+            )
+        if combined.shape != main.shape:
+            raise ValueError(
+                f"microbatches[{index}] iREPA split differs from the loss vector"
+            )
+        if not all(
+            bool(torch.isfinite(vector).all().item())
+            for vector in (main, irepa, weighted, cosine, combined)
+        ):
+            raise ValueError(
+                f"microbatches[{index}] iREPA loss split contains nonfinite values"
+            )
+        # Strict wiring check: re-derive the combined objective in the
+        # production FP32 and require a bit-exact match with the stored
+        # per-sample loss.  The re-derivation must use the same dtype and
+        # operation the runtime used; the FP32 sum is NOT generally
+        # representable exactly in FP64, so a float64 re-derivation would
+        # fail closed on every enabled update with non-binary-exact losses.
+        if not bool(
+            torch.equal(
+                measurement.main_per_sample_loss.detach()
+                + measurement.irepa_weighted_per_sample_loss.detach(),
+                measurement.per_sample_loss.detach(),
+            )
+        ):
+            raise ValueError(
+                "the combined per-sample loss is not main + weighted iREPA"
+            )
+        if type(measurement.irepa_lambda) is not float or not math.isfinite(
+            measurement.irepa_lambda
+        ) or measurement.irepa_lambda < 0.0:
+            raise ValueError(
+                f"microbatches[{index}].irepa_lambda must be a finite float >= 0"
+            )
+        if lamda is None:
+            lamda = measurement.irepa_lambda
+        elif lamda != measurement.irepa_lambda:
+            raise ValueError(
+                "irepa_lambda differs across the microbatches of one update"
+            )
+        main_sum += main.sum()
+        irepa_sum += irepa.sum()
+        weighted_sum += weighted.sum()
+        cosine_sum += cosine.sum()
+        total += main.numel()
+    if total != observation.loop.update.effective_samples:
+        raise ValueError("iREPA split sample count differs from effective batch")
+    return (
+        float(main_sum.item() / total),
+        float(irepa_sum.item() / total),
+        float(weighted_sum.item() / total),
+        float(cosine_sum.item() / total),
+        lamda if lamda is not None else 0.0,
+    )
+
+
 def build_training_metric(
     observation: SuccessfulTrainingObservation,
     *,
@@ -404,6 +505,13 @@ def build_training_metric(
     if type(recorded_at_unix_ns) is not int or recorded_at_unix_ns <= 0:
         raise TypeError("recorded_at_unix_ns must be a positive integer")
     update = observation.loop.update
+    (
+        main_loss,
+        irepa_loss,
+        irepa_weighted_loss,
+        irepa_cosine_mean,
+        irepa_lambda,
+    ) = _irepa_metric_splits(observation)
     high_noise_loss, high_noise_count = _noise_bucket(
         observation,
         loss_attribute="high_noise_loss_sum",
@@ -504,6 +612,12 @@ def build_training_metric(
         transparent_composited=transparent_composited,
         transparent_nl_suppressed=transparent_nl_suppressed,
         transparent_rejection_totals=context.transparent_rejection_totals,
+        main_loss=main_loss,
+        irepa_loss=irepa_loss,
+        irepa_weighted_loss=irepa_weighted_loss,
+        irepa_cosine_mean=irepa_cosine_mean,
+        irepa_lambda=irepa_lambda,
+        irepa_projector_grad_norm=update.irepa_projector_grad_norm,
     )
 
 

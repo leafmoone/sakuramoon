@@ -169,6 +169,9 @@ class DenseDiTFeatures:
     image_start: int
     image_shape: tuple[int, int]
     condition: GlobalConditionOutput
+    # Stable-slot image-span capture [B, T_image, hidden_size]; None when the
+    # caller did not request a capture (the legacy default path).
+    capture_hidden: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +180,10 @@ class PackedDiTFeatures:
     packed: PackedSequences
     condition: GlobalConditionOutput
     sample_indices: torch.Tensor
+    # Stable-slot image-span capture [total_image_tokens, hidden_size] flat,
+    # per-sample row-major in sample order; None when the caller did not
+    # request a capture (the legacy default path).
+    capture_hidden: torch.Tensor | None = None
 
 
 class DenseDiT(nn.Module):
@@ -407,7 +414,13 @@ class DenseDiT(nn.Module):
         *,
         image_coordinates: torch.Tensor,
         growth_alpha: float,
+        capture_slot_id: int | None = None,
     ) -> DenseDiTFeatures:
+        if capture_slot_id is not None and capture_slot_id not in self.active_slot_ids:
+            raise ValueError(
+                "capture slot is not an active stable slot at the current "
+                f"depth ({capture_slot_id} not in {self.active_slot_ids})"
+            )
         joint, token_mask, coordinates, image_start, image_shape = self._prepare_tokens(
             latent,
             text_tokens,
@@ -424,6 +437,7 @@ class DenseDiT(nn.Module):
             self.active_slot_ids,
         )
         attention_mask = dense_attention_mask(token_mask)
+        capture_hidden: torch.Tensor | None = None
         for active_index, slot_id in enumerate(self.active_slot_ids):
             growth = slot_growth(self.depth, slot_id, growth_alpha)
             block = self.blocks[slot_name(slot_id)]
@@ -462,12 +476,22 @@ class DenseDiT(nn.Module):
                     attention_growth=growth,
                     mlp_growth=growth,
                 )
+            if capture_slot_id is not None and slot_id == capture_slot_id:
+                # Stable-slot capture AFTER the tapped block, eager outer-loop
+                # point (never a hook, never inside a compiled block).
+                capture_hidden = joint
+        if capture_hidden is not None:
+            height, width = image_shape
+            capture_hidden = capture_hidden[
+                :, image_start : image_start + height * width
+            ]
         return DenseDiTFeatures(
             joint_hidden=joint,
             token_mask=token_mask,
             image_start=image_start,
             image_shape=image_shape,
             condition=condition,
+            capture_hidden=capture_hidden,
         )
 
     def forward(
@@ -508,6 +532,61 @@ class DenseDiT(nn.Module):
             features.condition.final_shift,
             features.image_shape,
         )
+
+    def forward_tapped(
+        self,
+        latent: torch.Tensor,
+        text_tokens: torch.Tensor,
+        text_mask: torch.Tensor,
+        condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
+        timestep: torch.Tensor,
+        size_scale: torch.Tensor,
+        aspect: torch.Tensor,
+        *,
+        image_coordinates: torch.Tensor,
+        growth_alpha: float,
+        tap_slot_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Legacy dense forward plus one stable-slot image-hidden capture.
+
+        Returns ``(predictions, image_hidden)`` where ``predictions`` is the
+        exact legacy output and ``image_hidden`` is ``[B, T_image,
+        hidden_size]`` — the image span of the joint hidden states after the
+        tapped stable slot's block.  The prediction path is untouched: the
+        capture only reads the block output in the eager outer loop.
+        """
+
+        features = self.forward_features(
+            latent,
+            text_tokens,
+            text_mask,
+            condition_tokens,
+            condition_active_mask,
+            timestep,
+            size_scale,
+            aspect,
+            image_coordinates=image_coordinates,
+            growth_alpha=growth_alpha,
+            capture_slot_id=tap_slot_id,
+        )
+        if features.capture_hidden is None:
+            raise RuntimeError(
+                "tapped dense forward did not capture the requested stable slot"
+            )
+        height, width = features.image_shape
+        image_tokens = height * width
+        image_hidden = features.joint_hidden[
+            :,
+            features.image_start : features.image_start + image_tokens,
+        ]
+        predictions = self.output_head(
+            image_hidden,
+            features.condition.final_scale,
+            features.condition.final_shift,
+            features.image_shape,
+        )
+        return predictions, features.capture_hidden
 
     def model_metadata(self) -> dict[str, int | str]:
         return {
@@ -759,7 +838,13 @@ class PackedDiT(nn.Module):
         *,
         image_coordinates: tuple[torch.Tensor, ...],
         growth_alpha: float,
+        capture_slot_id: int | None = None,
     ) -> PackedDiTFeatures:
+        if capture_slot_id is not None and capture_slot_id not in self.active_slot_ids:
+            raise ValueError(
+                "capture slot is not an active stable slot at the current "
+                f"depth ({capture_slot_id} not in {self.active_slot_ids})"
+            )
         if packed.tokens.ndim != 2 or packed.tokens.shape[-1] != self.hidden_size:
             raise ValueError("packed tokens must have shape [T,hidden_size]")
         if len(packed.spans) != timestep.shape[0]:
@@ -787,6 +872,7 @@ class PackedDiT(nn.Module):
             if growth_slots
             else None
         )
+        capture_hidden: torch.Tensor | None = None
         for active_index, slot_id in enumerate(self.active_slot_ids):
             growth = (
                 dynamic_growth
@@ -831,11 +917,25 @@ class PackedDiT(nn.Module):
                     attention_growth=growth,
                     mlp_growth=growth,
                 )
+            if capture_slot_id is not None and slot_id == capture_slot_id:
+                # Stable-slot capture AFTER the tapped block, eager outer-loop
+                # point (never a hook, never inside a compiled block).
+                capture_hidden = joint
+        if capture_hidden is not None:
+            # Per-sample image spans in row-major sample order (reuses the
+            # exact span metadata the prediction head consumes).
+            capture_hidden = torch.cat(
+                tuple(
+                    capture_hidden[spans.image.start : spans.image.end]
+                    for spans in packed.spans
+                )
+            )
         return PackedDiTFeatures(
             joint_hidden=joint,
             packed=packed,
             condition=condition,
             sample_indices=sample_indices,
+            capture_hidden=capture_hidden,
         )
 
     def predict_from_features(
@@ -894,6 +994,47 @@ class PackedDiT(nn.Module):
                 growth_alpha=growth_alpha,
             )
         )
+
+    def forward_packed_tapped(
+        self,
+        packed: PackedSequences,
+        condition_tokens: torch.Tensor,
+        condition_active_mask: torch.Tensor,
+        timestep: torch.Tensor,
+        size_scale: torch.Tensor,
+        aspect: torch.Tensor,
+        *,
+        image_coordinates: tuple[torch.Tensor, ...],
+        growth_alpha: float,
+        tap_slot_id: int,
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        """Legacy packed forward plus one stable-slot image-hidden capture.
+
+        Returns ``(predictions, capture_hidden)`` where ``predictions`` is
+        the exact legacy per-sample output and ``capture_hidden`` is
+        ``[total_image_tokens, hidden_size]`` flat in per-sample row-major
+        sample order — the image span of the joint hidden states after the
+        tapped stable slot's block.  The prediction path is untouched: the
+        capture only reads the block output in the eager outer loop.
+        """
+
+        features = self.forward_packed_features(
+            packed,
+            condition_tokens,
+            condition_active_mask,
+            timestep,
+            size_scale,
+            aspect,
+            image_coordinates=image_coordinates,
+            growth_alpha=growth_alpha,
+            capture_slot_id=tap_slot_id,
+        )
+        if features.capture_hidden is None:
+            raise RuntimeError(
+                "tapped packed forward did not capture the requested stable slot"
+            )
+        predictions = self.predict_from_features(features)
+        return predictions, features.capture_hidden
 
     def forward(
         self,

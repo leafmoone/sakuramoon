@@ -16,8 +16,12 @@ from sakuramoon.telemetry.observer import _timestep_bin_stats
 
 
 def test_timestep_bin_stats_uses_half_open_bins_and_includes_t_one() -> None:
+    # the t-bin histogram is MAIN-JLT-only: per_sample_loss carries the
+    # combined (main + weighted iREPA) objective and must NOT reweight the
+    # bins, so the two vectors are deliberately different here
     measurement = SimpleNamespace(
-        per_sample_loss=torch.tensor([2.0, 4.0, 8.0, 10.0]),
+        per_sample_loss=torch.tensor([2.1, 4.1, 8.1, 10.1]),
+        main_per_sample_loss=torch.tensor([2.0, 4.0, 8.0, 10.0]),
         timesteps=torch.tensor([0.0, 0.90, 0.95, 1.0], dtype=torch.float32),
     )
     observation = SimpleNamespace(

@@ -1,0 +1,103 @@
+{
+  "phase": 4,
+  "title": "iREPA representation-alignment training graph",
+  "branch": "iprea",
+  "parent_commit": "14c9cee",
+  "generated": "2026-09-03",
+  "host": "salt10 (2x BW DCU, DTK 26.04, system torch 2.9.0+das.opt1.dtk2604, Python 3.11.9)",
+  "verdict": {
+    "iprea_p4_test_parity": "PASS",
+    "iprea_only_failures": 0,
+    "base_only_failures": 0,
+    "pyright_new_in_src": 0,
+    "frozen_check": "CLEAN"
+  },
+  "gate_results": {
+    "ruff": "All checks passed",
+    "pyright_new_in_src": 0,
+    "frozen_check": "CLEAN (flow/cmuon/guarded_canonical/fp32_rescue/save untouched)",
+    "p4_unit_tests": "59 passed",
+    "p4_gpu_tests": "13 passed",
+    "full_iprea_p4": "2 failed, 992 passed, 2 skipped",
+    "full_dev_base": "2 failed, 786 passed, 2 skipped",
+    "shared_baseline_failures": [
+      "tests/gpu/data/test_pipeline_encoders.py::test_real_pipeline_qwen_and_mage_encode_one_batch",
+      "tests/gpu/fa4/test_varlen_attention.py::test_forged_boundary_handle_fails_before_native_kernel[host_metadata]"
+    ]
+  },
+  "answers": {
+    "A_slot08_capture": {
+      "contract": "capture is exactly the image span of the tapped slot_08 block output, read at an eager outer-loop point (never a hook, never inside a compiled/ckpt block); row-major raster T=H*W, no pad/resize",
+      "key_constraint": "slot 8 is a G1 growth slot, active only at depth 20/24 (not base 16)",
+      "verified_by": [
+        "test_slot08_capture_is_tapped_block_output (bitwise == block output via test-only hook)",
+        "test_slot08_capture_token_count_is_row_major_grid (T==H*W, square+rect, depth 20/24)",
+        "test_slot08_capture_dense_vs_packed_parity (full production d=2560 model, depth 20, SDPA vs FA4 varlen)"
+      ]
+    },
+    "B_projector": {
+      "contract": "IRepaAlignment(in_channels) = locked MixedPrecisionConv2d (bf16 w / fp32 b), out=768 k=3 s=1 p=1 d=1 g=1 bias; bf16 [B,T,D]+(H,W) -> [B,T,768]; TypeError non-bf16, ValueError H*W!=T / width",
+      "verified_by": ["tests/unit/model/test_irepa_alignment.py"]
+    },
+    "C_zscore_target": {
+      "contract": "spatial_zscore_target(teacher_features, gamma, eps) = per-channel spatial z-score of the frozen teacher [B,T,768] bf16 features in float32",
+      "verified_by": ["tests/unit/objective/test_irepa_objective.py", "GPU teacher chain"]
+    },
+    "D_cosine_loss": {
+      "contract": "irepa_alignment_loss = fp32 F.cosine_similarity(dim=-1); per_sample=(1-cosine).mean(1); returns (per_sample, cosine_per_sample)",
+      "verified_by": ["tests/unit/objective/test_irepa_objective.py", "GPU teacher chain (finite, cosine in [-1,1])"]
+    },
+    "E_lambda_schedule": {
+      "contract": "IRepaLambdaSchedule + irepa_weight_for_update: stateless, deterministic function of successful-update count; ramp in/hold/ramp out",
+      "verified_by": ["tests/unit/objective/test_irepa_objective.py (math, determinism, statelessness, boundaries)"]
+    },
+    "F_combined_objective": {
+      "contract": "per-sample combined = main + lambda*irepa (fp32); section-14 NO lambda=0 skip (full graph, exact-zero contribution + exact-zero grad)",
+      "verified_by": ["tests/unit/train/test_irepa_zero_impact.py", "test_lambda_zero_is_exact_zero_contribution (DCU)"]
+    },
+    "G_telemetry_v11": {
+      "contract": "schema 11; 2 new timing phases (irepa_teacher, irepa_projector); 6 iREPA fields; t-bin MAIN-JLT-only; observer re-derives main+weighted==combined bit-exact fp32 + one-update lambda uniformity + finiteness; payload publishes 6 fields",
+      "verified_by": ["tests/unit/test_irepa_metrics_v11.py (11 tests)", "test_telemetry_t_bins / test_telemetry_spatial / test_g1_telemetry (schema 11)"]
+    },
+    "H_zero_impact": {
+      "contract": "disabled (irepa_alignment None) = byte-identical legacy tuple; enabled lambda=0 = exact-zero contribution, legacy grads torch.equal",
+      "verified_by": ["tests/unit/train/test_irepa_zero_impact.py (4 tests)"]
+    },
+    "I_production_gate": {
+      "contract": "fail-closed: enabled iREPA with a missing/inconsistent prerequisite raises a blocker (no silent degrade)",
+      "verified_by": ["tests/unit/train/test_irepa_production_gate.py"]
+    },
+    "J_frozen_and_parity": {
+      "frozen": ["objective/flow.py", "optim/cmuon.py", "optim/guarded_canonical.py", "optim/fp32_rescue.py", "checkpoint/save.py (v4 gate)", "train/preflight.py"],
+      "frozen_check": "CLEAN (zero P4 diff)",
+      "parity": "iprea-P4 2 failed == dev 2 failed (both shared baseline); iprea-only=0, base-only=0; no skip/xfail added"
+    }
+  },
+  "test_isolation_note": "the compile-stability GPU test injects torch.dynamo __compiled_fn_* namespace artifacts that test_distributed_compile asserts on; the GPU file carries an autouse fixture removing those artifacts before/after each test (no production change)",
+  "files": {
+    "new_src": ["src/sakuramoon/objective/irepa.py", "src/sakuramoon/train/irepa_diagnostics.py"],
+    "new_tests": [
+      "tests/gpu/irepa/test_irepa_training_graph.py",
+      "tests/unit/objective/test_irepa_objective.py",
+      "tests/unit/test_irepa_metrics_v11.py",
+      "tests/unit/train/test_irepa_lambda_binding.py",
+      "tests/unit/train/test_irepa_shadow_audit.py",
+      "tests/unit/train/test_irepa_zero_impact.py"
+    ],
+    "modified": [
+      "src/sakuramoon/config/assembly.py",
+      "src/sakuramoon/model/dit.py",
+      "src/sakuramoon/telemetry/metrics.py",
+      "src/sakuramoon/telemetry/observer.py",
+      "src/sakuramoon/train/loop.py",
+      "src/sakuramoon/train/production.py",
+      "src/sakuramoon/train/runtime.py",
+      "src/sakuramoon/train/step.py",
+      "tests/unit/test_g1_telemetry.py",
+      "tests/unit/test_telemetry_spatial.py",
+      "tests/unit/test_telemetry_t_bins.py",
+      "tests/unit/train/test_irepa_composite.py",
+      "tests/unit/train/test_irepa_production_gate.py"
+    ]
+  }
+}

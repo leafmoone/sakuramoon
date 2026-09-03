@@ -36,6 +36,10 @@ CORE_TIMING_PHASES = (
     "optimizer",
     "checkpoint",
     "evaluation",
+    # Phase-4 iREPA: the frozen teacher forward and the projector conv are
+    # timed separately; both are exactly 0.0 when iREPA is absent/disabled.
+    "irepa_teacher",
+    "irepa_projector",
 )
 DETAILED_TIMING_PHASES = (
     "cache",
@@ -58,7 +62,11 @@ NOISE_T_BIN_LABELS = tuple(
     f"bin_{index:02d}_t{index * 5:03d}_{(index + 1) * 5:03d}"
     for index in range(NOISE_T_BIN_COUNT)
 )
-TRAINING_METRIC_SCHEMA_VERSION = 10
+# v11: iREPA Phase 4 — main/irepa/weighted loss split, cosine mean, lambda,
+# projector grad norm, and the irepa_teacher / irepa_projector timing phases.
+# When iREPA is absent/disabled, main_loss == total_loss, the irepa_* loss
+# fields are exactly 0.0 (no NaN sentinels), and both irepa phases are 0.0.
+TRAINING_METRIC_SCHEMA_VERSION = 11
 DROPOUT_KEYS = CAPTION_DROPOUT_KEYS
 def _spatial_default_fallback_reasons(effective_batch: int) -> Mapping[str, int]:
     """Default spatial-crop table for an update with no spatial activity.
@@ -151,6 +159,19 @@ class TrainingMetric:
     # completion channel; None is filled with the strict-zero fixed-key
     # table in __post_init__ (post-init the field is never None or empty).
     transparent_rejection_totals: Mapping[str, int] | None = None
+    # Phase-4 iREPA split.  ``total_loss`` stays the actual backward
+    # objective (main + lambda * irepa when enabled); ``main_loss`` is the
+    # sample-weighted MAIN-JLT-only mean (the same value total_loss had
+    # before Phase 4); ``irepa_loss`` is the unweighted cosine alignment
+    # mean; ``irepa_weighted_loss`` is lambda * irepa_loss; ``irepa_lambda``
+    # is the weight bound for the whole update.  All exactly 0.0 (except
+    # main_loss) when iREPA is absent/disabled.
+    main_loss: float = 0.0
+    irepa_loss: float = 0.0
+    irepa_weighted_loss: float = 0.0
+    irepa_cosine_mean: float = 0.0
+    irepa_lambda: float = 0.0
+    irepa_projector_grad_norm: float = 0.0
 
     def __post_init__(self) -> None:
         _nonnegative_int("successful_update", self.successful_update, positive=True)
@@ -188,8 +209,16 @@ class TrainingMetric:
             "growth_new_slot_grad_norm",
             "growth_new_block_grad_norm",
             "growth_new_conditioner_grad_norm",
+            "main_loss",
+            "irepa_loss",
+            "irepa_weighted_loss",
+            "irepa_lambda",
+            "irepa_projector_grad_norm",
         ):
             _finite_float(name, getattr(self, name), minimum=0.0)
+        # Per-sample mean cosine is in [-1, 1] (untrained features are
+        # roughly orthogonal, trained ones drift positive).
+        _finite_float("irepa_cosine_mean", self.irepa_cosine_mean, minimum=-1.0)
         _finite_float("clip_fraction", self.clip_fraction, minimum=0.0)
         if self.clip_fraction > 1.0:
             raise ValueError("clip_fraction must not exceed one")
@@ -453,6 +482,12 @@ class TrainingMetric:
             "transparent_rejection_totals": dict(
                 self.transparent_rejection_totals or {}
             ),
+            "main_loss": self.main_loss,
+            "irepa_loss": self.irepa_loss,
+            "irepa_weighted_loss": self.irepa_weighted_loss,
+            "irepa_cosine_mean": self.irepa_cosine_mean,
+            "irepa_lambda": self.irepa_lambda,
+            "irepa_projector_grad_norm": self.irepa_projector_grad_norm,
         }
 
     def as_wandb_mapping(self) -> dict[str, int | float]:
