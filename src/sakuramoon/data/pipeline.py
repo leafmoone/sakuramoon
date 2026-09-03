@@ -566,10 +566,18 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             _trace_sample(shard_record.path, metadata.id, f"reject:{error.reason}")
             self.rejection_observer(error.reason)
             return None
-        except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
+        except (
+            OSError,
+            SyntaxError,
+            ValueError,
+            MemoryError,
+            Image.DecompressionBombError,
+        ):
             # A corrupt image is an individual bad sample, not a failed data
             # service. Drop it so one malformed archive member cannot abort
             # an otherwise healthy training run.
+            # 2026-09-02 part C: MemoryError included so a decode/convert OOM
+            # skips the sample as decode_error instead of killing the worker.
             _trace_sample(shard_record.path, metadata.id, "decode_error")
             self.rejection_observer("decode_error")
             return None
