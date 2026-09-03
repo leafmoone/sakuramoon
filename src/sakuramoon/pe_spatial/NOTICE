@@ -1,0 +1,48 @@
+SakuraMoon iREPA frozen PE-Spatial teacher — vendored source notice
+===================================================================
+
+This package vendors a minimal, frozen-only subset of the Perception
+Encoder (PE) vision encoder from:
+
+  Repository : facebookresearch/perception_models
+  Commit     : 3e352cca660658d4b5c90f42a7808b11469e4c66
+  License    : Apache License 2.0 (see LICENSE.PE in this directory)
+  Copyright  : Copyright (c) Meta Platforms, Inc. and affiliates.
+
+Vendored files (upstream path -> local path):
+  core/vision_encoder/rope.py   -> rope.py        (copied byte-for-byte verbatim)
+  core/vision_encoder/pe.py     -> pe_vision.py   (vision-encoder classes only)
+  core/vision_encoder/config.py -> config.py      (PEConfig + B16-512 entry)
+
+Deliberately NOT vendored (per the iREPA Phase 3 dependency policy):
+  text/PLM towers, tokenizer, video/data/eval code, requirements.txt,
+  and the huggingface_hub checkpoint fetcher.
+
+Fidelity (verified by automated diff / AST comparison against the upstream
+commit above):
+  - rope.py: byte-for-byte identical (a 4-line provenance header prepended).
+  - pe_vision.py: every vendored class (LayerScale, AttentionPooling,
+    SelfAttention, ResidualAttentionBlock, Transformer, VisionTransformer)
+    is AST-identical to upstream, with the single exception of
+    VisionTransformer.from_config (see below).  Only import re-basing,
+    unused-import trimming, and whitespace normalization differ textually.
+  - config.py: the PE-Core-B16-224 and PE-Spatial-B16-512 definitions are
+    AST-identical to upstream; PEConfig fields are identical.
+
+Documented changes to the copied code:
+  - import paths re-based to sakuramoon.pe_spatial;
+  - unused imports trimmed in pe_vision.py;
+  - pe_vision.py drops the text tower / CLIP / fetch_pe_checkpoint;
+  - VisionTransformer.from_config's pretrained path requires a local
+    checkpoint_path (the huggingface_hub fetcher is intentionally not
+    vendored, so a pretrained load with no local path fails closed);
+  - config.py: the `output_dim: Optional[int]` annotation is written as
+    `int | None` (identical type), and the `image_size` field default is
+    the int `224`.  Upstream's source line `image_size: int = 224,` is
+    parsed by Python as a 1-tuple default `(224,)` (a trailing-comma
+    typo); every PE_VISION_CONFIG entry passes an explicit int image_size,
+    so the normalized default is behaviorally equivalent for all configs.
+
+The teacher weights (PE-Spatial-B16-512.pt) are NOT part of this
+repository; they are bound at runtime by the asset contract in
+src/sakuramoon/assets/pe_spatial.py (SHA256 fingerprint).

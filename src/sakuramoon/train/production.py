@@ -115,20 +115,22 @@ class ProductionReadinessError(RuntimeError):
 
 
 def require_production_irepa_readiness(config: RuntimeConfig) -> None:
-    """Phase 2 safety gate for the iREPA auxiliary.
+    """Phase 3 safety gate for the iREPA auxiliary.
 
-    ``[irepa] enabled = true`` parses and its schema v4 architecture artifact
-    constructs, but the runtime teacher/tap/loss integration is not installed
-    yet.  Production must fail closed BEFORE optimizer build, data-service
-    connection, and the training loop — never start a run where the projector
-    exists but no loss consumes it.  Unlocked in the runtime-integration
-    phase.
+    ``[irepa] enabled = true`` parses, its schema v4 architecture artifact
+    constructs, and the frozen PE-Spatial teacher asset contract + encoder
+    are installed (Phase 3).  The student tap (slot capture), projector
+    invocation, spatial z-score, cosine loss, and lambda schedule are NOT
+    installed yet.  Production must fail closed BEFORE optimizer build,
+    data-service connection, and the training loop — never start a run
+    where the teacher and projector exist but no loss consumes them.
+    Unlocked in Phase 4 (runtime integration).
     """
 
     irepa = config.irepa
     if irepa is not None and irepa.enabled:
         raise ProductionReadinessError(
-            ("iREPA enabled but runtime teacher/tap/loss integration is not installed",)
+            ("iREPA teacher is available but student tap/loss integration is not installed",)
         )
 
 

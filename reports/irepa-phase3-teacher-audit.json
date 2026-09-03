@@ -1,0 +1,155 @@
+{
+  "audit": "irepa-phase3-frozen-teacher",
+  "generated_at_utc": "2026-09-03T00:02:20.603473+00:00",
+  "device": {
+    "name": "cuda:0",
+    "cuda_name": "BW",
+    "torch": "2.9.0"
+  },
+  "teacher": {
+    "model": "facebook/PE-Spatial-B16-512",
+    "parameter_dtype": "bfloat16",
+    "input_dtype": "bfloat16",
+    "output_dtype": "bfloat16",
+    "frozen": true,
+    "eval": true,
+    "grad_graph": false
+  },
+  "warmup": 10,
+  "iters": 30,
+  "cases": [
+    {
+      "shape": "256x256",
+      "grid": [
+        16,
+        16
+      ],
+      "batch": 4,
+      "forward_median_ms": 19.113,
+      "forward_p95_ms": 19.719,
+      "peak_allocated_bytes": 267557376,
+      "peak_reserved_bytes": 289406976,
+      "output_tokens": 1024,
+      "output_feature_width": 768,
+      "output_dtype": "torch.bfloat16",
+      "output_finite": true
+    },
+    {
+      "shape": "256x256",
+      "grid": [
+        16,
+        16
+      ],
+      "batch": 16,
+      "forward_median_ms": 29.916,
+      "forward_p95_ms": 30.127,
+      "peak_allocated_bytes": 428669440,
+      "peak_reserved_bytes": 465567744,
+      "output_tokens": 4096,
+      "output_feature_width": 768,
+      "output_dtype": "torch.bfloat16",
+      "output_finite": true
+    },
+    {
+      "shape": "512x512",
+      "grid": [
+        32,
+        32
+      ],
+      "batch": 4,
+      "forward_median_ms": 46.732,
+      "forward_p95_ms": 46.821,
+      "peak_allocated_bytes": 730558464,
+      "peak_reserved_bytes": 767557632,
+      "output_tokens": 4096,
+      "output_feature_width": 768,
+      "output_dtype": "torch.bfloat16",
+      "output_finite": true
+    },
+    {
+      "shape": "512x512",
+      "grid": [
+        32,
+        32
+      ],
+      "batch": 16,
+      "forward_median_ms": 165.099,
+      "forward_p95_ms": 165.315,
+      "peak_allocated_bytes": 2284004864,
+      "peak_reserved_bytes": 3152019456,
+      "output_tokens": 16384,
+      "output_feature_width": 768,
+      "output_dtype": "torch.bfloat16",
+      "output_finite": true
+    },
+    {
+      "shape": "256x1024",
+      "grid": [
+        16,
+        64
+      ],
+      "batch": 4,
+      "forward_median_ms": 47.254,
+      "forward_p95_ms": 47.504,
+      "peak_allocated_bytes": 749432832,
+      "peak_reserved_bytes": 3152019456,
+      "output_tokens": 4096,
+      "output_feature_width": 768,
+      "output_dtype": "torch.bfloat16",
+      "output_finite": true
+    },
+    {
+      "shape": "256x1024",
+      "grid": [
+        16,
+        64
+      ],
+      "batch": 16,
+      "forward_median_ms": 165.472,
+      "forward_p95_ms": 165.656,
+      "peak_allocated_bytes": 2284004864,
+      "peak_reserved_bytes": 3133145088,
+      "output_tokens": 16384,
+      "output_feature_width": 768,
+      "output_dtype": "torch.bfloat16",
+      "output_finite": true
+    },
+    {
+      "shape": "1024x256",
+      "grid": [
+        64,
+        16
+      ],
+      "batch": 4,
+      "forward_median_ms": 47.797,
+      "forward_p95_ms": 48.681,
+      "peak_allocated_bytes": 749432832,
+      "peak_reserved_bytes": 3133145088,
+      "output_tokens": 4096,
+      "output_feature_width": 768,
+      "output_dtype": "torch.bfloat16",
+      "output_finite": true
+    },
+    {
+      "shape": "1024x256",
+      "grid": [
+        64,
+        16
+      ],
+      "batch": 16,
+      "forward_median_ms": 165.288,
+      "forward_p95_ms": 165.38,
+      "peak_allocated_bytes": 2284004864,
+      "peak_reserved_bytes": 3133145088,
+      "output_tokens": 16384,
+      "output_feature_width": 768,
+      "output_dtype": "torch.bfloat16",
+      "output_finite": true
+    }
+  ],
+  "deterministic_bitwise": true,
+  "max_viable_batch_512": 64,
+  "compile_benchmark": {
+    "status": "failed: InductorError: SubprocException: An exception occurred in a subprocess:\n\nName=triton_red_fused_add_cat_expand_native_layer_norm_permute_unsqueeze_view_0\nTraceback (most recent call last):\n  File \"/usr/local/lib/python3.11/site-packages/torch/_inductor/compile_worker/subproc_pool.py\", line 397, in do_job\n    result"
+  }
+}

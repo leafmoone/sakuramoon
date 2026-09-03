@@ -68,7 +68,7 @@ def test_enabled_irepa_fails_production_readiness(tmp_path: Path) -> None:
     with pytest.raises(ProductionReadinessError) as excinfo:
         require_production_irepa_readiness(loaded.config)
     assert excinfo.value.blockers == (
-        "iREPA enabled but runtime teacher/tap/loss integration is not installed",
+        "iREPA teacher is available but student tap/loss integration is not installed",
     )
 
 

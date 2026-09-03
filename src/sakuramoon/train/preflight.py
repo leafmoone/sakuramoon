@@ -16,6 +16,10 @@ import torch
 from torch import nn
 
 from sakuramoon.assets import require_local_clip, require_local_qwen, require_local_vae
+from sakuramoon.assets.pe_spatial import (
+    pe_spatial_teacher_required,
+    require_local_pe_spatial_teacher,
+)
 from sakuramoon.checkpoint.policy import CheckpointReason
 from sakuramoon.checkpoint.schema import (
     CheckpointCadence,
@@ -524,6 +528,11 @@ def build_single_gpu_preflight_checks(
         if loaded.config.evaluation.enabled is True:
             require_local_clip(repository_root)
             require_local_inception_weights()
+        irepa = loaded.config.irepa
+        if irepa is not None and pe_spatial_teacher_required(irepa):
+            require_local_pe_spatial_teacher(
+                repository_root, irepa.teacher_local_path
+            )
 
     def data_service() -> None:
         if data_client.health():
