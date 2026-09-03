@@ -443,8 +443,10 @@ def migrate_checkpoint(
         or source_state.growth.alpha != 1.0
     ):
         raise CheckpointError("source checkpoint is not the live canonical S0 topology")
-    ramp_updates = growth_ramp_updates(planned_updates)
     transition_update = source_state.trainer.successful_updates
+    # planned_updates is the absolute successful-update terminal of the target
+    # stage; the growth ramp scales with the stage length, not the terminal.
+    ramp_updates = growth_ramp_updates(planned_updates - transition_update)
     identity = CheckpointIdentity(
         f"raw-{transition_update}-post-transition", transition_update
     )
@@ -474,7 +476,7 @@ def migrate_checkpoint(
                 ramp_updates=ramp_updates,
             ),
             stage_budget=StageBudgetCheckpointState(
-                transition_update, transition_update + planned_updates
+                transition_update, planned_updates
             ),
             checkpoint_cadence=source_state.checkpoint_cadence,
         )
@@ -526,7 +528,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--target", type=Path, required=True)
     parser.add_argument("--target-stage", required=True)
-    parser.add_argument("--planned-updates", type=int, required=True)
+    parser.add_argument(
+        "--planned-updates",
+        type=int,
+        required=True,
+        help="absolute successful-update terminal of the target stage",
+    )
     parser.add_argument("--migration-seed", type=int, required=True)
     parser.add_argument("--manual-approval", action="store_true")
     return parser

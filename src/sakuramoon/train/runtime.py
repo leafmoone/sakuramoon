@@ -963,10 +963,7 @@ def require_single_gpu_checkpoint_compatibility(
         raise ValueError("restored S0 stage budget must start at update zero")
     if config.stage.name == "G1" and stage_budget.start_successful_update <= 0:
         raise ValueError("restored G1 stage budget must start at its transition update")
-    if (
-        stage_budget.terminal_successful_update - stage_budget.start_successful_update
-        != config.stage.planned_updates
-    ):
+    if stage_budget.terminal_successful_update != config.stage.planned_updates:
         raise ValueError("restored stage budget differs from resolved config")
     if state.checkpoint_cadence.last_successful_update != trainer.successful_updates:
         raise ValueError("checkpoint cadence update does not match trainer state")
