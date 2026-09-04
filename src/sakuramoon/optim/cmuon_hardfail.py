@@ -190,6 +190,37 @@ def publish_hard_fail_artifact(
             "hard-fail input artifacts are owner-only; a non-owner rank "
             f"(rank {rank}) must not publish an input for owner {owner}"
         )
+    return _publish_event_dir(
+        root,
+        observations,
+        rank,
+        fqn,
+        chunk_idx,
+        input_tensor=input_tensor,
+        metadata=metadata,
+        fill_local_path=False,
+        error_label="hard-fail artifact",
+    )
+
+
+def _publish_event_dir(
+    root: Path | str,
+    observations: int,
+    rank: int,
+    fqn: str,
+    chunk_idx: int,
+    *,
+    input_tensor: torch.Tensor,
+    metadata: dict[str, object],
+    fill_local_path: bool = False,
+    error_label: str = "hard-fail capsule",
+) -> Path:
+    """Atomic event-dir publish shared by the F1 artifact and the F2
+    minimal capsule: temp sibling dir + tensor file + ``metadata.json``,
+    fsynced, published by an atomic rename, unique per
+    (observation, rank, fqn, chunk) with a ``-r2``/``-r3`` suffix on a
+    repeated failure. Old events are never clobbered. Raises
+    ``HardFailArtifactError`` on any I/O failure."""
     root_path = Path(root)
     base = _event_base_name(observations, rank, fqn, chunk_idx)
     event_dir = root_path / base
@@ -206,9 +237,16 @@ def publish_hard_fail_artifact(
         # Non-finite verdict values (the "nonfinite" category itself) are
         # not representable in strict JSON: they become null. The sibling
         # *_finite flags already encode that state, so null is unambiguous.
+        meta_dict = dict(metadata)
+        if fill_local_path:
+            # The event dir name is chosen before the temp dir is created;
+            # the FileExistsError retry below can still shift the final
+            # name by one -rN slot — the directory listing (and the
+            # F2 mirror.json) remain authoritative in that race.
+            meta_dict["local_artifact_path"] = str(event_dir)
         meta_bytes = (
             json.dumps(
-                _json_safe(metadata), indent=1, sort_keys=True, allow_nan=False
+                _json_safe(meta_dict), indent=1, sort_keys=True, allow_nan=False
             )
             + "\n"
         ).encode()
@@ -229,7 +267,7 @@ def publish_hard_fail_artifact(
     except Exception as exc:
         _cleanup(tmp)
         raise HardFailArtifactError(
-            f"hard-fail artifact publish failed for {fqn}#chunk{chunk_idx}: {exc!r}"
+            f"{error_label} publish failed for {fqn}#chunk{chunk_idx}: {exc!r}"
         ) from exc
     return event_dir
 
@@ -370,6 +408,273 @@ def _final_delta_finite(diag: dict[str, object] | None) -> bool | None:
     return None if value is None else bool(value)  # type: ignore[arg-type]
 
 
+# ======================================================================
+# F2: FAST MINIMAL HARD-FAIL CAPSULE (local-first, teardown-safe)
+# ======================================================================
+#
+# The F1 publish ran, BEFORE writing a single byte, two full op-exact
+# CPU NS replays (BF16 + FP32) over the failing input (tens of seconds
+# for 2560x2560). In the 2-rank production topology the non-owner rank
+# raises first, torch-elastic tears down the worker group, and the owner
+# rank is SIGTERM/SIGKILLed mid-replay: the exact input was lost (the
+# 112105 event). F2 reorders the failure critical path to:
+#
+#   verdict settled -> freeze exact input (device clone) -> ONE
+#   device->CPU transfer -> serialize + sha -> minimal metadata ->
+#   LOCAL atomic capsule publish (durable) -> best-effort shared mirror
+#   -> original CMuonSafetyError
+#
+# No CPU NS replay, no trace, no SVD, and no tensor statistics beyond
+# the four existing O(n) scalar reductions required by the metadata are
+# performed before the local capsule is durable. All diagnostics (NS
+# replay, per-iteration trace, spectrum / effective-rank analysis) are
+# OFFLINE via ``dev-tools/cmuon_hardfail_enrich.py``.
+
+#: Local-first durable emergency root for the minimal capsule. On the
+#: verified production host ``/sakuramoon-runtime`` is the local overlay
+#: filesystem (716G free) while ``/root/private_data`` is the 50G-quota
+#: NFS share — the emergency root therefore sits on local disk next to
+#: the shared forensic tree. Isolated tests MUST redirect it (never
+#: touch this path).
+DEFAULT_EMERGENCY_CAPSULE_ROOT = "/sakuramoon-runtime/cmuon-f1-emergency"
+
+#: Schema tag for the minimal capsule metadata (F2).
+MINIMAL_CAPSULE_SCHEMA = "sakuramoon.cmuon_minimal_hardfail_capsule.v1"
+
+
+def build_minimal_capsule_metadata(
+    *,
+    observations: int,
+    this_rank: int,
+    world_size: int,
+    fqn: str,
+    chunk_idx: int,
+    role: str,
+    owner: int,
+    run_id: str | None,
+    hostname: str,
+    pid: int,
+    process_steps: int,
+    last_successful_update: int | None,
+    attempted_update: int | None,
+    checkpoint_source: str | None,
+    input_tensor: torch.Tensor,
+    alpha: float,
+    ns_steps: int,
+    ns_coefficients: tuple[float, ...],
+    eps: float,
+    lr: float,
+    target_delta_rms: float,
+    ceiling: float,
+    rescue_floor: float,
+    bf16_delta_rms: float | None,
+    original_fp32_delta_rms: float | None,
+    original_fp32_finite: bool | None,
+    fp32_failure_reason: str | None,
+    bf16_failure_name: str,
+    failure_message: str,
+    tensor_sha256: str,
+    tensor_format: str,
+    shared_mirror_root: str,
+) -> dict[str, object]:
+    """Assemble the MINIMAL capsule metadata (F2).
+
+    Carries the event identity (run / host / process / update numbers),
+    the exact-input description (shape / dtype / sha / format), the
+    ORIGINAL production verdict values (the BF16 and FP32 delta rms +
+    finiteness + reason the step actually compared), and the NS
+    parameters the offline replay / enrichment need. Deliberately NO
+    diagnostic replay, trace, spectrum, or rank statistics: those are
+    computed OFFLINE by ``dev-tools/cmuon_hardfail_enrich.py`` and never
+    in the production failure critical path.
+
+    ``local_artifact_path`` is filled by the publish helper with the
+    chosen event-dir name (and re-asserted by ``mirror.json`` after the
+    mirror attempt).
+    """
+    inp = input_tensor.contiguous()
+    tf = inp.float()
+    # ``input_rms`` is the NS-input RMS (the ``u_t_rms`` of the legacy
+    # guard-forensic record); both names are recorded so offline tooling
+    # can use either.
+    input_rms = float(tf.pow(2).mean().sqrt().item())
+    return {
+        "schema": MINIMAL_CAPSULE_SCHEMA,
+        # Event identity:
+        "observations": observations,
+        "this_rank": this_rank,
+        "owner": owner,
+        "world_size": world_size,
+        "run_id": run_id,
+        "hostname": hostname,
+        "pid": pid,
+        "process_steps": process_steps,
+        "last_successful_update": last_successful_update,
+        "attempted_update": attempted_update,
+        "checkpoint_source": checkpoint_source,
+        # Failing NS input identity:
+        "fqn": fqn,
+        "chunk": chunk_idx,
+        "role": role,
+        "shape": [int(s) for s in tuple(inp.shape)],
+        "numel": int(math.prod(tuple(inp.shape))),
+        "dtype": str(inp.dtype),
+        "contiguous": bool(inp.is_contiguous()),
+        # Existing scalars required to write the metadata (four O(n) CPU
+        # reductions over the saved clone; nothing heavier):
+        "input_rms": input_rms,
+        "u_t_rms": input_rms,
+        "input_frobenius_norm": float(tf.norm().item()),
+        "input_abs_max": float(tf.abs().max().item()),
+        "input_finite": bool(torch.isfinite(tf).all().item()),
+        # NS parameters (offline replay / enrichment inputs):
+        "alpha": float(alpha),
+        "ns_steps": int(ns_steps),
+        "ns_coefficients": [float(v) for v in ns_coefficients],
+        "eps": float(eps),
+        "lr": float(lr),
+        "target_delta_rms": float(target_delta_rms),
+        "ceiling": float(ceiling),
+        "rescue_floor": float(rescue_floor),
+        # ORIGINAL production verdict values (what the step compared):
+        "bf16_delta_rms": (
+            None if bf16_delta_rms is None else float(bf16_delta_rms)
+        ),
+        "original_fp32_delta_rms": (
+            None if original_fp32_delta_rms is None else float(original_fp32_delta_rms)
+        ),
+        "original_fp32_finite": (
+            None if original_fp32_finite is None else bool(original_fp32_finite)
+        ),
+        # Spec-named aliases of the original values:
+        "fp32_delta_rms": (
+            None if original_fp32_delta_rms is None else float(original_fp32_delta_rms)
+        ),
+        "fp32_finite": (
+            None if original_fp32_finite is None else bool(original_fp32_finite)
+        ),
+        "fp32_failure_reason": fp32_failure_reason,
+        "bf16_failure": bf16_failure_name,
+        "failure_message": failure_message,
+        # Artifact identity:
+        "tensor_sha256": tensor_sha256,
+        "tensor_format": tensor_format,
+        "shared_mirror_root": shared_mirror_root,
+        "wall_clock_unix_seconds": time.time(),
+    }
+
+
+def publish_minimal_capsule(
+    *,
+    root: Path | str,
+    observations: int,
+    rank: int,
+    world_size: int,
+    fqn: str,
+    chunk_idx: int,
+    role: str,
+    owner: int,
+    input_tensor: torch.Tensor,
+    metadata: dict[str, object],
+) -> Path:
+    """Publish the minimal LOCAL-first capsule (owner rank only, F2).
+
+    This is the ONLY write in the production failure critical path: one
+    exact-input tensor file + one ``metadata.json``, fsynced, atomically
+    published under the local emergency root. CPU NS replay, traces, and
+    SVD must happen OFFLINE (``dev-tools/cmuon_hardfail_enrich.py``).
+    Follow up with :func:`mirror_capsule` (best-effort shared root) and
+    then raise the original ``CMuonSafetyError``.
+    """
+    if owner != rank:
+        raise ValueError(
+            "hard-fail capsules are owner-only; a non-owner rank "
+            f"(rank {rank}) must not publish an input for owner {owner}"
+        )
+    return _publish_event_dir(
+        root,
+        observations,
+        rank,
+        fqn,
+        chunk_idx,
+        input_tensor=input_tensor,
+        metadata=metadata,
+        fill_local_path=True,
+        error_label="minimal hard-fail capsule",
+    )
+
+
+def mirror_capsule(event_dir: Path, shared_root: Path | str) -> dict[str, object]:
+    """Best-effort mirror of a published local capsule into the shared
+    forensic root (F2).
+
+    NEVER raises and never changes the outcome: the result
+    ``{"status": "ok" | "failed", "shared_path": ..., "error": ...}`` is
+    returned AND recorded as a small new ``mirror.json`` file inside the
+    local (already durable) event dir. A mirror failure never affects the
+    original ``CMuonSafetyError`` and never invalidates the local
+    capsule as evidence.
+    """
+    shared_root_path = Path(shared_root)
+    tmp: Path | None = None
+    result: dict[str, object] = {
+        "status": "failed",
+        "shared_path": None,
+        "error": None,
+    }
+    try:
+        base = event_dir.name
+        target = shared_root_path / base
+        seq = 1
+        while target.exists() or target.is_symlink():
+            seq += 1
+            target = shared_root_path / f"{base}-r{seq}"
+        shared_root_path.mkdir(parents=True, exist_ok=True)
+        tmp = shared_root_path / f".{base}.mirror-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        tmp.mkdir()
+        for name in sorted(os.listdir(event_dir)):
+            src = event_dir / name
+            if src.is_file():
+                _fsync_write(tmp / name, src.read_bytes())
+        _fsync_dir(tmp)
+        try:
+            os.rename(tmp, target)
+        except FileExistsError:
+            seq += 1
+            target = shared_root_path / f"{base}-r{seq}"
+            while target.exists() or target.is_symlink():
+                seq += 1
+                target = shared_root_path / f"{base}-r{seq}"
+            os.rename(tmp, target)
+        _fsync_dir(shared_root_path)
+        tmp = None
+        result = {"status": "ok", "shared_path": str(target), "error": None}
+    except Exception as exc:  # noqa: BLE001 - the mirror is best-effort by
+        # contract: it must NEVER raise (the local capsule is already
+        # durable and stays the success evidence).
+        if tmp is not None:
+            _cleanup(tmp)
+        result = {"status": "failed", "shared_path": None, "error": repr(exc)}
+    # Record the mirror status inside the local (already durable) event
+    # dir as a new small file; the capsule is complete without it.
+    try:
+        payload = dict(result)
+        payload["local_artifact_path"] = str(event_dir)
+        payload["mirrored_at_unix_seconds"] = time.time()
+        _fsync_write(
+            event_dir / "mirror.json",
+            (
+                json.dumps(
+                    _json_safe(payload), indent=1, sort_keys=True, allow_nan=False
+                )
+                + "\n"
+            ).encode(),
+        )
+    except OSError:
+        pass  # advisory record; the capsule itself is already durable
+    return result
+
+
 def tensor_sha256(tensor: torch.Tensor) -> str:
     """SHA256 of the exact tensor bytes (same serialization as the saved
     file: contiguous, original dtype)."""
@@ -431,17 +736,22 @@ def compare_recorded_vs_replayed(
 
 
 __all__ = [
+    "DEFAULT_EMERGENCY_CAPSULE_ROOT",
     "DEFAULT_HARD_FAIL_ROOT",
     "FP32_REASON_ABOVE_CEILING",
     "FP32_REASON_BELOW_FLOOR",
     "FP32_REASON_NONFINITE",
     "HARD_FAIL_ARTIFACT_SCHEMA",
+    "MINIMAL_CAPSULE_SCHEMA",
     "HardFailArtifactError",
     "HardFailReplayComparison",
     "build_hard_fail_metadata",
+    "build_minimal_capsule_metadata",
     "classify_fp32_verdict",
     "compare_recorded_vs_replayed",
+    "mirror_capsule",
     "publish_hard_fail_artifact",
+    "publish_minimal_capsule",
     "tensor_format_name",
     "tensor_sha256",
 ]

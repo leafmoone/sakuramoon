@@ -1,4 +1,4 @@
-"""F1 forensic tests for the Hybrid CMuon FP32-rescue optimizer.
+"""F2 forensic tests for the Hybrid CMuon FP32-rescue optimizer (fast minimal local-first capsule).
 
 Verifies the telemetry-only hard-failure patch against the spec:
 
@@ -6,14 +6,16 @@ Verifies the telemetry-only hard-failure patch against the spec:
   B. BF16 fail + FP32 above ceiling    -> hard fail, reason=above_ceiling
   C. BF16 fail + FP32 below floor      -> hard fail, reason=below_floor
   D. BF16 fail + FP32 nonfinite        -> hard fail, reason=nonfinite
-  E. forensic writer failure           -> original CMuonSafetyError still
+  E. local capsule writer failure           -> original CMuonSafetyError still
                                           raised (I/O never masks root cause)
-  F. diagnostic trace failure          -> original CMuonSafetyError still
-                                          raised; forensic_trace_error set
+  F. tensor serialization failure          -> original CMuonSafetyError still
+                                          raised; no partial capsule published
+  M2. shared mirror failure            -> local capsule stays durable,
+                                          mirror.json=failed, original error
   G. successful step                   -> no hard-fail artifact created
   H. hard fail                         -> no CMuon param commit, no AdamW
                                           fallback step commit
-  I. exact input artifact              -> tensor is the EXACT NS input (same
+  I. exact input capsule              -> tensor is the EXACT NS input (same
                                           bits); replay CLI recomputes from it
   J. non-owner rank                    -> no fabricated input artifact
   K. repeated failure (crash loop)     -> older event never overwritten
@@ -190,6 +192,9 @@ def _build_optimizer(
     world_size: int,
     lr: float = 1.5625e-4,
     artifact_root: str | None = None,
+    emergency_root: str | Path | None = None,
+    checkpoint_source: str | None = None,
+    run_id: str | None = None,
 ):
     from sakuramoon.optim.fp32_rescue import build_fp32_rescue
     from sakuramoon.optim.guarded_canonical import GuardedCanonicalGuardConfig
@@ -234,6 +239,16 @@ def _build_optimizer(
         kwargs["hard_fail_artifact_root"] = str(artifact_root)
     if legacy_dir is not None:
         kwargs["legacy_forensic_dir"] = str(legacy_dir)
+    # F2: the LOCAL emergency root MUST be redirected in isolated tests
+    # (never touch the production emergency capsule root).
+    if emergency_root is not None:
+        kwargs["emergency_capsule_root"] = str(emergency_root)
+    elif legacy_dir is not None:
+        kwargs["emergency_capsule_root"] = str(Path(legacy_dir) / "emergency")
+    if checkpoint_source is not None:
+        kwargs["checkpoint_source"] = checkpoint_source
+    if run_id is not None:
+        kwargs["run_id"] = run_id
     return build_fp32_rescue(**kwargs)  # type: ignore[arg-type]
 
 
@@ -400,16 +415,41 @@ def test_bcd_hard_fail_captures_fp32_reason(
         elif reason == "below_floor":
             assert rec["fp32_delta_rms"] < 0.05 * (0.2 * lr)
 
-    # Exact-input artifact: owner (rank0) published one event.
-    events = _event_for_fqn(root, "content_gate")
-    assert events is not None, f"no hard-fail event under {root}"
+    # F2: the MINIMAL capsule lands in the LOCAL emergency root (the only
+    # critical-path write), NOT the shared mirror root.
+    emergency = tmp_path / "emergency"
+    events = _event_for_fqn(emergency, "content_gate")
+    assert events is not None, f"no capsule event under {emergency}"
     meta = json.loads((events / "metadata.json").read_text())
+    assert meta["schema"] == "sakuramoon.cmuon_minimal_hardfail_capsule.v1"
     assert meta["fp32_failure_reason"] == reason
     assert meta["owner"] == 0
     assert meta["this_rank"] == 0
     assert meta["shape"] == list(POISON_SHAPE)
     assert meta["dtype"] == "torch.bfloat16"
     assert meta["observations"] == 0
+    # F2 event identity fields (trainer hook not called in this harness):
+    assert isinstance(meta["pid"], int)
+    assert isinstance(meta["hostname"], str) and meta["hostname"]
+    assert meta["process_steps"] >= 1
+    assert meta["run_id"] is None
+    assert meta["last_successful_update"] is None
+    assert meta["attempted_update"] is None
+    assert meta["checkpoint_source"] is None
+    assert meta["local_artifact_path"] == str(events)
+    assert meta["shared_mirror_root"] == str(root)
+    # F2: NO diagnostic replay/trace in the capsule metadata (offline only).
+    assert "diagnostic_replay_bf16" not in meta
+    assert "diagnostic_replay_fp32" not in meta
+    assert "forensic_trace_error" not in meta
+    # Best-effort shared mirror: an event of the same name landed under the
+    # shared root and mirror.json records the mirror as ok.
+    mirror_events = _event_for_fqn(root, "content_gate")
+    assert mirror_events is not None, f"no mirror event under {root}"
+    mirror_json = json.loads((events / "mirror.json").read_text())
+    assert mirror_json["status"] == "ok"
+    assert mirror_json["shared_path"] == str(mirror_events)
+    assert (mirror_events / "metadata.json").is_file()
     # Internal consistency of the recorded verdict constants (exact
     # production expressions against the recorded lr; HCU rounds lr to
     # bf16, so the literal request is only a bound).
@@ -431,16 +471,6 @@ def test_bcd_hard_fail_captures_fp32_reason(
             assert meta["fp32_delta_rms"] > meta["ceiling"]
         elif reason == "below_floor":
             assert meta["fp32_delta_rms"] < meta["rescue_floor"]
-    # Diagnostic replay present (CPU trace of both dtypes) and structurally
-    # valid. It runs the REAL production NS on the saved exact input, so it
-    # is NOT required to equal the (stubbed) recorded value here; the
-    # recorded-vs-replay equivalence is asserted in the real-NS HCU test and
-    # the replay CLI (spec §8 separates the two on purpose).
-    assert meta["diagnostic_replay_bf16"] is not None
-    assert meta["diagnostic_replay_fp32"] is not None
-    diag_fp32_rms = meta["diagnostic_replay_fp32"]["final"]["delta_rms"]
-    if meta["fp32_finite"]:
-        assert diag_fp32_rms is not None and math.isfinite(diag_fp32_rms)
     # The saved tensor is the EXACT FP32-stub input (bits preserved).
     from sakuramoon.optim.cmuon_hardfail import tensor_format_name
 
@@ -470,9 +500,12 @@ def test_e_writer_failure_still_raises_original_error(
     module = _make_module(device)
     blocker = tmp_path / "blocker"
     blocker.write_bytes(b"file, not a dir")
-    root = blocker / "sub" / "artifacts"  # mkdir must fail
+    # F2: the critical-path write goes to the LOCAL emergency root — make
+    # IT the unwritable one (mkdir must fail before any byte is written).
+    emergency = blocker / "sub" / "emergency"
     opt = _build_optimizer(module, tmp_path, rank=0, world_size=1, lr=lr,
-                           artifact_root=root)
+                           artifact_root=tmp_path / "artifacts",
+                           emergency_root=emergency)
     _install_ns_stubs(monkeypatch, lr, "below_floor")
     _set_gradients(module, seed=13)
 
@@ -481,27 +514,36 @@ def test_e_writer_failure_still_raises_original_error(
 
     assert "content_gate.weight#chunk0" in str(excinfo.value)
     assert opt.fp32_rescue_failures == 1
-    # No partial artifact directory was published.
-    assert not any(tmp_path.iterdir()) or not (tmp_path / "artifacts").exists()
+    # No partial capsule was published anywhere: no local capsule under the
+    # blocker and no shared mirror at all (the mirror never starts without
+    # a durable local capsule).
+    assert not blocker.is_dir() or not any(
+        p.is_dir() for p in blocker.iterdir() if not p.name.startswith(".")
+    )
+    assert not (tmp_path / "artifacts").exists() or not any(
+        (tmp_path / "artifacts").iterdir()
+    )
 
 
 @REQUIRES_CUDA
-def test_f_trace_failure_still_raises_and_records_error(
+def test_f_serialization_failure_still_raises_and_leaves_no_capsule(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """F2: tensor serialization is on the critical path; a failure there
+    must still raise the ORIGINAL CMuonSafetyError and publish nothing
+    (no partial local capsule, no mirror)."""
     import sakuramoon.optim.fp32_rescue as fr
     from sakuramoon.optim.cmuon_forensic import CMuonSafetyError
 
     def boom(*a, **k):
-        raise RuntimeError("trace boom")
+        raise RuntimeError("serialization boom")
 
-    monkeypatch.setattr(fr, "trace_ns_replay", boom)
+    monkeypatch.setattr(fr, "_write_tensor_bytes", boom)
     device = torch.device("cuda", 0)
     lr = 1.5625e-4
     module = _make_module(device)
-    root = tmp_path / "artifacts"
     opt = _build_optimizer(module, tmp_path, rank=0, world_size=1, lr=lr,
-                           artifact_root=root)
+                           artifact_root=tmp_path / "artifacts")
     _install_ns_stubs(monkeypatch, lr, "below_floor")
     _set_gradients(module, seed=17)
 
@@ -509,15 +551,15 @@ def test_f_trace_failure_still_raises_and_records_error(
         opt.step()
 
     assert "content_gate.weight#chunk0" in str(excinfo.value)
-    events = _event_for_fqn(root, "content_gate")
-    assert events is not None, "artifact must still publish despite trace failure"
-    meta = json.loads((events / "metadata.json").read_text())
-    assert meta["forensic_trace_error"] is not None
-    assert "trace boom" in meta["forensic_trace_error"]
-    assert meta["diagnostic_replay_bf16"] is None
-    assert meta["diagnostic_replay_fp32"] is None
-    # Original verdict values are independent of the trace.
-    assert meta["fp32_failure_reason"] == "below_floor"
+    assert opt.fp32_rescue_failures == 1
+    # Nothing published (serialization failed before any fsynced write).
+    emergency = tmp_path / "emergency"
+    assert not emergency.exists() or not any(
+        p.is_dir() and not p.name.startswith(".") for p in emergency.iterdir()
+    )
+    assert not (tmp_path / "artifacts").exists() or not any(
+        (tmp_path / "artifacts").iterdir()
+    )
 
 
 @REQUIRES_CUDA
@@ -658,7 +700,16 @@ def test_j_nonowner_writes_no_input_artifact(tmp_path: Path, monkeypatch) -> Non
     _set_gradients(module, seed=31)
     with pytest.raises(CMuonSafetyError):
         opt_owner.step()
-    assert _event_for_fqn(root_owner, "content_gate") is not None
+    # F2: the owner's MINIMAL capsule is in the shared local emergency
+    # root (both test instances use tmp_path/"emergency"; event names
+    # carry the rank, so owner/non-owner events never collide).
+    emergency = tmp_path / "emergency"
+    owner_events = [p for p in _event_dirs(emergency) if f"rank{owner}-" in p.name]
+    assert len(owner_events) == 1, (
+        f"owner must publish exactly one local capsule: {owner_events}"
+    )
+    assert any("content_gate" in p.name for p in owner_events)
+    assert _event_for_fqn(root_owner, "content_gate") is not None  # mirror
 
     # Non-owner instance (same hard fail seen through the persisted MAX
     # wire — the owner's contribution survives, exactly as in a real
@@ -672,6 +723,9 @@ def test_j_nonowner_writes_no_input_artifact(tmp_path: Path, monkeypatch) -> Non
     _set_gradients(module2, seed=31)  # identical stream -> identical verdict
     with pytest.raises(CMuonSafetyError):
         opt_nonowner.step()
+    assert not [
+        p for p in _event_dirs(emergency) if f"rank{nonowner}-" in p.name
+    ], "non-owner must not publish a local capsule (fabrication)"
     assert not root_nonowner.exists() or not any(root_nonowner.iterdir())
     # Its legacy JSON record exists but carries null FP32 fields (it never
     # ran the FP32 rescue for the owned-by-someone-else chunk).
@@ -701,8 +755,13 @@ def test_k_crash_loop_never_overwrites_older_event(
         _set_gradients(module, seed=37 + attempt)
         with pytest.raises(CMuonSafetyError):
             opt.step()
-    events = _event_dirs(root)
-    assert len(events) == 2, f"expected 2 distinct events, got {events}"
+    # F2: the crash-loop -rN suffix contract applies to the LOCAL capsule
+    # root (and independently to the shared mirror root).
+    emergency = tmp_path / "emergency"
+    events = _event_dirs(emergency)
+    assert len(events) == 2, f"expected 2 distinct local capsules, got {events}"
+    mirror_events = _event_dirs(root)
+    assert len(mirror_events) == 2, f"expected 2 mirrored events, got {mirror_events}"
     first_meta = json.loads((events[0] / "metadata.json").read_text())
     second_meta = json.loads((events[1] / "metadata.json").read_text())
     # Same observation (no commit happened) -> the second must carry the -r2
@@ -712,6 +771,48 @@ def test_k_crash_loop_never_overwrites_older_event(
     assert first_meta["wall_clock_unix_seconds"] < second_meta["wall_clock_unix_seconds"]
     assert first_meta["fp32_failure_reason"] == "above_ceiling"
     assert second_meta["fp32_failure_reason"] == "above_ceiling"
+
+
+@REQUIRES_CUDA
+def test_m2_mirror_failure_keeps_local_capsule_and_original_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """F2: a shared-mirror failure NEVER affects the outcome: the local
+    capsule stays durable (success evidence), mirror.json records the
+    failure, and the ORIGINAL CMuonSafetyError is raised."""
+    from sakuramoon.optim.cmuon_forensic import CMuonSafetyError
+
+    device = torch.device("cuda", 0)
+    lr = 1.5625e-4
+    module = _make_module(device)
+    blocker = tmp_path / "shared-blocker"
+    blocker.write_bytes(b"file, not a dir")
+    shared = blocker / "sub"  # mirror mkdir must fail
+    opt = _build_optimizer(module, tmp_path, rank=0, world_size=1, lr=lr,
+                           artifact_root=shared)
+    _install_ns_stubs(monkeypatch, lr, "below_floor")
+    _set_gradients(module, seed=43)
+
+    with pytest.raises(CMuonSafetyError) as excinfo:
+        opt.step()
+
+    assert "content_gate.weight#chunk0" in str(excinfo.value)
+    emergency = tmp_path / "emergency"
+    events = _event_dirs(emergency)
+    assert len(events) == 1, f"local capsule must survive the mirror failure: {events}"
+    event = events[0]
+    meta = json.loads((event / "metadata.json").read_text())
+    assert meta["fp32_failure_reason"] == "below_floor"
+    tensor_name = next(
+        n for n in ("input.safetensors", "input.pt") if (event / n).is_file()
+    )
+    assert (event / tensor_name).stat().st_size > 0
+    mirror = json.loads((event / "mirror.json").read_text())
+    assert mirror["status"] == "failed"
+    assert mirror["error"] is not None
+    assert mirror["shared_path"] is None
+    # Nothing leaked into the shared (blocked) root.
+    assert not shared.exists()
 
 
 @REQUIRES_CUDA
@@ -730,7 +831,9 @@ def test_i_replay_cli_recomputes_from_artifact(
     _set_gradients(module, seed=41)
     with pytest.raises(CMuonSafetyError):
         opt.step()
-    event = _event_for_fqn(root, "content_gate")
+    # F2: the capsule (and thus the replay input) lives in the LOCAL
+    # emergency root; the shared mirror root carries a byte-identical copy.
+    event = _event_for_fqn(tmp_path / "emergency", "content_gate")
     assert event is not None
 
     replay = _load_replay_cli()

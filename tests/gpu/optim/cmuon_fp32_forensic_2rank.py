@@ -1,17 +1,19 @@
-"""F1 2-rank HCU forensic test for the FP32-rescue hard-fail artifacts.
+"""F2 2-rank HCU forensic test for the FP32-rescue minimal hard-fail capsules.
 
 Companion to ``fp32_rescue_2rank.py`` (the frozen cleanup-regression
-scenario matrix). THIS script covers the F1 telemetry contract (spec §15):
+scenario matrix). THIS script covers the F2 telemetry contract (fast minimal local-first capsules):
 
   A. hard fail, owner rank0 (BF16 ceiling + FP32 ABOVE_CEILING):
        * both ranks get the SAME verdict: identical CMuonSafetyError
          message (all_gather comparison)
        * ZERO commit (parameter bytes + observations untouched, both ranks)
        * cross-rank delta fingerprint mechanism intact (spread == 0)
-       * OWNER (rank0) publishes exactly one event: input tensor +
-         metadata.json with the ORIGINAL fp32 verdict values and
-         fp32_failure_reason = "above_ceiling", diagnostic replay present
-       * NON-OWNER (rank1) publishes NOTHING (no fabricated input)
+       * OWNER (rank0) publishes exactly one MINIMAL local
+         capsule (emergency root): input tensor + minimal
+         metadata with the ORIGINAL fp32 verdict values and
+         fp32_failure_reason = "above_ceiling"; best-effort
+         shared mirror + mirror.json ok; NO diagnostic replay/trace
+       * NON-OWNER (rank1) publishes NOTHING (no fabricated capsule)
        * legacy forensic JSON redirected to the per-rank test dir, owner
          record carries the fp32 fields, non-owner record nulls them
   B. hard fail, NONFINITE category (BF16 NaN + FP32 NaN):
@@ -19,11 +21,14 @@ scenario matrix). THIS script covers the F1 telemetry contract (spec §15):
          (nonfinite is unrepresentable; the *_finite flags carry the state)
        * legacy JSON (allow_nan default) carries Infinity for the same
   C. crash loop: a second fresh-optimizer hard fail into the SAME root:
-       * older event NEVER overwritten (metadata sha256 unchanged)
-       * new event gets the -r2 suffix (unique per (obs, rank, fqn, chunk))
+       * older capsule NEVER overwritten (metadata sha256 unchanged)
+       * new capsule gets the -r2 suffix (unique per (obs, rank, fqn, chunk))
   D. successful rescue under instrumentation:
        * spread == 0, param diff == 0, fp32_rescues advanced (owner only)
-       * NO artifact, NO legacy FP32 failure fields (failure section absent)
+       * NO capsule (local or mirror), NO legacy FP32 failure fields
+         E. hard fail, BELOW_FLOOR (the 112105 production class):
+               * owner capsule reason=below_floor, fp32 finite,
+                 delta < floor, BF16 above ceiling; mirror ok
 
 Launched with torchrun (2 local ranks), NOT pytest:
 
@@ -46,6 +51,10 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
+
+# Self-contained: put THIS tree's src first so torchrun workers (any cwd,
+# any interpreter) import the tree under test, not a system install.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "src"))
 
 import sakuramoon.optim.fp32_rescue as fr
 from sakuramoon.optim.cmuon import (
@@ -227,6 +236,10 @@ class _ForcedNS:
             return torch.full_like(out, float("inf"))
         if kind == "huge":
             return out * 1e9
+        if kind == "tiny":
+            # FP32 delta ~1e-9 x a normal NS delta: far BELOW the rescue
+            # floor (finite) — the 112105 production failure class.
+            return out * 1e-9
         raise ValueError(kind)
 
     def bf16(self, grad, ns_steps, ns_coefficients, eps):
@@ -248,6 +261,7 @@ def _build(
     artifact_root: str,
     legacy_dir: str,
     forced: _ForcedNS,
+    emergency_root: str | None = None,
 ):
     fr.cmuon_zeroth_power_bf16 = forced.bf16
     fr.cmuon_zeroth_power_fp32 = forced.fp32
@@ -277,6 +291,7 @@ def _build(
         chunk_rescale_sqrt_n=False,
         hard_fail_artifact_root=artifact_root,
         legacy_forensic_dir=legacy_dir,
+        emergency_capsule_root=emergency_root,
     )
 
 
@@ -376,6 +391,7 @@ def main() -> None:
             str(out_dir / "hf-a"),
             str(out_dir / "legacy"),
             forced,
+            emergency_root=str(out_dir / "hf-a-emergency"),
         )
         _run_hard_fail(
             model,
@@ -387,16 +403,19 @@ def main() -> None:
             report=results,
             scenario="A_above_ceiling",
         )
-        # owner (rank0) artifact contract
+        # owner (rank0) F2 capsule contract: the MINIMAL capsule lands in
+        # the LOCAL emergency root; the shared root carries the best-effort
+        # mirror.
         if rank == 0:
-            events = list((out_dir / "hf-a").iterdir())
-            assert len(events) == 1 and events[0].is_dir(), (
-                f"rank0 must publish exactly one event, got {events}"
-            )
+            local = out_dir / "hf-a-emergency"
+            events = list(local.iterdir()) if local.exists() else []
+            events = [e for e in events if e.is_dir() and not e.name.startswith(".")]
+            assert len(events) == 1, f"rank0 must publish exactly one local capsule, got {events}"
             ev = events[0]
             meta_path = ev / "metadata.json"
             assert meta_path.is_file(), f"missing {meta_path}"
             meta = json.loads(meta_path.read_text())  # strict JSON (allow_nan=False)
+            assert meta["schema"] == "sakuramoon.cmuon_minimal_hardfail_capsule.v1"
             assert meta["fp32_failure_reason"] == "above_ceiling"
             assert meta["original_fp32_finite"] is True
             assert meta["original_fp32_delta_rms"] is not None
@@ -404,27 +423,40 @@ def main() -> None:
             assert meta["fp32_delta_rms"] > meta["ceiling"]
             assert meta["owner"] == 0 and meta["this_rank"] == 0
             assert meta["fqn"] == poison_fqn and meta["chunk"] == poison_chunk
-            assert meta["diagnostic_replay_bf16"] is not None
-            assert meta["diagnostic_replay_fp32"] is not None
-            assert meta["forensic_trace_error"] is None
+            # F2: NO diagnostic replay/trace in the critical-path capsule.
+            assert "diagnostic_replay_bf16" not in meta
+            assert "diagnostic_replay_fp32" not in meta
+            assert "forensic_trace_error" not in meta
             assert meta["bf16_delta_rms"] is not None
             assert meta["bf16_delta_rms"] > meta["ceiling"]
+            assert isinstance(meta["pid"], int) and meta["process_steps"] >= 1
             input_files = [
                 f for f in ("input.safetensors", "input.pt") if (ev / f).is_file()
             ]
             assert len(input_files) == 1, f"exactly one input tensor: {input_files}"
             input_sha_local = _sha_file(ev / input_files[0])
             assert meta["tensor_sha256"] == input_sha_local
+            # Best-effort shared mirror + mirror.json status.
+            mirror_json = json.loads((ev / "mirror.json").read_text())
+            assert mirror_json["status"] == "ok", mirror_json
+            mirror_ev = Path(mirror_json["shared_path"])
+            assert mirror_ev.is_dir() and (mirror_ev / "metadata.json").is_file()
+            assert _sha_file(mirror_ev / input_files[0]) == input_sha_local
             results["A_rank0_artifact"] = {
                 "event": ev.name,
                 "input_file": input_files[0],
                 "input_sha256": input_sha_local,
                 "reason": meta["fp32_failure_reason"],
+                "mirror_status": mirror_json["status"],
             }
         else:
+            local1 = out_dir / "hf-a-emergency"
+            assert not local1.exists() or not any(
+                e.is_dir() and not e.name.startswith(".") for e in local1.iterdir()
+            ), "non-owner must not publish a local capsule (fabrication)"
             assert not (out_dir / "hf-a").exists() or not any(
-                (out_dir / "hf-a").iterdir()
-            ), "non-owner must not publish an input artifact (fabrication)"
+                e.is_dir() and not e.name.startswith(".") for e in (out_dir / "hf-a").iterdir()
+            ), "non-owner must not publish a mirror (fabrication)"
             results["A_rank1_artifact"] = {"published": False}
         # legacy JSON (redirected per rank): owner has fp32 fields,
         # non-owner nulls them.
@@ -455,6 +487,7 @@ def main() -> None:
             str(out_dir / "hf-b"),
             str(out_dir / "legacy"),
             forced_b,
+            emergency_root=str(out_dir / "hf-b-emergency"),
         )
         _run_hard_fail(
             model,
@@ -467,7 +500,7 @@ def main() -> None:
             scenario="B_nonfinite",
         )
         if rank == 0:
-            evb = next(iter((out_dir / "hf-b").iterdir()))
+            evb = next(iter((out_dir / "hf-b-emergency").iterdir()))
             metab = json.loads((evb / "metadata.json").read_text())
             assert metab["fp32_failure_reason"] == "nonfinite"
             assert metab["original_fp32_finite"] is False
@@ -491,7 +524,7 @@ def main() -> None:
         meta_a_path = None
         sha_before = None
         if rank == 0:
-            meta_a_path = next((out_dir / "hf-a").glob("*/metadata.json"))
+            meta_a_path = next((out_dir / "hf-a-emergency").glob("*/metadata.json"))
             sha_before = _sha_file(meta_a_path)
         forced_c = _ForcedNS(owned0 if rank == 0 else owned1)
         opt_c = _build(
@@ -501,6 +534,7 @@ def main() -> None:
             str(out_dir / "hf-a"),
             str(out_dir / "legacy"),
             forced_c,
+            emergency_root=str(out_dir / "hf-a-emergency"),
         )
         _run_hard_fail(
             model,
@@ -514,8 +548,12 @@ def main() -> None:
         )
         if rank == 0:
             assert meta_a_path is not None and sha_before is not None
-            events_c = sorted(p.name for p in (out_dir / "hf-a").iterdir())
-            assert len(events_c) == 2, f"crash loop must add a 2nd event: {events_c}"
+            events_c = sorted(
+                p.name
+                for p in (out_dir / "hf-a-emergency").iterdir()
+                if p.is_dir() and not p.name.startswith(".")
+            )
+            assert len(events_c) == 2, f"crash loop must add a 2nd local capsule: {events_c}"
             assert any(name.endswith("-r2") for name in events_c), (
                 f"second event must carry the -r2 suffix: {events_c}"
             )
@@ -533,6 +571,7 @@ def main() -> None:
             str(out_dir / "hf-d"),
             str(out_dir / "legacy"),
             forced_d,
+            emergency_root=str(out_dir / "hf-d-emergency"),
         )
         forced_d.pattern = {poison_pos: "huge"}  # BF16 trips; FP32 runs REAL
         forced_d.call = 0
@@ -551,17 +590,61 @@ def main() -> None:
             assert opt_d.fp32_rescues == rescues_before, (
                 "non-owner must not record a rescue for the owner's chunk"
             )
-        assert not (out_dir / "hf-d").exists() or not any(
-            (out_dir / "hf-d").iterdir()
-        ), "successful rescue must not publish a hard-fail artifact"
+        for d_root in ("hf-d-emergency", "hf-d"):
+            ddir = out_dir / d_root
+            assert not ddir.exists() or not any(
+                e.is_dir() and not e.name.startswith(".") for e in ddir.iterdir()
+            ), f"successful rescue must not publish a capsule under {d_root}"
         results["D_rescue"] = {
             "rank": rank,
             "fp32_rescues": opt_d.fp32_rescues,
             "param_fingerprint_spread": fp_spread,
-            "artifact_published": bool(
-                (out_dir / "hf-d").exists() and any((out_dir / "hf-d").iterdir())
-            ),
+            "artifact_published": False,
         }
+
+        # ---- E. hard fail, BELOW_FLOOR (the 112105 production class) ------
+        # BF16 trips (huge); the REAL FP32 NS is scaled to 1e-9x so the
+        # FP32 delta is finite but far below the rescue floor — exactly the
+        # 112105 production failure (below_floor, finite, ~floor-graze class).
+        forced_e = _ForcedNS(owned0 if rank == 0 else owned1)
+        opt_e = _build(
+            model,
+            rank,
+            world_size,
+            str(out_dir / "hf-e"),
+            str(out_dir / "legacy"),
+            forced_e,
+            emergency_root=str(out_dir / "hf-e-emergency"),
+        )
+        _run_hard_fail(
+            model,
+            opt_e,
+            forced_e,
+            {poison_pos: "huge"},
+            "tiny",
+            seed=77,
+            report=results,
+            scenario="E_below_floor",
+        )
+        if rank == 0:
+            eve = next(iter((out_dir / "hf-e-emergency").iterdir()))
+            metae = json.loads((eve / "metadata.json").read_text())
+            assert metae["fp32_failure_reason"] == "below_floor"
+            assert metae["original_fp32_finite"] is True
+            assert metae["fp32_delta_rms"] is not None
+            assert metae["fp32_delta_rms"] < metae["rescue_floor"]
+            assert metae["bf16_delta_rms"] > metae["ceiling"]
+            mirror_e = json.loads((eve / "mirror.json").read_text())
+            assert mirror_e["status"] == "ok"
+            results["E_rank0_capsule"] = {
+                "event": eve.name,
+                "reason": metae["fp32_failure_reason"],
+                "fp32_delta_rms": metae["fp32_delta_rms"],
+                "rescue_floor": metae["rescue_floor"],
+                "mirror_status": mirror_e["status"],
+            }
+        else:
+            results["E_rank1_capsule"] = {"published": False}
 
         report["poison"] = f"{poison_fqn}#chunk{poison_chunk}"
         report["results"] = results
@@ -574,10 +657,10 @@ def main() -> None:
         dist.destroy_process_group()
 
     if report.get("verdict") != "PASS":
-        print(f"[F1-2rank] rank{rank} FAIL", file=sys.stderr)
+        print(f"[F2-2rank] rank{rank} FAIL", file=sys.stderr)
         sys.exit(1)
     if rank == 0:
-        print(f"[F1-2rank] PASS: {json.dumps(report['results'], indent=1)[:400]}")
+        print(f"[F2-2rank] PASS: {json.dumps(report['results'], indent=1)[:400]}")
 
 
 if __name__ == "__main__":

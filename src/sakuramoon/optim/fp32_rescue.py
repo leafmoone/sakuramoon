@@ -40,8 +40,11 @@ schema contract inherited from the guarded canonical base class).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
+import socket
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,15 +64,15 @@ from sakuramoon.optim.cmuon import (
 )
 from sakuramoon.optim.cmuon_forensic import CMuonSafetyError
 from sakuramoon.optim.cmuon_hardfail import (
+    DEFAULT_EMERGENCY_CAPSULE_ROOT,
     DEFAULT_HARD_FAIL_ROOT,
     HardFailArtifactError,
-    build_hard_fail_metadata,
+    _write_tensor_bytes,  # pyright: ignore[reportPrivateUsage]
+    build_minimal_capsule_metadata,
     classify_fp32_verdict,
-    publish_hard_fail_artifact,
-    tensor_format_name,
-    tensor_sha256,
+    mirror_capsule,
+    publish_minimal_capsule,
 )
-from sakuramoon.optim.cmuon_ns_trace import replay_result_to_json, trace_ns_replay
 from sakuramoon.optim.guarded_canonical import (
     _CEILING,
     _FAILURE_NAMES,
@@ -137,10 +140,14 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
     """
 
     def __init__(self, **kwargs: object) -> None:
-        # F1 telemetry parameter (telemetry-only: never feeds the verdict).
-        # Popped BEFORE super() because the base __init__ is explicit.
+        # F1/F2 telemetry parameters (telemetry-only: never feed the
+        # verdict). Popped BEFORE super() because the base __init__ is
+        # explicit.
         hard_fail_root = kwargs.pop("hard_fail_artifact_root", None)
         legacy_forensic_dir = kwargs.pop("legacy_forensic_dir", None)
+        emergency_capsule_root = kwargs.pop("emergency_capsule_root", None)
+        checkpoint_source = kwargs.pop("checkpoint_source", None)
+        run_id = kwargs.pop("run_id", None)
         super().__init__(**kwargs)  # pyright: ignore[reportArgumentType]
         self.bf16_attempts = 0
         self.bf16_safety_failures = 0
@@ -161,10 +168,38 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
             if legacy_forensic_dir is not None and str(legacy_forensic_dir)
             else Path(LEGACY_FORENSIC_DIR_DEFAULT)
         )
+        # F2: LOCAL-first durable emergency root for the minimal hard-fail
+        # capsule (the ONLY write in the failure critical path). Production
+        # default is a verified local filesystem on the production host;
+        # isolated tests MUST redirect it. F2: the shared forensic root
+        # (``hard_fail_artifact_root``) is now the BEST-EFFORT mirror
+        # target only — it is never on the critical path.
+        self.emergency_capsule_root = (
+            Path(str(emergency_capsule_root))
+            if emergency_capsule_root is not None and str(emergency_capsule_root)
+            else Path(DEFAULT_EMERGENCY_CAPSULE_ROOT)
+        )
+        # F2 telemetry-only identity (never feeds the verdict): the resume
+        # checkpoint path and the run id, recorded in the capsule so a
+        # capsule found after a crash is self-identifying.
+        self.checkpoint_source = (
+            None if checkpoint_source is None else str(checkpoint_source)
+        )
+        self.run_id = None if run_id is None else str(run_id)
+        # F2 process-local step counter (1-based at the failing step;
+        # NOT persisted — the persisted identity is ``observations``).
+        self._steps_this_process = 0
+        # F2 trainer-noted global update identity, refreshed by
+        # ``note_forensic_update`` before each ``step()`` (None when the
+        # trainer does not call the hook, e.g. isolated harnesses).
+        self._forensic_update: tuple[int, int] | None = None
 
     # -- step: BF16 first, FP32 rescue, two-phase atomic ---------------------
 
     def step(self) -> None:
+        # F2 process-local counter (telemetry only; not persisted — the
+        # persisted event identity is ``observations``).
+        self._steps_this_process += 1
         self._sync_learning_rate()  # pyright: ignore[reportPrivateUsage]
         self._validate_finite_gradients()  # pyright: ignore[reportPrivateUsage]
         mu = self.cfg.momentum
@@ -509,12 +544,18 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                     import sys as _sys
 
                     print(f"[guard-forensic] log failed: {exc!r}", file=_sys.stderr)
-            # ---- F1: exact-input hard-fail artifacts (owner rank only) ----
+            # ---- F2: minimal exact-input capsule (owner rank only) -------
             # Published strictly after the rank-consistent failure verdict.
             # Telemetry-only: nothing here feeds the flag, staged delta,
-            # momentum, parameters, owner broadcast, or commit. A publish
-            # failure is logged; the original CMuonSafetyError below still
-            # raises (telemetry I/O can never replace the root cause).
+            # momentum, parameters, owner broadcast, or commit. The
+            # critical path is now: freeze exact input -> ONE device->CPU
+            # transfer -> serialize+sha -> minimal metadata -> LOCAL atomic
+            # publish (durable) -> best-effort shared mirror. NO CPU NS
+            # replay / trace / SVD (F1's pre-write replays were what let
+            # the 2-rank elastic teardown kill the owner before any byte
+            # landed). A publish failure is logged; the original
+            # CMuonSafetyError below still raises (telemetry I/O can never
+            # replace the root cause).
             for idx, flag in enumerate(fail_flags.tolist()):
                 if flag <= 0 or owners[idx] != self.rank:
                     continue
@@ -522,7 +563,7 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                 if meta is None:
                     continue
                 try:
-                    self._publish_hard_fail_artifact(
+                    self._publish_minimal_hardfail_capsule(
                         idx=idx,
                         meta=meta,
                         flag=int(flag),
@@ -640,9 +681,19 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                 )
             )
 
-    # -- F1: exact-input hard-fail artifact (owner rank, post-verdict) ------
+    # -- F2: fast minimal hard-fail capsule (owner rank, post-verdict) ------
 
-    def _publish_hard_fail_artifact(
+    def note_forensic_update(
+        self, *, last_successful_update: int, attempted_update: int
+    ) -> None:
+        """Trainer hook (F2 telemetry): record the global update identity
+        immediately before ``step()`` so the minimal hard-fail capsule can
+        carry it. Consumed ONLY by the capsule; never feeds the verdict.
+        Duck-typed by the trainer (``getattr`` no-op for optimizers that
+        do not implement it)."""
+        self._forensic_update = (int(last_successful_update), int(attempted_update))
+
+    def _publish_minimal_hardfail_capsule(
         self,
         *,
         idx: int,
@@ -656,23 +707,33 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
         lr: float,
         target_delta_rms: float,
     ) -> None:
-        """Owner-only exact-input hard-fail artifact (F1 telemetry).
+        """Owner-only MINIMAL exact-input capsule (F2 telemetry).
 
         Runs strictly AFTER the rank-consistent failure verdict is settled:
         it cannot change the fail flag, staged delta, momentum, parameters,
-        owner broadcast, or commit. The CPU copy of the NS input happens
-        only here, after the hard-fail decision; the hot path is untouched.
-        A diagnostic NS replay (second pass over the clone, via
-        ``cmuon_ns_trace``) is stored alongside the ORIGINAL production
-        verdict values so a nondeterministic HCU GEMM can never be
-        confused with the value the verdict compared. ANY failure in this
-        method (tensor clone, statistics, serialization, I/O) is converted
-        to ``HardFailArtifactError``; the caller logs it and the original
-        ``CMuonSafetyError`` is still raised (spec §9: telemetry can never
-        replace the root cause).
+        owner broadcast, or commit. The critical path is exactly:
+
+          1. freeze the exact NS input (``detach().contiguous().clone()``
+             on the original device/dtype — a fresh storage that live
+             momentum/grad mutations can never touch),
+          2. ONE device->CPU transfer,
+          3. serialize + sha256 over the exact file bytes,
+          4. minimal metadata (the four existing O(n) scalar reductions
+             plus the recorded original verdict values),
+          5. LOCAL atomic capsule publish (durable, emergency root),
+          6. best-effort shared mirror (never raises, never on the
+             critical path's durability guarantee).
+
+        There is NO CPU NS replay, trace, SVD, or other expensive scan
+        before the local capsule is durable — that is what made F1 lose
+        the 2-rank elastic-teardown race (112105). All diagnostics are
+        OFFLINE via ``dev-tools/cmuon_hardfail_enrich.py``. ANY failure in
+        this method is converted to ``HardFailArtifactError``; the caller
+        logs it and the original ``CMuonSafetyError`` is still raised
+        (telemetry can never replace the root cause).
         """
         try:
-            return self._publish_hard_fail_artifact_inner(
+            self._publish_minimal_hardfail_capsule_inner(
                 idx=idx,
                 meta=meta,
                 flag=flag,
@@ -688,11 +749,11 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
             raise
         except Exception as exc:
             raise HardFailArtifactError(
-                f"hard-fail artifact preparation failed for "
+                f"minimal hard-fail capsule preparation failed for "
                 f"{meta.spec_name}#chunk{meta.chunk_idx}: {exc!r}"
             ) from exc
 
-    def _publish_hard_fail_artifact_inner(
+    def _publish_minimal_hardfail_capsule_inner(
         self,
         *,
         idx: int,
@@ -706,34 +767,22 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
         lr: float,
         target_delta_rms: float,
     ) -> None:
-        input_tensor = meta.chunk.contiguous().clone().cpu()
-        trace_error: str | None = None
-        diag_bf16: dict[str, object] | None = None
-        diag_fp32: dict[str, object] | None = None
-        try:
-            diag_bf16 = replay_result_to_json(
-                trace_ns_replay(
-                    input_tensor,
-                    ns_steps=meta.ns_steps,
-                    coefficients=self.cfg.ns_coefficients,
-                    eps=self.cfg.eps,
-                    alpha=meta.alpha,
-                    working_dtype="bfloat16",
-                )
-            )
-            diag_fp32 = replay_result_to_json(
-                trace_ns_replay(
-                    input_tensor,
-                    ns_steps=meta.ns_steps,
-                    coefficients=self.cfg.ns_coefficients,
-                    eps=self.cfg.eps,
-                    alpha=meta.alpha,
-                    working_dtype="float32",
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 - analysis failure never masks the safety failure
-            trace_error = repr(exc)
-        metadata = build_hard_fail_metadata(
+        # 1. Freeze the EXACT NS input IMMEDIATELY: a fresh contiguous
+        #    storage on the original device/dtype. It is the BF16 nesterov
+        #    chunk the production BF16 NS consumed (and, via the exact
+        #    BF16->FP32 cast, the input the FP32 rescue recomputed from);
+        #    the clone cannot be altered by any later live mutation.
+        frozen_input = meta.chunk.detach().contiguous().clone()
+        # 2. The ONE device->CPU transfer (the only synchronizing op here).
+        input_tensor = frozen_input.cpu()
+        del frozen_input
+        # 3. Serialize + sha256 over the exact file bytes (so the capsule
+        #    is self-verifying end to end).
+        tensor_bytes, tensor_format, _tensor_name = _write_tensor_bytes(input_tensor)
+        tensor_sha = hashlib.sha256(tensor_bytes).hexdigest()
+        # 4. Minimal metadata (existing scalars only — no replay/trace/SVD).
+        forensic_update = self._forensic_update
+        metadata = build_minimal_capsule_metadata(
             observations=self.observations,
             this_rank=self.rank,
             world_size=self.world_size,
@@ -741,10 +790,19 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
             chunk_idx=meta.chunk_idx,
             role=meta.role,
             owner=self.rank,
+            run_id=self.run_id,
+            hostname=socket.gethostname(),
+            pid=os.getpid(),
+            process_steps=self._steps_this_process,
+            last_successful_update=(
+                None if forensic_update is None else forensic_update[0]
+            ),
+            attempted_update=None if forensic_update is None else forensic_update[1],
+            checkpoint_source=self.checkpoint_source,
             input_tensor=input_tensor,
             alpha=meta.alpha,
             ns_steps=meta.ns_steps,
-            ns_coefficients=self.cfg.ns_coefficients,
+            ns_coefficients=tuple(self.cfg.ns_coefficients),
             eps=self.cfg.eps,
             lr=lr,
             target_delta_rms=target_delta_rms,
@@ -762,14 +820,13 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
             ),
             bf16_failure_name=_FAILURE_NAMES.get(flag, str(flag)),
             failure_message=failure_message,
-            tensor_sha256=tensor_sha256(input_tensor),
-            tensor_format=tensor_format_name(),
-            diagnostic_bf16=diag_bf16,
-            diagnostic_fp32=diag_fp32,
-            forensic_trace_error=trace_error,
+            tensor_sha256=tensor_sha,
+            tensor_format=tensor_format,
+            shared_mirror_root=str(self.hard_fail_artifact_root),
         )
-        publish_hard_fail_artifact(
-            root=self.hard_fail_artifact_root,
+        # 5. LOCAL-first durable capsule (the only critical-path write).
+        event_dir = publish_minimal_capsule(
+            root=self.emergency_capsule_root,
             observations=self.observations,
             rank=self.rank,
             world_size=self.world_size,
@@ -780,6 +837,18 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
             input_tensor=input_tensor,
             metadata=metadata,
         )
+        # 6. Best-effort shared mirror (never raises; the local capsule is
+        #    already durable and remains the success evidence either way).
+        mirror_result = mirror_capsule(event_dir, self.hard_fail_artifact_root)
+        try:
+            if self.stats_logger is not None:
+                self.stats_logger(
+                    f"[hard-fail-capsule] {event_dir.name} "
+                    f"local=durable mirror={mirror_result.get('status')}"
+                )
+        except Exception:  # noqa: BLE001, S110 - a logger failure can never
+            # mask the safety failure; the capsule is already durable.
+            pass
 
     # -- state (rescue counters ride inside the inherited guard block) -------
 
@@ -838,19 +907,34 @@ def build_fp32_rescue(
     stats_log_every_n: int = 10,
     hard_fail_artifact_root: str | None = None,
     legacy_forensic_dir: str | None = None,
+    emergency_capsule_root: str | None = None,
+    checkpoint_source: str | None = None,
+    run_id: str | None = None,
 ) -> HybridCMuonCanonicalNS4FP32Rescue:
     """Build the FP32-rescue candidate (same routing/AdamW policy as the
     guarded canonical base; BF16-first NS + owner-rank FP32 rescue).
 
-    ``hard_fail_artifact_root`` (F1 telemetry only): where the exact-input
-    hard-fail artifacts are published; None keeps the production default
-    (``/sakuramoon-runtime/artifacts/g1/cmuon-hard-fail``). It never feeds
-    the safety verdict.
+    ``hard_fail_artifact_root`` (F1/F2 telemetry only): the BEST-EFFORT
+    shared mirror target for hard-fail capsules; None keeps the production
+    default (``/sakuramoon-runtime/artifacts/g1/cmuon-hard-fail``). Since
+    F2 it is never on the failure critical path (the local capsule lands
+    first). It never feeds the safety verdict.
 
     ``legacy_forensic_dir`` (F1 telemetry only): redirect the legacy
     per-rank forensic JSON (the analysis-only failure dump) for isolated
     test environments; None keeps the production default (``/sakuramoon-
     runtime/artifacts/g1``). It never feeds the safety verdict.
+
+    ``emergency_capsule_root`` (F2 telemetry only): the LOCAL-first
+    durable emergency root where the minimal hard-fail capsule is
+    published BEFORE any shared mirror; None keeps the production default
+    (``/sakuramoon-runtime/cmuon-f1-emergency``, a verified local
+    filesystem on the production host). Isolated tests MUST redirect it.
+    It never feeds the safety verdict.
+
+    ``checkpoint_source`` / ``run_id`` (F2 telemetry only): identity
+    strings recorded in the capsule (the resume checkpoint path and the
+    run id); None keeps null fields. They never feed the safety verdict.
     """
     routing = route_cmuon_parameters(
         module,
@@ -888,6 +972,9 @@ def build_fp32_rescue(
         stats_log_every_n=stats_log_every_n,
         hard_fail_artifact_root=hard_fail_artifact_root,
         legacy_forensic_dir=legacy_forensic_dir,
+        emergency_capsule_root=emergency_capsule_root,
+        checkpoint_source=checkpoint_source,
+        run_id=run_id,
     )
 
 
