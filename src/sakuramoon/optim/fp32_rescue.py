@@ -10,13 +10,23 @@ reports/cmuon-fp32-rescue-audit.md):
   2. A chunk whose BF16 result trips the safety ceiling or goes nonfinite
      is recomputed by the OWNER rank only, in pure FP32
      (``cmuon_zeroth_power_fp32``, same coefficients/steps/normalization).
-  3. The FP32 result is re-checked (finite + Moonlight-sane lower band +
-     ceiling) and, when safe, staged as BF16 (a single rounding at the
-     update boundary) and flows through the unchanged canonical
-     broadcast / cross-rank fingerprint / two-phase atomic commit.
-  4. Only an FP32-also-failed chunk fails the step: ``CMuonSafetyError``
-     with zero commits. A bad BF16 result alone is NEVER an optimizer
-     failure (no clamp-and-continue, no skip-on-bad, no AdamW fallback).
+  3. The FP32 result is re-checked (finite + ceiling) and, when safe,
+     staged as BF16 (a single rounding at the update boundary) and flows
+     through the unchanged canonical broadcast / cross-rank fingerprint /
+     two-phase atomic commit. F3: the Moonlight-sane lower band
+     (``_RESCUE_SANITY_LOW`` x target, numerically unchanged) is a
+     DIAGNOSTIC boundary, not a safety boundary: a finite FP32 delta below
+     it (including exactly zero) is accepted UNCHANGED (no clamp, rescale,
+     normalization, or fallback) and emits scalar soft-rescue telemetry.
+     Rationale (R2 evidence, reports/cmuon-f2-real-capture-r2.md): the
+     production below-floor case was a finite structurally-small update on
+     a near-rank-1 input (stable rank 1.001, top32 energy 0.99999,
+     LOW_RANK_CONFIRMED) — a zero/small finite parameter update is not a
+     parameter-safety violation.
+  4. Only an FP32-also-failed chunk (nonfinite or above ceiling) fails the
+     step: ``CMuonSafetyError`` with zero commits. A bad BF16 result alone
+     is NEVER an optimizer failure (no clamp-and-continue, no skip-on-bad,
+     no AdamW fallback).
 
 Offline evidence (16-obs shadow at ckpt_97100 + repeats + align + bench):
   - BF16 chaos on the D1 danger class: 15-51% catastrophic per input over
@@ -89,11 +99,14 @@ from sakuramoon.optim.guarded_canonical import (
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sakuramoon.train.step import TrainableComposite
 
-# Rescue safety band (validated offline, D2): the FP32 delta must be finite
-# and sit inside [0.05, 10.0] x (0.2*lr) — the ceiling (10x, identical to
-# the BF16 path) on top, a Moonlight-sane floor (0.05x) that rejects
-# degenerate zero-energy NS outputs. These are fixed constants of the
-# validated criterion, NOT tunable parameters.
+# Rescue band constants (validated offline, D2): the ceiling (10x target,
+# identical to the BF16 path) is the SAFETY boundary on top. The
+# Moonlight-sane floor (0.05x target) — F3: a DIAGNOSTIC boundary, not a
+# safety boundary. A finite FP32 delta below it (including exactly zero)
+# is accepted unchanged (the R2 evidence: below-floor production events
+# were finite, bit-deterministic, structurally-small updates on
+# near-rank-1 inputs); the floor value itself is unchanged. Both are
+# fixed constants of the validated criterion, NOT tunable parameters.
 _RESCUE_SANITY_LOW = 0.05
 
 # Production location of the LEGACY per-rank forensic JSON (the analysis-only
@@ -155,6 +168,13 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
         self.fp32_rescues = 0
         self.fp32_rescue_failures = 0
         self.rescue_by_role: dict[str, int] = {}
+        # F3 process-local telemetry (NOT persisted — deliberately absent
+        # from _guard_state/_guard load_state_dict to keep the checkpoint
+        # schema byte-identical to bb41292). Counts finite FP32 rescues
+        # whose delta sat below the diagnostic floor (including exactly
+        # zero) and were therefore accepted unchanged.
+        self.fp32_low_delta_rescues = 0
+        self.fp32_low_delta_by_role: dict[str, int] = {}
         self.hard_fail_artifact_root = (
             Path(str(hard_fail_root))
             if hard_fail_root is not None and str(hard_fail_root)
@@ -360,19 +380,19 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                         torch.isfinite(delta32).all().to(torch.float32),
                     )
                 ).tolist()
-                if (
-                    not bool(finite32)
-                    or rms32 < rescue_floor
-                    or rms32 > ceiling
-                ):
-                    # FP32 also failed: keep the flag -> hard fail-closed below.
+                if not bool(finite32) or rms32 > ceiling:
+                    # FP32 also failed: keep the flag -> hard fail-closed
+                    # below. F3: ONLY nonfinite and above_ceiling are safety
+                    # failures; a finite below-floor delta is NOT a failure
+                    # (accept unchanged, below).
                     self.fp32_rescue_failures += 1
                     # F1 telemetry: persist the ORIGINAL FP32 verdict values
                     # (rms32/finite32 are locals of this loop and would
                     # otherwise be lost). The failure reason follows the
                     # verdict's condition order exactly (nonfinite ->
                     # below_floor -> above_ceiling); it only ever appears in
-                    # report fields and never feeds the verdict.
+                    # report fields and never feeds the verdict. After F3 the
+                    # branch is only reachable for nonfinite / above_ceiling.
                     fp32_verdicts[idx] = _FP32Verdict(
                         original_fp32_delta_rms=float(rms32),
                         original_fp32_finite=bool(finite32),
@@ -381,6 +401,10 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                         ),
                     )
                     continue
+                # Accept the ORIGINAL FP32 delta: single BF16 rounding at the
+                # update boundary, then the unchanged owner broadcast /
+                # fingerprint / two-phase commit. No amplitude correction of
+                # any kind (F3: finite below-floor is accepted unchanged).
                 staged[idx] = delta32.bfloat16().contiguous()
                 fail_flags[idx] = 0
                 self.fp32_rescues += 1
@@ -388,6 +412,33 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                 self.rescue_by_role[meta.role] = (
                     self.rescue_by_role.get(meta.role, 0) + 1
                 )
+                if rms32 < rescue_floor:
+                    # F3 diagnostic telemetry for the soft below-floor band
+                    # (scalar only: no replay, SVD, or tensor dump; never
+                    # feeds the verdict; process-local, not persisted).
+                    # A finite zero delta is a degenerate-but-safe update,
+                    # not a parameter-safety violation.
+                    reason = (
+                        "zero_delta_soft_rescue"
+                        if rms32 == 0.0
+                        else "below_floor_soft_rescue"
+                    )
+                    self.fp32_low_delta_rescues += 1
+                    self.fp32_low_delta_by_role[meta.role] = (
+                        self.fp32_low_delta_by_role.get(meta.role, 0) + 1
+                    )
+                    if self.stats_logger is not None:
+                        fqn, cix = self._input_key(idx)
+                        self.stats_logger(
+                            f"[fp32-soft-rescue] reason={reason} "
+                            f"fqn={fqn}#chunk{cix} role={meta.role} "
+                            f"fp32_delta_rms={rms32:.6e} "
+                            f"target_delta_rms={target_delta_rms:.6e} "
+                            f"rescue_floor={rescue_floor:.6e} "
+                            f"delta/target={rms32 / target_delta_rms:.6g} "
+                            f"delta/floor={rms32 / rescue_floor:.6g} "
+                            f"u_t_rms={sig_by_input[idx]}"
+                        )
         if rescued_this_step and self.stats_logger is not None:
             self.stats_logger(
                 json.dumps(
@@ -400,6 +451,13 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                         "fp32_rescues": self.fp32_rescues,
                         "fp32_rescue_failures": self.fp32_rescue_failures,
                         "rescue_by_role": dict(sorted(self.rescue_by_role.items())),
+                        # F3: process-local (not persisted) soft below-floor
+                        # counts, so production logs can separate normal
+                        # rescues from accepted small-delta rescues.
+                        "fp32_low_delta_rescues": self.fp32_low_delta_rescues,
+                        "fp32_low_delta_by_role": dict(
+                            sorted(self.fp32_low_delta_by_role.items())
+                        ),
                     }
                 )
             )
@@ -673,6 +731,12 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                         "fp32_rescues": self.fp32_rescues,
                         "fp32_rescue_failures": self.fp32_rescue_failures,
                         "rescue_by_role": dict(sorted(self.rescue_by_role.items())),
+                        # F3: process-local (not persisted) soft below-floor
+                        # counts (see the per-rescue block above).
+                        "fp32_low_delta_rescues": self.fp32_low_delta_rescues,
+                        "fp32_low_delta_by_role": dict(
+                            sorted(self.fp32_low_delta_by_role.items())
+                        ),
                         "ref_min": min(self._refs.values()),
                         "ref_max": max(self._refs.values()),
                         "max_delta_rank_spread": self.max_delta_rank_spread,
