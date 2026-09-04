@@ -1,0 +1,104 @@
+{
+  "phase": 5,
+  "title": "iREPA explicit checkpoint migration (v3 -> v4)",
+  "branch": "iprea",
+  "parent_commit": "00bd795",
+  "p4_functional_commit": "c56c7c1",
+  "generated": "2026-09-04",
+  "host": "salt13 (2x BW DCU, DTK 2.9.0+das, Python 3.11.9)",
+  "verdict": {
+    "phase5_checkpoint_migration": "PASS",
+    "zero_lambda_one_step_parity": "PASS (primary gate bit-exact; spec-17 HCU leg within tolerance, no safety failure)",
+    "resume_parity": "PASS (all pre-existing params + SR RNG bit-exact at resume)",
+    "ddp_2rank_smoke": "PASS (world_size=2, per-rank lambda=0 parity bit-exact; 0 cross-rank mismatches of 864 fingerprints; 221s)",
+    "production_checkpoint_tests": "PASS",
+    "cmuon_forensic_isolation": "CLEAN (allowlist 141->141 identical FQN set; no NS/guard/rescue numeric change; deterministic NS stand-in is test-only)",
+    "iprea_phase5_only_failures": 0,
+    "pyright_new_in_src": 0,
+    "ruff": "All checks passed"
+  },
+  "gate_results": {
+    "ruff_src_tests": "All checks passed",
+    "pyright_new_in_src": 0,
+    "unit_migration_tests": "PASS (tests/unit/checkpoint/test_irepa_checkpoint_migration.py)",
+    "gpu_checkpoint_save_tests": "PASS (tests/gpu/checkpoint/test_irepa_checkpoint_save.py)",
+    "irepa_production_gate_tests": "PASS (tests/unit/train/test_irepa_production_gate.py extended)",
+    "s18_primary_gate_deterministic_ns": "PASS (tests/gpu/irepa/test_irepa_zero_lambda_optimizer_parity.py::test_lambda_zero_one_update_parity)",
+    "s18_hcu_leg_production_ns": "PASS (tests/gpu/irepa/test_irepa_zero_lambda_optimizer_parity.py::test_lambda_zero_production_ns_behavior)",
+    "ddp_2rank_smoke": "PASS (tests/gpu/irepa/irepa_ddp_lambda_zero_smoke.py via torchrun, world_size=2, 221s)",
+    "full_pytest_vs_p4_baseline": "2 failed / 1016 passed / 2 skipped (1306s, final tree) vs P4 baseline 2 failed / 992 passed / 2 skipped; identical failure set = BASELINE_SHARED (Qwen asset + host_metadata); Phase5-only failures = 0"
+  },
+  "answers": {
+    "A_checkpoint_schema_before_after": {
+      "raw_manifest": "RAW_SCHEMA_VERSION=4 unchanged; file list gains model/model-irepa-projector.safetensors + train_state/irepa_state.json under the same kind/identity",
+      "architecture_document": "v3 {schema_version:3, class:TrainableComposite, dit, text, condition_tokens} -> v4 adding training_auxiliaries.irepa (in_channels 2560 -> 768, k=3 s=1 p=1 d=1 g=1 bias, bf16 w / fp32 b)",
+      "optimizer_state": "hybrid schema v1: CMuon block + sr_rng preserved; AdamW block re-IDed by canonical FQN order with the 2 projector FQNs appended LAST per group (state matched 1:1 by name); routing manifest rewritten to v4 (AdamW lists +projector at end, CMuon list identical); optimizer_schema.json v2 algorithm blocks (hybrid_cmuon/guarded_canonical) preserved verbatim, only AdamW groups FQN lists change",
+      "new_sidecar": "train_state/irepa_state.json (schema v1: start_successful_update, source_checkpoint_id, source_update, migration_seed)"
+    },
+    "B_parameter_counts": {
+      "source_v3": {"total": 287, "cmuon": 141, "adamw": 146},
+      "migrated_v4": {"total": 289, "cmuon": 141, "adamw": 148},
+      "added_fqns": ["irepa_alignment.projector.bias", "irepa_alignment.projector.weight"],
+      "cmuon_allowlist": "unchanged (identical 141-FQN set, asserted inside migration + at load via routing manifest)"
+    },
+    "C_zero_lambda_one_step_parity": {
+      "primary_gate_deterministic_ns": {
+        "old_model_tensor_mismatches": 0,
+        "cmuon_state_mismatches": 0,
+        "adamw_state_mismatches": 0,
+        "guard_state_mismatches": 0,
+        "main_loss": "bit-exact",
+        "total_equals_main": "bit-exact at lambda=0",
+        "fp32_rescue": {"bf16_attempts": 498, "bf16_safety_failures": 0, "fp32_attempts": 0, "fp32_rescues": 0, "fp32_rescue_failures": 0}
+      },
+      "hcu_leg_production_ns": {
+        "deterministic_components": "bit-exact (losses, non-CMuon params, AdamW state, CMuon momenta, guard refs, counters)",
+        "worst_cmuon_rel_rms": 0.004781,
+        "worst_param": "dit.conditioner.shared_block_projection.weight",
+        "tolerance": 0.05,
+        "safety_failures": 0
+      },
+      "sr_rng_at_resume": "bit-exact"
+    },
+    "D_lambda_anchor_semantics": {
+      "sidecar": "start_successful_update = source_update + 1 (validated: anchor == source_update + 1, fail-closed)",
+      "binding": "weight_for_update(anchor) == 0 exactly; resume + production readiness gate bind the IRepaLambdaSchedule to the persisted anchor; anchor re-persisted verbatim on every v4 save",
+      "v3_saves": "reject an anchor document (v3 has no sidecar)"
+    },
+    "E_hcu_ddp_result": {
+      "hcu_determinism": "bf16 matmul/SDPA bit-deterministic; bf16 addmm (NS GEMM) cross-call NON-deterministic (use_deterministic_algorithms ineffective); FP32 path bit-deterministic",
+      "production_2rank_impact": "none (owner rank computes NS once per update and broadcasts; non-determinism is cross-call, not cross-rank, not within one update)",
+      "ddp_smoke": "PASS (2-rank S18 chain at world_size=2, deterministic NS: per-rank spec-18 parity bit-exact + cross-rank bit identity 0/864 mismatches; 221s)"
+    },
+    "F_cmuon_forensic_isolation": {
+      "allowlist": "141 -> 141 identical FQN set (projector is allowlist-free, joins AdamW only)",
+      "numeric_changes": "none (no NS algorithm/guard calibration/rescue change; cmuon.py, guarded_canonical.py, fp32_rescue.py zero diff in this working tree)",
+      "deterministic_ns": "test-only monkeypatch of the cmuon_zeroth_power_bf16 module attribute in the parity test; production untouched"
+    }
+  },
+  "files": {
+    "new_src": ["src/sakuramoon/checkpoint/migrate_irepa_checkpoint.py"],
+    "modified_src": [
+      "src/sakuramoon/checkpoint/load.py",
+      "src/sakuramoon/checkpoint/save.py",
+      "src/sakuramoon/checkpoint/artifact.py",
+      "src/sakuramoon/optim/groups.py",
+      "src/sakuramoon/train/preflight.py",
+      "src/sakuramoon/train/production.py"
+    ],
+    "new_tests": [
+      "tests/unit/checkpoint/test_irepa_checkpoint_migration.py",
+      "tests/gpu/checkpoint/test_irepa_checkpoint_save.py",
+      "tests/gpu/irepa/test_irepa_zero_lambda_optimizer_parity.py",
+      "tests/gpu/irepa/s18_chain.py",
+      "tests/gpu/irepa/irepa_ddp_lambda_zero_smoke.py"
+    ],
+    "modified_tests": ["tests/unit/train/test_irepa_production_gate.py"],
+    "reports_committed": [
+      "reports/irepa-phase5-checkpoint-migration-audit.md",
+      "reports/irepa-phase5-checkpoint-migration-audit.json",
+      "reports/irepa-phase5-state-parity.json"
+    ],
+    "reports_not_committed": ["reports/irepa-phase5-copy-report.md (user gate)"]
+  }
+}

@@ -49,9 +49,11 @@ from sakuramoon.encoders.mage_vae import (
     compile_vae_methods,
     load_local_mage_vae,
 )
+from sakuramoon.encoders.pe_spatial import FrozenPESpatialEncoder
 from sakuramoon.encoders.qwen import QwenRuntime, load_local_qwen
 from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
 from sakuramoon.model.growth import active_slot_ids, growth_ramp_updates
+from sakuramoon.objective.irepa import IRepaLambdaSchedule
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
 from sakuramoon.optim.dtk import configure_tunableop
 from sakuramoon.optim.guard_calibration import (
@@ -114,30 +116,41 @@ class ProductionReadinessError(RuntimeError):
         super().__init__("production runtime has unresolved governed bindings")
 
 
-def require_production_irepa_readiness(config: RuntimeConfig) -> None:
-    """Phase 4 safety gate for the iREPA auxiliary.
+def require_production_irepa_readiness(config: RuntimeConfig, resume: Path | None) -> None:
+    """Phase 5 gate: an iREPA-enabled production run requires a migrated checkpoint.
 
     ``[irepa] enabled = true`` parses, its schema v4 architecture artifact
     constructs, the frozen PE-Spatial teacher asset contract + encoder are
-    installed (Phase 3), and the full runtime graph is implemented (Phase 4):
-    stable slot_08 capture inside the eager outer loop, the projector as the
-    canonical ``irepa_alignment.*`` trainable child, FP32 spatial z-score,
-    FP32 per-sample cosine alignment loss, and the successful-update-based
-    lambda schedule.  What is NOT installed is the no-iREPA (v3) → iREPA
-    (v4) checkpoint/optimizer migration: the production mainline still holds
-    a v3 checkpoint whose state dict has no ``irepa_alignment.*`` tensors,
-    and Phase 5 owns the migration + the persisted start anchor.  Production
-    therefore stays fail-closed BEFORE optimizer build, data-service
-    connection, and the training loop.
+    installed (Phase 3), and the full runtime graph is implemented (Phase 4).
+    Phase 5 installs the no-iREPA (v3) → iREPA (v4) checkpoint/optimizer
+    migration plus the persisted schedule anchor.  An iREPA-enabled run is
+    therefore accepted only when the resume checkpoint is an explicitly
+    migrated checkpoint (a valid ``train_state/irepa_state.json`` anchor
+    sidecar); a non-migrated (or absent) checkpoint stays fail-closed BEFORE
+    optimizer build, data-service connection, and the training loop.
     """
 
     irepa = config.irepa
-    if irepa is not None and irepa.enabled:
+    if irepa is None or not irepa.enabled:
+        return
+    if resume is None:
         blocker = (
-            "iREPA runtime graph is implemented, but no-iREPA→iREPA "
-            "checkpoint/optimizer migration is not installed"
+            "iREPA is enabled but no resume checkpoint was provided; an iREPA "
+            "production run requires an explicitly migrated checkpoint"
         )
         raise ProductionReadinessError((blocker,))
+    from sakuramoon.checkpoint.load import CheckpointError
+    from sakuramoon.checkpoint.migrate_irepa_checkpoint import irepa_state_anchor
+
+    checkpoint = resume.resolve(strict=True)
+    try:
+        irepa_state_anchor(checkpoint)
+    except CheckpointError as error:
+        blocker = (
+            "iREPA is enabled but the checkpoint is not a migrated iREPA "
+            f"checkpoint; run the explicit migration first ({error})"
+        )
+        raise ProductionReadinessError((blocker,)) from None
 
 
 class ProductionPreflightError(RuntimeError):
@@ -867,8 +880,37 @@ def _runtime(
     forward_module: nn.Module | None,
     restored: RestoredSingleGpuCheckpoint,
     device: torch.device,
+    repository_root: Path,
+    resume: Path | None,
 ) -> SingleGpuBatchRuntime:
     index = int(device.index or 0)
+    irepa_teacher: FrozenPESpatialEncoder | None = None
+    irepa_schedule: IRepaLambdaSchedule | None = None
+    irepa_gamma: float = 0.6
+    irepa_eps: float = 1e-6
+    irepa = config.irepa
+    if irepa is not None and irepa.enabled:
+        from sakuramoon.checkpoint.migrate_irepa_checkpoint import (
+            irepa_state_anchor,
+        )
+
+        if resume is None:
+            raise ProductionTrainingError(
+                "iREPA runtime requires a migrated resume checkpoint"
+            )
+        irepa_teacher = FrozenPESpatialEncoder.load_asset(
+            repository_root, irepa.teacher_local_path, device=device
+        )
+        anchor = irepa_state_anchor(resume.resolve(strict=True))
+        irepa_schedule = IRepaLambdaSchedule(
+            start_successful_update=anchor,
+            target_weight=float(irepa.weight),
+            ramp_in_updates=irepa.ramp_in_updates,
+            ramp_out_after_updates=irepa.ramp_out_after_updates,
+            ramp_out_updates=irepa.ramp_out_updates,
+        )
+        irepa_gamma = float(irepa.spatial_norm_gamma)
+        irepa_eps = float(irepa.spatial_norm_eps)
     return SingleGpuBatchRuntime(
         qwen=qwen.encoder,
         vae=vae,
@@ -886,6 +928,10 @@ def _runtime(
         torch_compile_backend=config.kernels.torch_compile_backend,
         torch_compile_mode=config.kernels.torch_compile_mode,
         torch_compile_dynamic=config.kernels.torch_compile_dynamic,
+        irepa_teacher=irepa_teacher,
+        irepa_gamma=irepa_gamma,
+        irepa_eps=irepa_eps,
+        irepa_schedule=irepa_schedule,
     )
 
 
@@ -1047,10 +1093,11 @@ def _run_accepted_lifecycle(
     wall_clock: Callable[[], float],
 ) -> ProductionTrainingResult:
     config = loaded.config
-    # iREPA Phase 2 gate: fail before accelerator setup, static preflight,
-    # resolved-config publish, encoder loading, module/optimizer build,
-    # data-service connection, and the training loop.
-    require_production_irepa_readiness(config)
+    # iREPA Phase 5 gate: an iREPA-enabled run requires an explicitly migrated
+    # checkpoint (a valid irepa_state anchor sidecar).  Fail before accelerator
+    # setup, static preflight, resolved-config publish, encoder loading,
+    # module/optimizer build, data-service connection, and the training loop.
+    require_production_irepa_readiness(config, resume)
     accelerator = (
         Accelerator(
             mixed_precision="no",
@@ -1383,6 +1430,8 @@ def _run_accepted_lifecycle(
             forward_module=forward_module,
             restored=restored,
             device=device,
+            repository_root=repository_root,
+            resume=resume,
         )
         if in_calibration:
             publisher: (

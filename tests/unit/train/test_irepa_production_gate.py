@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -62,24 +63,69 @@ def _load(tmp_path: Path, *, irepa: dict[str, Any] | None) -> Any:
     )
 
 
-def test_enabled_irepa_fails_production_readiness(tmp_path: Path) -> None:
+def _migrated_checkpoint(tmp_path: Path) -> Path:
+    checkpoint = tmp_path / "ckpt_100_raw"
+    (checkpoint / "train_state").mkdir(parents=True)
+    (checkpoint / "train_state" / "irepa_state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "start_successful_update": 101,
+                "source_checkpoint_id": "raw-100-abc",
+                "source_update": 100,
+                "migration_seed": 42,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return checkpoint
+
+
+def test_enabled_irepa_without_resume_fails_production_readiness(
+    tmp_path: Path,
+) -> None:
     loaded = _load(tmp_path, irepa=_irepa_table())
 
     with pytest.raises(ProductionReadinessError) as excinfo:
-        require_production_irepa_readiness(loaded.config)
-    assert excinfo.value.blockers == (
-        (
-            "iREPA runtime graph is implemented, but no-iREPA→iREPA "
-            "checkpoint/optimizer migration is not installed"
-        ),
+        require_production_irepa_readiness(loaded.config, None)
+    assert "no resume checkpoint" in excinfo.value.blockers[0]
+
+
+def test_enabled_irepa_with_unmigrated_checkpoint_fails(tmp_path: Path) -> None:
+    loaded = _load(tmp_path, irepa=_irepa_table())
+    checkpoint = tmp_path / "ckpt_100_raw"
+    (checkpoint / "train_state").mkdir(parents=True)
+
+    with pytest.raises(ProductionReadinessError) as excinfo:
+        require_production_irepa_readiness(loaded.config, checkpoint)
+    assert "not a migrated iREPA" in excinfo.value.blockers[0]
+
+
+def test_enabled_irepa_with_migrated_checkpoint_passes(tmp_path: Path) -> None:
+    loaded = _load(tmp_path, irepa=_irepa_table())
+    checkpoint = _migrated_checkpoint(tmp_path)
+
+    require_production_irepa_readiness(loaded.config, checkpoint)
+
+
+def test_enabled_irepa_with_invalid_state_sidecar_fails(tmp_path: Path) -> None:
+    loaded = _load(tmp_path, irepa=_irepa_table())
+    checkpoint = tmp_path / "ckpt_100_raw"
+    (checkpoint / "train_state").mkdir(parents=True)
+    (checkpoint / "train_state" / "irepa_state.json").write_text(
+        json.dumps({"schema_version": 1, "start_successful_update": 7}),
+        encoding="utf-8",
     )
+
+    with pytest.raises(ProductionReadinessError):
+        require_production_irepa_readiness(loaded.config, checkpoint)
 
 
 def test_absent_irepa_passes_production_readiness(tmp_path: Path) -> None:
     loaded = _load(tmp_path, irepa=None)
 
     assert loaded.config.irepa is None
-    require_production_irepa_readiness(loaded.config)
+    require_production_irepa_readiness(loaded.config, None)
 
 
 def test_disabled_irepa_passes_production_readiness(tmp_path: Path) -> None:
@@ -87,4 +133,4 @@ def test_disabled_irepa_passes_production_readiness(tmp_path: Path) -> None:
 
     assert loaded.config.irepa is not None
     assert loaded.config.irepa.enabled is False
-    require_production_irepa_readiness(loaded.config)
+    require_production_irepa_readiness(loaded.config, None)

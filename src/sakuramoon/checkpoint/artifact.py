@@ -124,15 +124,22 @@ def validate_optimizer_coverage(
     canonical_parameters: tuple[tuple[str, nn.Parameter], ...],
 ) -> None:
     export_trainable_composite(module)
+    # Coverage is order-independent by contract: the canonical audit order
+    # deliberately appends introduced auxiliary parameters (e.g. the iREPA
+    # projector, P5 spec-11) after every pre-existing parameter, so the
+    # optimizer's audit order is not a plain FQN sort on v4 modules.  Both
+    # sides are compared in FQN order; the names must match exactly and each
+    # name must bind to the identical parameter object.
+    canonical_sorted = tuple(sorted(canonical_parameters, key=lambda item: item[0]))
     module_parameters = tuple(
         sorted(module.named_parameters(remove_duplicate=False), key=lambda item: item[0])
     )
     if tuple(name for name, _ in module_parameters) != tuple(
-        name for name, _ in canonical_parameters
+        name for name, _ in canonical_sorted
     ) or any(
         module_parameter is not optimizer_parameter
         for (_, module_parameter), (_, optimizer_parameter) in zip(
-            module_parameters, canonical_parameters, strict=True
+            module_parameters, canonical_sorted, strict=True
         )
     ):
         raise ValueError("checkpoint module and optimizer canonical parameters differ")

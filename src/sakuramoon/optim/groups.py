@@ -11,6 +11,18 @@ from torch import nn
 
 ParameterGroupName = Literal["matrix_decay", "sensitive_no_decay"]
 
+# P5 spec-11 (AdamW SR RNG audit, HARD GATE): FQN prefix of the iREPA
+# projector parameters.  The AdamW8bit step consumes ONE shared
+# stochastic-rounding CUDA RNG stream in parameter-group order (one draw per
+# BF16 decay parameter, including exact-zero gradients), so a parameter
+# interleaved into the middle of the order shifts the SR consumption of every
+# pre-existing parameter drawn after it.  The projector must therefore be
+# APPENDED AFTER every existing parameter in the canonical audit order —
+# never FQN-interleaved — which keeps the first lambda=0 update (and every
+# later old-parameter SR draw) bit-identical to the no-iREPA baseline
+# (spec-18 parity).
+_IREPA_FQN_PREFIX = "irepa_alignment."
+
 _SENSITIVE_ANCESTORS = {"FinalOutputHead", "GlobalConditioner"}
 _SENSITIVE_RANKED_PARAMETERS = {
     ("ModalityEmbedding", "image"),
@@ -127,6 +139,23 @@ def audit_trainable_parameters(
                 weight_decay=weight_decay,
             )
         )
+    # P5 spec-11 (AdamW SR RNG audit): append the iREPA projector parameters
+    # AFTER every existing parameter (never FQN-interleaved).  Pre-existing
+    # parameters keep their exact canonical FQN-sorted relative order, so the
+    # AdamW parameter-group order — and therefore the shared SR RNG
+    # consumption order (one draw per BF16 decay parameter, including
+    # exact-zero gradients) — is bit-identical to the no-iREPA model for the
+    # whole pre-existing set.  This is the single source of truth: it
+    # propagates into every AdamW group construction (build_adamw8bit,
+    # _build_adamw8bit_for_specs), the routing manifest, and the checkpoint
+    # migration's target group order.
+    irepa_specs = [
+        spec for spec in specs if spec.name.startswith(_IREPA_FQN_PREFIX)
+    ]
+    if irepa_specs:
+        specs = [
+            spec for spec in specs if not spec.name.startswith(_IREPA_FQN_PREFIX)
+        ] + irepa_specs
     return ParameterAudit(specs=tuple(specs))
 
 

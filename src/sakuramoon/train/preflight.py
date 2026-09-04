@@ -332,6 +332,22 @@ class ProductionSingleGpuCheckpointPublisher:
         self._optimizer = optimizer
         self._base_identity = restored_checkpoint.manifest.identity
         self._restored_state = restored_checkpoint.state
+        # The persistent iREPA schedule anchor, read ONCE from the resume
+        # checkpoint (migrated checkpoints only): every post-migration RAW
+        # save republishes this ORIGINAL document verbatim, never a value
+        # recomputed from the current update.  The import stays lazy:
+        # checkpoint and train packages cross-reference each other through
+        # their __init__ files (the production gate uses the same pattern).
+        from sakuramoon.checkpoint.migrate_irepa_checkpoint import (
+            IREPA_STATE_FILE,
+            read_irepa_state,
+        )
+
+        self._irepa_state: dict[str, object] | None = (
+            read_irepa_state(restored_checkpoint.path)
+            if (restored_checkpoint.path / IREPA_STATE_FILE).exists()
+            else None
+        )
         self._accepted_checkpoint_ids = accepted_checkpoint_ids
         self._retention_slots = retention_slots
         self._pending: dict[Path, tuple[CheckpointIdentity, RawCheckpointState]] = {}
@@ -375,6 +391,7 @@ class ProductionSingleGpuCheckpointPublisher:
             self._optimizer,
             raw_state,
             resolved_config=self._resolved_config,
+            irepa_state=self._irepa_state,
         )
         path = result.path.resolve(strict=True)
         self._pending[path] = (identity, raw_state)

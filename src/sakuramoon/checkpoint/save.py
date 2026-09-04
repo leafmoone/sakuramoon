@@ -228,6 +228,7 @@ def _write_raw_sidecars(
     optimizer: IsolatedAdamW8bit | HybridCMuon,
     state: RawCheckpointState,
     resolved_config: bytes,
+    irepa_state: dict[str, object] | None,
 ) -> None:
     _write_bytes(temporary / "resolved_config.toml", resolved_config)
     train_state = temporary / "train_state"
@@ -269,6 +270,15 @@ def _write_raw_sidecars(
     )
     _fsync_file(rng_dir / "optimizer_sr.safetensors")
     _fsync_directory(rng_dir)
+    if irepa_state is not None:
+        # Repersist the ORIGINAL migration anchor document verbatim (it was
+        # validated in _validate_irepa_save_context); the anchor must never be
+        # reset to the current update by post-migration saves.
+        from sakuramoon.checkpoint.migrate_irepa_checkpoint import IREPA_STATE_FILE
+
+        irepa_state_path = temporary / IREPA_STATE_FILE
+        _write_bytes(irepa_state_path, _json_bytes(irepa_state))
+        _fsync_file(irepa_state_path)
     _fsync_directory(train_state)
 
 
@@ -281,22 +291,52 @@ def _payload_records(temporary: Path) -> tuple[FileRecord, ...]:
     return tuple(records)
 
 
-def _require_checkpoint_lifecycle_unlocked(module: nn.Module) -> None:
-    """Fail closed on iREPA-enabled (schema v4) composites.
+def _validate_irepa_save_context(
+    module: nn.Module,
+    kind: CheckpointKind,
+    irepa_state: dict[str, object] | None,
+) -> None:
+    """Validate the iREPA (schema v4) save context (fail-closed).
 
-    Phase 2 establishes the v4 artifact vocabulary only; the iREPA
-    checkpoint lifecycle (no-iREPA -> iREPA migration, projector stripping
-    for MODEL_ONLY/RELEASE, teacher fingerprint, iREPA optimizer-state
-    migration) is not implemented yet.  A half-finished v4 checkpoint must
-    not be published by the production RAW/MODEL_ONLY path.  v3 modules are
-    unaffected.
+    v3 (no-iREPA) modules are unaffected, and no anchor document may accompany
+    them.  An iREPA-enabled composite may only publish RAW training
+    checkpoints, and only with the persisted iREPA state document read once
+    from the resume checkpoint: the ORIGINAL migration anchor, never
+    recomputed from the current update (the schedule anchor must survive every
+    post-migration save so any later resume rebinds lambda to the same
+    zero-lambda first update).  MODEL_ONLY/RELEASE export of a v4 composite
+    (projector stripping, teacher fingerprint) remains locked: it is not part
+    of the explicit migration lifecycle and must not silently publish a
+    half-stripped artifact.
     """
 
-    if type(module) is TrainableComposite and module.irepa_alignment is not None:
+    if type(module) is not TrainableComposite or module.irepa_alignment is None:
+        if irepa_state is not None:
+            raise CheckpointError(
+                "irepa_state anchor document cannot accompany a v3 (no-iREPA) "
+                "checkpoint"
+            )
+        return
+    if kind is not CheckpointKind.RAW:
         raise CheckpointError(
-            "iREPA-enabled (architecture schema v4) checkpoint lifecycle is "
-            "not unlocked yet; production RAW/MODEL_ONLY save is rejected"
+            "iREPA-enabled (architecture schema v4) MODEL_ONLY/RELEASE export "
+            "is not unlocked yet; only RAW training saves and the explicit "
+            "v3->v4 migration may publish iREPA checkpoints"
         )
+    if irepa_state is None:
+        raise CheckpointError(
+            "iREPA-enabled (architecture schema v4) RAW save requires the "
+            "persisted irepa_state anchor document from the resume checkpoint"
+        )
+    # The document is loaded (and validated) once at resume time; validate it
+    # again at save time so a corrupted or hand-edited document can never be
+    # published.  The import stays lazy: the checkpoint and train packages
+    # cross-reference each other through their __init__ files.
+    from sakuramoon.checkpoint.migrate_irepa_checkpoint import (
+        validate_irepa_state_document,
+    )
+
+    validate_irepa_state_document(irepa_state)
 
 
 def _save(
@@ -309,6 +349,7 @@ def _save(
     state: RawCheckpointState | None,
     resolved_config: bytes | None,
     max_shard_bytes: int,
+    irepa_state: dict[str, object] | None = None,
 ) -> CheckpointSaveResult:
     if kind not in {CheckpointKind.RAW, CheckpointKind.MODEL_ONLY}:
         raise ValueError("checkpoint artifact kind is unsupported")
@@ -325,7 +366,7 @@ def _save(
             raise ValueError("resolved config must be nonempty")
     elif resolved_config is not None:
         raise ValueError("non-raw artifacts cannot contain resolved config sidecars")
-    _require_checkpoint_lifecycle_unlocked(module)
+    _validate_irepa_save_context(module, kind, irepa_state)
     export_trainable_composite(module)
     if state is not None and identity.update != state.trainer.successful_updates:
         raise ValueError("checkpoint update must equal successful optimizer updates")
@@ -347,7 +388,9 @@ def _save(
     try:
         _write_model(temporary, module, identity, kind, max_shard_bytes)
         if optimizer is not None and state is not None and resolved_config is not None:
-            _write_raw_sidecars(temporary, optimizer, state, resolved_config)
+            _write_raw_sidecars(
+                temporary, optimizer, state, resolved_config, irepa_state
+            )
         records = _payload_records(temporary)
         manifest = CheckpointManifest(kind=kind, identity=identity, files=records)
         _write_json(temporary / "manifest.json", manifest_to_dict(manifest))
@@ -384,7 +427,16 @@ def save_raw_checkpoint(
     *,
     resolved_config: bytes,
     max_shard_bytes: int = MAX_MODEL_SHARD_BYTES,
+    irepa_state: dict[str, object] | None = None,
 ) -> CheckpointSaveResult:
+    """Atomically publish one RAW checkpoint.
+
+    ``irepa_state`` is the persistent iREPA schedule anchor document of the
+    resume checkpoint (the ORIGINAL migration anchor, read once at resume);
+    it is required for iREPA-enabled (schema v4) composites and must never be
+    built from the current update.  v3 saves leave it ``None``.
+    """
+
     return _save(
         destination_root,
         identity,
@@ -394,6 +446,7 @@ def save_raw_checkpoint(
         state=state,
         resolved_config=resolved_config,
         max_shard_bytes=max_shard_bytes,
+        irepa_state=irepa_state,
     )
 
 

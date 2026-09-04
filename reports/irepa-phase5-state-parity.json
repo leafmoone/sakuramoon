@@ -1,0 +1,109 @@
+{
+  "phase": 5,
+  "title": "iREPA checkpoint migration: lambda=0 one-update state parity (S18) and 2-rank DDP smoke",
+  "branch": "iprea",
+  "parent_commit": "00bd795",
+  "generated": "2026-09-04",
+  "host": "salt13 (2x BW DCU, DTK torch 2.9.0+das, Python 3.11.9, venv restored from salt10 2026-09-03 image)",
+  "chain": {
+    "source_update": 2,
+    "next_update": 3,
+    "model": "production-shape composite: DenseDiT d=2560 depth 20, 20Q/5KV heads, head_dim 128, BF16; production TextConditioner(16 heads); ConditionTokenEncoder; v4 adds IRepaAlignment(2560) projector LAST",
+    "seeds": {
+      "model": 20260905,
+      "batch": 90210,
+      "rgb_teacher": 31337,
+      "sr_optimizer": 777
+    },
+    "batch": "B=1 L=16 M=3 C=8, grid 8x8, T=0.37, T_EPS=0.05, NOISE_OBSERVATION_BOUNDARY=0.95, dropout 0 everywhere",
+    "tap_slot": 8,
+    "optimizer": "hybrid_cmuon_canonical_ns4_fp32_rescue built from the real train_g1_fp32_rescue_r1.toml (base_lr 5e-5, sr_seed 777, canonical NS map, 166 guard bootstrap references)",
+    "lambda_weight_at_next_update": 0.0,
+    "lambda_anchor": "start_successful_update = source_update + 1; weight_for_update(anchor) == 0 exactly (ramp-in starts there)"
+  },
+  "parameter_counts": {
+    "source_v3_total": 287,
+    "source_cmuon": 141,
+    "source_adamw": 146,
+    "migrated_v4_total": 289,
+    "migrated_cmuon": 141,
+    "migrated_adamw": 148,
+    "added_fqns": [
+      "irepa_alignment.projector.bias",
+      "irepa_alignment.projector.weight"
+    ],
+    "cmuon_allowlist_change": "none (141 -> 141, identical FQN set)"
+  },
+  "single_rank": {
+    "primary_gate_deterministic_ns": {
+      "verdict": "PASS",
+      "environment": "test-only monkeypatch: cmuon_zeroth_power_bf16 -> bit-deterministic FP32 NS + one BF16 rounding at the update boundary (production rescue staging); production code untouched",
+      "old_model_tensor_mismatches": 0,
+      "old_model_tensor_comparison": "all 287 pre-existing parameters bit-exact (torch.equal) after the one lambda=0 update",
+      "cmuon_state_mismatches": 0,
+      "cmuon_state_comparison": "all 141 CMuon bf16 momenta bit-exact",
+      "adamw_state_mismatches": 0,
+      "adamw_state_comparison": "all 146 pre-existing AdamW entries: step + exp_avg + exp_avg_sq bit-exact (torchao OptimState8bit compared via block_size/codes/qmap/scale)",
+      "guard_state_mismatches": 0,
+      "guard_comparison": "references/skip bookkeeping/observations/bootstrap/owner_mapping/ns_map identical",
+      "losses": "MAIN JLT per-sample bit-exact; TOTAL == MAIN bit-exact at lambda=0",
+      "sr_rng_at_resume": "bit-exact (saved state restored verbatim)",
+      "fp32_rescue_a": {"bf16_attempts": 498, "bf16_safety_failures": 0, "fp32_attempts": 0, "fp32_rescues": 0, "fp32_rescue_failures": 0, "rescue_by_role": {}},
+      "fp32_rescue_b": {"bf16_attempts": 498, "bf16_safety_failures": 0, "fp32_attempts": 0, "fp32_rescues": 0, "fp32_rescue_failures": 0, "rescue_by_role": {}},
+      "test": "tests/gpu/irepa/test_irepa_zero_lambda_optimizer_parity.py::test_lambda_zero_one_update_parity"
+    },
+    "hcu_leg_production_ns": {
+      "verdict": "PASS",
+      "environment": "UNPATCHED production optimizer (raw BF16-first Newton-Schulz)",
+      "deterministic_components": "bit-exact: MAIN/TOTAL losses, all non-CMuon parameters, all AdamW state, all 141 CMuon momenta, guard references, update counters",
+      "ns_affected_cmuon_values": "within tolerance: worst relative RMS below PRODUCTION_NS_REL_RMS_TOLERANCE=5e-2; O(1) relative divergence would indicate a checkpoint error and fails loudly",
+      "worst_cmuon_rel_rms": 0.004781,
+      "worst_param": "dit.conditioner.shared_block_projection.weight",
+      "tolerance": 0.05,
+      "margin": "worst measured is ~10x below tolerance; cross-call BF16 addmm non-determinism is ulp-level",
+      "fp32_rescue_a": {"bf16_attempts": 498, "bf16_safety_failures": 0, "fp32_attempts": 0, "fp32_rescues": 0, "fp32_rescue_failures": 0, "rescue_by_role": {}},
+      "fp32_rescue_b": {"bf16_attempts": 498, "bf16_safety_failures": 0, "fp32_attempts": 0, "fp32_rescues": 0, "fp32_rescue_failures": 0, "rescue_by_role": {}},
+      "test": "tests/gpu/irepa/test_irepa_zero_lambda_optimizer_parity.py::test_lambda_zero_production_ns_behavior"
+    }
+  },
+  "ddp_2rank": {
+    "script": "tests/gpu/irepa/irepa_ddp_lambda_zero_smoke.py (torchrun, 2 local ranks, nccl)",
+    "world_size": 2,
+    "ns_mode": "deterministic",
+    "verdict": "PASS",
+    "chain_seconds": 221.1,
+    "lambda_zero_parity": "bit_exact (primary gate) on BOTH ranks: all 287 pre-existing parameters, 141 CMuon momenta, 146 AdamW entries, guard references, MAIN/TOTAL losses bit-exact per rank (identical comparisons to the single-rank primary gate)",
+    "cross_rank_fingerprints": 864,
+    "cross_rank_mismatches": 0,
+    "cross_rank_note": "fp32 rms/max fingerprints of every parameter and CMuon momentum of BOTH arms plus both losses: all_gather_object exact equality across ranks (0 mismatches of 864); invariant_check=True additionally raises on any staged-delta rank spread inside step()",
+    "guard_rescue_b": {"observations": 3, "bf16_attempts": 249, "bf16_safety_failures": 0, "fp32_attempts": 0, "fp32_rescues": 0, "fp32_rescue_failures": 0, "rescue_by_role": {}},
+    "bf16_attempts_note": "249 per rank = 498/2: each rank owns half the NS chunks (166 chunks x 3 steps total), owner-rank-computes-once + broadcast",
+    "proof_targets": [
+      "lambda=0 parity per rank (spec-18 comparisons, identical to the single-rank primary gate)",
+      "cross-rank bit identity: fp32 rms/max fingerprints of every parameter and CMuon momentum of both arms identical across ranks (all_gather_object exact equality)",
+      "invariant_check=True inside step() raises on any staged-delta rank spread"
+    ],
+    "note": "guard state is world-size stamped (fail-closed): the whole chain (source -> migrate -> resume) runs at world_size=2 so the guard world_size stamps match"
+  },
+  "full_pytest": {
+    "tree": "final (post-refactor, post pyright fixes)",
+    "host": "salt13 (DTK torch 2.9.0+das, 2x BW HCU)",
+    "duration_seconds": 1306.07,
+    "result": "2 failed / 1016 passed / 2 skipped",
+    "p4_baseline": "2 failed / 992 passed / 2 skipped",
+    "delta": "+24 passed = the Phase 5 test additions",
+    "phase5_only_failures": 0,
+    "baseline_shared_failures": [
+      "tests/gpu/data/test_pipeline_encoders.py::test_real_pipeline_qwen_and_mage_encode_one_batch (Qwen asset — pre-existing salt10/salt13 environment condition)",
+      "tests/gpu/fa4/test_varlen_attention.py::test_forged_boundary_handle_fails_before_native_kernel[host_metadata] (host_metadata baseline bug — machine-independent)"
+    ]
+  },
+  "hcu_determinism_facts": {
+    "backend": "DTK torch 2.9.0+das on 2x BW DCU (salt13), measured 2026-09-04",
+    "bf16_matmul_AatB": "bit-deterministic across calls",
+    "bf16_addmm": "NON-deterministic across calls for identical inputs on every production chunk shape (torch.use_deterministic_algorithms has no effect)",
+    "fp32_path_including_addmm": "bit-deterministic",
+    "dit_dense_sdpa_forward_backward": "bit-deterministic (attn_mask + enable_gqa call shape)",
+    "implication": "the raw BF16-first Newton-Schulz is cross-call non-deterministic on this HCU; production 2-rank G1 is unaffected (owner rank computes each NS once and broadcasts); a single-rank two-arm comparison needs the deterministic NS stand-in for bit exactness (primary gate) and the tolerance leg (spec 17)"
+  }
+}
