@@ -1,0 +1,62 @@
+# hdm_shifted_square_v2 canary: 25% of samples train the exact full-canvas
+# shifted-square camera viewport (short edge -> stage square R, full long
+# axis preserved, uniform inclusive R x R crop) with exact full-canvas
+# image coordinates.
+#
+# Data strategy change only -- model architecture, optimizer, LR, batch,
+# objective and checkpoint schema are untouched. Extends the production
+# G1 config (train_g1_cmuon_production.toml, dev@3a341c0 lineage incl.
+# the CMuon F3 optimizer) and overrides exactly:
+#   - run identity and fully independent run/checkpoint/artifact paths
+#   - [data.camera_viewport]: p=0.25, equivalent zoom 1.10-1.50
+#   - [data.spatial_crop]: disabled (first-version mutual exclusion with
+#     camera_viewport.enabled; the production spatial p50 policy is
+#     replaced by the camera policy in this isolated canary lineage)
+#   - [stage].automatic_transition kept false (manual finalize only)
+#
+# NOT deployed: the p25 canary starts only after C1 + C2 PASS and an
+# explicit user GO; it then resumes from a COMPLETE production checkpoint
+# via scripts/training_stack.sh (see AGENTS.md launch contract).
+
+extends = ["train_g1_cmuon_production.toml"]
+
+[run]
+run_id = "g1_camera_v2_p25"
+
+[paths]
+run_dir = "runs/g1_camera_v2_p25"
+checkpoint_dir = "output_model/g1_camera_v2_p25"
+artifact_dir = "artifacts/g1_camera_v2_p25"
+
+[logging]
+local_jsonl_path = "artifacts/g1_camera_v2_p25/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/g1_camera_v2_p25/wandb-retry.jsonl"
+
+[evaluation]
+output_dir = "output_model/evaluation/g1_camera_v2_p25"
+
+[stage]
+automatic_transition = false
+
+[data.spatial_crop]
+enabled = false
+mode = "shifted_bucket"
+probability = 0.0
+min_equivalent_zoom = 1.02
+max_equivalent_zoom = 1.10
+zoom_distribution = "sqrt_uniform_high"
+offset_distribution = "uniform_independent"
+fallback_to_aspect_bucket = true
+
+[data.camera_viewport]
+enabled = true
+mode = "hdm_shifted_square_v2"
+probability = 0.25
+viewport = "stage_square"
+min_equivalent_zoom = 1.10
+max_equivalent_zoom = 1.50
+offset_distribution = "uniform_long_axis_inclusive"
+zoom_source = "natural_source_aspect"
+fallback_to_aspect_bucket = true

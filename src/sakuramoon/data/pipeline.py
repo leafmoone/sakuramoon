@@ -19,6 +19,12 @@ from torch.utils.data import IterableDataset, get_worker_info
 
 from sakuramoon.config.schema import DataTransparentBackgroundConfig
 from sakuramoon.data.buckets import BucketShape
+from sakuramoon.data.camera_viewport import (
+    CameraViewportPlan,
+    CameraViewportPolicy,
+    camera_stage_edge,
+    plan_camera_viewport,
+)
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
@@ -154,6 +160,8 @@ class RngIdentity:
     spatial_zoom_seed: int = 0
     spatial_offset_x_seed: int = 0
     spatial_offset_y_seed: int = 0
+    camera_policy_seed: int = 0
+    camera_offset_seed: int = 0
 
 
 @dataclass(frozen=True)
@@ -174,6 +182,23 @@ class ImageAudit:
     actual_equivalent_zoom: float = 0.0
     normalized_offset_x: float = 0.0
     normalized_offset_y: float = 0.0
+    # Camera-viewport outcome. Strict zero / none defaults keep the
+    # ordinary (camera-absent) path bit-identical; a camera-enabled
+    # fallback records the reason while every numeric field stays zero.
+    camera_policy: str = "none"
+    camera_selected: bool = False
+    camera_applied: bool = False
+    camera_fallback_reason: str = "none"
+    camera_orientation: str = "none"
+    camera_equivalent_zoom: float = 0.0
+    camera_final_retention: float = 0.0
+    camera_normalized_offset: float = 0.0
+    camera_pixel_center_shift: float = 0.0
+    camera_latent_center_shift: float = 0.0
+    camera_shift_x: float = 0.0
+    camera_shift_y: float = 0.0
+    camera_full_width: int = 0
+    camera_full_height: int = 0
 
 
 @dataclass(frozen=True)
@@ -278,6 +303,12 @@ def rng_identity(
         spatial_offset_y_seed=_domain_seed(
             base_seed, stage, cycle_index, sample_id, "spatial-offset-y"
         ),
+        camera_policy_seed=_domain_seed(
+            base_seed, stage, cycle_index, sample_id, "camera-policy"
+        ),
+        camera_offset_seed=_domain_seed(
+            base_seed, stage, cycle_index, sample_id, "camera-offset"
+        ),
     )
 
 
@@ -342,6 +373,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         stage: str,
         cycle_index: int,
         spatial_policy: SpatialCropPolicy | None = None,
+        camera_policy: CameraViewportPolicy | None = None,
         transparent_policy: DataTransparentBackgroundConfig | None = None,
         transparent_telemetry: TransparentWhiteTelemetry | None = None,
     ) -> None:
@@ -385,6 +417,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 or isinstance(spatial_policy, SpatialCropPolicy)  # pyright: ignore[reportUnnecessaryIsInstance]
             )
             or not (
+                camera_policy is None
+                or isinstance(camera_policy, CameraViewportPolicy)  # pyright: ignore[reportUnnecessaryIsInstance]
+            )
+            or not (
                 transparent_policy is None
                 or isinstance(transparent_policy, DataTransparentBackgroundConfig)  # pyright: ignore[reportUnnecessaryIsInstance]
             )
@@ -406,6 +442,8 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.stage = stage
         self.cycle_index = cycle_index
         self.spatial_policy = spatial_policy
+        self.camera_policy = camera_policy
+        self._camera_stage_edge = camera_stage_edge(buckets)
         self.transparent_policy = transparent_policy
         self.transparent_telemetry = (
             transparent_telemetry if transparent_telemetry is not None else TransparentWhiteTelemetry()
@@ -561,6 +599,24 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                         (spatial_plan.canvas_width, spatial_plan.canvas_height),
                         resample=Image.Resampling.LANCZOS,
                     ).crop(spatial_plan.crop_box)
+            camera_plan: CameraViewportPlan | None = None
+            camera_image: Image.Image | None = None
+            if self.camera_policy is not None and self.camera_policy.enabled:
+                camera_plan = plan_camera_viewport(
+                    processed.assignment,
+                    self.camera_policy,
+                    buckets=self.buckets,
+                    stage_edge=self._camera_stage_edge,
+                    source_size=(source_width, source_height),
+                    policy_seed=identity.camera_policy_seed,
+                    offset_seed=identity.camera_offset_seed,
+                )
+                if camera_plan.applied:
+                    normalized = normalize_image(work_image)
+                    camera_image = normalized.resize(
+                        (camera_plan.full_width, camera_plan.full_height),
+                        resample=Image.Resampling.LANCZOS,
+                    ).crop(camera_plan.crop_box)
         except ImageRejected as error:
             _trace_sample(shard_record.path, metadata.id, f"reject:{error.reason}")
             self.rejection_observer(error.reason)
@@ -581,8 +637,42 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             self.rejection_observer("decode_error")
             return None
         assignment = processed.assignment
-        if spatial_plan is not None and spatial_image is not None:
-            sample_image: Image.Image = spatial_image
+        if camera_plan is not None and camera_image is not None:
+            sample_image: Image.Image = camera_image
+            audit = ImageAudit(
+                source_width=assignment.source_width,
+                source_height=assignment.source_height,
+                resized_width=camera_plan.full_width,
+                resized_height=camera_plan.full_height,
+                crop_box=camera_plan.crop_box,
+                crop_retention=camera_plan.retention,
+                crop_policy="camera_viewport",
+                spatial_selected=False,
+                spatial_applied=False,
+                spatial_fallback_reason="none",
+                base_crop_retention=assignment.crop_retention,
+                final_crop_retention=camera_plan.retention,
+                requested_equivalent_zoom=camera_plan.equivalent_zoom,
+                actual_equivalent_zoom=camera_plan.equivalent_zoom,
+                normalized_offset_x=0.0,
+                normalized_offset_y=0.0,
+                camera_policy="hdm_shifted_square_v2",
+                camera_selected=True,
+                camera_applied=True,
+                camera_fallback_reason="none",
+                camera_orientation=camera_plan.orientation,
+                camera_equivalent_zoom=camera_plan.equivalent_zoom,
+                camera_final_retention=camera_plan.retention,
+                camera_normalized_offset=camera_plan.normalized_offset,
+                camera_pixel_center_shift=camera_plan.signed_pixel_center_shift,
+                camera_latent_center_shift=camera_plan.latent_center_shift,
+                camera_shift_x=camera_plan.camera_shift_x,
+                camera_shift_y=camera_plan.camera_shift_y,
+                camera_full_width=camera_plan.full_width,
+                camera_full_height=camera_plan.full_height,
+            )
+        elif spatial_plan is not None and spatial_image is not None:
+            sample_image = spatial_image
             audit = ImageAudit(
                 source_width=assignment.source_width,
                 source_height=assignment.source_height,
@@ -616,6 +706,14 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 selected = spatial_plan.fallback_reason != "not_selected"
                 fallback_reason = spatial_plan.fallback_reason
                 requested_zoom = spatial_plan.requested_equivalent_zoom
+            if camera_plan is None:
+                camera_policy_name = "none"
+                camera_selected = False
+                camera_fallback_reason = "none"
+            else:
+                camera_policy_name = "hdm_shifted_square_v2"
+                camera_selected = camera_plan.fallback_reason != "not_selected"
+                camera_fallback_reason = camera_plan.fallback_reason
             audit = ImageAudit(
                 source_width=assignment.source_width,
                 source_height=assignment.source_height,
@@ -633,6 +731,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 actual_equivalent_zoom=normal_zoom,
                 normalized_offset_x=0.0,
                 normalized_offset_y=0.0,
+                camera_policy=camera_policy_name,
+                camera_selected=camera_selected,
+                camera_applied=False,
+                camera_fallback_reason=camera_fallback_reason,
             )
         _trace_sample(
             shard_record.path,
@@ -647,14 +749,24 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 f" spatial={spatial_plan.fallback_reason}"
                 if spatial_plan is not None
                 else ""
+            )
+            + (
+                f" camera={camera_plan.fallback_reason}"
+                if camera_plan is not None
+                else ""
             ),
         )
+        # The training target is exactly the emitted crop size (the runtime
+        # full-canvas coordinate check enforces crop == target): the ordinary
+        # aspect-bucket crop, the spatial shifted-bucket crop, and the
+        # camera R x R viewport all agree by construction.
+        _left, _top, _right, _bottom = audit.crop_box
         return PipelineSample(
             sample_id=metadata.id,
             source_shard=shard_record.path,
             image=_uint8_chw(sample_image),
-            target_height=assignment.bucket.height,
-            target_width=assignment.bucket.width,
+            target_height=_bottom - _top,
+            target_width=_right - _left,
             caption=caption,
             audit=audit,
             rng=identity,
@@ -720,6 +832,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             stage=self.stage,
             cycle_index=cycle_index,
             spatial_policy=self.spatial_policy,
+            camera_policy=self.camera_policy,
             transparent_policy=self.transparent_policy,
             transparent_telemetry=self.transparent_telemetry,
         )
