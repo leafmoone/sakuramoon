@@ -551,14 +551,15 @@
     "new_camera_test_files": 8,
     "stage_scaling_tests": 10,
     "affected_preexisting_tests_updated": 10,
-    "targeted_suite": "13 files, 116 passed",
-    "ruff": "clean on C1 diff surface (pre-existing baseline flag in tests/gpu/optim/cmuon_capsule_teardown.py untouched)",
-    "pyright": "controlled per-file diagnostic-SET comparison vs full 3a341c0 worktree: non-C1 files identical; C1-added/modified files have ZERO new diagnostics (initial +27 delta closed by typing-only cleanup: unreachable-None locals + _required_camera_table helper for the optional camera tables, .cpu()+.item() for the DTK tolist() stubs boundary, local cast(TrainableComposite) in camera_eval); no pyright ignores added, two pre-existing targeted ignores removed, no config or strictness changes; tree total 820 == baseline 820",
+    "targeted_suite": "13 files, 116 passed; re-verified on the final tree across 14 files (superset incl. test_spatial_crop.py + test_pipeline.py) = 152 passed, 0 failed",
+    "ruff": "clean on the full C1 diff surface (26 Python files, 0 findings) on the final tree; pre-existing baseline flag in tests/gpu/optim/cmuon_capsule_teardown.py untouched",
+    "pyright": "controlled per-file comparison vs full 3a341c0 worktree in two environments: (a) codex-session run totals 820/820, initial +27 src delta (camera_eval +1, metrics +24, observer +2) closed by typing-only narrowing in 103b12b; (b) final closure re-verification, pyright 1.1.411 strict per pyproject with .venv -> /sakuramoon-runtime/venv-pyright-union (472 symlinks, DTK-first + system fill): totals 3296/3296, all 103 non-C1 files byte-identical per-file (0 mismatches), C1-added/modified files 0 new diagnostics; the 124 new diagnostics found in six C1 test files in that environment (BUCKETS/fixture typing, untyped lambdas, protected access, unnecessary casts, StageEdge literal, dict[str, object] **kwargs) were closed in this commit by typing-only edits. No pyright ignores added for new code beyond the repo-established targeted reportPrivateUsage pattern; no config/strictness changes; two pre-existing targeted ignores in the camera observer path removed",
     "baseline_failures": "9 failed + 1 collection error (onnxruntime), all pre-existing",
     "new_functional_failures": 0,
     "new_skips": 0,
     "full_pytest_corrected_tree": "9 failed / 872 passed / 2 skipped / 1 error (914.55s); failure set byte-identical to the 3a341c0 baseline (9F + 1E onnxruntime); 872 = 784 baseline + 78 C1 + 10 stage-scaling; 0 new functional failures",
-    "pyright_camera_attributable_delta": "0 (before: 27)"
+    "pyright_camera_attributable_delta": "0 (before: 27)",
+    "full_pytest_final_tree": "9 failed / 872 passed / 2 skipped / 1 error (926.36s, --continue-on-collection-errors); failure set byte-identical to the dev@3a341c0 baseline (9 failed + 1 onnxruntime collection error, all pre-existing); 872 = 784 baseline + 88 C1; 0 new functional failures, 0 new skips"
   },
   "forbidden_diff_check": {
     "zero_diff_required": [
@@ -582,7 +583,9 @@
   "commits": {
     "c1_data": "88250e9",
     "c1_telemetry": "75e6b6d",
-    "c1_correction": "this commit (HEAD): fix: scale camera viewport to active stage resolution"
+    "c1_correction": "8b525ef (fix: scale camera viewport to active stage resolution)",
+    "c1_types": "103b12b (types: close camera viewport C1 type-check gate)",
+    "c1_types_tests": "this commit (HEAD): types: close camera viewport C1 test-file type-check gate"
   },
   "verdict": "CAMERA_VIEWPORT_V2_C1 = PASS (corrected, stage 256)"
 }

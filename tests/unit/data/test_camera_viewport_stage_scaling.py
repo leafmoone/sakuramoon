@@ -29,6 +29,7 @@ from sakuramoon.config.schema import DataBucketsConfig
 from sakuramoon.data.buckets import (
     BucketRejection,
     BucketShape,
+    StageEdge,
     assign_bucket,
     generate_base_buckets,
     scale_buckets,
@@ -47,7 +48,7 @@ from sakuramoon.data.caption import (
 )
 from sakuramoon.data.manifest import ShardRecord
 from sakuramoon.data.metadata import MetadataFieldMapping
-from sakuramoon.data.pipeline import PipelineSample, WebDatasetPipeline
+from sakuramoon.data.pipeline import WebDatasetPipeline
 from sakuramoon.data.serialize import MAIN_SUFFIX, SYSTEM_PREFIX, FramingContract
 from sakuramoon.data.transparent_white import TransparentWhiteTelemetry
 
@@ -68,8 +69,10 @@ def _base_buckets_config() -> DataBucketsConfig:
 
 
 def _stage_buckets(stage_edge: int) -> tuple[BucketShape, ...]:
+    # Callers only pass stage-vocabulary edges (256/512/768/1024).
     return scale_buckets(
-        generate_base_buckets(_base_buckets_config()), stage_edge
+        generate_base_buckets(_base_buckets_config()),
+        cast(StageEdge, stage_edge),
     )
 
 
@@ -239,9 +242,17 @@ _G1_BUCKETS = _stage_buckets(256)
 _SHARD = "data/synthetic/shard-000000.tar"
 
 
+def _identity_adapter(metadata: Mapping[str, object]) -> Mapping[str, object]:
+    return metadata
+
+
+def _noop_observer(reason: str) -> None:
+    return None
+
+
 def _g1_pipeline() -> WebDatasetPipeline:
     pipeline = object.__new__(WebDatasetPipeline)
-    pipeline.metadata_adapter = lambda raw: raw
+    pipeline.metadata_adapter = _identity_adapter
     pipeline.metadata_fields = MetadataFieldMapping(id_field="id")
     pipeline.base_seed = 7
     pipeline.stage = "G1"
@@ -253,12 +264,12 @@ def _g1_pipeline() -> WebDatasetPipeline:
     pipeline.framing = FramingContract(34, 5, 248044)
     pipeline.buckets = _G1_BUCKETS
     pipeline.min_crop_retention = _MIN_CROP_RETENTION
-    pipeline.rejection_observer = lambda _reason: None
+    pipeline.rejection_observer = _noop_observer
     pipeline.spatial_policy = None
     pipeline.transparent_policy = None
     pipeline.transparent_telemetry = TransparentWhiteTelemetry()  # pyright: ignore[reportAttributeAccessIssue]
     pipeline.camera_policy = _policy()
-    pipeline._camera_stage_edge = camera_stage_edge(_G1_BUCKETS)  # pyright: ignore[reportAttributeAccessIssue]
+    pipeline._camera_stage_edge = camera_stage_edge(_G1_BUCKETS)  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     return cast(Any, pipeline)
 
 
@@ -269,12 +280,12 @@ def test_g1_pipeline_emits_256x256_viewport_for_512x256_source() -> None:
         "json": b'{"id": 1}',
         "png": _flat_png(512, 256),
     }
-    result = _g1_pipeline()._process(
+    result = _g1_pipeline()._process(  # pyright: ignore[reportPrivateUsage]
         sample,
         {_SHARD: ShardRecord(path=_SHARD, bytes=1)},
     )
     assert result is not None
-    processed = cast(PipelineSample, result)
+    processed = result
     assert processed.image.shape[-2:] == (256, 256)
     assert processed.target_height == 256
     assert processed.target_width == 256

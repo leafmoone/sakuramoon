@@ -11,12 +11,14 @@ import math
 import pickle
 import random
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from sakuramoon.config.schema import DataBucketsConfig
 from sakuramoon.data.buckets import (
     BucketRejection,
+    BucketShape,
     assign_bucket,
     generate_base_buckets,
     scale_buckets,
@@ -38,7 +40,7 @@ from sakuramoon.data.camera_viewport import (
 STAGE_EDGE = 512
 
 
-def _buckets() -> tuple:
+def _buckets() -> tuple[BucketShape, ...]:
     config = DataBucketsConfig(
         base_area_px=262144,
         quantum_px=32,
@@ -53,7 +55,7 @@ def _buckets() -> tuple:
 BUCKETS = _buckets()
 
 
-def _assignment(width: int, height: int, buckets=None):
+def _assignment(width: int, height: int, buckets: tuple[BucketShape, ...] | None = None):
     result = assign_bucket(
         width,
         height,
@@ -68,7 +70,7 @@ def _plan(
     width: int,
     height: int,
     *,
-    buckets=None,
+    buckets: tuple[BucketShape, ...] | None = None,
     probability: float = 1.0,
     policy_seed: int = 1,
     offset_seed: int = 1,
@@ -98,7 +100,11 @@ def test_square_bucket_discovery() -> None:
     assert discover_square_bucket(BUCKETS, stage_edge=256) is None
     assert (
         discover_square_bucket(
-            (type("B", (), {"width": 512, "height": 512})(),),
+            # Duck-type stand-in: the discovery contract reads width/height only.
+            cast(
+                "tuple[BucketShape, ...]",
+                (type("B", (), {"width": 512, "height": 512})(),),
+            ),
             stage_edge=STAGE_EDGE,
         )
         == STAGE_EDGE

@@ -280,25 +280,51 @@ FUTURE_STAGE_512 (stage_edge = 512, explicitly NOT current G1):
 - affected pre-existing tests updated = 10 (schema-11 ordinary band).
 - ruff = clean on the C1 diff surface (only the pre-existing baseline
   flag in tests/gpu/optim/cmuon_capsule_teardown.py remains, untouched).
-- pyright = controlled comparison vs the full 3a341c0 worktree
-  (per-file diagnostic SET comparison, message-level): every non-C1 file
-  identical; C1-added/modified files carry ZERO new diagnostics and no
-  baseline diagnostic was lost (total = 820 on both trees). The initial
-  +27 camera-attributable delta (camera_eval +1, metrics +24, observer
-  +2) was closed in the types commit by typing-only changes: optional
-  camera tables narrowed through unreachable-None locals + a
-  _required_camera_table helper, the torch tolist() stubs boundary
-  replaced by a single .cpu() transfer + per-element .item(), and a
-  local cast(TrainableComposite) at the camera_eval load boundary. No
-  pyright ignores added (two pre-existing targeted ignores in the camera
-  observer path were removed); no config/strictness changes.
+- pyright = controlled per-file comparison vs the full 3a341c0 worktree
+  (/tmp/c1-wt), verified in two independent environments:
+  (a) codex-session run (recorded with 103b12b): tree totals 820 on
+      both sides; every non-C1 file identical; the initial +27
+      camera-attributable delta (camera_eval +1, metrics +24, observer
+      +2, all in src) closed in 103b12b by typing-only changes:
+      optional camera tables narrowed through unreachable-None locals +
+      a _required_camera_table helper, the DTK tolist() stubs boundary
+      replaced by a single .cpu() transfer + per-element .item(), and a
+      local cast(TrainableComposite) at the camera_eval load boundary.
+      No pyright ignores added (two pre-existing targeted ignores in the
+      camera observer path were removed); no config/strictness changes.
+  (b) final closure re-verification (documented environment): pyright
+      1.1.411 (DTK venv CLI) with the repo pyproject strict config;
+      import resolution through the workspace .venv ->
+      /sakuramoon-runtime/venv-pyright-union (472 package symlinks: DTK
+      site-packages first, system /usr/local site-packages fill;
+      required because the DTK venv lacks torch/PIL while the system
+      python lacks pytest, and pyright does not honor
+      include-system-site-packages). Tree totals 3296 on both sides;
+      all 103 non-C1 files byte-identical per-file (line, rule,
+      message) = 0 mismatches; C1-added/modified files = 0 new
+      diagnostics (message-level multiset diff). In this environment
+      the pre-closure C1 tree carried 124 new diagnostics, all in six
+      C1 test files (BUCKETS/fixture typing, untyped lambdas, protected
+      access, unnecessary casts, StageEdge literal, dict[str, object]
+      **kwargs); all closed in C1_TYPES_TESTS_COMMIT by typing-only
+      edits: explicit annotations, local casts, typed helper defs, and
+      targeted reportPrivateUsage ignores matching the repo's
+      established pattern.
 - targeted suite (13 files, camera + stage-scaling + affected telemetry/
-  spatial/pipeline) = 116 passed.
+  spatial/pipeline) = 116 passed; re-verified on the final tree across
+  14 files (superset incl. test_spatial_crop.py + test_pipeline.py)
+  = 152 passed, 0 failed.
 - full pytest (corrected tree) = 9 failed / 872 passed / 2
   skipped / 1 error (914.55s); 872 = 784 baseline + 78 C1 + 10
   stage-scaling; failure set BYTE-IDENTICAL to the baseline
   (9 failed + 1 onnxruntime collection error, all pre-existing); 0 new
   functional failures.
+- full pytest (final tree, after the types commits,
+  --continue-on-collection-errors) = 9 failed / 872 passed / 2
+  skipped / 1 error (926.36s); the 10 failed/errored items are
+  byte-identical to the dev@3a341c0 baseline run (9 failed + 1
+  onnxruntime collection error, all pre-existing); 872 = 784 baseline
+  + 88 C1; 0 new functional failures, 0 new skips.
 - new functional failures = 0 (verified on the corrected tree).
 - new skips = 0.
 
@@ -306,9 +332,15 @@ FUTURE_STAGE_512 (stage_edge = 512, explicitly NOT current G1):
 
 - C1_DATA_COMMIT = 88250e9 (data: add HDM-style shifted-square camera viewport)
 - C1_TELEMETRY_COMMIT = 75e6b6d (telemetry: add camera viewport observability and evaluation suite)
-- C1_CORRECTION_COMMIT = this commit
+- C1_CORRECTION_COMMIT = 8b525ef
   (fix: scale camera viewport to active stage resolution)
-- No push; no origin/camera-v2 remote branch; `model` symlink untracked.
+- C1_TYPES_COMMIT = 103b12b (types: close camera viewport C1
+  type-check gate; src typing-only narrowing + this audit update)
+- C1_TYPES_TESTS_COMMIT = this commit
+  (types: close camera viewport C1 test-file type-check gate;
+  typing-only cleanup of the six C1 test files + final audit numbers)
+- No push; no origin/camera-v2 remote branch; `model` and `.venv`
+  symlinks untracked.
 
 ## Pipeline target fix (C1 internal finding)
 

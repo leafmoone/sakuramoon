@@ -13,9 +13,11 @@ import dataclasses
 import json
 from pathlib import Path
 
-from sakuramoon.config import load_config
+from sakuramoon.config import LoadedConfig, load_config
 from sakuramoon.train.preflight import DATA_POLICY_TRANSITION_KIND
-from sakuramoon.train.production import _record_data_policy_resume_transition
+from sakuramoon.train.production import (
+    _record_data_policy_resume_transition,  # pyright: ignore[reportPrivateUsage]
+)
 
 CONFIG_ROOT = Path("config")
 
@@ -47,7 +49,7 @@ def _load(name: str):
     return load_config(Path(name), config_root=CONFIG_ROOT, validate_secrets=False)
 
 
-def _artifact(tmp_path: Path, loaded) -> Path:
+def _artifact(tmp_path: Path, loaded: LoadedConfig) -> Path:
     return tmp_path / loaded.config.paths.artifact_dir / "data_policy_transition.json"
 
 

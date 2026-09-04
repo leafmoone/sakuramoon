@@ -92,12 +92,20 @@ def _buckets() -> tuple[BucketShape, ...]:
 BUCKETS = _buckets()
 
 
+def _identity_adapter(metadata: Mapping[str, object]) -> Mapping[str, object]:
+    return metadata
+
+
+def _noop_observer(reason: str) -> None:
+    return None
+
+
 def _pipeline(
     *,
     camera_policy: CameraViewportPolicy | None,
 ) -> WebDatasetPipeline:
     pipeline = object.__new__(WebDatasetPipeline)
-    pipeline.metadata_adapter = lambda raw: raw
+    pipeline.metadata_adapter = _identity_adapter
     pipeline.metadata_fields = MetadataFieldMapping(id_field="id")
     pipeline.base_seed = 7
     pipeline.stage = "S0"
@@ -109,12 +117,12 @@ def _pipeline(
     pipeline.framing = FramingContract(34, 5, 248044)
     pipeline.buckets = BUCKETS
     pipeline.min_crop_retention = 0.8
-    pipeline.rejection_observer = lambda _reason: None
+    pipeline.rejection_observer = _noop_observer
     pipeline.spatial_policy = None
     pipeline.transparent_policy = None
     pipeline.transparent_telemetry = TransparentWhiteTelemetry()  # pyright: ignore[reportAttributeAccessIssue]
     pipeline.camera_policy = camera_policy
-    pipeline._camera_stage_edge = camera_stage_edge(BUCKETS)  # pyright: ignore[reportAttributeAccessIssue]
+    pipeline._camera_stage_edge = camera_stage_edge(BUCKETS)  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     return cast(Any, pipeline)
 
 
@@ -130,12 +138,12 @@ def _process_sample(
         "json": b'{"id": ' + str(sample_id).encode("ascii") + b"}",
         "png": image_bytes,
     }
-    result = pipeline._process(
+    result = pipeline._process(  # pyright: ignore[reportPrivateUsage]
         sample,
         {_SHARD: ShardRecord(path=_SHARD, bytes=1)},
     )
     assert result is not None, "decodable sample must not be rejected"
-    return cast(PipelineSample, result)
+    return result
 
 
 def _policy(

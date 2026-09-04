@@ -7,6 +7,9 @@ JSON / W&B payload shape the canary gates read.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any, cast
+
 import pytest
 
 from sakuramoon.data.camera_viewport import (
@@ -52,7 +55,7 @@ def _base_metric(**camera: object) -> TrainingMetric:
 
     condition_routes = {key: 0 for key in CONDITION_ROUTE_KEYS}
     condition_routes[next(iter(CONDITION_ROUTE_KEYS))] = 20
-    kwargs: dict[str, object] = {
+    kwargs: dict[str, Any] = {
         "successful_update": 1,
         "recorded_at_unix_ns": 1,
         "total_loss": 1.0,
@@ -88,7 +91,7 @@ def _base_metric(**camera: object) -> TrainingMetric:
         "camera_ordinary_loss_count": 20,
     }
     kwargs.update(camera)
-    return TrainingMetric(  # type: ignore[arg-type]
+    return TrainingMetric(
         phase_seconds={key: 0.01 for key in TIMING_PHASES}, **kwargs
     )
 
@@ -121,14 +124,21 @@ def test_legacy_metric_is_strict_zero_outside_ordinary_band() -> None:
         assert document[key] == 0, key
     assert document["camera_ordinary_loss_count"] == 20
     assert document["camera_ordinary_loss_sum"] == 20.0
-    assert document["camera_fallback_reasons"]["none"] == 20
+    fallback = cast("Mapping[str, int]", document["camera_fallback_reasons"])
+    assert fallback["none"] == 20
     for reason in CAMERA_FALLBACK_REASONS:
         if reason != "none":
-            assert document["camera_fallback_reasons"][reason] == 0
+            assert fallback[reason] == 0
+    zoom_histogram = cast(
+        "Mapping[str, int]", document["camera_zoom_histogram"]
+    )
     for label in CAMERA_ZOOM_BAND_LABELS:
-        assert document["camera_zoom_histogram"][label] == 0
+        assert zoom_histogram[label] == 0
+    shift_histogram = cast(
+        "Mapping[str, int]", document["camera_shift_token_histogram"]
+    )
     for label in CAMERA_SHIFT_TOKEN_BIN_LABELS:
-        assert document["camera_shift_token_histogram"][label] == 0
+        assert shift_histogram[label] == 0
 
 
 def test_legacy_metric_without_ordinary_partition_fails() -> None:
@@ -169,15 +179,20 @@ def test_applied_metric_full_contract() -> None:
     )
     document = metric.as_json_mapping()
     assert document["camera_viewport_applied"] == 3
-    assert (
-        document["camera_mild_loss_count"]
-        + document["camera_medium_loss_count"]
-        + document["camera_strong_loss_count"]
-        + document["camera_ordinary_loss_count"]
-        == 20
-    )
-    assert sum(document["camera_zoom_histogram"].values()) == 3
-    assert sum(document["camera_shift_token_histogram"].values()) == 3
+    band_counts = {
+        name: cast("int", document[name])
+        for name in (
+            "camera_mild_loss_count",
+            "camera_medium_loss_count",
+            "camera_strong_loss_count",
+            "camera_ordinary_loss_count",
+        )
+    }
+    assert sum(band_counts.values()) == 20
+    zoom = cast("Mapping[str, int]", document["camera_zoom_histogram"])
+    assert sum(zoom.values()) == 3
+    shift = cast("Mapping[str, int]", document["camera_shift_token_histogram"])
+    assert sum(shift.values()) == 3
 
 
 def test_applied_without_selected_fails() -> None:

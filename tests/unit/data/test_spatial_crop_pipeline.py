@@ -99,7 +99,7 @@ def _pipeline(
     pipeline.rejection_observer = lambda _reason: None
     pipeline.spatial_policy = spatial_policy
     pipeline.camera_policy = None  # pyright: ignore[reportAttributeAccessIssue]
-    pipeline._camera_stage_edge = 0  # pyright: ignore[reportAttributeAccessIssue]
+    pipeline._camera_stage_edge = 0  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     pipeline.transparent_policy = None
     pipeline.transparent_telemetry = TransparentWhiteTelemetry()  # pyright: ignore[reportAttributeAccessIssue]
     return cast(Any, pipeline)
