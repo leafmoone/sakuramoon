@@ -40,16 +40,36 @@ from sakuramoon.data.camera_viewport import (
 )
 from sakuramoon.data.image_ops import normalize_image, prepare_image
 
-STAGE_EDGE = 512
 MIN_CROP_RETENTION = 0.8
 WARMUP = 3
 REPEATS = 10
 
-_GEOMETRIES: tuple[tuple[str, int, int], ...] = (
-    ("square_256", 256, 256),
-    ("square_512", 512, 512),
-    ("wide_2to1", 1024, 512),
-    ("tall_2to1", 512, 1024),
+# Audited stages. R is discovered from each stage-scaled vocabulary at run
+# time (no hardcoded R): 256 = current G1 (config/train_g1.toml
+# [stage].resolution), 512 = a future stage, labeled FUTURE_STAGE_512.
+STAGES: tuple[tuple[str, int, tuple[tuple[str, int, int], ...]], ...] = (
+    (
+        "CURRENT_G1",
+        256,
+        (
+            ("square_128", 128, 128),
+            ("square_256", 256, 256),
+            ("wide_2to1", 512, 256),
+            ("tall_2to1", 256, 512),
+            ("wide_3to2", 384, 256),
+            ("tall_3to2", 256, 384),
+        ),
+    ),
+    (
+        "FUTURE_STAGE_512",
+        512,
+        (
+            ("square_256", 256, 256),
+            ("square_512", 512, 512),
+            ("wide_2to1", 1024, 512),
+            ("tall_2to1", 512, 1024),
+        ),
+    ),
 )
 
 
@@ -135,14 +155,21 @@ def _camera_path(decoded: Image.Image, plan):
     ).crop(plan.crop_box)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("reports/camera-viewport-v2-performance.json"),
+def _build_policy() -> CameraViewportPolicy:
+    return CameraViewportPolicy(
+        enabled=True,
+        probability=1.0,
+        min_equivalent_zoom=1.10,
+        max_equivalent_zoom=1.50,
     )
-    args = parser.parse_args(argv)
+
+
+def _audit_stage(
+    label: str,
+    stage_edge: int,
+    geometries: tuple[tuple[str, int, int], ...],
+) -> tuple[list[dict[str, object]], bool]:
+    """Time the ordinary and camera paths for one stage-scaled vocabulary."""
 
     config = DataBucketsConfig(
         base_area_px=262144,
@@ -152,17 +179,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         shape_count=17,
         transpose_closed=True,
     )
-    buckets = scale_buckets(generate_base_buckets(config), STAGE_EDGE)
-    policy = CameraViewportPolicy(
-        enabled=True,
-        probability=1.0,
-        min_equivalent_zoom=1.10,
-        max_equivalent_zoom=1.50,
-    )
+    buckets = scale_buckets(generate_base_buckets(config), stage_edge)
+    policy = _build_policy()
 
     results: list[dict[str, object]] = []
     double_resize_seen = False
-    for geometry, width, height in _GEOMETRIES:
+    for geometry, width, height in geometries:
         for fmt in ("JPEG", "PNG"):
             image_bytes = _encode(width, height, fmt)
             decoded = Image.open(io.BytesIO(image_bytes))
@@ -187,7 +209,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                     }
                                 )
                                 print(
-                                    f"[camera-perf] {geometry}/{fmt} rejected: {assignment.reason}",
+                                    f"[camera-perf] {label}/{geometry}/{fmt} rejected: {assignment.reason}",
                                     flush=True,
                                 )
                                 continue
@@ -202,7 +224,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 assignment,
                 policy,
                 buckets=buckets,
-                stage_edge=STAGE_EDGE,
+                stage_edge=stage_edge,
                 source_size=(source_width, source_height),
                 policy_seed=1,
                 offset_seed=1,
@@ -255,19 +277,44 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
             print(
-                f"[camera-perf] {geometry}/{fmt} ordinary={ordinary_ms:.3f}ms "
+                f"[camera-perf] {label}/{geometry}/{fmt} ordinary={ordinary_ms:.3f}ms "
                 f"(resizes={ordinary_resizes}) camera={camera_ms:.3f}ms "
                 f"(resizes={camera_resizes})",
                 flush=True,
             )
 
+    return results, double_resize_seen
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/camera-viewport-v2-performance.json"),
+    )
+    args = parser.parse_args(argv)
+
+    stages_out: list[dict[str, object]] = []
+    double_resize_seen = False
+    for label, stage_edge, geometries in STAGES:
+        results, stage_double = _audit_stage(label, stage_edge, geometries)
+        double_resize_seen = double_resize_seen or stage_double
+        stages_out.append(
+            {
+                "stage": label,
+                "stage_edge": stage_edge,
+                "results": results,
+            }
+        )
+
     document = {
         "audit": "camera_viewport_v2_performance",
-        "stage_edge": STAGE_EDGE,
+        "current_stage": "CURRENT_G1 (config/train_g1.toml [stage].resolution = 256)",
         "warmup": WARMUP,
         "repeats": REPEATS,
         "no_double_resize": not double_resize_seen,
-        "results": results,
+        "stages": stages_out,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(

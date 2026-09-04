@@ -18,7 +18,9 @@ Output: reports/camera-viewport-v2-distribution.json (+ console summary).
 Usage:
     python scripts/audit_camera_viewport_distribution.py \
         --samples 1000000 --seed 20260905 --probability 0.25 \
-        --stage-edge 512 --output reports/camera-viewport-v2-distribution.json
+        --stage-edge 256 --output reports/camera-viewport-v2-distribution.json
+    # 256 = current G1 stage.resolution (config/train_g1.toml [stage]).
+    # 512/768/1024 = future stage resolutions (label as FUTURE_STAGE_<edge>).
 """
 
 from __future__ import annotations
@@ -71,7 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--probability", type=float, default=0.25)
     parser.add_argument("--min-zoom", type=float, default=1.10)
     parser.add_argument("--max-zoom", type=float, default=1.50)
-    parser.add_argument("--stage-edge", type=int, default=512)
+    parser.add_argument("--stage-edge", type=int, default=256)
     parser.add_argument("--real-metadata", type=Path, default=None)
     parser.add_argument("--real-samples", type=int, default=100_000)
     parser.add_argument(

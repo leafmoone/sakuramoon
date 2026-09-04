@@ -1,6 +1,7 @@
 {
   "audit": "camera_viewport_v2_c1_audit",
   "phase": "C1",
+  "revision": "correction 2026-09-05 (current-stage bucket provenance)",
   "base": "3a341c0efa8aa6c82b41e508cf5fa2730e20fddb",
   "base_expected_equal_actual": true,
   "branch": "camera-v2",
@@ -40,6 +41,37 @@
     "caption_crop_mismatch": "scientific risk, disclosed, accepted",
     "exact_hdm_visual_parity_claimed": false
   },
+  "current_stage_provenance": {
+    "base_bucket": {
+      "equivalent_base_edge": 512,
+      "source": "config/base.toml data.buckets.base_area_px = 262144 (512-equivalent BASE family definition only)",
+      "incorrectly_used_as_runtime_edge": "NO"
+    },
+    "runtime": {
+      "current_stage_buckets_scaled_before_camera": "YES",
+      "call_chain": [
+        "config/train_g1.toml:86 resolution = 256",
+        "src/sakuramoon/data/production.py:808-811 buckets = scale_buckets(generate_base_buckets(config.data.buckets), config.stage.resolution)",
+        "src/sakuramoon/data/production.py:821-836 WebDatasetPipeline(buckets=buckets, camera_policy=...)",
+        "src/sakuramoon/data/pipeline.py:446 self._camera_stage_edge = camera_stage_edge(buckets)",
+        "src/sakuramoon/data/pipeline.py:605-613 plan_camera_viewport(buckets=self.buckets, stage_edge=self._camera_stage_edge, ...)",
+        "src/sakuramoon/data/camera_viewport.py:382-383 discover_square_bucket(buckets, stage_edge=...)"
+      ],
+      "vocabulary_driven_discovery": true,
+      "fail_closed_no_square_bucket": true,
+      "r_inferred_from_base_area_px": "NO",
+      "unscaled_base_family_used": "NO",
+      "source_512x256_at_g1_camera_feasible": "YES (full canvas 512x256, viewport 256x256, z = sqrt(2), applied)"
+    },
+    "correction_scope": [
+      "scripts/audit_camera_viewport_distribution.py default --stage-edge 512 -> 256 (current G1) + usage note",
+      "scripts/audit_camera_viewport_performance.py restructured into CURRENT_G1 (256) + FUTURE_STAGE_512 sections",
+      "reports/camera-viewport-v2-{distribution,performance}.json regenerated at current G1",
+      "reports/camera-viewport-v2-audit.{md,json} rewritten (this revision)",
+      "tests/unit/data/test_camera_viewport_stage_scaling.py (new, 10 tests)"
+    ],
+    "production_path_bug": "NONE (runtime already stage-scaled; only the offline audit used R=512)"
+  },
   "f3": {
     "semantic_commit": "147355d",
     "remote_head": "b4f3709",
@@ -50,19 +82,35 @@
   },
   "geometry": {
     "mode": "hdm_shifted_square_v2",
-    "viewport": 512,
+    "r_discovery": "unique square of scale_buckets(generate_base_buckets(data.buckets), stage.resolution); fail-closed; no hardcoded R",
+    "current_g1_stage_resolution": 256,
+    "current_g1_viewport": 256,
+    "future_stage_squares": {
+      "512": 512,
+      "768": 768,
+      "1024": 1024
+    },
     "ordinary_admission_preserved": true,
     "no_upscale": true,
     "min_zoom": 1.1,
     "max_zoom": 1.5,
     "retention_floor": 0.4444444444444444,
     "inclusive_offset": true,
-    "quantized_no_effect_unreachable_at_r512": true,
-    "fallback_reasons": 7
+    "quantized_no_effect_unreachable": "proven at R=512; 0 occurrences at R=256 in 1M audit",
+    "fallback_reasons": 7,
+    "g1_feasibility": {
+      "512x256": "applied, full 512x256, z = sqrt(2)",
+      "256x512": "applied, vertical mirror",
+      "384x256": "applied, z = sqrt(1.5)",
+      "256x384": "applied, z = sqrt(1.5)",
+      "256x256": "admitted (no upscale needed), fallback near_square_below_min",
+      "128x128": "ordinary rejection no_upscale (sub-stage at G1)"
+    }
   },
   "coordinates": {
     "formula": "(base + [y_shift, x_shift]) / zoom on FP32 [T,2] (y,x order)",
-    "training_full_canvas_equivalence_max_error": 1.192e-07,
+    "training_full_canvas_equivalence_max_error_r512": 1.192e-07,
+    "training_full_canvas_equivalence_max_error_r256": 1.192e-07,
     "equivalence_unit_test_tolerance": 2e-06,
     "text_anchor": 0.0,
     "condition_anchor": 0.0,
@@ -106,30 +154,50 @@
     "legacy_resolved_sha256": "833850a7d63f6e79c76bc46330c5d06bef285b635a60ea427c17f5ba70accd4b",
     "v1_spatial_preserved": true,
     "mutual_exclusion": true,
+    "stage_resolution_inherited": "p25/p50 do not override [stage]; inherit 256 at current G1",
     "p25": "config/train_g1_camera_v2_p25.toml (NOT deployed)",
     "p50": "config/train_g1_camera_v2_p50.toml (LOCKED)"
   },
   "distribution": {
+    "stage_edge": 256,
+    "stage": "CURRENT_G1",
     "synthetic_samples": 1000000,
     "seed": 20260905,
-    "admitted": 932773,
-    "selected_rate": 0.24966631752848764,
+    "admitted": 1000000,
+    "admission_rate": 1.0,
+    "selected": 249762,
+    "selected_rate": 0.249762,
     "binomial_5sigma_pass": true,
-    "applied": 95952,
-    "applied_rate_total": 0.095952,
+    "binomial_observed_minus_expected": -238.0,
+    "applied": 112123,
+    "applied_rate_total": 0.112123,
+    "applied_given_admitted": 0.112123,
     "zoom_bands": {
-      "[1.10,1.20)": 27202,
-      "[1.20,1.35)": 36376,
-      "[1.35,1.501]": 32374
+      "[1.10,1.20)": 31503,
+      "[1.20,1.35)": 42673,
+      "[1.35,1.501]": 37947
     },
-    "latent_shift_p50": 4.375,
-    "latent_shift_p90": 11.6875,
-    "latent_shift_max": 20.0,
-    "pixel_shift_p50": 70.0,
-    "pixel_shift_p90": 187.0,
-    "pixel_shift_max": 320.0,
-    "square_bucket_before": 0.04157495982409439,
-    "square_bucket_after": 0.14444243133109555,
+    "fallback_reasons": {
+      "none": 112123,
+      "not_selected": 750238,
+      "short_edge_too_small": 0,
+      "near_square_below_min": 34326,
+      "aspect_above_max": 103313,
+      "quantized_no_effect": 0,
+      "no_square_bucket": 0
+    },
+    "orientation": {
+      "horizontal": 55926,
+      "vertical": 56197
+    },
+    "latent_shift_p50": 2.21875,
+    "latent_shift_p90": 5.84375,
+    "latent_shift_max": 10.0,
+    "pixel_shift_p50": 35.5,
+    "pixel_shift_p90": 93.5,
+    "pixel_shift_max": 160.0,
+    "square_bucket_before": 0.045308,
+    "square_bucket_after": 0.157431,
     "real_metadata_audit": "PENDING",
     "invariants": {
       "crop_inside_full_canvas": true,
@@ -140,135 +208,323 @@
       "all_applied_outputs_square": true,
       "ordinary_fallback_unchanged": true,
       "inclusive_endpoints_reachable": true
-    }
+    },
+    "old_r512_numbers": "superseded; FUTURE_STAGE_512 measurement only, not a G1 p25 basis"
   },
   "performance": {
     "no_double_resize": true,
-    "camera_resize_calls_per_image": [
-      1.0,
-      1.0,
-      1.0,
-      1.0
-    ],
-    "sub_stage_256_rejection": "no_upscale (never reaches the camera path)",
-    "results": [
-      {
-        "geometry": "square_256",
-        "format": "JPEG",
-        "source": "256x256",
-        "admissible": false,
-        "rejection_reason": "no_upscale"
-      },
-      {
-        "geometry": "square_256",
-        "format": "PNG",
-        "source": "256x256",
-        "admissible": false,
-        "rejection_reason": "no_upscale"
-      },
-      {
-        "geometry": "square_512",
-        "format": "JPEG",
-        "source": "512x512",
-        "admissible": true,
-        "ordinary_bucket": "512x512",
-        "camera_applied": false,
-        "camera_full_canvas": null,
-        "ordinary_ms": 7.669,
-        "ordinary_resize_calls": 13,
-        "ordinary_crop_calls": 13,
-        "camera_ms": 0.0,
-        "camera_resize_calls": 0,
-        "camera_crop_calls": 0,
-        "camera_resize_calls_per_image": null,
-        "timed_calls": 13
-      },
-      {
-        "geometry": "square_512",
-        "format": "PNG",
-        "source": "512x512",
-        "admissible": true,
-        "ordinary_bucket": "512x512",
-        "camera_applied": false,
-        "camera_full_canvas": null,
-        "ordinary_ms": 0.8581,
-        "ordinary_resize_calls": 13,
-        "ordinary_crop_calls": 13,
-        "camera_ms": 0.0,
-        "camera_resize_calls": 0,
-        "camera_crop_calls": 0,
-        "camera_resize_calls_per_image": null,
-        "timed_calls": 13
-      },
-      {
-        "geometry": "wide_2to1",
-        "format": "JPEG",
-        "source": "1024x512",
-        "admissible": true,
-        "ordinary_bucket": "736x352",
-        "camera_applied": true,
-        "camera_full_canvas": "1024x512",
-        "ordinary_ms": 49.0035,
-        "ordinary_resize_calls": 13,
-        "ordinary_crop_calls": 13,
-        "camera_ms": 9.0804,
-        "camera_resize_calls": 13,
-        "camera_crop_calls": 13,
-        "camera_resize_calls_per_image": 1.0,
-        "timed_calls": 13
-      },
-      {
-        "geometry": "wide_2to1",
-        "format": "PNG",
-        "source": "1024x512",
-        "admissible": true,
-        "ordinary_bucket": "736x352",
-        "camera_applied": true,
-        "camera_full_canvas": "1024x512",
-        "ordinary_ms": 48.3605,
-        "ordinary_resize_calls": 13,
-        "ordinary_crop_calls": 13,
-        "camera_ms": 0.3795,
-        "camera_resize_calls": 13,
-        "camera_crop_calls": 13,
-        "camera_resize_calls_per_image": 1.0,
-        "timed_calls": 13
-      },
-      {
-        "geometry": "tall_2to1",
-        "format": "JPEG",
-        "source": "512x1024",
-        "admissible": true,
-        "ordinary_bucket": "352x736",
-        "camera_applied": true,
-        "camera_full_canvas": "512x1024",
-        "ordinary_ms": 39.6858,
-        "ordinary_resize_calls": 13,
-        "ordinary_crop_calls": 13,
-        "camera_ms": 0.4249,
-        "camera_resize_calls": 13,
-        "camera_crop_calls": 13,
-        "camera_resize_calls_per_image": 1.0,
-        "timed_calls": 13
-      },
-      {
-        "geometry": "tall_2to1",
-        "format": "PNG",
-        "source": "512x1024",
-        "admissible": true,
-        "ordinary_bucket": "352x736",
-        "camera_applied": true,
-        "camera_full_canvas": "512x1024",
-        "ordinary_ms": 39.7065,
-        "ordinary_resize_calls": 13,
-        "ordinary_crop_calls": 13,
-        "camera_ms": 0.3487,
-        "camera_resize_calls": 13,
-        "camera_crop_calls": 13,
-        "camera_resize_calls_per_image": 1.0,
-        "timed_calls": 13
-      }
-    ]
+    "current_g1": {
+      "stage_edge": 256,
+      "results": [
+        {
+          "geometry": "square_128",
+          "format": "JPEG",
+          "source": "128x128",
+          "admissible": false,
+          "rejection_reason": "no_upscale"
+        },
+        {
+          "geometry": "square_128",
+          "format": "PNG",
+          "source": "128x128",
+          "admissible": false,
+          "rejection_reason": "no_upscale"
+        },
+        {
+          "geometry": "square_256",
+          "format": "JPEG",
+          "source": "256x256",
+          "admissible": true,
+          "ordinary_bucket": "256x256",
+          "camera_applied": false,
+          "camera_full_canvas": null,
+          "ordinary_ms": 0.122,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.0,
+          "camera_resize_calls": 0,
+          "camera_crop_calls": 0,
+          "camera_resize_calls_per_image": null,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "square_256",
+          "format": "PNG",
+          "source": "256x256",
+          "admissible": true,
+          "ordinary_bucket": "256x256",
+          "camera_applied": false,
+          "camera_full_canvas": null,
+          "ordinary_ms": 0.1076,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.0,
+          "camera_resize_calls": 0,
+          "camera_crop_calls": 0,
+          "camera_resize_calls_per_image": null,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "wide_2to1",
+          "format": "JPEG",
+          "source": "512x256",
+          "admissible": true,
+          "ordinary_bucket": "368x176",
+          "camera_applied": true,
+          "camera_full_canvas": "512x256",
+          "ordinary_ms": 3.4057,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.109,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "wide_2to1",
+          "format": "PNG",
+          "source": "512x256",
+          "admissible": true,
+          "ordinary_bucket": "368x176",
+          "camera_applied": true,
+          "camera_full_canvas": "512x256",
+          "ordinary_ms": 3.3859,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.1067,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "tall_2to1",
+          "format": "JPEG",
+          "source": "256x512",
+          "admissible": true,
+          "ordinary_bucket": "176x368",
+          "camera_applied": true,
+          "camera_full_canvas": "256x512",
+          "ordinary_ms": 3.3761,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.1093,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "tall_2to1",
+          "format": "PNG",
+          "source": "256x512",
+          "admissible": true,
+          "ordinary_bucket": "176x368",
+          "camera_applied": true,
+          "camera_full_canvas": "256x512",
+          "ordinary_ms": 3.3861,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.1093,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "wide_3to2",
+          "format": "JPEG",
+          "source": "384x256",
+          "admissible": true,
+          "ordinary_bucket": "320x208",
+          "camera_applied": true,
+          "camera_full_canvas": "384x256",
+          "ordinary_ms": 2.9648,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.0915,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "wide_3to2",
+          "format": "PNG",
+          "source": "384x256",
+          "admissible": true,
+          "ordinary_bucket": "320x208",
+          "camera_applied": true,
+          "camera_full_canvas": "384x256",
+          "ordinary_ms": 2.7397,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.0928,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "tall_3to2",
+          "format": "JPEG",
+          "source": "256x384",
+          "admissible": true,
+          "ordinary_bucket": "208x320",
+          "camera_applied": true,
+          "camera_full_canvas": "256x384",
+          "ordinary_ms": 2.7212,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.0902,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "tall_3to2",
+          "format": "PNG",
+          "source": "256x384",
+          "admissible": true,
+          "ordinary_bucket": "208x320",
+          "camera_applied": true,
+          "camera_full_canvas": "256x384",
+          "ordinary_ms": 2.7285,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.0926,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        }
+      ]
+    },
+    "future_stage_512": {
+      "stage_edge": 512,
+      "label": "FUTURE_STAGE_512 (NOT current G1)",
+      "results": [
+        {
+          "geometry": "square_256",
+          "format": "JPEG",
+          "source": "256x256",
+          "admissible": false,
+          "rejection_reason": "no_upscale"
+        },
+        {
+          "geometry": "square_256",
+          "format": "PNG",
+          "source": "256x256",
+          "admissible": false,
+          "rejection_reason": "no_upscale"
+        },
+        {
+          "geometry": "square_512",
+          "format": "JPEG",
+          "source": "512x512",
+          "admissible": true,
+          "ordinary_bucket": "512x512",
+          "camera_applied": false,
+          "camera_full_canvas": null,
+          "ordinary_ms": 1.1343,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.0,
+          "camera_resize_calls": 0,
+          "camera_crop_calls": 0,
+          "camera_resize_calls_per_image": null,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "square_512",
+          "format": "PNG",
+          "source": "512x512",
+          "admissible": true,
+          "ordinary_bucket": "512x512",
+          "camera_applied": false,
+          "camera_full_canvas": null,
+          "ordinary_ms": 0.9003,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.0,
+          "camera_resize_calls": 0,
+          "camera_crop_calls": 0,
+          "camera_resize_calls_per_image": null,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "wide_2to1",
+          "format": "JPEG",
+          "source": "1024x512",
+          "admissible": true,
+          "ordinary_bucket": "736x352",
+          "camera_applied": true,
+          "camera_full_canvas": "1024x512",
+          "ordinary_ms": 14.6049,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 1.425,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "wide_2to1",
+          "format": "PNG",
+          "source": "1024x512",
+          "admissible": true,
+          "ordinary_bucket": "736x352",
+          "camera_applied": true,
+          "camera_full_canvas": "1024x512",
+          "ordinary_ms": 13.0416,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.3297,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "tall_2to1",
+          "format": "JPEG",
+          "source": "512x1024",
+          "admissible": true,
+          "ordinary_bucket": "352x736",
+          "camera_applied": true,
+          "camera_full_canvas": "512x1024",
+          "ordinary_ms": 13.0449,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.3254,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        },
+        {
+          "geometry": "tall_2to1",
+          "format": "PNG",
+          "source": "512x1024",
+          "admissible": true,
+          "ordinary_bucket": "352x736",
+          "camera_applied": true,
+          "camera_full_canvas": "512x1024",
+          "ordinary_ms": 12.9731,
+          "ordinary_resize_calls": 13,
+          "ordinary_crop_calls": 13,
+          "camera_ms": 0.3444,
+          "camera_resize_calls": 13,
+          "camera_crop_calls": 13,
+          "camera_resize_calls_per_image": 1.0,
+          "timed_calls": 13
+        }
+      ]
+    },
+    "camera_p25_amortized_current_g1_ms_per_effective_image": 0.0031
   },
   "camera_eval": {
     "manifest_points": 23,
@@ -279,7 +535,7 @@
       "zoom_out_extrapolation",
       "decoupled_shift_extrapolation"
     ],
-    "manifest": "src/sakuramoon/cli/camera_eval.py::build_camera_eval_manifest"
+    "resolution_source": "config.stage.resolution (camera_eval.py:286; 256 at current G1)"
   },
   "transition_contract": {
     "record": "data_policy_transition.json (sakuramoon.data_policy_transition.v1)",
@@ -291,14 +547,17 @@
     "forbidden_prefixes_touched": []
   },
   "tests": {
-    "new_camera_tests": 78,
-    "new_camera_test_files": 7,
+    "new_camera_tests": 88,
+    "new_camera_test_files": 8,
+    "stage_scaling_tests": 10,
     "affected_preexisting_tests_updated": 10,
+    "targeted_suite": "13 files, 116 passed",
     "ruff": "clean on C1 diff surface (pre-existing baseline flag in tests/gpu/optim/cmuon_capsule_teardown.py untouched)",
-    "pyright": "controlled comparison: all non-C1 files byte-identical per-file error counts vs 3a341c0 worktree; C1 files carry only error classes already present in their files' established patterns",
+    "pyright": "controlled comparison vs full 3a341c0 worktree: all non-C1 files byte-identical per-file counts; C1 delta +27 (camera_eval +1, metrics +24, observer +2) in established file-local error classes",
     "baseline_failures": "9 failed + 1 collection error (onnxruntime), all pre-existing",
     "new_functional_failures": 0,
-    "new_skips": 0
+    "new_skips": 0,
+    "full_pytest_corrected_tree": "9 failed / 872 passed / 2 skipped / 1 error (914.55s); failure set byte-identical to the 3a341c0 baseline (9F + 1E onnxruntime); 872 = 784 baseline + 78 C1 + 10 stage-scaling; 0 new functional failures"
   },
   "forbidden_diff_check": {
     "zero_diff_required": [
@@ -319,5 +578,10 @@
     "push": false,
     "p25_started": false
   },
-  "verdict": "CAMERA_VIEWPORT_V2_C1 = PASS"
+  "commits": {
+    "c1_data": "88250e9",
+    "c1_telemetry": "75e6b6d",
+    "c1_correction": "this commit (HEAD): fix: scale camera viewport to active stage resolution"
+  },
+  "verdict": "CAMERA_VIEWPORT_V2_C1 = PASS (corrected, stage 256)"
 }
