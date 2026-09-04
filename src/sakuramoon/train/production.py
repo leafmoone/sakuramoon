@@ -745,9 +745,9 @@ def _resume_state_for_config(
     """Apply explicit governed resume-policy changes to a validated RAW state."""
 
     terminal = state.stage_budget.terminal_successful_update
-    configured_terminal = (
-        state.stage_budget.start_successful_update + config.stage.planned_updates
-    )
+    # stage.planned_updates is the absolute successful-update terminal; the
+    # restored stage_budget reads this value live on every resume.
+    configured_terminal = config.stage.planned_updates
     if configured_terminal < terminal:
         raise ValueError("configured planned updates cannot shrink checkpoint budget")
     resumed = state
