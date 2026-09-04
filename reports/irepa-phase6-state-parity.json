@@ -1,0 +1,119 @@
+{
+  "phase": "6A",
+  "title": "iREPA Phase 6A final-dev integration state parity summary",
+  "date": "2026-09-04",
+  "machine": "salt13 (2x BW DCU, DTK torch 2.9.0+das)",
+  "verdict": "PASS",
+  "anchors": {
+    "p5_head": "4571d75b006c77e628a693fa7038dece47556db2",
+    "p55_evidence_head": "87cc153803362fc6068c42b356fc02e614cb6c5a",
+    "final_dev": "3a341c0efa8aa6c82b41e508cf5fa2730e20fddb",
+    "merge_base_verified": "f045f87830913a0220d66a60408b856508d68910",
+    "merge_commit": "174c52a076e403ef98b002f70a9a5dc550ffacf6",
+    "merge_parents_order": ["87cc153803362fc6068c42b356fc02e614cb6c5a", "3a341c0efa8aa6c82b41e508cf5fa2730e20fddb"],
+    "phase6_fix_head": "NONE"
+  },
+  "topology": {
+    "no_irepa": {"total": 289, "cmuon": 141, "adamw": 148, "gate": "PASS"},
+    "irepa": {"total": 291, "cmuon": 141, "adamw": 150, "gate": "PASS"},
+    "cmuon_fqn_set_invariant": true,
+    "adamw_added_fqns": ["irepa_alignment.projector.bias", "irepa_alignment.projector.weight"]
+  },
+  "migration_dry_run_finaldev_schema": {
+    "source_update": 2,
+    "anchor": 3,
+    "projector_in_channels": 2560,
+    "added_optimizer_parameters": 2,
+    "destination_written": false,
+    "gate": "PASS"
+  },
+  "s18_lambda_zero": {
+    "deterministic_primary_gate": "PASS",
+    "old_params_bit_exact": 289,
+    "cmuon_momenta_bit_exact": 141,
+    "adamw_entries_bit_exact": 148,
+    "sr_rng_bit_exact": true,
+    "guard_rescue_bit_exact": true,
+    "main_loss_bit_exact": true,
+    "total_equals_main": true,
+    "production_ns_leg": {
+      "gate": "PASS",
+      "worst_rel_rms": 0.004106,
+      "worst_param": "dit.conditioner.shared_block_projection.weight",
+      "tolerance": 0.05,
+      "margin_x": 12.2,
+      "phase5_measured": 0.004781,
+      "safety_failures": 0,
+      "nonfinite": 0,
+      "partial_commits": 0,
+      "rescue_counters_arm_a": {"bf16_attempts": 498, "bf16_safety_failures": 0, "fp32_attempts": 0, "fp32_rescues": 0, "fp32_rescue_failures": 0},
+      "rescue_counters_arm_b": {"bf16_attempts": 498, "bf16_safety_failures": 0, "fp32_attempts": 0, "fp32_rescues": 0, "fp32_rescue_failures": 0}
+    },
+    "duration_s": 347.53
+  },
+  "f3_regression": {
+    "unit_fp32_rescue_f3": "PASS",
+    "below_floor_finite": "ACCEPT",
+    "nonfinite": "FAIL (CMuonSafetyError, expected)",
+    "above_ceiling": "FAIL (CMuonSafetyError, expected)",
+    "two_rank_hcu": "PASS (verdict=PASS; healthy/soft_rescue/mixed_step ok with rank spread 0.0; above_ceiling + nonfinite raise CMuonSafetyError)"
+  },
+  "hardfail_forensic_isolation": {
+    "fp32_rescue_vs_finaldev_diff_lines": 0,
+    "guarded_canonical_vs_finaldev_diff_lines": 0,
+    "forensic_unit": "8 passed / 4 BASELINE_SHARED (pre-F3 expectations; reproduce on dev parent)"
+  },
+  "ddp_2rank_full_chain": "PASS (chain 89.8s; source_update=2 -> next_update=3; lambda_zero_parity=bit_exact (primary gate); 864 cross-rank fingerprints, 0 mismatches; guard 249 bf16 attempts, 0 failures)",
+  "compile_activation_ckpt_matrix": {
+    "legs": ["eager_none", "eager_alternating", "eager_all", "compile_none", "compile_all"],
+    "all_completed": true,
+    "loss_identical_across_legs": true,
+    "grad_norm_identical_across_legs": true,
+    "capture_actckpt_bit_identical": true,
+    "capture_compile_max_abs": 0.0078125,
+    "capture_compile_gate": "PASS (allclose rtol=2e-2 atol=1e-2)",
+    "gate": "PASS"
+  },
+  "performance_smoke": {
+    "A_final_dev_no_irepa": {"tree": "/tmp/rt-dev (3a341c0)", "tensors": 289, "median_s_per_update": 0.9406},
+    "B_integrated_no_irepa": {"tree": "merged v3", "tensors": 289, "median_s_per_update": 0.9284, "ratio_vs_A": 0.987},
+    "C_integrated_lambda_zero": {"tree": "merged v4 + teacher", "tensors": 291, "median_s_per_update": 0.9571, "overhead_vs_A": "+1.8%"},
+    "zero_impact_no_irepa_path": true,
+    "gate": "PASS"
+  },
+  "static": {
+    "ruff": "PASS (2 pre-existing fixes inside merge commit, proven pre-existing on both parents)",
+    "pyright_new_in_src": 0,
+    "pyright_union_baseline": {"merged": 599, "dev_parent": 600, "iprea_parent": 573},
+    "targeted_unit": "162 passed / 4 failed (4 = BASELINE_SHARED dev, verified on dev parent)",
+    "targeted_gpu_save": "6 passed"
+  },
+  "full_pytest": {
+    "merged_tree": "7 failed, 1040 passed, 3 skipped (2132s)",
+    "dev_parent": "7 failed, 810 passed, 2 skipped (1268s)",
+    "delta": "exactly the 230 new iREPA tests — all pass",
+    "integration_only_failures": 0,
+    "failure_set": "byte-identical across trees (same 7 test IDs)",
+    "shared_failures": {
+      "qwen_asset": "test_pipeline_encoders.py::test_real_pipeline_qwen_and_mage_encode_one_batch (asset absent on salt13)",
+      "varlen_host_metadata": "test_varlen_attention.py[host_metadata] (machine-independent baseline bug)",
+      "forensic_pre_f3": "4x test_cmuon_fp32_forensic.py (F2-expected pre-F3 semantics; reproduce on dev parent)",
+      "two_rank_single_gpu_env": "test_fp32_rescue.py::test_DE_two_rank_owner_only_and_consistency (identical in both trees)"
+    },
+    "extra_skip_merged": "test_pe_spatial_geometry.py::test_teacher_device_mismatch_rejected (new iREPA test; explicit pytest.skip 'requires two accelerators'; single-visible-DCU env; 2-rank path covered by dedicated DDP leg PASS 0/864)",
+    "gate": "PASS"
+  },
+  "cmuon_state_contract": {
+    "transparency_class": "A-literal-transparent",
+    "recursive_exact_finaldev_fixture_test": "PASS (tests/unit/checkpoint/test_irepa_migration_finaldev_state.py, untracked Phase6A artifact)",
+    "key_tree": "/tmp/irepa-phase6-final-cmuon-state.json"
+  },
+  "immutability": {
+    "dev_cmuon_files_verbatim": true,
+    "merge_scope_symmetric": true,
+    "pushes": 0,
+    "production_checkpoint_touched": false,
+    "training_started": false
+  },
+  "real_production_checkpoint_test": "PENDING (no user-copied COMPLETE RAW checkpoint on the experiment machine; not a FAIL per spec)"
+}

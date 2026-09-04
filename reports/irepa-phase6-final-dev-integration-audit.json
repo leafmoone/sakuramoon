@@ -1,0 +1,86 @@
+{
+  "phase": "6A",
+  "title": "iREPA Phase 6A final-dev integration + revalidation audit",
+  "date": "2026-09-04",
+  "machine": "salt13 (2x BW DCU, DTK torch 2.9.0+das)",
+  "verdict": "PASS — all 28 conditions met; stopped at user gate; Phase 6B NOT started",
+  "anchors": {
+    "p5_head": "4571d75b006c77e628a693fa7038dece47556db2",
+    "p55_evidence_head": "87cc153803362fc6068c42b356fc02e614cb6c5a",
+    "final_dev": "3a341c0efa8aa6c82b41e508cf5fa2730e20fddb",
+    "merge_base_verified": "f045f87830913a0220d66a60408b856508d68910",
+    "merge_commit": "174c52a076e403ef98b002f70a9a5dc550ffacf6",
+    "merge_parents_order": [
+      "87cc153803362fc6068c42b356fc02e614cb6c5a",
+      "3a341c0efa8aa6c82b41e508cf5fa2730e20fddb"
+    ],
+    "phase6_fix_head": "NONE"
+  },
+  "conditions": {
+    "01_entrance_remote_verified_worktree_p5_head": "PASS (CRLF-only drift; stash+branch backup; reset to 4571d75)",
+    "02_p55_evidence_commit_3_files_no_push": "PASS (87cc153)",
+    "03_tracked_p5_audit_counts_corrected": "PASS (8 targeted edits + Phase5.5 NOTE)",
+    "04_untracked_copy_report_corrected_sole_untracked": "PASS (Windows clone; 2 edits; 0 residual; untracked/unstaged/uncommitted)",
+    "05_overlap_exactly_3_files_hunk_disjoint_semantic_union": "PASS (/tmp/irepa-phase6-overlap-audit.txt)",
+    "06_merge_parents_order": "PASS",
+    "07_scope_both_directions": "PASS (dev set ∪ 1 lint fix; irepa set ∪ 1 lint fix)",
+    "08_cmuon_core_5_files_verbatim": "PASS (0-line diff vs 3a341c0)",
+    "09_f3_semantics_preserved": "PASS (stats_log_every_n=100; _trace_sample+rejection_observer kept; no per-sample spam)",
+    "10_f2_checkpoint_source_identity": "PASS (3 hits production.py)",
+    "11_terminal_planned_updates_fix": "PASS (both call sites)",
+    "12_production_toml_dev_byte_no_irepa_section_no_new_iprea_config": "PASS",
+    "13_ruff_pass": "PASS (2 pre-existing fixes documented, proven pre-existing per parent)",
+    "14_pyright_new_in_src_zero": "PASS (merged 599 ⊆ union(dev 600, iprea 573); GONE=1 = load.py reportUnnecessaryContains removed by P5)",
+    "15_targeted_unit_integration_only_failures_zero": "PASS (162P/4F; 4F reproduce on dev parent)",
+    "16_targeted_gpu_save": "PASS (6 passed)",
+    "17_finaldev_recursive_exact_migration_test": "PASS (tests/unit/checkpoint/test_irepa_migration_finaldev_state.py; untracked Phase6A artifact)",
+    "18_topology": "PASS (289/141/148 no-iREPA; 291/141/150 iREPA; CMuon 141 identical; AdamW delta = exactly 2 projector FQNs)",
+    "19_migration_dry_run_finaldev_schema": "PASS (real source chain; anchor=3=src+1; in_channels=2560; delta = exactly 2 projector FQNs; no destination write)",
+    "20_s18_deterministic_bit_exact": "PASS (289 params / 141 momenta / 148 AdamW / SR RNG / guard / losses bit-exact; TOTAL==MAIN)",
+    "21_production_ns_hcu_worst_rel_rms": "PASS (4.106e-3 ≤ 5e-2; margin 12.2x; worst param dit.conditioner.shared_block_projection.weight; Phase5 measured 4.781e-3; 0 safety failures/nonfinite/partial commits; rescue counters A==B)",
+    "22_f3_regression_unit_plus_2rank": "PASS (unit f3 suite; 2-rank verdict=PASS: healthy/soft_rescue/mixed_step ok spread 0.0; above_ceiling+nonfinite raise CMuonSafetyError)",
+    "23_hardfail_forensic_isolation": "PASS (0-line semantic delta; 4F = BASELINE_SHARED pre-F3)",
+    "24_ddp_2rank_full_chain": "PASS (0/864 mismatches; bit_exact primary gate; chain 89.8s; guard 249 bf16 attempts 0 failures)",
+    "25_compile_actckpt_matrix_production_shape": "PASS (5/5 legs; loss+grad identical; capture bit-stable act-ckpt / 1-ulp compile allclose)",
+    "26_performance_smoke": "PASS (A 0.9406s / B 0.9284s = -1.3% zero-impact / C 0.9571s = +1.8% at lambda=0)",
+    "27_telemetry_config_preflight": "PASS (irepa v11 splits superset; t-bin MAIN-JLT-only; production TOML no [irepa]; 6 preflight gate tests + tap + teacher PASS)",
+    "28_dual_full_pytest": "PASS (merged 1040P/7F/3S vs dev 810P/7F/2S; failure set byte-identical; delta = 230 new iREPA tests all pass; 1 extra skip = new iREPA 2-accel test by design)"
+  },
+  "invariants_cross_cutting": {
+    "pushes": 0,
+    "production_checkpoint_touched": false,
+    "salt11_salt14_untouched": true,
+    "salt12_untouched": true,
+    "training_started": false,
+    "copy_report_untracked_unstaged_uncommitted": true
+  },
+  "pending_items": {
+    "real_production_checkpoint_test": "PENDING — no user-copied COMPLETE RAW production checkpoint on the experiment machine (not a FAIL per spec)"
+  },
+  "deviations_documented": [
+    "entrance worktree at 00bd795 with uncommitted P5 work: remote verified first, byte-level reconciliation (CRLF-only), backup stash+branch, reset to 4571d75",
+    "P5 copy report lives in the Windows clone (not the salt13 worktree); corrected there; remains untracked",
+    "new final-dev recursive-exact test file kept untracked (respects the fix-commit budget; report-or-commit choice left to the user)",
+    "two pre-existing lint defects (1 per parent, proven) fixed inside the merge commit to satisfy the pre-commit ruff gate",
+    "one pre-existing cosmetic whitespace artifact in the dev-added production TOML left byte-identical (config/train_g1_cmuon_production.toml blank line at EOF)"
+  ],
+  "artifacts": {
+    "worktree_unstaged_reports": [
+      "reports/irepa-phase6-final-dev-integration-audit.md",
+      "reports/irepa-phase6-final-dev-integration-audit.json",
+      "reports/irepa-phase6-state-parity.json",
+      "reports/irepa-phase6-copy-report.md"
+    ],
+    "untracked_test": "tests/unit/checkpoint/test_irepa_migration_finaldev_state.py",
+    "tmp": [
+      "/tmp/irepa-phase6-overlap-audit.txt",
+      "/tmp/irepa-phase6-final-cmuon-state.json",
+      "/tmp/irepa-phase6-topology-dryrun.json",
+      "/tmp/irepa-phase6-compile-matrix.json",
+      "/tmp/collect-merged.txt",
+      "/tmp/collect-dev.txt"
+    ],
+    "hcu_logs": "/sakuramoon-runtime/p6a-*.log (topology, s18, s18hcu-report, ddp, f3, matrix, perf-{A,B,C}, fullest-{merged,dev})",
+    "json_results": "/sakuramoon-runtime/{p6a-ddp-smoke.json,p6a-f3.json,p6a-perf-A.json,p6a-perf-B.json,p6a-perf-C.json}"
+  }
+}
