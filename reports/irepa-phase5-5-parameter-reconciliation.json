@@ -1,0 +1,54 @@
+{
+  "phase": "5.5",
+  "title": "iREPA phase 5 parameter count reconciliation",
+  "date": "2026-09-04",
+  "phase5_head": "4571d75b006c77e628a693fa7038dece47556db2",
+  "verdict": "PASS",
+  "topologies": {
+    "historical_production_salt1_audit": {"total": 289, "cmuon": 141, "adamw": 148},
+    "real_production_rebuild": {"total": 289, "cmuon": 141, "adamw": 148},
+    "s18_source_rebuild": {"total": 289, "cmuon": 141, "adamw": 148},
+    "migrated": {"total": 291, "cmuon": 141, "adamw": 150}
+  },
+  "fqn_reconciliation": {
+    "common": 289,
+    "real_only": 0,
+    "s18_only": 0,
+    "mismatch_classes": {
+      "shape": 0,
+      "dtype": 0,
+      "audit_group": 0,
+      "route": 0,
+      "weight_decay": 0,
+      "owner": 0
+    }
+  },
+  "migration_audit": {
+    "count_hardcodes": 0,
+    "fqn_driven": true,
+    "synthetic_production_dry_run": "PASS",
+    "dry_run_kind": "metadata-only",
+    "source_update_test_anchor": 111500,
+    "added_projector_fqns": [
+      "irepa_alignment.projector.weight",
+      "irepa_alignment.projector.bias"
+    ],
+    "projector_routes": "AdamW (neither CMuon)",
+    "cmuon_set_invariant": "141 identical FQN set"
+  },
+  "stale_documentation": {
+    "stale_figures": "287/141/146",
+    "root_cause": "stale draft numbers in P5 report documents only; absent from spec/code/tests",
+    "locations": [
+      "reports/irepa-phase5-checkpoint-migration-audit.md",
+      "reports/irepa-phase5-copy-report.md (untracked)"
+    ],
+    "corrected_in": [
+      "reports/irepa-phase5-checkpoint-migration-audit.md (tracked; committed with this evidence)",
+      "reports/irepa-phase5-copy-report.md (untracked; fixed in place, never committed)"
+    ]
+  },
+  "phase5_conclusion_weakened": false,
+  "live_checkpoint_touched": false,
+  "production_training_started": false
+}

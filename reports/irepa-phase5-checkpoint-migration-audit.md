@@ -69,7 +69,7 @@ produced on this host.
 
 RAW manifest (`manifest.json`, `RAW_SCHEMA_VERSION = 4`): unchanged — the
 migration rebuilds the file list (new projector shard + new sidecar) under the
-same kind/identity. Before: `model/` shards with 287 FQNs + `train_state/`
+same kind/identity. Before: `model/` shards with 289 FQNs + `train_state/`
 (optimizer.pt, optimizer_schema.json, …). After: identical plus
 `model/model-irepa-projector.safetensors` (2 FQNs) and
 `train_state/irepa_state.json` (new sidecar, schema v1:
@@ -83,7 +83,7 @@ adding `training_auxiliaries.irepa` (the projector metadata: in_channels
 2560 → 768, k=3 s=1 p=1 d=1 g=1 bias, bf16 weight / fp32 bias).
 
 Optimizer state (`train_state/optimizer.pt`, hybrid schema v1): before =
-CMuon block (141 specs) + AdamW block with 146 parameters under integer IDs +
+CMuon block (141 specs) + AdamW block with 148 parameters under integer IDs +
 `sr_rng` + `routing` manifest. After = identical CMuon block and SR RNG;
 AdamW block re-IDed by canonical FQN order with the 2 projector FQNs appended
 as the LAST member of each group (existing parameters keep their state
@@ -97,8 +97,16 @@ verbatim, only the AdamW `groups` FQN lists change.
 
 | | total | CMuon | AdamW |
 |---|---|---|---|
-| source v3 | 287 | 141 | 146 |
-| migrated v4 | 289 | 141 | 148 |
+| source v3 | 289 | 141 | 148 |
+| migrated v4 | 291 | 141 | 150 |
+
+NOTE (Phase 5.5 reconciliation, 09-04): Phase 5.5 reconciliation
+established that the earlier 287/146 figures were stale draft
+documentation only. The S18 source topology actually used in the
+accepted parity run was the full production-equivalent
+289/141/148 topology; the migrated topology is 291/141/150. See
+reports/irepa-phase5-5-parameter-reconciliation.md for the full
+evidence.
 
 Added FQNs: `irepa_alignment.projector.weight`, `irepa_alignment.projector.bias`
 (both AdamW, neither CMuon — the CMuon allowlist is unchanged, 141 → 141,
@@ -122,9 +130,9 @@ parameter bit-exact after resume; SR RNG state at resume bit-exact
 **Zero-lambda one-step parity:**
 
 - Primary gate (deterministic NS stand-in, bit-exact environment): **PASS** —
-  old model tensor mismatches = **0** (all 287 pre-existing parameters
+  old model tensor mismatches = **0** (all 289 pre-existing parameters
   `torch.equal`); CMuon state mismatches = **0** (141 bf16 momenta
-  bit-exact); AdamW state mismatches = **0** (146 entries: step + exp_avg +
+  bit-exact); AdamW state mismatches = **0** (148 entries: step + exp_avg +
   exp_avg_sq bit-exact, torchao OptimState8bit compared via
   block_size/codes/qmap/scale); guard references/bookkeeping identical; MAIN
   JLT loss bit-exact; TOTAL == MAIN bit-exact; fp32-rescue counters equal and
@@ -179,8 +187,8 @@ optimizer's internal `invariant_check=True` additionally raises on any
 staged-delta spread inside `step()`). The guard state is world-size stamped
 (fail-closed on mismatch), so the whole chain runs at the target world size.
 
-**Result: PASS** (221s). Per-rank lambda=0 parity bit-exact (all 287
-pre-existing parameters, 141 CMuon momenta, 146 AdamW entries, guard
+**Result: PASS** (221s). Per-rank lambda=0 parity bit-exact (all 289
+pre-existing parameters, 141 CMuon momenta, 148 AdamW entries, guard
 references, MAIN/TOTAL losses). Cross-rank: **0 mismatches of 864**
 fingerprints (every parameter + CMuon momentum of both arms + both losses,
 `all_gather_object` exact equality). Guard rescue counters per rank
