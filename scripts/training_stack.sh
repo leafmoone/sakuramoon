@@ -18,6 +18,12 @@ WORKLOAD_ENV_FILE="${WORKLOAD_ENV_FILE:-${PROJECT_ROOT}/.env.training-stack.nul}
 RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
 SAKURAMOON_TORCHINDUCTOR_CACHE_DIR="${SAKURAMOON_TORCHINDUCTOR_CACHE_DIR:-${RUNTIME_ROOT}/torchinductor-cache}"
 export SAKURAMOON_TORCHINDUCTOR_CACHE_DIR
+# 2026-09-02 A+C memory fix (re-applied on salt11): bound the Inductor
+# compile thread pool. Default min(32,cpu)=32 per rank; two ranks x 32
+# pools plus 16 data workers saturated the 118 GiB cgroup and caused
+# the 2026-09-02 CPU MemoryError during torch.compile autotune windows.
+TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-8}"
+export TORCHINDUCTOR_COMPILE_THREADS
 PUBLISH_STATE_ROOT="${PUBLISH_STATE_ROOT:-${RUNTIME_ROOT}/.sm-train-state-publisher}"
 PUBLISH_LAST_PUBLISHED="${PUBLISH_LAST_PUBLISHED:-/root/private_data/.sm-train-state-publisher/last-published-s0.txt}"
 REQUIRED_HOST_SUBSTRING="${REQUIRED_HOST_SUBSTRING:-leaf10}"

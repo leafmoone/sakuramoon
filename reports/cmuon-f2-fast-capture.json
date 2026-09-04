@@ -1,0 +1,167 @@
+{
+  "schema": "sakuramoon.cmuon_f2_fast_capture_report.v1",
+  "date_local": "2026-09-04T10:45+08:00",
+  "base": "811a4caec0f6591c8bf061a35473aab59107d4b9",
+  "branch": "cmuon-fp32-forensic-f2",
+  "worktree": "D:\\sakruamoon\\sakuramoon-cmuon-f2",
+  "test_hosts": {
+    "salt10": "old-path timings, original capture bench (24 runs), unit 12/12, 2-rank 5 scenarios — completed before the user released this machine (its disk is gone; the measured numbers stand)",
+    "salt11": "user-designated host for the remaining GPU gates (isolated /sakuramoon-runtime/f2-gates/ dir, production zero-touched, deleted after evidence collection): bench re-run 24 runs, 2-rank F2+F1, success parity, hardfail parity, enrich smoke, teardown v1+v2, tests/gpu",
+    "salt12": "one CPU-only full unit run (775 tests) before the machine-role red line was stated; fully cleaned afterwards; provenance only"
+  },
+  "old_race": {
+    "root_cause": "F1 hard-fail critical path ran two full op-exact CPU NS replays (BF16 + FP32, 4 iters x 2560x2560) + traces BEFORE any write; the 112105 owner was SIGTERM'd ~30s after the raise (SIGKILL ~60s) and the publish never finished",
+    "f1_critical_path_seconds_measured": {
+      "source": "/sakuramoon-runtime/cmuon-f1/out/oldpath-timings.json (F1 tree, salt10, 1 pass, 2560x2560 bf16)",
+      "d2h": 0.003393,
+      "serialize_sha": 0.025461,
+      "trace_bf16_cpu_ns_replay": 747.519962,
+      "trace_fp32_cpu_ns_replay": 10.119252,
+      "metadata": 0.682309,
+      "local_publish": 0.04297,
+      "total_before_any_byte_durable": 758.393346
+    },
+    "kill_window_seconds_112105": 30,
+    "shortfall_factor": 25
+  },
+  "new_critical_path": {
+    "sequence": [
+      "verdict settled",
+      "frozen = chunk.detach().contiguous().clone() (device)",
+      "one .cpu() (13 MB D2H)",
+      "_write_tensor_bytes + sha256 over file bytes",
+      "build_minimal_capsule_metadata (4 O(n) scalar reductions)",
+      "publish_minimal_capsule (LOCAL atomic: temp + fsync files + fsync dir + atomic rename + -rN)",
+      "mirror_capsule (best-effort shared root; never raises; advisory mirror.json)",
+      "original CMuonSafetyError raise"
+    ],
+    "offline_only": [
+      "dev-tools/cmuon_hardfail_enrich.py (replay >=3 repeats both dtypes, per-iteration traces, recorded-vs-replay, FP32 input stats, full/randomized SVD, low-rank verdict per spec s11)",
+      "dev-tools/cmuon_fp32_rescue_replay.py (F1 replay CLI, unchanged, capsule-compatible)"
+    ]
+  },
+  "filesystem": {
+    "emergency_root": "/sakuramoon-runtime/cmuon-f1-emergency",
+    "emergency_root_fs": "local overlay (verified df -T on salt10 and salt11)",
+    "emergency_free_gib": {"salt10": 709, "salt11": 716},
+    "shared_mirror_root": "/sakuramoon-runtime/artifacts/g1/cmuon-hard-fail",
+    "spec_example_refuted": "the spec's /root/private_data/cmuon-f1-emergency example is NFS (scnet.hx, 50G/machine quota) on the production host; the spec's local-first fallback clause applies",
+    "note": "cmuon_ns_trace.py stays deployed on salt11 but is no longer imported by production code (offline helper only); NOT deleted"
+  },
+  "capture_bench": {
+    "source": "24 runs, cuda:0, 2560x2560 bf16; salt11 re-run /sakuramoon-runtime/f2-gates/out/capture-bench-salt11.json (table of record); original salt10 run /sakuramoon-runtime/cmuon-f2/out/capture-bench.json (pod released; totals preserved)",
+    "runs": 24,
+    "phases_seconds_salt11": {
+      "device_clone": {"p50": 0.000273, "p95": 0.000497, "max": 0.000576},
+      "d2h": {"p50": 0.002728, "p95": 0.004274, "max": 0.008658},
+      "serialize": {"p50": 0.017012, "p95": 0.023723, "max": 0.033403},
+      "sha256": {"p50": 0.011128, "p95": 0.011181, "max": 0.011229},
+      "metadata": {"p50": 0.526304, "p95": 0.607715, "max": 0.61252},
+      "local_publish": {"p50": 0.040809, "p95": 0.125901, "max": 0.135246},
+      "total_local": {"p50": 0.65887, "p95": 0.708693, "max": 0.763403},
+      "mirror_excluded": {"p50": 0.019704, "p95": 0.022649, "max": 0.024106},
+      "total_with_mirror": {"p50": 0.676479, "p95": 0.732799, "max": 0.782443}
+    },
+    "phases_seconds_salt10_original": {
+      "sha256": {"p50": 0.011135, "p95": 0.011222, "max": 0.011982},
+      "metadata": {"p50": 0.548475, "p95": 0.637208, "max": 0.644922},
+      "local_publish": {"p50": 0.029049, "p95": 0.104631, "max": 0.113103},
+      "mirror_excluded": {"p50": 0.013947, "p95": 0.015935, "max": 0.020582},
+      "total_local": {"p50": 0.66032, "p95": 0.685878, "max": 0.70135},
+      "total_with_mirror": {"p50": 0.680903, "p95": 0.701133, "max": 0.714636}
+    },
+    "sla": {"total_local_p50_s": 1.0, "total_local_p95_s": 2.0, "runs_required": 20},
+    "verdict": "PASS",
+    "speedup_vs_old": 1149
+  },
+  "teardown_test": {
+    "tool": "tests/gpu/optim/cmuon_capsule_teardown.py (2-rank torchrun worker, production-scale 2560x2560 chunks, forced below_floor; driver kill is select-poll timer-driven, anchor = owner RAISED — the production elastic-teardown window; schema v2)",
+    "delays_s": [5, 2, 1],
+    "v2_result": {
+      "verdict": "PASS",
+      "durable_by_delay": {"5": true, "2": true, "1": true},
+      "minimum_safe_window_s": 1,
+      "raise_at_step_plus_s": {"5": 5.895, "2": 5.087, "1": 5.265},
+      "kill_at_step_plus_s": {"5": 10.895, "2": 7.087, "1": 6.265},
+      "kill_delivered": {"5": true, "2": true, "1": true},
+      "sha_ok": {"5": true, "2": true, "1": true},
+      "mirror_status": {"5": "ok", "2": "ok", "1": "ok"},
+      "worker_post_step_event": "obs-0-rank0-dit_blocks_slot_00_attention_content_gate_weight-chunk0 (all three)",
+      "source": "/sakuramoon-runtime/f2-gates/out/teardown-report-v2.json (salt11)"
+    },
+    "v1_result_retained": {
+      "verdict": "REPORTED-QUANTIFIED (schema v1, kill anchor STEP_START + delay, kill check gated on worker stdout line arrival)",
+      "effect": "workers are silent over the whole NS+publish window, so every kill landed ~5s late = inside the verdict->rename publish window -> capsule lost (rename never ran); quantifies the pre-raise loss zone (~0.7s publish tail). Not a production scenario (elastic teardown fires AFTER a rank raises)",
+      "source": "runs-v1-evidence.tar (salt11, preserved)"
+    },
+    "note": "the v1->v2 test fix is test-harness only (kill scheduling + anchor); no optimizer/production code was touched"
+  },
+  "success_parity": {
+    "tool": "dev-tools/cmuon_fp32_parity.py (run --tree src --steps 10 on F1 forensic tree and F2 tree, compare byte-exact: params/momentum/AdamW state/SR RNG/guard refs/rescue counters)",
+    "base_tree": "/sakuramoon-runtime/f2-gates/f1-forensic (811a4ca, salt11)",
+    "result": "PASS (salt11): 'PASS: 10 steps, all fields byte-identical' (53.1s base / 52.6s F2); sources parity-base.json + parity-f2.json",
+    "no_hard_fail_triggered_on_either_tree": true
+  },
+  "hardfail_parity": {
+    "tool": "dev-tools/cmuon_hardfail_parity.py (cross-tree: f1-2rank.json vs f2-2rank.json; same verdict/zero-commit/error, only the artifact contract differs)",
+    "result": "PASS (salt11): 12/12 checks ok — identical verdict/zero-commit/error for A/B/C; D identical no-capsule; only differences = F2 artifact contract fields (E scenario F2-only minimal capsule, below_floor, fp32_delta_rms 2.824e-14 < floor 1.562e-6, mirror ok; A-rank0 artifact +mirror_status)",
+    "source": "/sakuramoon-runtime/f2-gates/out/hardfail-parity.json"
+  },
+  "enrich_smoke": {
+    "tool": "dev-tools/cmuon_hardfail_enrich.py --capsule <real 2-rank E-scenario capsule> --device cuda --svd full --repeats 3",
+    "result": "PASS (execution gate, salt11, 29.2s): sha integrity OK; 3x FP32 replay + per-iteration traces + recorded-vs-replay; full SVD spectrum on HCU (stable_rank 67.34, top32_energy 0.372, rank_implied 2.09e-16); LOW_RANK_HYPOTHESIS = INCONCLUSIVE (expected for the synthetic capsule: recorded fp32 rms came from the test's forced 'tiny' stub, so replay != recorded is the correct flag; the real 112105-class verdict is made on the real capsule)",
+    "source": "/sakuramoon-runtime/f2-gates/out/enrich-smoke.json"
+  },
+  "tests": {
+    "unit_forensic_12": "12/12 PASS (26.9s salt10 HCU; re-verified 33.6s salt12 HCU)",
+    "tworank_5_scenarios": "PASS (85.6s salt10 HCU; re-run PASS 79.6s + 84.3s on salt11 — values byte-identical across hosts) — A above_ceiling, B nonfinite, C crash-loop -r2, D successful rescue no-capsule, E below_floor (112105 class: fp32 finite 2.824e-14 < floor 1.562e-6, mirror ok)",
+    "teardown": "PASS (schema v2, RAISED anchor): all three delays durable, minimum_safe_window_s = 1; v1 (STEP_START anchor) retained as pre-raise loss-zone quantification",
+    "full_pytest_gpu": "1 failed / 24 passed / 2 skipped (95.5s, salt11, f2-gates/f2/model -> /sakuramoon-runtime/model symlink): sole failure = test_varlen_attention::test_forged_boundary_handle_fails_before_native_kernel[host_metadata] = machine-independent host_metadata packing code bug (KNOWN baseline, classify only, no skip/xfail); test_pipeline_encoders PASSES on salt11 (real assets reachable via symlink — bare-tree 'qwen asset missing' is a tree artifact, not a machine gap); zero new failures",
+    "full_pytest_unit": "775 passed / 0 failed (934s, CPU-only run)",
+    "ruff_check_0_16_src_tests_dev_tools": "PASS",
+    "pyright_vs_f1_baseline": "FLAT (219 vs 215 errors on the same 4 files under identical interpreter conditions; delta = line-shift noise + 1 pre-existing **dict-unpack noise line; no new error categories)"
+  },
+  "deployment_closure": {
+    "runtime_files_4": [
+      "src/sakuramoon/optim/cmuon_hardfail.py",
+      "src/sakuramoon/optim/fp32_rescue.py",
+      "src/sakuramoon/train/step.py",
+      "src/sakuramoon/train/production.py"
+    ],
+    "not_deployed": ["dev-tools/*", "tests/*", "reports/*"],
+    "cmuon_py_diff": "ZERO (frozen NS/optimizer core untouched)"
+  },
+  "algorithm_changes": {
+    "ns_steps_or_coefficients": false,
+    "alpha": false,
+    "ceiling": false,
+    "rescue_floor": false,
+    "below_floor_verdict": false,
+    "routing": false,
+    "adamw_fallback": false,
+    "delta_clamp_or_rescale": false,
+    "target_rms": false,
+    "svd_or_polar_production_update": false,
+    "momentum_math": false,
+    "commit_ordering": false,
+    "optimizer_state_schema": false,
+    "checkpoint": false,
+    "lr": false,
+    "batch": false,
+    "objective": false,
+    "data": false,
+    "irepa": false,
+    "camera_v2": false,
+    "merge_or_push": false
+  },
+  "deployment": {"production_deployed": false},
+  "production_integrity_salt11": {
+    "data_service_pid_84199": "alive before/after",
+    "state_publisher_pid_84343": "alive before/after",
+    "hcu_utilization_before_each_gpu_step": "0% both HCUs",
+    "layout_diff": "top-level /sakuramoon-runtime diff = f2-gates test dir only (deleted after evidence collection)",
+    "production_code_config_checkpoints_model": "zero-touched"
+  },
+  "verdict": "PASS",
+  "next": "wait for explicit user approval to deploy the 4-file closure, then resume from ckpt_112100 only long enough for one real exact-input capsule; do NOT implement below_floor optimizer changes yet (low-rank hypothesis decided on the real capsule via enrich CLI per spec s11)"
+}
