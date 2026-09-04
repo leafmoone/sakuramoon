@@ -1,0 +1,136 @@
+{
+  "audit": "camera_viewport_v2_distribution",
+  "seed": 20260905,
+  "samples": 1000000,
+  "policy": {
+    "probability": 0.25,
+    "min_equivalent_zoom": 1.1,
+    "max_equivalent_zoom": 1.5,
+    "stage_edge": 512
+  },
+  "elapsed_seconds": 70.56565317400964,
+  "admitted": 932773,
+  "ordinary_rejected": 67227,
+  "admission_rate": 0.932773,
+  "selected": 232882,
+  "selected_probability": 0.24966631752848764,
+  "binomial_consistency": {
+    "n_trials": 932773,
+    "k_selected": 232882,
+    "p_configured": 0.25,
+    "sigma": 418.2044207083421,
+    "sigma_limit": 5.0,
+    "observed_minus_expected": -311.25,
+    "pass": true
+  },
+  "applied": 95952,
+  "applied_probability": 0.095952,
+  "applied_given_admitted": 0.10286747150700117,
+  "fallback_reasons": {
+    "none": 95952,
+    "not_selected": 699891,
+    "short_edge_too_small": 18894,
+    "near_square_below_min": 29450,
+    "aspect_above_max": 88586,
+    "quantized_no_effect": 0,
+    "no_square_bucket": 0
+  },
+  "source_orientation": {
+    "horizontal": 47874,
+    "vertical": 48078
+  },
+  "full_canvas_dimensions": {
+    "applied_horizontal_width_max": 1152,
+    "applied_vertical_height_max": 1152,
+    "mean_width_when_applied": 684.5756940970485,
+    "mean_height_when_applied": 685.164280056695
+  },
+  "zoom_bands": {
+    "[1.10,1.20)": 27202,
+    "[1.20,1.35)": 36376,
+    "[1.35,1.501]": 32374
+  },
+  "shift_token_bins": {
+    "[0,1)": 11024,
+    "[1,2)": 11171,
+    "[2,4)": 21889,
+    "[4,8)": 28411,
+    "[8,16)": 21564,
+    "[16,inf)": 1893
+  },
+  "zoom": {
+    "mean": 1.289174865383646,
+    "max": 1.5
+  },
+  "retention": {
+    "mean": 0.6162916533636992,
+    "min": 0.4444444444444444,
+    "floor": 0.4444444444444444
+  },
+  "pixel_shifts": {
+    "mean_abs": 86.82643405035851,
+    "p50": 70.0,
+    "p90": 187.0,
+    "max_abs": 320.0
+  },
+  "latent_cell_shifts": {
+    "p50": 4.375,
+    "p90": 11.6875,
+    "max_abs": 20.0
+  },
+  "ordinary_17_bucket_cohorts": {
+    "640x416": 50596,
+    "896x288": 75685,
+    "352x736": 67216,
+    "480x544": 39806,
+    "544x480": 38915,
+    "384x672": 51299,
+    "288x896": 76261,
+    "512x512": 38780,
+    "672x384": 51190,
+    "320x832": 68950,
+    "448x576": 49287,
+    "576x448": 49031,
+    "832x320": 68711,
+    "736x352": 67058,
+    "416x640": 50505,
+    "1024x256": 44583,
+    "256x1024": 44900
+  },
+  "resulting_target_bucket_distribution": {
+    "512x512": 134732,
+    "896x288": 75685,
+    "352x736": 54670,
+    "480x544": 39806,
+    "544x480": 38915,
+    "384x672": 39532,
+    "288x896": 76261,
+    "672x384": 39348,
+    "320x832": 68950,
+    "448x576": 37559,
+    "576x448": 37363,
+    "832x320": 68711,
+    "640x416": 38690,
+    "416x640": 38468,
+    "1024x256": 44583,
+    "736x352": 54600,
+    "256x1024": 44900
+  },
+  "square_bucket_share_before": 0.04157495982409439,
+  "square_bucket_share_after": 0.14444243133109555,
+  "inclusive_endpoint_probe": {
+    "endpoint_zero": 80,
+    "endpoint_full": 68
+  },
+  "invariants": {
+    "crop_inside_full_canvas": true,
+    "no_upscale": true,
+    "no_distortion_except_integer_rounding": true,
+    "zoom_in_band": true,
+    "retention_above_floor": true,
+    "all_applied_outputs_square": true,
+    "ordinary_fallback_unchanged": true,
+    "inclusive_endpoints_reachable": true
+  },
+  "real_metadata_audit": "PENDING"
+}

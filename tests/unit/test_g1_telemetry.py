@@ -42,6 +42,10 @@ def test_growth_telemetry_is_in_jsonl_and_wandb_payloads() -> None:
         nonfinite_count=0,
         dropout_hits={key: 0 for key in DROPOUT_KEYS},
         condition_routes={"artist_text": 7, "character_text": 6, "null": 7},
+        # Legacy (camera-absent) contract for schema 11: the ordinary band
+        # carries the whole effective batch's main loss.
+        camera_ordinary_loss_sum=1.0,
+        camera_ordinary_loss_count=20,
         phase_seconds={phase: 0.0 for phase in TIMING_PHASES},
         growth_alpha=0.5,
         growth_new_slot_grad_norm=0.75,
@@ -51,7 +55,7 @@ def test_growth_telemetry_is_in_jsonl_and_wandb_payloads() -> None:
     json_payload = metric.as_json_mapping()
     wandb_payload = metric.as_wandb_mapping()
 
-    assert json_payload["schema_version"] == TRAINING_METRIC_SCHEMA_VERSION == 10
+    assert json_payload["schema_version"] == TRAINING_METRIC_SCHEMA_VERSION == 11
     for key, value in (
         ("growth_alpha", 0.5),
         ("growth_new_slot_grad_norm", 0.75),

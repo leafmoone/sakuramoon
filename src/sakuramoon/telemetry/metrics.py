@@ -13,6 +13,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol, Self
 
+from sakuramoon.data.camera_viewport import (
+    CAMERA_FALLBACK_REASONS,
+    CAMERA_ORIENTATION_KEYS,
+    CAMERA_SHIFT_TOKEN_BIN_LABELS,
+    CAMERA_ZOOM_BAND_LABELS,
+)
 from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
     CONDITION_ROUTE_KEYS,
@@ -58,7 +64,7 @@ NOISE_T_BIN_LABELS = tuple(
     f"bin_{index:02d}_t{index * 5:03d}_{(index + 1) * 5:03d}"
     for index in range(NOISE_T_BIN_COUNT)
 )
-TRAINING_METRIC_SCHEMA_VERSION = 10
+TRAINING_METRIC_SCHEMA_VERSION = 11
 DROPOUT_KEYS = CAPTION_DROPOUT_KEYS
 def _spatial_default_fallback_reasons(effective_batch: int) -> Mapping[str, int]:
     """Default spatial-crop table for an update with no spatial activity.
@@ -74,6 +80,32 @@ def _spatial_default_fallback_reasons(effective_batch: int) -> Mapping[str, int]
 def _spatial_default_zoom_histogram() -> Mapping[str, int]:
     """Default all-zero zoom histogram (no applied crops)."""
     return MappingProxyType({label: 0 for label in ZOOM_HISTOGRAM_LABELS})
+
+
+def _camera_default_fallback_reasons(effective_batch: int) -> Mapping[str, int]:
+    """Default camera table for an update with no camera activity.
+
+    Every effective sample kept the ordinary path, so all of them are
+    accounted for under ``none`` and the fixed keys stay complete.
+    """
+    reasons = {reason: 0 for reason in CAMERA_FALLBACK_REASONS}
+    reasons["none"] = effective_batch
+    return MappingProxyType(reasons)
+
+
+def _camera_default_orientation_counts() -> Mapping[str, int]:
+    """Default all-zero camera orientation table."""
+    return MappingProxyType({key: 0 for key in CAMERA_ORIENTATION_KEYS})
+
+
+def _camera_default_zoom_histogram() -> Mapping[str, int]:
+    """Default all-zero camera zoom histogram."""
+    return MappingProxyType({label: 0 for label in CAMERA_ZOOM_BAND_LABELS})
+
+
+def _camera_default_shift_token_histogram() -> Mapping[str, int]:
+    """Default all-zero camera shift-token histogram."""
+    return MappingProxyType({label: 0 for label in CAMERA_SHIFT_TOKEN_BIN_LABELS})
 
 
 def _transparent_default_rejection_totals() -> Mapping[str, int]:
@@ -143,6 +175,31 @@ class TrainingMetric:
     spatial_abs_offset_x_mean: float = 0.0
     spatial_abs_offset_y_mean: float = 0.0
     spatial_both_axes_count: int = 0
+    # Camera-viewport fixed fields. Strict-zero defaults keep the
+    # camera-absent path bit-identical; a fallback update records the
+    # reasons under the fixed keys while every aggregate stays zero.
+    camera_viewport_selected: int = 0
+    camera_viewport_applied: int = 0
+    camera_fallback_reasons: Mapping[str, int] | None = None
+    camera_orientation_counts: Mapping[str, int] | None = None
+    camera_zoom_histogram: Mapping[str, int] | None = None
+    camera_shift_token_histogram: Mapping[str, int] | None = None
+    camera_equivalent_zoom_mean: float = 0.0
+    camera_equivalent_zoom_max: float = 0.0
+    camera_final_retention_mean: float = 0.0
+    camera_final_retention_min: float = 0.0
+    camera_abs_pixel_shift_mean: float = 0.0
+    camera_abs_pixel_shift_max: float = 0.0
+    camera_abs_latent_shift_mean: float = 0.0
+    camera_abs_latent_shift_max: float = 0.0
+    camera_mild_loss_sum: float = 0.0
+    camera_mild_loss_count: int = 0
+    camera_medium_loss_sum: float = 0.0
+    camera_medium_loss_count: int = 0
+    camera_strong_loss_sum: float = 0.0
+    camera_strong_loss_count: int = 0
+    camera_ordinary_loss_sum: float = 0.0
+    camera_ordinary_loss_count: int = 0
     # Per-update retained-sample counters (rejects are structurally zero here).
     transparent_tagged: int = 0
     transparent_composited: int = 0
@@ -336,6 +393,166 @@ class TrainingMetric:
         if self.spatial_abs_offset_x_mean > 1.0 or self.spatial_abs_offset_y_mean > 1.0:
             raise ValueError("spatial crop offset means must not exceed one")
         for name in (
+            "camera_viewport_selected",
+            "camera_viewport_applied",
+        ):
+            _nonnegative_int(name, getattr(self, name))
+        if self.camera_viewport_applied > self.camera_viewport_selected:
+            raise ValueError(
+                "camera viewport applied count exceeds selected count"
+            )
+        if self.camera_fallback_reasons is None:
+            object.__setattr__(
+                self,
+                "camera_fallback_reasons",
+                _camera_default_fallback_reasons(self.effective_batch),
+            )
+        if self.camera_orientation_counts is None:
+            object.__setattr__(
+                self,
+                "camera_orientation_counts",
+                _camera_default_orientation_counts(),
+            )
+        if self.camera_zoom_histogram is None:
+            object.__setattr__(
+                self, "camera_zoom_histogram", _camera_default_zoom_histogram()
+            )
+        if self.camera_shift_token_histogram is None:
+            object.__setattr__(
+                self,
+                "camera_shift_token_histogram",
+                _camera_default_shift_token_histogram(),
+            )
+        if set(self.camera_fallback_reasons) != set(CAMERA_FALLBACK_REASONS):
+            raise ValueError(
+                "camera fallback reasons must contain every fixed key"
+            )
+        for key, value in self.camera_fallback_reasons.items():
+            _nonnegative_int(f"camera_fallback_reasons.{key}", value)
+            if value > self.effective_batch:
+                raise ValueError(
+                    "camera fallback count exceeds effective batch"
+                )
+        if sum(self.camera_fallback_reasons.values()) != self.effective_batch:
+            raise ValueError(
+                "camera fallback counts must equal effective batch"
+            )
+        if set(self.camera_orientation_counts) != set(CAMERA_ORIENTATION_KEYS):
+            raise ValueError(
+                "camera orientation counts must contain every fixed key"
+            )
+        for key, value in self.camera_orientation_counts.items():
+            _nonnegative_int(f"camera_orientation_counts.{key}", value)
+        if (
+            sum(self.camera_orientation_counts.values())
+            != self.camera_viewport_applied
+        ):
+            raise ValueError(
+                "camera orientation counts must cover applied samples"
+            )
+        if set(self.camera_zoom_histogram) != set(CAMERA_ZOOM_BAND_LABELS):
+            raise ValueError(
+                "camera zoom histogram must contain every fixed label"
+            )
+        for key, value in self.camera_zoom_histogram.items():
+            _nonnegative_int(f"camera_zoom_histogram.{key}", value)
+        if sum(self.camera_zoom_histogram.values()) != self.camera_viewport_applied:
+            raise ValueError(
+                "camera zoom histogram must cover applied samples"
+            )
+        if (
+            set(self.camera_shift_token_histogram)
+            != set(CAMERA_SHIFT_TOKEN_BIN_LABELS)
+        ):
+            raise ValueError(
+                "camera shift token histogram must contain every fixed label"
+            )
+        for key, value in self.camera_shift_token_histogram.items():
+            _nonnegative_int(f"camera_shift_token_histogram.{key}", value)
+        if (
+            sum(self.camera_shift_token_histogram.values())
+            != self.camera_viewport_applied
+        ):
+            raise ValueError(
+                "camera shift token histogram must cover applied samples"
+            )
+        for name in (
+            "camera_mild_loss_sum",
+            "camera_medium_loss_sum",
+            "camera_strong_loss_sum",
+            "camera_ordinary_loss_sum",
+        ):
+            _finite_float(name, getattr(self, name), minimum=0.0)
+        for name in (
+            "camera_mild_loss_count",
+            "camera_medium_loss_count",
+            "camera_strong_loss_count",
+            "camera_ordinary_loss_count",
+        ):
+            _nonnegative_int(name, getattr(self, name))
+        if (
+            self.camera_mild_loss_count
+            + self.camera_medium_loss_count
+            + self.camera_strong_loss_count
+            + self.camera_ordinary_loss_count
+            != self.effective_batch
+        ):
+            raise ValueError(
+                "camera per-band loss counts must partition the effective batch"
+            )
+        for name in (
+            "camera_equivalent_zoom_mean",
+            "camera_equivalent_zoom_max",
+            "camera_final_retention_mean",
+            "camera_final_retention_min",
+            "camera_abs_pixel_shift_mean",
+            "camera_abs_pixel_shift_max",
+            "camera_abs_latent_shift_mean",
+            "camera_abs_latent_shift_max",
+        ):
+            _finite_float(name, getattr(self, name), minimum=0.0)
+        if self.camera_viewport_applied == 0:
+            if any(
+                getattr(self, name) != 0.0
+                for name in (
+                    "camera_equivalent_zoom_mean",
+                    "camera_equivalent_zoom_max",
+                    "camera_final_retention_mean",
+                    "camera_final_retention_min",
+                    "camera_abs_pixel_shift_mean",
+                    "camera_abs_pixel_shift_max",
+                    "camera_abs_latent_shift_mean",
+                    "camera_abs_latent_shift_max",
+                    "camera_mild_loss_sum",
+                    "camera_medium_loss_sum",
+                    "camera_strong_loss_sum",
+                )
+            ) or any(
+                getattr(self, name) != 0
+                for name in (
+                    "camera_mild_loss_count",
+                    "camera_medium_loss_count",
+                    "camera_strong_loss_count",
+                )
+            ):
+                raise ValueError(
+                    "camera viewport aggregates must be zero when nothing was applied"
+                )
+            if self.camera_ordinary_loss_count != self.effective_batch:
+                raise ValueError(
+                    "every sample must be ordinary when nothing was applied"
+                )
+        else:
+            if (
+                self.camera_equivalent_zoom_max < 1.10
+                or self.camera_equivalent_zoom_max > 1.501
+                or self.camera_equivalent_zoom_mean < 1.10
+                or self.camera_final_retention_min <= 0.0
+            ):
+                raise ValueError(
+                    "applied camera viewport aggregates violate the zoom/retention bounds"
+                )
+        for name in (
             "transparent_tagged",
             "transparent_composited",
             "transparent_nl_suppressed",
@@ -445,6 +662,28 @@ class TrainingMetric:
             "spatial_abs_offset_x_mean": self.spatial_abs_offset_x_mean,
             "spatial_abs_offset_y_mean": self.spatial_abs_offset_y_mean,
             "spatial_both_axes_count": self.spatial_both_axes_count,
+            "camera_viewport_selected": self.camera_viewport_selected,
+            "camera_viewport_applied": self.camera_viewport_applied,
+            "camera_fallback_reasons": dict(self.camera_fallback_reasons),
+            "camera_orientation_counts": dict(self.camera_orientation_counts),
+            "camera_zoom_histogram": dict(self.camera_zoom_histogram),
+            "camera_shift_token_histogram": dict(self.camera_shift_token_histogram),
+            "camera_equivalent_zoom_mean": self.camera_equivalent_zoom_mean,
+            "camera_equivalent_zoom_max": self.camera_equivalent_zoom_max,
+            "camera_final_retention_mean": self.camera_final_retention_mean,
+            "camera_final_retention_min": self.camera_final_retention_min,
+            "camera_abs_pixel_shift_mean": self.camera_abs_pixel_shift_mean,
+            "camera_abs_pixel_shift_max": self.camera_abs_pixel_shift_max,
+            "camera_abs_latent_shift_mean": self.camera_abs_latent_shift_mean,
+            "camera_abs_latent_shift_max": self.camera_abs_latent_shift_max,
+            "camera_mild_loss_sum": self.camera_mild_loss_sum,
+            "camera_mild_loss_count": self.camera_mild_loss_count,
+            "camera_medium_loss_sum": self.camera_medium_loss_sum,
+            "camera_medium_loss_count": self.camera_medium_loss_count,
+            "camera_strong_loss_sum": self.camera_strong_loss_sum,
+            "camera_strong_loss_count": self.camera_strong_loss_count,
+            "camera_ordinary_loss_sum": self.camera_ordinary_loss_sum,
+            "camera_ordinary_loss_count": self.camera_ordinary_loss_count,
             "transparent_tagged": self.transparent_tagged,
             "transparent_composited": self.transparent_composited,
             "transparent_nl_suppressed": self.transparent_nl_suppressed,
@@ -485,6 +724,32 @@ class TrainingMetric:
             {
                 f"spatial_zoom_histogram/{key}": value
                 for key, value in self.spatial_zoom_histogram.items()
+            }
+        )
+        # Fixed camera-viewport tables always publish, including strict
+        # zeros, so a missing key cannot mask a silent policy regression.
+        payload.update(
+            {
+                f"camera_fallback_reasons/{key}": value
+                for key, value in self.camera_fallback_reasons.items()
+            }
+        )
+        payload.update(
+            {
+                f"camera_orientation_counts/{key}": value
+                for key, value in self.camera_orientation_counts.items()
+            }
+        )
+        payload.update(
+            {
+                f"camera_zoom_histogram/{key}": value
+                for key, value in self.camera_zoom_histogram.items()
+            }
+        )
+        payload.update(
+            {
+                f"camera_shift_token_histogram/{key}": value
+                for key, value in self.camera_shift_token_histogram.items()
             }
         )
         # Cumulative transparent-white reject totals: fixed keys always

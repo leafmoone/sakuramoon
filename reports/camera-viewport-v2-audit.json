@@ -1,0 +1,323 @@
+{
+  "audit": "camera_viewport_v2_c1_audit",
+  "phase": "C1",
+  "base": "3a341c0efa8aa6c82b41e508cf5fa2730e20fddb",
+  "base_expected_equal_actual": true,
+  "branch": "camera-v2",
+  "worktree": "/sakuramoon-runtime/sakuramoon-camera-v2",
+  "hdm_reference": "5fef7c4b71fe8386b497176021fe458810fdb7c0",
+  "hdm_evidence_status": {
+    "public_code": "NO",
+    "oracle": "NO",
+    "conflicts_found": true,
+    "private_behavior": "UNKNOWN",
+    "clean_room": "YES",
+    "invariants_authoritative": "YES",
+    "exact_parity_claimed": "NO"
+  },
+  "hdm_discrepancies": [
+    "initial 256 config references hdm.data.danbooru512.Danbooru512Dataset, absent from current public repo (exact initial dataset source unavailable)",
+    "TechReport square-root-area normalization description does not fully match current public HDM bounding_box implementation",
+    "current public HDM Kohya crop randint does not include the last legal offset",
+    "HDM pixel crop offset vs position offset // vae_scale can produce up to vae_scale-1 pixel alignment error",
+    "HDM training Kohya addon_info is linear W/H while Diffusers pipeline has a log(W/H) path",
+    "recent HDM history once fixed the training preview position/aspect path",
+    "HDM AxialRoPE frequencies are a trainable Parameter; SakuraMoon RoPE is fixed (not adopted)"
+  ],
+  "mandatory_disclosures": {
+    "hdm_exact_initial_dataset_source": "unavailable",
+    "hdm_report_source_discrepancies": "documented (7)",
+    "clean_room_implementation": true,
+    "code_copied": "NO",
+    "architecture_change": "NO",
+    "parameter_change": 0,
+    "checkpoint_schema_change": "NO",
+    "optimizer_change": "NO",
+    "vae_scale": "SakuraMoon x16 vs HDM x8 (latent shift = abs_pixel_shift / 16.0)",
+    "rope": "fixed SakuraMoon RoPE vs trainable HDM RoPE (not adopted)",
+    "p25_deployed": false,
+    "p50": "LOCKED",
+    "caption_crop_mismatch": "scientific risk, disclosed, accepted",
+    "exact_hdm_visual_parity_claimed": false
+  },
+  "f3": {
+    "semantic_commit": "147355d",
+    "remote_head": "b4f3709",
+    "verdict": "F3_CANARY_PASS_RESUME_MAIN_TRAINING",
+    "inherited_from_base": true,
+    "camera_changes_to_f3": false,
+    "production_touched": false
+  },
+  "geometry": {
+    "mode": "hdm_shifted_square_v2",
+    "viewport": 512,
+    "ordinary_admission_preserved": true,
+    "no_upscale": true,
+    "min_zoom": 1.1,
+    "max_zoom": 1.5,
+    "retention_floor": 0.4444444444444444,
+    "inclusive_offset": true,
+    "quantized_no_effect_unreachable_at_r512": true,
+    "fallback_reasons": 7
+  },
+  "coordinates": {
+    "formula": "(base + [y_shift, x_shift]) / zoom on FP32 [T,2] (y,x order)",
+    "training_full_canvas_equivalence_max_error": 1.192e-07,
+    "equivalence_unit_test_tolerance": 2e-06,
+    "text_anchor": 0.0,
+    "condition_anchor": 0.0,
+    "sign": "+x/+y = increasing crop left/top; center shift exactly 0.0",
+    "sub_latent_precision": "affine exact; latent units = pixels / 16.0 (VAE x16)"
+  },
+  "pipeline": {
+    "applied_physical_crop": "one resize (source -> full canvas, LANCZOS) + one R x R crop",
+    "fallback_bit_identical": true,
+    "double_resize": false,
+    "exif": "preserved by existing decode path",
+    "draft_jpeg": "unchanged",
+    "transparent_white_order": "compositing precedes all crop paths (unchanged)",
+    "memoryerror_behavior_preserved": true,
+    "target_equals_crop_box_size": true
+  },
+  "telemetry": {
+    "schema": 11,
+    "zoom_bands": [
+      "[1.10,1.20)",
+      "[1.20,1.35)",
+      "[1.35,1.501]"
+    ],
+    "shift_token_bins": 6,
+    "band_loss_fields": [
+      "camera_mild_loss_sum",
+      "camera_mild_loss_count",
+      "camera_medium_loss_sum",
+      "camera_medium_loss_count",
+      "camera_strong_loss_sum",
+      "camera_strong_loss_count",
+      "camera_ordinary_loss_sum",
+      "camera_ordinary_loss_count"
+    ],
+    "partition_invariant": "mild+medium+strong+ordinary counts == effective_batch (always)",
+    "legacy_zero_semantics": "ordinary band carries whole effective batch (count=effective_batch, sum=JLT main loss); fallback none=effective_batch"
+  },
+  "config": {
+    "optional_table": "data.camera_viewport",
+    "legacy_resolved_toml_byte_identical": true,
+    "legacy_resolved_sha256": "833850a7d63f6e79c76bc46330c5d06bef285b635a60ea427c17f5ba70accd4b",
+    "v1_spatial_preserved": true,
+    "mutual_exclusion": true,
+    "p25": "config/train_g1_camera_v2_p25.toml (NOT deployed)",
+    "p50": "config/train_g1_camera_v2_p50.toml (LOCKED)"
+  },
+  "distribution": {
+    "synthetic_samples": 1000000,
+    "seed": 20260905,
+    "admitted": 932773,
+    "selected_rate": 0.24966631752848764,
+    "binomial_5sigma_pass": true,
+    "applied": 95952,
+    "applied_rate_total": 0.095952,
+    "zoom_bands": {
+      "[1.10,1.20)": 27202,
+      "[1.20,1.35)": 36376,
+      "[1.35,1.501]": 32374
+    },
+    "latent_shift_p50": 4.375,
+    "latent_shift_p90": 11.6875,
+    "latent_shift_max": 20.0,
+    "pixel_shift_p50": 70.0,
+    "pixel_shift_p90": 187.0,
+    "pixel_shift_max": 320.0,
+    "square_bucket_before": 0.04157495982409439,
+    "square_bucket_after": 0.14444243133109555,
+    "real_metadata_audit": "PENDING",
+    "invariants": {
+      "crop_inside_full_canvas": true,
+      "no_upscale": true,
+      "no_distortion_except_integer_rounding": true,
+      "zoom_in_band": true,
+      "retention_above_floor": true,
+      "all_applied_outputs_square": true,
+      "ordinary_fallback_unchanged": true,
+      "inclusive_endpoints_reachable": true
+    }
+  },
+  "performance": {
+    "no_double_resize": true,
+    "camera_resize_calls_per_image": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "sub_stage_256_rejection": "no_upscale (never reaches the camera path)",
+    "results": [
+      {
+        "geometry": "square_256",
+        "format": "JPEG",
+        "source": "256x256",
+        "admissible": false,
+        "rejection_reason": "no_upscale"
+      },
+      {
+        "geometry": "square_256",
+        "format": "PNG",
+        "source": "256x256",
+        "admissible": false,
+        "rejection_reason": "no_upscale"
+      },
+      {
+        "geometry": "square_512",
+        "format": "JPEG",
+        "source": "512x512",
+        "admissible": true,
+        "ordinary_bucket": "512x512",
+        "camera_applied": false,
+        "camera_full_canvas": null,
+        "ordinary_ms": 7.669,
+        "ordinary_resize_calls": 13,
+        "ordinary_crop_calls": 13,
+        "camera_ms": 0.0,
+        "camera_resize_calls": 0,
+        "camera_crop_calls": 0,
+        "camera_resize_calls_per_image": null,
+        "timed_calls": 13
+      },
+      {
+        "geometry": "square_512",
+        "format": "PNG",
+        "source": "512x512",
+        "admissible": true,
+        "ordinary_bucket": "512x512",
+        "camera_applied": false,
+        "camera_full_canvas": null,
+        "ordinary_ms": 0.8581,
+        "ordinary_resize_calls": 13,
+        "ordinary_crop_calls": 13,
+        "camera_ms": 0.0,
+        "camera_resize_calls": 0,
+        "camera_crop_calls": 0,
+        "camera_resize_calls_per_image": null,
+        "timed_calls": 13
+      },
+      {
+        "geometry": "wide_2to1",
+        "format": "JPEG",
+        "source": "1024x512",
+        "admissible": true,
+        "ordinary_bucket": "736x352",
+        "camera_applied": true,
+        "camera_full_canvas": "1024x512",
+        "ordinary_ms": 49.0035,
+        "ordinary_resize_calls": 13,
+        "ordinary_crop_calls": 13,
+        "camera_ms": 9.0804,
+        "camera_resize_calls": 13,
+        "camera_crop_calls": 13,
+        "camera_resize_calls_per_image": 1.0,
+        "timed_calls": 13
+      },
+      {
+        "geometry": "wide_2to1",
+        "format": "PNG",
+        "source": "1024x512",
+        "admissible": true,
+        "ordinary_bucket": "736x352",
+        "camera_applied": true,
+        "camera_full_canvas": "1024x512",
+        "ordinary_ms": 48.3605,
+        "ordinary_resize_calls": 13,
+        "ordinary_crop_calls": 13,
+        "camera_ms": 0.3795,
+        "camera_resize_calls": 13,
+        "camera_crop_calls": 13,
+        "camera_resize_calls_per_image": 1.0,
+        "timed_calls": 13
+      },
+      {
+        "geometry": "tall_2to1",
+        "format": "JPEG",
+        "source": "512x1024",
+        "admissible": true,
+        "ordinary_bucket": "352x736",
+        "camera_applied": true,
+        "camera_full_canvas": "512x1024",
+        "ordinary_ms": 39.6858,
+        "ordinary_resize_calls": 13,
+        "ordinary_crop_calls": 13,
+        "camera_ms": 0.4249,
+        "camera_resize_calls": 13,
+        "camera_crop_calls": 13,
+        "camera_resize_calls_per_image": 1.0,
+        "timed_calls": 13
+      },
+      {
+        "geometry": "tall_2to1",
+        "format": "PNG",
+        "source": "512x1024",
+        "admissible": true,
+        "ordinary_bucket": "352x736",
+        "camera_applied": true,
+        "camera_full_canvas": "512x1024",
+        "ordinary_ms": 39.7065,
+        "ordinary_resize_calls": 13,
+        "ordinary_crop_calls": 13,
+        "camera_ms": 0.3487,
+        "camera_resize_calls": 13,
+        "camera_crop_calls": 13,
+        "camera_resize_calls_per_image": 1.0,
+        "timed_calls": 13
+      }
+    ]
+  },
+  "camera_eval": {
+    "manifest_points": 23,
+    "classes": [
+      "in_distribution_coupled",
+      "interpolation",
+      "extrapolation",
+      "zoom_out_extrapolation",
+      "decoupled_shift_extrapolation"
+    ],
+    "manifest": "src/sakuramoon/cli/camera_eval.py::build_camera_eval_manifest"
+  },
+  "transition_contract": {
+    "record": "data_policy_transition.json (sakuramoon.data_policy_transition.v1)",
+    "cutover_diff": [
+      "data.spatial_crop.enabled",
+      "data.camera_viewport.*"
+    ],
+    "allowlist_enforced_by_test": true,
+    "forbidden_prefixes_touched": []
+  },
+  "tests": {
+    "new_camera_tests": 78,
+    "new_camera_test_files": 7,
+    "affected_preexisting_tests_updated": 10,
+    "ruff": "clean on C1 diff surface (pre-existing baseline flag in tests/gpu/optim/cmuon_capsule_teardown.py untouched)",
+    "pyright": "controlled comparison: all non-C1 files byte-identical per-file error counts vs 3a341c0 worktree; C1 files carry only error classes already present in their files' established patterns",
+    "baseline_failures": "9 failed + 1 collection error (onnxruntime), all pre-existing",
+    "new_functional_failures": 0,
+    "new_skips": 0
+  },
+  "forbidden_diff_check": {
+    "zero_diff_required": [
+      "src/sakuramoon/optim/",
+      "src/sakuramoon/model/",
+      "src/sakuramoon/objective/flow.py",
+      "src/sakuramoon/conditioning/rope.py",
+      "src/sakuramoon/conditioning/packing.py",
+      "src/sakuramoon/checkpoint/artifact.py",
+      "src/sakuramoon/checkpoint/schema.py"
+    ],
+    "verified": true
+  },
+  "production": {
+    "mainline_touched": false,
+    "training_started": false,
+    "deployment": false,
+    "push": false,
+    "p25_started": false
+  },
+  "verdict": "CAMERA_VIEWPORT_V2_C1 = PASS"
+}

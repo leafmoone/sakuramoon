@@ -28,12 +28,17 @@ from sakuramoon.checkpoint.policy import (
 from sakuramoon.checkpoint.schema import CheckpointManifest, RawCheckpointState
 from sakuramoon.conditioning.rope import full_canvas_crop_coordinates
 from sakuramoon.config.schema import RuntimeConfig
+from sakuramoon.data.camera_viewport import (
+    CameraViewportCounts,
+    camera_zoom_band,
+)
 from sakuramoon.data.caption import (
     CaptionDropoutCounts,
     CaptionPlan,
     ConditionRouteCounts,
 )
 from sakuramoon.data.collate import TrainingBatch
+from sakuramoon.data.pipeline import ImageAudit
 from sakuramoon.data.production import (
     AcceptedProductionBatchStream,
     require_accepted_production_batch_stream,
@@ -379,6 +384,14 @@ class PreparedTrainingBatch:
     states: tuple[torch.Tensor, ...]
 
 
+def _camera_zoom_band_index(audit: ImageAudit) -> int:
+    """Fixed camera zoom-band index for one sample; -1 when not applied."""
+
+    if not audit.camera_applied:
+        return -1
+    return camera_zoom_band(audit.camera_equivalent_zoom)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeMeasurement:
     """A loss vector plus counters consumed by the loop/benchmark adapters."""
@@ -399,6 +412,11 @@ class RuntimeMeasurement:
     captions: tuple[SerializedCaption, ...]
     caption_plans: tuple[CaptionPlan, ...]
     spatial_crop: SpatialCropCounts
+    camera_viewport: CameraViewportCounts
+    # Per-sample camera zoom-band index in fixed CAMERA_ZOOM_BAND_LABELS
+    # order; -1 marks a sample without an applied camera viewport. The
+    # length must equal per_sample_loss.numel().
+    camera_zoom_bands: tuple[int, ...]
     transparent: TransparentWhiteCounts
 
     def detached(self) -> RuntimeMeasurement:
@@ -421,6 +439,8 @@ class RuntimeMeasurement:
             captions=self.captions,
             caption_plans=self.caption_plans,
             spatial_crop=self.spatial_crop,
+            camera_viewport=self.camera_viewport,
+            camera_zoom_bands=self.camera_zoom_bands,
             transparent=self.transparent,
         )
 
@@ -834,6 +854,11 @@ class SingleGpuBatchRuntime:
             for value in batch.sample_ids.detach().cpu().unbind()
         )
         shape_key = f"{batch.target_height}x{batch.target_width}x{batch.dense_length}"
+        camera_bands = tuple(_camera_zoom_band_index(audit) for audit in batch.audits)
+        if len(camera_bands) != loss.per_sample.numel():
+            raise ValueError(
+                "camera zoom band count differs from per-sample loss count"
+            )
         return RuntimeMeasurement(
             per_sample_loss=loss.per_sample,
             image_tokens=image_tokens,
@@ -851,6 +876,8 @@ class SingleGpuBatchRuntime:
             captions=batch.captions,
             caption_plans=tuple(caption.plan for caption in batch.captions),
             spatial_crop=batch.spatial_crop,
+            camera_viewport=batch.camera_viewport,
+            camera_zoom_bands=camera_bands,
             transparent=batch.transparent,
         )
 

@@ -13,6 +13,13 @@ from typing import TYPE_CHECKING, Self
 
 import torch
 
+from sakuramoon.data.camera_viewport import (
+    CAMERA_FALLBACK_REASONS,
+    CAMERA_ORIENTATION_KEYS,
+    CAMERA_SHIFT_TOKEN_BIN_LABELS,
+    CAMERA_ZOOM_BAND_LABELS,
+    CameraViewportCounts,
+)
 from sakuramoon.data.spatial_crop import (
     SPATIAL_FALLBACK_REASONS,
     ZOOM_HISTOGRAM_LABELS,
@@ -304,6 +311,169 @@ def _spatial_crop_metrics(
     )
 
 
+
+@dataclass(frozen=True, slots=True)
+class _CameraViewportMetrics:
+    """Aggregated camera-viewport facts for one successful update."""
+
+    selected: int
+    applied: int
+    fallback_reasons: dict[str, int]
+    orientation_counts: dict[str, int]
+    zoom_histogram: dict[str, int]
+    shift_token_histogram: dict[str, int]
+    equivalent_zoom_mean: float
+    equivalent_zoom_max: float
+    final_retention_mean: float
+    final_retention_min: float
+    abs_pixel_shift_mean: float
+    abs_pixel_shift_max: float
+    abs_latent_shift_mean: float
+    abs_latent_shift_max: float
+    mild_loss_sum: float
+    mild_loss_count: int
+    medium_loss_sum: float
+    medium_loss_count: int
+    strong_loss_sum: float
+    strong_loss_count: int
+    ordinary_loss_sum: float
+    ordinary_loss_count: int
+
+
+def _camera_viewport_metrics(
+    observation: SuccessfulTrainingObservation,
+) -> _CameraViewportMetrics:
+    fallback_reasons = {reason: 0 for reason in CAMERA_FALLBACK_REASONS}
+    orientation_counts = {key: 0 for key in CAMERA_ORIENTATION_KEYS}
+    zoom_histogram = {label: 0 for label in CAMERA_ZOOM_BAND_LABELS}
+    shift_token_histogram = {label: 0 for label in CAMERA_SHIFT_TOKEN_BIN_LABELS}
+    mild_loss_sum = 0.0
+    mild_loss_count = 0
+    medium_loss_sum = 0.0
+    medium_loss_count = 0
+    strong_loss_sum = 0.0
+    strong_loss_count = 0
+    ordinary_loss_sum = 0.0
+    ordinary_loss_count = 0
+    selected = 0
+    applied = 0
+    zoom_sum = 0.0
+    zoom_max = 0.0
+    retention_sum = 0.0
+    retention_min = math.inf
+    pixel_shift_sum = 0.0
+    pixel_shift_max = 0.0
+    latent_shift_sum = 0.0
+    latent_shift_max = 0.0
+    for index, measurement in enumerate(observation.microbatches):
+        counts = measurement.camera_viewport
+        if type(counts) is not CameraViewportCounts:
+            raise TypeError(
+                f"microbatches[{index}].camera_viewport must be a CameraViewportCounts"
+            )
+        bands = measurement.camera_zoom_bands
+        losses = measurement.per_sample_loss
+        if len(bands) != losses.numel():
+            raise ValueError(
+                f"microbatches[{index}] camera band count differs from per-sample loss"
+            )
+        selected += counts.selected
+        applied += counts.applied
+        zoom_sum += counts.camera_zoom_sum
+        zoom_max = max(zoom_max, counts.camera_zoom_max)
+        retention_sum += counts.camera_retention_sum
+        if counts.camera_retention_min > 0.0:
+            retention_min = min(retention_min, counts.camera_retention_min)
+        pixel_shift_sum += counts.camera_abs_pixel_shift_sum
+        pixel_shift_max = max(pixel_shift_max, counts.camera_abs_pixel_shift_max)
+        latent_shift_sum += counts.camera_abs_latent_shift_sum
+        latent_shift_max = max(latent_shift_max, counts.camera_abs_latent_shift_max)
+        for key, value in counts.fallback_reasons.items():
+            if key not in fallback_reasons:
+                raise ValueError(
+                    f"microbatches[{index}] camera fallback reason {key} is not fixed"
+                )
+            fallback_reasons[key] += value
+        for key, value in counts.orientation_counts.items():
+            if key not in orientation_counts:
+                raise ValueError(
+                    f"microbatches[{index}] camera orientation {key} is not fixed"
+                )
+            orientation_counts[key] += value
+        for key, value in counts.zoom_bands.items():
+            if key not in zoom_histogram:
+                raise ValueError(
+                    f"microbatches[{index}] camera zoom label {key} is not fixed"
+                )
+            zoom_histogram[key] += value
+        for key, value in counts.shift_token_bins.items():
+            if key not in shift_token_histogram:
+                raise ValueError(
+                    f"microbatches[{index}] camera shift label {key} is not fixed"
+                )
+            shift_token_histogram[key] += value
+        # torch stubs: tolist() elements are partially unknown; float() pins them.
+        for band, loss in zip(  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            bands, losses.detach().cpu().tolist(), strict=True
+        ):
+            if type(band) is not int or not -1 <= band < 3:
+                raise ValueError(
+                    f"microbatches[{index}] carries an invalid camera band {band!r}"
+                )
+            loss = float(loss)  # pyright: ignore[reportUnknownArgumentType]
+            if band < 0:
+                ordinary_loss_sum += loss
+                ordinary_loss_count += 1
+            elif band == 0:
+                mild_loss_sum += loss
+                mild_loss_count += 1
+            elif band == 1:
+                medium_loss_sum += loss
+                medium_loss_count += 1
+            else:
+                strong_loss_sum += loss
+                strong_loss_count += 1
+    effective = observation.loop.update.effective_samples
+    if sum(fallback_reasons.values()) != effective:
+        raise ValueError("camera fallback counts differ from effective batch")
+    if mild_loss_count + medium_loss_count + strong_loss_count != applied:
+        raise ValueError("camera per-band loss counts differ from applied count")
+    if applied == 0:
+        zoom_mean = 0.0
+        retention_mean = 0.0
+        retention_min_out = 0.0
+        pixel_shift_mean = 0.0
+        latent_shift_mean = 0.0
+    else:
+        zoom_mean = zoom_sum / applied
+        retention_mean = retention_sum / applied
+        retention_min_out = retention_min
+        pixel_shift_mean = pixel_shift_sum / applied
+        latent_shift_mean = latent_shift_sum / applied
+    return _CameraViewportMetrics(
+        selected=selected,
+        applied=applied,
+        fallback_reasons=fallback_reasons,
+        orientation_counts=orientation_counts,
+        zoom_histogram=zoom_histogram,
+        shift_token_histogram=shift_token_histogram,
+        equivalent_zoom_mean=zoom_mean,
+        equivalent_zoom_max=zoom_max,
+        final_retention_mean=retention_mean,
+        final_retention_min=retention_min_out,
+        abs_pixel_shift_mean=pixel_shift_mean,
+        abs_pixel_shift_max=pixel_shift_max,
+        abs_latent_shift_mean=latent_shift_mean,
+        abs_latent_shift_max=latent_shift_max,
+        mild_loss_sum=mild_loss_sum,
+        mild_loss_count=mild_loss_count,
+        medium_loss_sum=medium_loss_sum,
+        medium_loss_count=medium_loss_count,
+        strong_loss_sum=strong_loss_sum,
+        strong_loss_count=strong_loss_count,
+        ordinary_loss_sum=ordinary_loss_sum,
+        ordinary_loss_count=ordinary_loss_count,
+    )
 def _transparent_white_metrics(
     observation: SuccessfulTrainingObservation,
 ) -> tuple[int, int, int]:
@@ -422,6 +592,7 @@ def build_training_metric(
     if coefficient < 0.0 or coefficient > 1.0:
         raise ValueError("clip coefficient must be in [0,1]")
     spatial = _spatial_crop_metrics(observation)
+    camera = _camera_viewport_metrics(observation)
     transparent_tagged, transparent_composited, transparent_nl_suppressed = (
         _transparent_white_metrics(observation)
     )
@@ -500,6 +671,28 @@ def build_training_metric(
         spatial_abs_offset_x_mean=spatial.abs_offset_x_mean,
         spatial_abs_offset_y_mean=spatial.abs_offset_y_mean,
         spatial_both_axes_count=spatial.both_axes_count,
+        camera_viewport_selected=camera.selected,
+        camera_viewport_applied=camera.applied,
+        camera_fallback_reasons=camera.fallback_reasons,
+        camera_orientation_counts=camera.orientation_counts,
+        camera_zoom_histogram=camera.zoom_histogram,
+        camera_shift_token_histogram=camera.shift_token_histogram,
+        camera_equivalent_zoom_mean=camera.equivalent_zoom_mean,
+        camera_equivalent_zoom_max=camera.equivalent_zoom_max,
+        camera_final_retention_mean=camera.final_retention_mean,
+        camera_final_retention_min=camera.final_retention_min,
+        camera_abs_pixel_shift_mean=camera.abs_pixel_shift_mean,
+        camera_abs_pixel_shift_max=camera.abs_pixel_shift_max,
+        camera_abs_latent_shift_mean=camera.abs_latent_shift_mean,
+        camera_abs_latent_shift_max=camera.abs_latent_shift_max,
+        camera_mild_loss_sum=camera.mild_loss_sum,
+        camera_mild_loss_count=camera.mild_loss_count,
+        camera_medium_loss_sum=camera.medium_loss_sum,
+        camera_medium_loss_count=camera.medium_loss_count,
+        camera_strong_loss_sum=camera.strong_loss_sum,
+        camera_strong_loss_count=camera.strong_loss_count,
+        camera_ordinary_loss_sum=camera.ordinary_loss_sum,
+        camera_ordinary_loss_count=camera.ordinary_loss_count,
         transparent_tagged=transparent_tagged,
         transparent_composited=transparent_composited,
         transparent_nl_suppressed=transparent_nl_suppressed,

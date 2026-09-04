@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import torch
 
 from sakuramoon.telemetry.metrics import (
+    CAMERA_FALLBACK_REASONS,
     DROPOUT_KEYS,
     NOISE_T_BIN_COUNT,
     NOISE_T_BIN_LABELS,
@@ -70,6 +71,10 @@ def test_training_metric_flattens_t_bin_metrics_for_wandb() -> None:
         nonfinite_count=0,
         dropout_hits={key: 0 for key in DROPOUT_KEYS},
         condition_routes={"artist_text": 7, "character_text": 6, "null": 7},
+        # Legacy (camera-absent) contract for schema 11: the ordinary band
+        # carries the whole effective batch's main loss.
+        camera_ordinary_loss_sum=1.0,
+        camera_ordinary_loss_count=20,
         phase_seconds={phase: 0.0 for phase in TIMING_PHASES},
     )
 
@@ -118,12 +123,21 @@ def test_training_metric_omits_empty_t_bin_loss_from_wandb() -> None:
         nonfinite_count=0,
         dropout_hits={key: 0 for key in DROPOUT_KEYS},
         condition_routes={"artist_text": 7, "character_text": 6, "null": 7},
+        # Legacy (camera-absent) contract for schema 11: the ordinary band
+        # carries the whole effective batch's main loss.
+        camera_ordinary_loss_sum=1.0,
+        camera_ordinary_loss_count=20,
         phase_seconds={phase: 0.0 for phase in TIMING_PHASES},
     )
     sparse = replace(
         metric,
         effective_batch=19,
         high_noise_sample_count=19,
+        camera_ordinary_loss_count=19,
+        camera_fallback_reasons={
+            reason: (19 if reason == "none" else 0)
+            for reason in CAMERA_FALLBACK_REASONS
+        },
         spatial_fallback_reasons=None,
         spatial_zoom_histogram=None,
         condition_routes={"artist_text": 7, "character_text": 6, "null": 6},
