@@ -420,6 +420,7 @@ def _build_optimizer(
     telemetry_logger: Callable[[str], None] | None = None,
     rank: int = 0,
     world_size: int = 1,
+    checkpoint_source: str | None = None,
 ) -> IsolatedAdamW8bit | HybridCMuon:
     optimizer = config.optimizer
     common = {
@@ -528,6 +529,8 @@ def _build_optimizer(
                 momentum_dtype=optimizer.cmuon_momentum_dtype,
                 chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
                 stats_logger=stats_logger,
+                checkpoint_source=checkpoint_source,
+                run_id=config.run.run_id,
                 **common,
             )
         return build_guarded_canonical(
@@ -781,9 +784,9 @@ def _resume_state_for_config(
     """Apply explicit governed resume-policy changes to a validated RAW state."""
 
     terminal = state.stage_budget.terminal_successful_update
-    configured_terminal = (
-        state.stage_budget.start_successful_update + config.stage.planned_updates
-    )
+    # stage.planned_updates is the absolute successful-update terminal; the
+    # restored stage_budget reads this value live on every resume.
+    configured_terminal = config.stage.planned_updates
     if configured_terminal < terminal:
         raise ValueError("configured planned updates cannot shrink checkpoint budget")
     resumed = state
@@ -1201,6 +1204,10 @@ def _run_accepted_lifecycle(
         telemetry_logger=_log if is_main_process else None,
         rank=rank,
         world_size=world_size,
+        # F2 telemetry identity: the resume checkpoint path (null for a
+        # fresh start) so a hard-fail capsule is self-identifying after a
+        # crash. Pure metadata; never feeds training.
+        checkpoint_source=None if resume is None else str(resume),
     )
     if resume is None:
         _log("创建全新训练状态")

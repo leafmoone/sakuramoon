@@ -72,6 +72,9 @@ class StageTransitionRequest:
     target_stage: str
     source_checkpoint: Path
     source_checkpoint_id: str
+    # Absolute successful-update terminal of the target stage (NOT a stage
+    # length); transition_checkpoint_state derives the growth ramp from the
+    # stage length (planned_updates - source update).
     planned_updates: int
     manual_approval: bool
 
@@ -106,10 +109,6 @@ class StageTransitionRequest:
     @property
     def is_growth(self) -> bool:
         return stage_spec(self.source_stage).depth != stage_spec(self.target_stage).depth
-
-    @property
-    def ramp_updates(self) -> int:
-        return growth_ramp_updates(self.planned_updates) if self.is_growth else 0
 
     def forced_checkpoints(self) -> tuple[ForcedCheckpoint, ...]:
         if not self.is_growth:
@@ -262,11 +261,16 @@ def transition_checkpoint_state(
             ramp_start_successful_update=(
                 source.trainer.successful_updates if request.is_growth else None
             ),
-            ramp_updates=request.ramp_updates if request.is_growth else None,
+            # The ramp scales with the stage length, not the absolute terminal.
+            ramp_updates=(
+                growth_ramp_updates(request.planned_updates - stage_start)
+                if request.is_growth
+                else None
+            ),
         ),
         stage_budget=StageBudgetCheckpointState(
             start_successful_update=stage_start,
-            terminal_successful_update=stage_start + request.planned_updates,
+            terminal_successful_update=request.planned_updates,
         ),
         checkpoint_cadence=checkpoint_cadence,
     )

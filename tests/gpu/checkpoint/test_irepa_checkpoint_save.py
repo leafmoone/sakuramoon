@@ -40,9 +40,9 @@ from sakuramoon.checkpoint.schema import (
     RawCheckpointState,
     StageBudgetCheckpointState,
 )
-from sakuramoon.config.schema import IRepaConfig
 from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
+from sakuramoon.config.schema import IRepaConfig
 from sakuramoon.model.dit import DenseDiT
 from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.model.irepa import IRepaAlignment

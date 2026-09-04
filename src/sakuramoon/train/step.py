@@ -368,6 +368,24 @@ class StepOptimizer(Protocol):
     def zero_grad(self, *, set_to_none: bool) -> None: ...
 
 
+def _note_forensic_update(
+    optimizer: StepOptimizer, state: SingleGpuUpdateState
+) -> None:
+    """F2 telemetry hook: optimizers that implement ``note_forensic_update``
+    learn the global update identity immediately before the optimizer
+    step, so the minimal hard-fail capsule can record
+    (last_successful_update, attempted_update). Duck-typed: a no-op for
+    every optimizer that does not implement it (the production AdamW
+    paths are untouched). Pure attribute storage — it never feeds any
+    computation."""
+    note = getattr(optimizer, "note_forensic_update", None)
+    if callable(note):
+        note(
+            last_successful_update=state.successful_updates,
+            attempted_update=state.attempted_updates,
+        )
+
+
 class SingleGpuStep:
     """Accumulate per-sample sums, then normalize once at the update boundary."""
 
@@ -617,6 +635,7 @@ class SingleGpuStep:
 
         try:
             with _record_phase(phase_timer, "optimizer"):
+                _note_forensic_update(self.optimizer, attempted)
                 self.optimizer.step()
         except BaseException as error:
             self._detection_phase = "optimizer"

@@ -44,7 +44,8 @@ output_dir = "output_model/evaluation/g1_transparent_white"
 #   - 2-dcu canary:  0.0000475 * 760 / 256 = 0.000141015625
 #   - 1-dcu canary:  0.0000475 * 400 / 256 = 0.00007421875 (the live p50 rate)
 # Growth/budget inherit unchanged from train_g1.toml (half-cosine growth,
-# planned_updates 110000). The preflight "resume_contract" check verifies at
+# planned_updates 168000 = absolute successful-update terminal). The
+# preflight "resume_contract" check verifies at
 # cutover that the source checkpoint's saved optimizer learning rate equals
 # this configured rate exactly (no tolerance); any drift fails the run.
 [stage]

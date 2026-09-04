@@ -90,7 +90,10 @@ accumulation = 20
 # [optimizer]) -> actual_lr=0.00015625 (JLT auto-scaled, reference_batch=256).
 global_batch = 800
 activation_checkpoint_mode = "none"
-planned_updates = 110000
+# Absolute successful-update terminal for this stage. The restored trainer
+# stage_budget reads this value live on every resume (terminal := this value,
+# extend-only, fail-closed on shrink). G1: 58000 -> 168000.
+planned_updates = 168000
 manual_finalize = true
 automatic_transition = false
 

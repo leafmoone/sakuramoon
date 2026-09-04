@@ -1,0 +1,115 @@
+{
+  "report": "cmuon-f3-soft-below-floor",
+  "date": "2026-09-04",
+  "branch": "cmuon-soft-below-floor-f3",
+  "base_commit": "bb4129293f799fc8fe25d2ed66fabe73363d5eb6",
+  "semantic_change": {
+    "description": "finite FP32 below_floor verdict: HARD FAIL -> ACCEPT ORIGINAL FP32 DELTA + diagnostic telemetry",
+    "rescue_floor_numeric": "0.05 * (0.2 * lr) unchanged, role demoted SAFETY -> DIAGNOSTIC BOUNDARY",
+    "reasons": ["below_floor_soft_rescue", "zero_delta_soft_rescue (exact zero)"],
+    "hard_fail_preserved_for": ["nonfinite", "above_ceiling"],
+    "no_clamp_or_rescale": true,
+    "no_adamw_svd_fallback": true,
+    "ns_coefficients_unchanged": true,
+    "checkpoint_schema_unchanged": true
+  },
+  "runtime_diff": {
+    "files": ["src/sakuramoon/optim/fp32_rescue.py"],
+    "insertions": 83,
+    "deletions": 19,
+    "process_local_counters_not_persisted": ["fp32_low_delta_rescues", "fp32_low_delta_by_role"],
+    "persisted_guard_keys_exact": [
+      "bf16_attempts",
+      "bf16_safety_failures",
+      "fp32_attempts",
+      "fp32_rescues",
+      "fp32_rescue_failures",
+      "rescue_by_role"
+    ]
+  },
+  "verification": {
+    "unit_f3": {"tests": 15, "passed": 15, "seconds": 73.71, "suite": "tests/unit/optim/test_fp32_rescue_f3.py"},
+    "f2_regression_unit_optim": {
+      "passed": 129,
+      "failed_expected_semantic_diff": 4,
+      "failed_cases": [
+        "test_bcd_hard_fail_captures_fp32_reason[below_floor-below_floor]",
+        "test_e_writer_failure_still_raises_original_error",
+        "test_f_serialization_failure_still_raises_and_leaves_no_capsule",
+        "test_m2_mirror_failure_keeps_local_capsule_and_original_error"
+      ],
+      "classification": "below_floor-driven hard-fail fault-injection tests; under F3 that input class is a successful soft rescue so the fault-injection path is not reached; hard-fail capture mechanism fully covered by still-passing above_ceiling/nonfinite cases + F3 tests E/F; per spec existing tests are not modified"
+    },
+    "r2_exact_replay": {
+      "capsule": "/sakuramoon-runtime/cmuon-f1-emergency/obs-611-rank0-dit_blocks_slot_02_attention_content_gate_weight-chunk0",
+      "input_sha256": "1c782a4601cb357ff97f6c81de61706a151b4796e4462a83561cf4792fbb5541",
+      "input_sha_verified": true,
+      "input_rms_recheck": true,
+      "alpha_floor_ceiling_recomputed": true,
+      "bf16_production": {"repeats": 20, "all_finite": true, "all_above_ceiling": true, "rms_min": 204801589248.0, "rms_max": 300651020288.0, "rms_median": 234843955200.0},
+      "bf16_deterministic_oracle_test_only": {"repeats": 3, "bit_exact": false, "rms": [228747575296.0, 251910176768.0, 206894071808.0], "note": "salt11 HCU: bf16 matmul also nondeterministic across calls on this pathological input (environment fact, recorded per section 13)"},
+      "fp32_production": {"repeats": 3, "bit_exact": true, "rms": 1.377804551339068e-06, "rms_all_equal": true, "readback_matches_capsule": true},
+      "staged_delta_bf16_sha256": "65422097cde9010474c2400bac37f6fa199922a4e518ee85168ad4e2d9250708",
+      "verdict_f2_reference": "HARD_FAIL / below_floor",
+      "verdict_f3": "SUCCESSFUL_RESCUE / below_floor_soft_rescue",
+      "f3_semantic_change": true
+    },
+    "parity_cross_tree": {
+      "seed": 20260904,
+      "safe_oracle_10_steps": "BIT-IDENTICAL modulo known HCU environment nondeterminism (8-bit AdamW exp_avg/exp_avg_sq of mock input_projection; proven pre-existing by within-tree separate-process control runs f2a-vs-f2b and f3a-vs-f3b)",
+      "normal_3_steps": "BIT-IDENTICAL modulo the same known environment nondeterministic keys",
+      "params_momenta_refs_sr_rng_cmuon_counters": "bit-identical every step, both modes",
+      "hardfail_nonfinite": "identical outcome CMuonSafetyError, byte-identical message, zero commit, identical final state",
+      "hardfail_ceiling": "identical outcome CMuonSafetyError, byte-identical message, zero commit, identical final state",
+      "below_floor_intended_diff": "F2: CMuonSafetyError, 0 committed steps, 16 failures, zero commit | F3: SUCCESS, 20 steps, 320/320 soft rescues (by_role breakdown), spread 0"
+    },
+    "safe_real_10_steps": {"bf16_failures": 0, "fp32_attempts": 0, "fp32_rescues": 0, "observations": 10, "note": "healthy production kernel path fidelity"},
+    "two_rank_hcu": {
+      "verdict": "PASS",
+      "scenarios": ["healthy", "soft_rescue", "mixed_step", "above_ceiling", "nonfinite"],
+      "max_delta_rank_spread": 0.0,
+      "max_param_rank_diff": 0.0,
+      "param_fingerprint_spread": 0.0,
+      "soft_owner_fp32_calls": 1,
+      "soft_nonowner_fp32_calls": 0,
+      "hardfail_zero_commit_both_ranks": true
+    },
+    "performance_20_steps": {"normal_constant_ms_per_step": 133.0, "below_floor_ms_per_step": 132.5, "soft_branch_overhead_ms_per_step": -0.5, "verdict": "noise"},
+    "ckpt_112100_compat_audit": {
+      "file": "train_state/optimizer.pt (3143794315 B)",
+      "loader": "_load_hybrid_optimizer_state (exact production resume loader)",
+      "top_level_and_schema_validation": "PASS",
+      "fp32_rescue_keys_match_f3_loader": true,
+      "fp32_rescue_counters": {"bf16_attempts": 49800, "bf16_safety_failures": 170, "fp32_attempts": 170, "fp32_rescues": 170, "fp32_rescue_failures": 0},
+      "rescue_by_role": {"attention_content_gate": 58, "attention_k": 28, "attention_q": 84},
+      "f3_process_local_counters_absent": true,
+      "migration_required": false,
+      "verdict": "PASS"
+    },
+    "nondeterminism_recorded_not_fixed": {
+      "bf16_addmm": "nondeterministic across calls (S18, reconfirmed)",
+      "bf16_matmul_salt11_pathological_input": "nondeterministic across calls (NEW: S18 on salt13 found matmul bit-deterministic; property is machine/build-dependent; amplified at the NS convergence boundary on near-zero-signal inputs; healthy O(1) inputs stay bit-consistent cross-process per safe-oracle parity)",
+      "bf16_norm": "deterministic",
+      "fp32_all": "deterministic (bit-exact x3 in R2 replay; production rescue relies on this)",
+      "production_impact": "none: owner computes NS once per update and broadcasts; FP32 rescue path deterministic"
+    },
+    "quality_gates": {
+      "ruff": "0 errors on all 5 F3 files",
+      "pyright": "fp32_rescue.py 246=246 FLAT (uniform uv 3.12 pythonpath); test_fp32_rescue.py 274=274; new F3 test file 496 (same noise class as existing test files)",
+      "local_full_pytest": "59 failed / 710 passed / 3 skipped / 3 collection errors (Windows): 46 pre-existing Windows-baseline-class (3 config symlink-rejection, 2 run_deepghs subprocess watchdog, 41 TritonMissing CUDA-gated) + 13 F3 CUDA-gated tests in the same TritonMissing known class (F3 file: 13/15 TritonMissing locally, 2 CPU tests pass locally, 15/15 on HCU); passed count identical to pre-F3 baseline (710); no new non-baseline-class failure",
+      "hcu_full_unit_suite": "AUTHORITATIVE FINAL (complete staged tree incl. config/): 756 passed / 4 failed / 0 errors in 958s; the 4 failures are exactly the 4 documented expected F3 semantic diffs (section 2.9); intermediate run without config/: 729 passed / 14 failed / 17 errors where every non-optim failure/error was a staging artifact (FileNotFoundError /tmp/f3-src/config) re-verified 46/46 PASS once config/ was staged; 2 deepghs data-pipeline test files excluded: their script requires onnxruntime which the DTK venv does not install (pre-existing environment gap, unrelated to F3, excluded identically for any tree)",
+      "known_baseline_only": true,
+      "new_skip_or_xfail": 0
+    }
+  },
+  "production_safety": {
+    "salt11_production_writes": 0,
+    "restarts": 0,
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "staging_only": ["/tmp/f3-src", "/tmp/f2-src", "/tmp/f3-results", "/tmp/f3-src.tgz", "/tmp/f3-results.tgz"],
+    "read_only_production_assets": ["cmuon-f1-emergency capsule obs-611-rank0", "ckpt_112100_raw-112100-update-cadence (optimizer.pt)"]
+  },
+  "verdict": "IMPLEMENT + VERIFY COMPLETE; awaiting explicit user approval for any production deployment/canary"
+}
