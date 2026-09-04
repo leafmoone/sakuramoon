@@ -458,11 +458,9 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         try:
             fields = cast(object, self.caption_fields_parser(raw_metadata))
         except PipelineSampleRejected as rejected:
-            print(
-                f"[data] skip sample shard={shard_record.path} "
-                f"id={metadata.id} reason={rejected.reason}",
-                flush=True,
-            )
+            # Per-sample skip logging is intentionally omitted (production
+            # log-cadence reduction, 2026-09-04): rejections are still
+            # accounted for via _trace_sample + rejection_observer.
             _trace_sample(
                 shard_record.path,
                 metadata.id,

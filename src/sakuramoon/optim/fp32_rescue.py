@@ -968,7 +968,11 @@ def build_fp32_rescue(
     momentum_dtype: str = "bfloat16",
     chunk_rescale_sqrt_n: bool = False,
     stats_logger: Callable[[str], None] | None = None,
-    stats_log_every_n: int = 10,
+    # The guard's observations counter advances once per update, so 100
+    # = once per 100 updates. Default reduced from 10 (2026-09-04,
+    # production log-cadence reduction); the per-update rescue-telemetry
+    # line is unaffected.
+    stats_log_every_n: int = 100,
     hard_fail_artifact_root: str | None = None,
     legacy_forensic_dir: str | None = None,
     emergency_capsule_root: str | None = None,
