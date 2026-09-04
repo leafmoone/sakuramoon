@@ -280,10 +280,18 @@ FUTURE_STAGE_512 (stage_edge = 512, explicitly NOT current G1):
 - affected pre-existing tests updated = 10 (schema-11 ordinary band).
 - ruff = clean on the C1 diff surface (only the pre-existing baseline
   flag in tests/gpu/optim/cmuon_capsule_teardown.py remains, untouched).
-- pyright = controlled comparison vs the full 3a341c0 worktree: every
-  non-C1 file byte-identical per-file error counts; C1 delta (+27 total:
-  camera_eval +1, metrics +24, observer +2) confined to camera files and
-  each in an error class already established in that file's patterns.
+- pyright = controlled comparison vs the full 3a341c0 worktree
+  (per-file diagnostic SET comparison, message-level): every non-C1 file
+  identical; C1-added/modified files carry ZERO new diagnostics and no
+  baseline diagnostic was lost (total = 820 on both trees). The initial
+  +27 camera-attributable delta (camera_eval +1, metrics +24, observer
+  +2) was closed in the types commit by typing-only changes: optional
+  camera tables narrowed through unreachable-None locals + a
+  _required_camera_table helper, the torch tolist() stubs boundary
+  replaced by a single .cpu() transfer + per-element .item(), and a
+  local cast(TrainableComposite) at the camera_eval load boundary. No
+  pyright ignores added (two pre-existing targeted ignores in the camera
+  observer path were removed); no config/strictness changes.
 - targeted suite (13 files, camera + stage-scaling + affected telemetry/
   spatial/pipeline) = 116 passed.
 - full pytest (corrected tree) = 9 failed / 872 passed / 2

@@ -553,11 +553,12 @@
     "affected_preexisting_tests_updated": 10,
     "targeted_suite": "13 files, 116 passed",
     "ruff": "clean on C1 diff surface (pre-existing baseline flag in tests/gpu/optim/cmuon_capsule_teardown.py untouched)",
-    "pyright": "controlled comparison vs full 3a341c0 worktree: all non-C1 files byte-identical per-file counts; C1 delta +27 (camera_eval +1, metrics +24, observer +2) in established file-local error classes",
+    "pyright": "controlled per-file diagnostic-SET comparison vs full 3a341c0 worktree: non-C1 files identical; C1-added/modified files have ZERO new diagnostics (initial +27 delta closed by typing-only cleanup: unreachable-None locals + _required_camera_table helper for the optional camera tables, .cpu()+.item() for the DTK tolist() stubs boundary, local cast(TrainableComposite) in camera_eval); no pyright ignores added, two pre-existing targeted ignores removed, no config or strictness changes; tree total 820 == baseline 820",
     "baseline_failures": "9 failed + 1 collection error (onnxruntime), all pre-existing",
     "new_functional_failures": 0,
     "new_skips": 0,
-    "full_pytest_corrected_tree": "9 failed / 872 passed / 2 skipped / 1 error (914.55s); failure set byte-identical to the 3a341c0 baseline (9F + 1E onnxruntime); 872 = 784 baseline + 78 C1 + 10 stage-scaling; 0 new functional failures"
+    "full_pytest_corrected_tree": "9 failed / 872 passed / 2 skipped / 1 error (914.55s); failure set byte-identical to the 3a341c0 baseline (9F + 1E onnxruntime); 872 = 784 baseline + 78 C1 + 10 stage-scaling; 0 new functional failures",
+    "pyright_camera_attributable_delta": "0 (before: 27)"
   },
   "forbidden_diff_check": {
     "zero_diff_required": [

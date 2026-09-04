@@ -108,6 +108,19 @@ def _camera_default_shift_token_histogram() -> Mapping[str, int]:
     return MappingProxyType({label: 0 for label in CAMERA_SHIFT_TOKEN_BIN_LABELS})
 
 
+def _required_camera_table(table: Mapping[str, int] | None) -> Mapping[str, int]:
+    """Narrow an optional camera table after ``__post_init__`` filled it.
+
+    Every constructed TrainingMetric has all four camera tables non-None
+    (filled in ``__post_init__``); the None branch is unreachable at
+    runtime and exists only to narrow the optional dataclass fields for
+    the type checker (``object.__setattr__`` is invisible to pyright).
+    """
+    if table is None:
+        raise ValueError("camera table missing after __post_init__ fill")
+    return table
+
+
 def _transparent_default_rejection_totals() -> Mapping[str, int]:
     """Default all-zero transparent-white reject totals (policy disabled)."""
     return MappingProxyType({key: 0 for key in TRANSPARENT_REJECTION_KEYS})
@@ -423,54 +436,71 @@ class TrainingMetric:
                 "camera_shift_token_histogram",
                 _camera_default_shift_token_histogram(),
             )
-        if set(self.camera_fallback_reasons) != set(CAMERA_FALLBACK_REASONS):
+        # Typed locals for the four camera tables: every None was filled
+        # above, so the is-None branches below are unreachable at runtime;
+        # they narrow the optional dataclass fields for the type checker.
+        camera_fallback_reasons = self.camera_fallback_reasons
+        if camera_fallback_reasons is None:
+            camera_fallback_reasons = _camera_default_fallback_reasons(
+                self.effective_batch
+            )
+        camera_orientation_counts = self.camera_orientation_counts
+        if camera_orientation_counts is None:
+            camera_orientation_counts = _camera_default_orientation_counts()
+        camera_zoom_histogram = self.camera_zoom_histogram
+        if camera_zoom_histogram is None:
+            camera_zoom_histogram = _camera_default_zoom_histogram()
+        camera_shift_token_histogram = self.camera_shift_token_histogram
+        if camera_shift_token_histogram is None:
+            camera_shift_token_histogram = _camera_default_shift_token_histogram()
+        if set(camera_fallback_reasons) != set(CAMERA_FALLBACK_REASONS):
             raise ValueError(
                 "camera fallback reasons must contain every fixed key"
             )
-        for key, value in self.camera_fallback_reasons.items():
+        for key, value in camera_fallback_reasons.items():
             _nonnegative_int(f"camera_fallback_reasons.{key}", value)
             if value > self.effective_batch:
                 raise ValueError(
                     "camera fallback count exceeds effective batch"
                 )
-        if sum(self.camera_fallback_reasons.values()) != self.effective_batch:
+        if sum(camera_fallback_reasons.values()) != self.effective_batch:
             raise ValueError(
                 "camera fallback counts must equal effective batch"
             )
-        if set(self.camera_orientation_counts) != set(CAMERA_ORIENTATION_KEYS):
+        if set(camera_orientation_counts) != set(CAMERA_ORIENTATION_KEYS):
             raise ValueError(
                 "camera orientation counts must contain every fixed key"
             )
-        for key, value in self.camera_orientation_counts.items():
+        for key, value in camera_orientation_counts.items():
             _nonnegative_int(f"camera_orientation_counts.{key}", value)
         if (
-            sum(self.camera_orientation_counts.values())
+            sum(camera_orientation_counts.values())
             != self.camera_viewport_applied
         ):
             raise ValueError(
                 "camera orientation counts must cover applied samples"
             )
-        if set(self.camera_zoom_histogram) != set(CAMERA_ZOOM_BAND_LABELS):
+        if set(camera_zoom_histogram) != set(CAMERA_ZOOM_BAND_LABELS):
             raise ValueError(
                 "camera zoom histogram must contain every fixed label"
             )
-        for key, value in self.camera_zoom_histogram.items():
+        for key, value in camera_zoom_histogram.items():
             _nonnegative_int(f"camera_zoom_histogram.{key}", value)
-        if sum(self.camera_zoom_histogram.values()) != self.camera_viewport_applied:
+        if sum(camera_zoom_histogram.values()) != self.camera_viewport_applied:
             raise ValueError(
                 "camera zoom histogram must cover applied samples"
             )
         if (
-            set(self.camera_shift_token_histogram)
+            set(camera_shift_token_histogram)
             != set(CAMERA_SHIFT_TOKEN_BIN_LABELS)
         ):
             raise ValueError(
                 "camera shift token histogram must contain every fixed label"
             )
-        for key, value in self.camera_shift_token_histogram.items():
+        for key, value in camera_shift_token_histogram.items():
             _nonnegative_int(f"camera_shift_token_histogram.{key}", value)
         if (
-            sum(self.camera_shift_token_histogram.values())
+            sum(camera_shift_token_histogram.values())
             != self.camera_viewport_applied
         ):
             raise ValueError(
@@ -664,10 +694,10 @@ class TrainingMetric:
             "spatial_both_axes_count": self.spatial_both_axes_count,
             "camera_viewport_selected": self.camera_viewport_selected,
             "camera_viewport_applied": self.camera_viewport_applied,
-            "camera_fallback_reasons": dict(self.camera_fallback_reasons),
-            "camera_orientation_counts": dict(self.camera_orientation_counts),
-            "camera_zoom_histogram": dict(self.camera_zoom_histogram),
-            "camera_shift_token_histogram": dict(self.camera_shift_token_histogram),
+            "camera_fallback_reasons": dict(_required_camera_table(self.camera_fallback_reasons)),
+            "camera_orientation_counts": dict(_required_camera_table(self.camera_orientation_counts)),
+            "camera_zoom_histogram": dict(_required_camera_table(self.camera_zoom_histogram)),
+            "camera_shift_token_histogram": dict(_required_camera_table(self.camera_shift_token_histogram)),
             "camera_equivalent_zoom_mean": self.camera_equivalent_zoom_mean,
             "camera_equivalent_zoom_max": self.camera_equivalent_zoom_max,
             "camera_final_retention_mean": self.camera_final_retention_mean,
@@ -731,25 +761,25 @@ class TrainingMetric:
         payload.update(
             {
                 f"camera_fallback_reasons/{key}": value
-                for key, value in self.camera_fallback_reasons.items()
+                for key, value in _required_camera_table(self.camera_fallback_reasons).items()
             }
         )
         payload.update(
             {
                 f"camera_orientation_counts/{key}": value
-                for key, value in self.camera_orientation_counts.items()
+                for key, value in _required_camera_table(self.camera_orientation_counts).items()
             }
         )
         payload.update(
             {
                 f"camera_zoom_histogram/{key}": value
-                for key, value in self.camera_zoom_histogram.items()
+                for key, value in _required_camera_table(self.camera_zoom_histogram).items()
             }
         )
         payload.update(
             {
                 f"camera_shift_token_histogram/{key}": value
-                for key, value in self.camera_shift_token_histogram.items()
+                for key, value in _required_camera_table(self.camera_shift_token_histogram).items()
             }
         )
         # Cumulative transparent-white reject totals: fixed keys always

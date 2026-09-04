@@ -372,7 +372,7 @@ def _camera_viewport_metrics(
                 f"microbatches[{index}].camera_viewport must be a CameraViewportCounts"
             )
         bands = measurement.camera_zoom_bands
-        losses = measurement.per_sample_loss
+        losses: torch.Tensor = measurement.per_sample_loss
         if len(bands) != losses.numel():
             raise ValueError(
                 f"microbatches[{index}] camera band count differs from per-sample loss"
@@ -412,15 +412,20 @@ def _camera_viewport_metrics(
                     f"microbatches[{index}] camera shift label {key} is not fixed"
                 )
             shift_token_histogram[key] += value
-        # torch stubs: tolist() elements are partially unknown; float() pins them.
-        for band, loss in zip(  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-            bands, losses.detach().cpu().tolist(), strict=True
-        ):
+        # The DTK torch stubs leave Tensor.tolist() partially unknown once
+        # a torch submodule is in the module graph (a stubs boundary issue,
+        # not a runtime one); the single .cpu() transfer and the per-element
+        # .item() floats are the same values the old tolist() loop consumed.
+        loss_tensor: torch.Tensor = losses.detach().cpu()
+        loss_values: list[float] = [
+            float(loss_tensor[i].item()) for i in range(loss_tensor.numel())
+        ]
+        for band, loss in zip(bands, loss_values, strict=True):
             if type(band) is not int or not -1 <= band < 3:
                 raise ValueError(
                     f"microbatches[{index}] carries an invalid camera band {band!r}"
                 )
-            loss = float(loss)  # pyright: ignore[reportUnknownArgumentType]
+            loss = float(loss)
             if band < 0:
                 ordinary_loss_sum += loss
                 ordinary_loss_count += 1

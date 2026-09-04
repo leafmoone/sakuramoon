@@ -30,6 +30,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 CAMERA_EVAL_MANIFEST_VERSION = 1
 
@@ -259,6 +260,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _generate,  # pyright: ignore[reportPrivateUsage]
         _stage_cases,  # pyright: ignore[reportPrivateUsage]
     )
+    from sakuramoon.train.step import TrainableComposite
 
     root = args.root.resolve(strict=True)
     config_root = (
@@ -288,6 +290,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("camera evaluation resolution must be a positive multiple of 16")
 
     composite = load_inference_artifact(checkpoint, manifest.identity, device=device)
+    # Training checkpoints always compose a TrainableComposite
+    # (build_trainable_composite); the loader's nn.Module return annotation
+    # is the shared baseline surface (checkpoint/load.py) and is not
+    # widened here, so narrow it locally for _generate.
+    composite = cast(TrainableComposite, composite)
     qwen = load_local_qwen(root, device)
     vae = load_local_mage_vae(root, device)
 
