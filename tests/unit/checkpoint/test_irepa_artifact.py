@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import shutil
+from pathlib import Path
 from typing import Any, cast
 
 import torch
@@ -12,6 +14,8 @@ from sakuramoon.checkpoint.artifact import (
 )
 from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
+from sakuramoon.config.assembly import trainable_composite_spec
+from sakuramoon.config.load import load_config
 from sakuramoon.model.dit import PackedDiT
 from sakuramoon.model.irepa import IRepaAlignment, irepa_alignment_metadata
 from sakuramoon.train.step import TrainableComposite
@@ -252,3 +256,75 @@ def test_v4_export_rejects_width_mismatch() -> None:
         assert "iREPA projector input width differ" in str(error)
     else:
         raise AssertionError("expected ValueError for projector/DiT width mismatch")
+
+REPOSITORY_ROOT = Path(__file__).parents[3]
+
+
+def _production_v4_document(work_dir: Path) -> dict[str, object]:
+    """Assemble the frozen production chain + [irepa] overlay with the real
+    config loader (extends resolution) and return the canonical v4
+    architecture document.
+
+    The chain files are copied into an isolated directory so the test never
+    writes inside the repository config tree; only the loader and the
+    production config content are involved.
+    """
+    chain = work_dir / "config"
+    chain.mkdir()
+    for toml in sorted((REPOSITORY_ROOT / "config").glob("*.toml")):
+        shutil.copy2(toml, chain / toml.name)
+    overlay = chain / "p6b_device_regression.toml"
+    overlay.write_text(
+        'extends = ["train_g1_cmuon_production.toml"]\n\n'
+        "[irepa]\n"
+        "enabled = true\n"
+        'teacher_id = "facebook/PE-Spatial-B16-512"\n'
+        "tap_slot = 8\n"
+        "projector_kernel_size = 3\n"
+        'spatial_norm = "zscore"\n'
+        'loss = "cosine"\n',
+        encoding="utf-8",
+    )
+    loaded = load_config(
+        Path("p6b_device_regression.toml"),
+        config_root=chain,
+        environment={
+            "MODELSCOPE_API_TOKEN": "synthetic-modelscope-secret",
+            "WANDB_API_KEY": "synthetic-wandb-secret",
+        },
+    )
+    return trainable_composite_spec(loaded.config)
+
+
+def test_irepa_projector_is_constructed_on_requested_device(tmp_path: Path) -> None:
+    """Regression for the Phase6B pre-canary blocker.
+
+    The canonical builder used to construct the iREPA projector OUTSIDE the
+    requested-device context, so the projector stayed on CPU while the other
+    289 production trainable parameters were on the accelerator and the
+    production optimizer rejected the composite (single-device contract).
+    The builder must create the projector on the requested device itself:
+    no post-build ``.to(device)`` is allowed to make this test pass.
+
+    The architecture document comes from the real frozen production input
+    chain (train_g1_cmuon_production.toml + the [irepa] overlay), so the
+    asserted topology is the production one: 289 + 2 = 291 trainable
+    parameters.
+    """
+    document = _production_v4_document(tmp_path)
+    requested = torch.device("cuda", 0)
+    module = build_trainable_composite(document, device=requested)
+    trainable = [p for p in module.parameters() if p.requires_grad]
+    assert len(trainable) == 291
+    assert {p.device for p in trainable} == {requested}
+    assert module.irepa_alignment is not None
+    alignment = module.irepa_alignment
+    weight = alignment.projector.weight
+    bias = alignment.projector.bias
+    assert weight is not None
+    assert bias is not None
+    assert weight.device == requested
+    assert bias.device == requested
+    assert weight.dtype == torch.bfloat16
+    assert bias.dtype == torch.float32
+    assert export_trainable_composite(module) == document

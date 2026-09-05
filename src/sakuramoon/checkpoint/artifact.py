@@ -153,8 +153,12 @@ def active_slot_ids_from_module(module: nn.Module) -> tuple[int, ...]:
     return slots
 
 
-def _decode_irepa_auxiliary(value: object) -> IRepaAlignment:
-    """Strictly decode and construct the locked iREPA v1 auxiliary document."""
+def _decode_irepa_auxiliary(value: object) -> int:
+    """Strictly decode the locked iREPA v1 auxiliary document.
+
+    Returns the projector input width; the module itself is constructed on
+    the requested device by ``build_trainable_composite``.
+    """
 
     auxiliaries = _mapping(value, "training auxiliaries")
     if set(auxiliaries) != {"irepa"}:
@@ -180,14 +184,10 @@ def _decode_irepa_auxiliary(value: object) -> IRepaAlignment:
         raise ValueError(
             "irepa auxiliary metadata is not the locked v1 projector contract"
         )
-    if type(meta["in_channels"]) is not int or meta["in_channels"] <= 0:
+    in_channels = meta["in_channels"]
+    if type(in_channels) is not int or in_channels <= 0:
         raise ValueError("irepa auxiliary input width is invalid")
-    try:
-        return IRepaAlignment(meta["in_channels"])
-    except (TypeError, ValueError):
-        raise ValueError(
-            "irepa auxiliary metadata cannot construct the locked projector"
-        ) from None
+    return in_channels
 
 
 def build_trainable_composite(
@@ -197,7 +197,7 @@ def build_trainable_composite(
 ) -> TrainableComposite:
     document = _mapping(value, "model architecture")
     version = document.get("schema_version")
-    irepa_alignment: IRepaAlignment | None = None
+    irepa_in_channels: int | None = None
     if version == _ARCHITECTURE_SCHEMA_VERSION:
         if (
             set(document) != _ROOT_KEYS
@@ -212,7 +212,7 @@ def build_trainable_composite(
             raise ValueError(
                 "v4 model architecture has unknown or missing fields"
             )
-        irepa_alignment = _decode_irepa_auxiliary(document["training_auxiliaries"])
+        irepa_in_channels = _decode_irepa_auxiliary(document["training_auxiliaries"])
     else:
         raise ValueError("model architecture schema version is unsupported")
     dit_config = _mapping(document["dit"], "DiT architecture")
@@ -240,6 +240,18 @@ def build_trainable_composite(
         "condition_tokens",
     )
     dit_arguments = _decode_dtypes(dit_arguments, "dit")
+    # iREPA projector: construct on the same requested device as the rest of
+    # the canonical composite so the builder returns a fully placed trainable
+    # composite (the production contract forbids a post-build device move).
+    irepa_alignment: IRepaAlignment | None = None
+    if irepa_in_channels is not None:
+        with torch.device(device):
+            try:
+                irepa_alignment = IRepaAlignment(irepa_in_channels)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "irepa auxiliary metadata cannot construct the locked projector"
+                ) from None
     try:
         with torch.device(device):
             module = TrainableComposite(
