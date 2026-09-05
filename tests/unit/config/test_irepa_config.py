@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +62,7 @@ def test_legacy_config_without_irepa_parses_as_absent(
     loaded = _load(tmp_path, valid_payload, secret_environment)
 
     assert loaded.config.irepa is None
-    assert "irepa" not in loaded.resolved_toml
+    assert "irepa" not in tomllib.loads(loaded.resolved_toml)
     dumped = loaded.config.model_dump(
         mode="python", by_alias=True, exclude_none=True
     )

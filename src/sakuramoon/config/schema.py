@@ -61,6 +61,8 @@ FIXED_TIMING_PHASES = (
     "optimizer",
     "checkpoint",
     "evaluation",
+    "irepa_teacher",
+    "irepa_projector",
     "cache",
     "tar",
     "json",

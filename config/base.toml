@@ -340,6 +340,7 @@ force_synchronize_each_phase = false
 phases = [
   "data", "qwen", "vae", "conditioning", "dit_forward", "loss",
   "backward", "ddp", "clip", "optimizer", "checkpoint", "evaluation",
+  "irepa_teacher", "irepa_projector",
   "cache", "tar", "json", "caption", "tokenize", "decode", "exif",
   "crop", "bucket", "h2d", "condition", "zero_grad", "sample",
 ]
