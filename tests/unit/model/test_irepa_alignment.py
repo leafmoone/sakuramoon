@@ -40,14 +40,25 @@ def test_forward_square_grid_matches_conv2d_reference() -> None:
     image_hidden = torch.randn(2, height * width, INPUT_WIDTH, dtype=torch.bfloat16)
 
     output = irepa(image_hidden, (height, width))
-    expected = irepa.projector(image_hidden.reshape(2, INPUT_WIDTH, height, width))
+    # Independent reference built from the index definition (not the
+    # production reshape): spatial[b, c, y, x] = image_hidden[b, y*W + x, c].
+    token_idx = torch.arange(height * width).view(1, height, width)
+    c_idx = torch.arange(INPUT_WIDTH).view(INPUT_WIDTH, 1, 1)
+    spatial_ref = torch.stack(
+        [image_hidden[b, token_idx, c_idx] for b in range(2)], dim=0
+    )
+    expected = irepa.projector(spatial_ref)
 
     assert output.shape == (2, height * width, IREPA_TEACHER_FEATURE_WIDTH)
     assert output.dtype is torch.bfloat16
     assert torch.isfinite(output.float()).all()
-    # token order is row-major H*W and the forward is exactly the conv
+    # token order is row-major H*W and the forward is exactly the conv.
+    # torch's standard BF16 tolerance (rtol=1.6e-2) is used: a layout error
+    # is O(1) (RED baseline: 96.5% mismatched, max abs 1.68), while the
+    # backend's bf16 reduction nondeterminism between two separate conv
+    # calls is 1-ULP level (measured: 244/393216, max abs 3.9e-3).
     flat = expected.reshape(2, IREPA_TEACHER_FEATURE_WIDTH, -1).transpose(1, 2)
-    assert torch.equal(output, flat)
+    torch.testing.assert_close(output, flat)
 
 
 def test_forward_non_square_grid() -> None:

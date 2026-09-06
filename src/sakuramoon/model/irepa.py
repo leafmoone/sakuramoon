@@ -113,6 +113,11 @@ class IRepaAlignment(nn.Module):
         ``image_hidden`` is ``[B, T, D]`` with ``T = H * W`` row-major;
         ``image_shape`` is ``(H, W)`` (non-square grids are supported).
         Returns ``[B, T, 768]``.
+
+        Spatial index contract: ``spatial[b, c, y, x] ==
+        image_hidden[b, y * W + x, c]`` — each token keeps its spatial
+        position and its feature channels; the Conv2d operates over
+        channel-first ``[B, D, H, W]``.
         """
 
         if image_hidden.dtype is not torch.bfloat16:
@@ -145,9 +150,16 @@ class IRepaAlignment(nn.Module):
                 "hidden width does not match the projector input width "
                 f"(D={width} != in_channels={self.projector.in_channels})"
             )
-        features = self.projector(
-            image_hidden.reshape(batch, width, height, grid_width)
+        # The input is token-major [B, T, D] with T = H*W row-major, so the
+        # channel-first Conv2d input must be built by transposing the token
+        # and feature axes and only then reshaping the flat token axis into
+        # (H, W): spatial[b, c, y, x] == image_hidden[b, y * grid_width + x,
+        # c].  A bare image_hidden.reshape(batch, D, H, W) reinterprets the
+        # flat storage and mixes tokens with feature channels.
+        spatial = image_hidden.transpose(1, 2).reshape(
+            batch, width, height, grid_width
         )
+        features = self.projector(spatial)
         # flatten(2) keeps the spatial axis row-major (token t = h*W + w);
         # the transpose produces the documented [B, T, C] layout.
         return features.flatten(2).transpose(1, 2)
