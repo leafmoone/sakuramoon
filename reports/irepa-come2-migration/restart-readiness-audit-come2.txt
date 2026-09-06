@@ -1,0 +1,18 @@
+PASS  trunk shard model-00001-of-00002.safetensors identical  [2088736024 bytes]
+PASS  trunk shard model-00002-of-00002.safetensors identical  [1104529088 bytes]
+PASS  rng rank-0.safetensors identical  [16003 bytes]
+PASS  rng optimizer_sr.safetensors identical  [160 bytes]
+PASS  trainer_state identical
+PASS  successful_updates == 113400 (zero training updates since save)
+PASS  CMuon FQN set unchanged  [141 params]
+PASS  AdamW set == source + exactly the 2 projector FQNs
+PASS  every source AdamW state bit-identical after renumbering  [state entries compared: 148]
+PASS  projector FQNs have NO AdamW state entry (pristine lazy init)
+PASS  migrated AdamW state set == source set (no extra entries)
+PASS  CMuon optimizer state block bit-identical
+PASS  sr_rng block bit-identical
+PASS  transition block identical
+PASS  irepa_state anchors  [start_successful_update=113401]
+PASS  projector shard == deterministic init from migration_seed (bit-exact)  [seed=20260904]
+PASS  projector numel == 2560*768*3*3 + 768  [total=17695488]
+TOTAL: 17 checks, 0 FAIL
