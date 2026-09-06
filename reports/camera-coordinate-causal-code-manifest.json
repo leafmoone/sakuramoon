@@ -1,0 +1,119 @@
+{
+  "base_commit": "b2443af436b268fafb2cb6c05d724e3ab0d6042c",
+  "bootstrap_seed": 20260906,
+  "branch": "camera-v2-causal-audit-review",
+  "causal_reports": [
+    {
+      "bytes": 11945,
+      "name": "camera-coordinate-causal-audit.md",
+      "sha256": "1a3f299c43ed1a2ef32d8ec651a4bd0d7201f3b004542777ecda1dc706965b70"
+    },
+    {
+      "bytes": 231606,
+      "name": "camera-coordinate-causal-audit.json",
+      "sha256": "ccd33d348eac1ce8c66a7eedcdc726aee6fa07a3fe947f0b169014c438631ca0"
+    },
+    {
+      "bytes": 1097,
+      "name": "camera-coordinate-causal-metrics.json",
+      "sha256": "93aac18d30cb14c3fb9db464a81103407402cf0f1198920baa45d0e2dfcc7a99"
+    },
+    {
+      "bytes": 676722,
+      "name": "camera-coordinate-causal-units.csv",
+      "sha256": "763bc3df684ac1df409a1dac91eb1ce0f9d026a39e16ea171c5bbe2b18ffffd0"
+    },
+    {
+      "bytes": 3213,
+      "name": "camera-coordinate-causal-copy-report.md",
+      "sha256": "d55280c4e6c6d9deefc02e530a529282b348110357a28871a149c179207f93da"
+    }
+  ],
+  "expanded_effectiveness_reports": [
+    {
+      "bytes": 19320,
+      "name": "camera-p25-expanded-effectiveness-audit.md",
+      "sha256": "2cf75a17cef217085c1f3bd1af58c53cbd2dcbd27c5f8d7a47fca6e8f6e4efd1"
+    },
+    {
+      "bytes": 111982,
+      "name": "camera-p25-expanded-effectiveness-audit.json",
+      "sha256": "267088a5db5c88b35a0ced746045d94f76cbbfee464e4c65b4b602f175aa4e88"
+    },
+    {
+      "bytes": 18547,
+      "name": "camera-p25-expanded-effectiveness-metrics.json",
+      "sha256": "6de050858a1625c0344600a337c5d8c1cbb591d92bd6a09e658b6ac48c6f401e"
+    },
+    {
+      "bytes": 987200,
+      "name": "camera-p25-expanded-effectiveness-points.csv",
+      "sha256": "6da4d3e21a2cccb8094b97dc464c2f70b97c9757d62eaec8c7fee10eac4d8af5"
+    },
+    {
+      "bytes": 9468,
+      "name": "camera-p25-expanded-effectiveness-prompts.csv",
+      "sha256": "0ba1b77245eb5285b619429765d0131b720b8ba8f73a2d183ba46bdeb9ed5113"
+    },
+    {
+      "bytes": 5721,
+      "name": "camera-p25-expanded-effectiveness-copy-report.md",
+      "sha256": "b3540d840d1a97de61e0efe836900b84d762505b4230a8eedcde540b367045f1"
+    }
+  ],
+  "final_numbers_generated_by_snapshot": true,
+  "final_scripts": [
+    {
+      "bytes": 10435,
+      "sha256": "63edc8ef5a62fcb1e64c202f9f12d562713512e44b618e49a719fe0527aa437b",
+      "source_identity": true,
+      "source_path": "/tmp/camera-coordinate-causal/cc_common.py",
+      "source_sha256": "63edc8ef5a62fcb1e64c202f9f12d562713512e44b618e49a719fe0527aa437b",
+      "tracked_path": "dev-tools/camera_coordinate_causal/final_snapshot/cc_common.py"
+    },
+    {
+      "bytes": 26491,
+      "sha256": "384d58e49b3c08b345525aded9485c1bb38c310d426d399aa07acf6182aa65b0",
+      "source_identity": true,
+      "source_path": "/tmp/camera-coordinate-causal/cc_stage1.py",
+      "source_sha256": "384d58e49b3c08b345525aded9485c1bb38c310d426d399aa07acf6182aa65b0",
+      "tracked_path": "dev-tools/camera_coordinate_causal/final_snapshot/cc_stage1.py"
+    },
+    {
+      "bytes": 11309,
+      "sha256": "e5b7ae910df0db7847fcb96d9ecfddf12ce394e383045750da695c62c7c664b9",
+      "source_identity": true,
+      "source_path": "/tmp/camera-coordinate-causal/cc_stage2.py",
+      "source_sha256": "e5b7ae910df0db7847fcb96d9ecfddf12ce394e383045750da695c62c7c664b9",
+      "tracked_path": "dev-tools/camera_coordinate_causal/final_snapshot/cc_stage2.py"
+    },
+    {
+      "bytes": 6026,
+      "sha256": "aea987d6505338b81a7e9d72084e5bef6a458b04cf41454750f347c779da2177",
+      "source_identity": true,
+      "source_path": "/tmp/camera-coordinate-causal/cc_stage2b.py",
+      "source_sha256": "aea987d6505338b81a7e9d72084e5bef6a458b04cf41454750f347c779da2177",
+      "tracked_path": "dev-tools/camera_coordinate_causal/final_snapshot/cc_stage2b.py"
+    },
+    {
+      "bytes": 51117,
+      "sha256": "4a855b3134b78f4478003cbdd611945b9a4e1c8e53e95827ec0cc28ea27657a6",
+      "source_identity": true,
+      "source_path": "/tmp/camera-coordinate-causal/cc_stage3.py",
+      "source_sha256": "4a855b3134b78f4478003cbdd611945b9a4e1c8e53e95827ec0cc28ea27657a6",
+      "tracked_path": "dev-tools/camera_coordinate_causal/final_snapshot/cc_stage3.py"
+    }
+  ],
+  "input_manifest_sha256": "d000f58f394d42c094fe862f3fff273e42a147a0f29b380b058493c53c599485",
+  "input_manifest_units_section_sha256": "7387138e9f53d85d8dae2f32a6ea0ec3b52dbc041ab514c3eba3cc3b1b950f71",
+  "provenance_note": [
+    "audit.json provenance.script_sha256 records the shas at stage1-manifest time: ",
+    "cc_stage2=3420f055... and cc_stage3=c9d5646e... are PRE-FIX versions and cc_stage2b is ",
+    "absent (added after stage1). The authoritative final executed scripts are the ",
+    "final_snapshot/ entries above (cc_stage2=e5b7ae91..., cc_stage2b=aea987d6..., ",
+    "cc_stage3=4a855b31...); the full patch chain is documented in ",
+    "dev-tools/camera_coordinate_causal/README.md (Known bug history) and in the protected ",
+    "/tmp/camera-coordinate-causal/cc-audit-deployed-shas-rerun.txt (not in git)."
+  ],
+  "schema_version": 1
+}
