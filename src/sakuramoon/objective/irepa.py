@@ -47,6 +47,34 @@ def _require_finite_float(name: str, value: object) -> None:
         raise ValueError(f"{name} must be a finite float")
 
 
+def _validate_ramp_out_anchor(
+    start_successful_update: int,
+    ramp_in_updates: int,
+    ramp_out_after_updates: int | None,
+) -> None:
+    """Reject a ramp-out start that lands before the anchored ramp-in end.
+
+    ``ramp_out_after_updates`` is an absolute successful-update number
+    (never a duration), while ``ramp_in_updates`` is a duration; the
+    anchored ramp-in ends at ``start_successful_update + ramp_in_updates``.
+    A ramp-out start earlier than that anchored end is invalid.  Equality
+    is allowed: ramp-out may begin exactly at the ramp-in end (a continuous
+    schedule with no extra hold).  This check must run before any weight
+    computation or early return so an invalid configuration is never
+    silently accepted.
+    """
+    if ramp_out_after_updates is None:
+        return
+    ramp_in_end = start_successful_update + ramp_in_updates
+    if ramp_out_after_updates < ramp_in_end:
+        raise ValueError(
+            "ramp_out_after_updates is an absolute successful-update "
+            "number and must not be earlier than the anchored ramp-in end "
+            f"(start_successful_update + ramp_in_updates = {ramp_in_end}); "
+            f"got ramp_out_after_updates={ramp_out_after_updates}"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class IRepaLambdaSchedule:
     """Pure data carrier for one iREPA lambda schedule.
@@ -72,6 +100,11 @@ class IRepaLambdaSchedule:
                 raise ValueError(
                     "ramp_out_after_updates must be greater than ramp_in_updates"
                 )
+            _validate_ramp_out_anchor(
+                self.start_successful_update,
+                self.ramp_in_updates,
+                self.ramp_out_after_updates,
+            )
         _require_positive_int("ramp_out_updates", self.ramp_out_updates)
 
     def weight_for_update(self, successful_update: int) -> float:
@@ -113,6 +146,14 @@ def irepa_weight_for_update(
       ``0.0``.
     - ``u >= ramp_out_after_updates + ramp_out_updates``: ``0.0``.
 
+    Validation: ``ramp_out_after_updates`` is an absolute successful-update
+    number; when set it must not be earlier than the anchored ramp-in end
+    (``start_successful_update + ramp_in_updates``), so ramp-out can never
+    begin before or during ramp-in.  Equality is the continuous no-hold
+    boundary.  Validation runs before any early return, so an invalid
+    configuration is rejected even when ``target_weight == 0.0`` or the
+    update is still before the anchor.
+
     No mutable state, no RNG, no hidden counter: a resume that rebinds the
     same successful-update number reproduces the same weight.
     """
@@ -127,6 +168,9 @@ def irepa_weight_for_update(
             raise ValueError(
                 "ramp_out_after_updates must be greater than ramp_in_updates"
             )
+        _validate_ramp_out_anchor(
+            start_successful_update, ramp_in_updates, ramp_out_after_updates
+        )
     _require_positive_int("ramp_out_updates", ramp_out_updates)
     if target_weight == 0.0:
         return 0.0

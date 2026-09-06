@@ -16,7 +16,7 @@
 | `ckpt_113400_raw-113400-update-cadence` 原始 ckpt | **ModelScope hub** `leafmoone/sm_train_state`（g1/ 290 个 ckpt 归档，100000 起，含 113400 与 113600） | ✅ 14/14 文件字节级落盘（大小全对齐 hub 清单；COMPLETE="complete"；manifest 可解析） |
 | `migrated/ckpt_113400_irepa` | come2 上重跑 `sakuramoon.checkpoint.migrate_irepa_checkpoint`（脚本在 repo；projector 初始化由 migration_seed 位级决定） | ✅ 见 §4 |
 | p6b 训练/评估日志、launcher、eval 原始数据 | W&B 云端遥测（eff1000 全窗口）；hub eff1000 终端 114600（15/15 字节级） | ⚠️ 原始日志不可恢复；评估终报在本地 `D:\sakruamoon\eval-deliverables\verification-dossier-eff1000.md`（28 boards 在本地） |
-| p6b 训练配置 TOML（irepa 段） | IRepaConfig schema 默认值 + eff1000 遥测形态重建（weight=0.5、ramp_in_updates=1000、无 ramp-out ⇒ λ 在首更新 113401 精确 0、1000u 线性到 0.5、114401-114600 保持） | ⚠️ 见 §5 重建说明 |
+| p6b 训练配置 TOML（irepa 段） | IRepaConfig schema 默认值 + eff1000 遥测形态重建（weight=0.5、ramp_in_updates=1000、无 ramp-out ⇒ λ 在首更新 113401 精确 0、1000u 半余弦到 0.5、114401-114600 保持） | ⚠️ 见 §5 重建说明 |
 | eff1000 中间 ckpt 113700-114500、canary raw 113500/113600 | — | ❌ 不可恢复（hub 仅有 100 步粒度；113600 在 hub 但属 iREPA 污染线，禁用） |
 
 ## 2. 环境重建（byte-for-byte 纪律）
@@ -49,7 +49,7 @@
 
 ## 5. [irepa] 配置重建说明（重训前必读）
 
-原 p6b 配置 TOML 随 salt13 丢失。迁移配置 `/sakuramoon-runtime/p6b/config/p6b_irepa_restart.toml` 由 repo 的 `config/train_s0.toml`（经 repo 自身 loader 解析 + dump 保证 schema 有效）生成，注入：① G1 真实 optimizer 衰减（matrix/sensitive weight decay = 0.0/0.0，取自 113400 的 resolved_config.toml）；② 最小 `[irepa]` 表（enabled/teacher_id/tap_slot=8/kernel=3/zscore/cosine，其余取 schema 默认：weight=0.5、ramp_in_updates=1000、无 ramp-out、gamma=0.6、eps=1e-6）。默认值与 eff1000 遥测形态自洽（λ 在 113401 精确 0、1000u 线性到 0.5、末 200u 保持）。迁移产物只依赖 optimizer 衰减 + irepa.enabled（in_channels 取自 checkpoint DiT hidden_size=2560），故迁移正确性不受配置重建影响。**重训 GO 前**：以 eff1000 W&B 遥测的 λ 曲线逐点核对重建配置的 ramp 参数（如需），并确认 data/eval 路径指向（validation cohort ~14GiB 不可再下载，须从 G1 宿主机 cohort 转移；G1 于 09-06 14:45 自 salt14 迁移至 come1 接管，cohort 源=come1）。
+原 p6b 配置 TOML 随 salt13 丢失。迁移配置 `/sakuramoon-runtime/p6b/config/p6b_irepa_restart.toml` 由 repo 的 `config/train_s0.toml`（经 repo 自身 loader 解析 + dump 保证 schema 有效）生成，注入：① G1 真实 optimizer 衰减（matrix/sensitive weight decay = 0.0/0.0，取自 113400 的 resolved_config.toml）；② 最小 `[irepa]` 表（enabled/teacher_id/tap_slot=8/kernel=3/zscore/cosine，其余取 schema 默认：weight=0.5、ramp_in_updates=1000、无 ramp-out、gamma=0.6、eps=1e-6）。默认值与 eff1000 遥测形态自洽（λ 在 113401 精确 0、1000u 半余弦到 0.5、末 200u 保持）。迁移产物只依赖 optimizer 衰减 + irepa.enabled（in_channels 取自 checkpoint DiT hidden_size=2560），故迁移正确性不受配置重建影响。**重训 GO 前**：以 eff1000 W&B 遥测的 λ 曲线逐点核对重建配置的 ramp 参数（如需），并确认 data/eval 路径指向（validation cohort ~14GiB 不可再下载，须从 G1 宿主机 cohort 转移；G1 于 09-06 14:45 自 salt14 迁移至 come1 接管，cohort 源=come1）。
 
 ## 6. 遗留事项
 

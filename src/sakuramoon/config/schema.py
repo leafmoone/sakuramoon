@@ -1114,6 +1114,15 @@ class IRepaConfig(StrictModel):
     spatial_norm_eps: FixedNormEps = 0.000001
     loss: Literal["cosine"]
     weight: NonNegativeFloat = 0.5
+    # Schedule fields: ``ramp_in_updates`` and ``ramp_out_updates`` are
+    # durations (number of successful updates); ``ramp_out_after_updates``
+    # is an ABSOLUTE successful-update number.  This config carries no start
+    # anchor (the runtime/migration anchor is bound at schedule
+    # construction), so the anchor-relative boundary
+    # (``ramp_out_after_updates >= start_successful_update +
+    # ramp_in_updates``) is enforced by
+    # ``sakuramoon.objective.irepa`` at ``IRepaLambdaSchedule`` /
+    # ``irepa_weight_for_update`` time.
     ramp_in_updates: PositiveInt = 1000
     ramp_out_after_updates: PositiveInt | None = None
     ramp_out_updates: PositiveInt = 1000
@@ -1137,6 +1146,9 @@ class IRepaConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_ramp_schedule(self) -> IRepaConfig:
+        # Anchor-free base relation only (no start anchor in the config).
+        # The anchored check (ramp-out start >= anchored ramp-in end) is
+        # enforced at schedule construction in objective/irepa.py.
         if (
             self.ramp_out_after_updates is not None
             and self.ramp_out_after_updates <= self.ramp_in_updates
