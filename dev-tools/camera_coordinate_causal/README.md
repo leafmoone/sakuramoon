@@ -72,8 +72,12 @@ units-section sha256 `7387138e9f53d85d8dae2f32a6ea0ec3b52dbc041ab514c3eba3cc3b1b
   bootstrap values are computed in a try/except and are not part of the
   verdict). Ordinary controls use SAME / RANDOM geometry.
 - **Margin definition:** `M = Loss(wrong arm) − Loss(correct arm)` per unit,
-  averaged over the unit's 4 stratum timesteps; a POSITIVE M means the wrong
-  camera geometry fits the unit better than the correct one.
+  averaged over the unit's 4 stratum timesteps. **Sign convention (see POSTHOC
+  REVIEW ERRATUM below):** a POSITIVE M means the wrong/alternative
+  coordinates receive HIGHER loss than the correct ones, i.e. the correct
+  coordinates are PREFERRED by the model and the wrong geometry fits WORSE.
+  (An earlier version of this README stated the opposite; the implementation
+  and the regression tests were correct from the start.)
 - **Aggregation:** per-unit stratum means
   `cam_loss[ck][arm][i] = mean(row.loss[arm])`;
   `M_{arm}_raw = nanmean((w − c)[sel])` with `sel = opp_mask` for OPPOSITE and
@@ -188,6 +192,40 @@ Contract helpers and their test mapping: 10A ledger keying, 10B variant
 cardinality, 10C distinct identity hashes, 10D latent 3-D contract,
 10E bootstrap checkpoint isolation + subspace bounds + paired structure,
 10F band/stratum masks, 10G margin sign convention.
+
+## POSTHOC REVIEW ERRATUM (added by the posthoc review branch)
+
+This README correction is **documentation erratum only**; the numerical sign
+implementation and the regression tests were already correct. Historical raw
+numbers are unchanged.
+
+1. **Margin sign prose (fixed above).** `M = Loss(wrong) − Loss(correct)`.
+   A POSITIVE M means the wrong geometry has HIGHER loss, therefore the
+   correct coordinates are preferred. The earlier prose ("wrong geometry fits
+   better") was directionally inverted.
+2. **Historical verdict short-circuit.** The historical `INCONCLUSIVE` verdict
+   was forced by the stage3 numerics gate
+   `numerics_ok = determinism AND max(M_SAME_maxabs over ck) < 1e-6`; the
+   actual ordinary SAME maxabs (PRE/MID/POST = 9.16e-05 / 1.57e-04 / 8.12e-05)
+   all exceed 1e-6, so the effect logic (rising + CI exclusion) never executed.
+   The `harness numerics OK=True` line in the historical audit.md is derived
+   from the determinism-probe non-empty check only — it is NOT the `numerics_ok`
+   gate boolean (decision state and reported state were inconsistent).
+3. **Edge naming.** The historical overall `L/C/R` labels are normalized-offset
+   tertiles (`norm_offset < 1/3 / [1/3, 2/3) / >= 2/3`) and do NOT by
+   themselves mean physical LEFT/CENTER/RIGHT. The posthoc report uses the
+   universal `START/CENTER/END` naming plus orientation-specific physical
+   labels (horizontal LEFT/CENTER/RIGHT, vertical TOP/CENTER/BOTTOM), with the
+   axis direction verified from `src/sakuramoon/data/camera_viewport.py`
+   (`normalized_offset = left/available` horizontal, `top/available` vertical).
+   The historical "right-edge" finding is re-stated as an **END-offset
+   regression candidate**.
+4. **Scope of supersession.** The new posthoc report
+   (`reports/camera-coordinate-causal-posthoc-*`) supersedes only the
+   verdict/numerics INTERPRETATION of the historical audit. It does not
+   supersede, regenerate, or alter any historical evidence file
+   (`final_snapshot/**`, the five historical causal reports, the six expanded
+   effectiveness reports). Historical raw numbers remain exactly as committed.
 
 ## Red lines (kept by this handoff)
 
