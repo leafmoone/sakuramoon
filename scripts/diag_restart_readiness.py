@@ -100,7 +100,7 @@ def main() -> int:
     # The production hybrid state embeds torchao 8-bit optimizer classes;
     # allowlist exactly those (same as the production loader path) and keep
     # weights_only=True.
-    import torchao.optim.subclass_8bit as _t8  # noqa: E402
+    import torchao.optim.subclass_8bit as _t8
 
     _safe = _t8.OptimState8bit
     with torch.serialization.safe_globals([_safe]):
@@ -169,8 +169,10 @@ def main() -> int:
 
     # 5) projector shard == deterministic reconstruction from migration_seed
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    from sakuramoon.checkpoint.migrate_irepa_checkpoint import _deterministic_projector  # noqa: E402
-    from sakuramoon.checkpoint.migrate_irepa_checkpoint import _projector_tensors  # noqa: E402
+    from sakuramoon.checkpoint.migrate_irepa_checkpoint import (
+        _deterministic_projector,
+        _projector_tensors,
+    )
 
     irepa_state = json.loads((MIGRATED / "train_state" / "irepa_state.json").read_text())
     check(
@@ -181,7 +183,7 @@ def main() -> int:
         f"start_successful_update={irepa_state.get('start_successful_update')}",
     )
     seed = int(irepa_state["migration_seed"])
-    from safetensors.torch import load_file  # noqa: E402
+    from safetensors.torch import load_file
 
     saved_rng = torch.get_rng_state()
     try:
