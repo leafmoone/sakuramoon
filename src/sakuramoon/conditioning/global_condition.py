@@ -77,20 +77,25 @@ class GlobalConditioner(nn.Module):
     ) -> None:
         super().__init__()
         if (
-            timestep_dim != 256
-            or size_dim != 64
-            or aspect_dim != 64
-            or hidden_dim != 1024
+            timestep_dim <= 0
+            or timestep_dim % 2
+            or size_dim <= 0
+            or size_dim % 2
+            or aspect_dim <= 0
+            or aspect_dim % 2
+            or hidden_dim <= 0
             or model_dim <= 0
             or slot_count <= 0
             or not active_slot_ids
             or len(set(active_slot_ids)) != len(active_slot_ids)
             or any(slot_id < 0 or slot_id >= slot_count for slot_id in active_slot_ids)
-            or modulation_chunks != 6
+            or modulation_chunks <= 0
             or final_modulation_size != 2 * model_dim
             or norm_eps <= 0.0
         ):
-            raise ValueError("global condition dimensions violate the locked contract")
+            raise ValueError(
+                "global condition dimensions violate the conditioner contract"
+            )
         self.timestep_dim = timestep_dim
         self.size_dim = size_dim
         self.aspect_dim = aspect_dim

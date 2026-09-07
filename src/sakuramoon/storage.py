@@ -176,9 +176,8 @@ def require_data_service_storage(
             )
         )
     )
-    if config.storage.atomic_publish_probe:
-        for directory in directories:
-            probe_atomic_publication(directory)
+    for directory in directories:
+        probe_atomic_publication(directory)
     persistent_mount = mount_identity(directories[0])
     free_bytes = min(shutil.disk_usage(path).free for path in directories)
     runtime_mount = require_host_local_runtime(

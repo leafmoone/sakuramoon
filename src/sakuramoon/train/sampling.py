@@ -701,7 +701,7 @@ class TrainingSampler:
     ) -> None:
         if not repository_root.is_absolute():
             raise ValueError("training sampler repository root must be absolute")
-        if config.stage.resolution % 16 or config.stage.resolution % 8:
+        if config.train.resolution % 16 or config.train.resolution % 8:
             raise ValueError("training sampler stage resolution has invalid geometry")
         if device.type != "cuda" or not torch.cuda.is_available():
             raise ValueError("training sampler requires the active CUDA device")
@@ -967,7 +967,7 @@ class TrainingSampler:
             raise TrainingSamplingError(
                 "fixed condition diagnostics require exactly four pairs"
             )
-        resolution = self.config.stage.resolution
+        resolution = self.config.train.resolution
         items: list[TrainingSampleItem] = []
         noise_rows: list[torch.Tensor] = []
         for fixed_pair in self.fixed_condition_pairs:
@@ -1258,7 +1258,7 @@ class TrainingSampler:
         sampled = sample_profile(
             velocity,
             noise,
-            profile=self.config.sampling.profile,
+            profile=self.config.sampling.selected,
         )
         if sampled.state.shape != noise.shape or sampled.state.dtype != torch.float32:
             raise TrainingSamplingError(
@@ -1336,7 +1336,7 @@ class TrainingSampler:
             pair,
             tokenizer=self.qwen.tokenizer,
             framing=framing,
-            resolution=self.config.stage.resolution,
+            resolution=self.config.train.resolution,
         )
         fixed_pair: _PromptPair | None = None
         fixed_items: tuple[TrainingSampleItem, ...] = ()
@@ -1347,13 +1347,13 @@ class TrainingSampler:
             fixed_pair = _fixed_neutral_prompt_pair(
                 tokenizer=self.qwen.tokenizer,
                 framing=framing,
-                resolution=self.config.stage.resolution,
+                resolution=self.config.train.resolution,
             )
             fixed_items = _build_variant_items(
                 fixed_pair,
                 tokenizer=self.qwen.tokenizer,
                 framing=framing,
-                resolution=self.config.stage.resolution,
+                resolution=self.config.train.resolution,
             )
         elif locked_cohort:
             for locked_pair in self.fixed_condition_pairs:
@@ -1362,7 +1362,7 @@ class TrainingSampler:
                     locked_prompts,
                     tokenizer=self.qwen.tokenizer,
                     framing=framing,
-                    resolution=self.config.stage.resolution,
+                    resolution=self.config.train.resolution,
                 )
                 fixed_groups.append(
                     (
@@ -1597,8 +1597,8 @@ class TrainingSampler:
             ),
             "cfg_coordinate_sharing": True,
             "output_size": {
-                "height": self.config.stage.resolution,
-                "width": self.config.stage.resolution,
+                "height": self.config.train.resolution,
+                "width": self.config.train.resolution,
             },
             "condition_sources": {
                 "A": _prompt_metadata(pair.a),

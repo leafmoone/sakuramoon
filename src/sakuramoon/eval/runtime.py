@@ -329,7 +329,11 @@ def _generate(
         )
 
     with _eager_composite_calls(composite):
-        sampled = sample_profile(velocity, noise, profile=evaluation.sampling_profile)
+        sampled = sample_profile(
+            velocity,
+            noise,
+            profile=config.sampling.by_name(evaluation.sampling_profile),
+        )
     decoded = vae.decode(sampled.state.to(torch.bfloat16))
     if not bool(torch.isfinite(decoded).all().item()):
         raise EvaluationError("VAE produced nonfinite validation images")
@@ -608,7 +612,7 @@ class TrainingEvaluator:
             "checkpoint_fingerprint": fingerprint,
             "prompt_sha256": prompt_sha256,
             "sample_count": self.evaluation.sample_count,
-            "resolution": self.config.stage.resolution,
+            "resolution": self.config.train.resolution,
             "sampling_profile": self.evaluation.sampling_profile,
             "clip_model_id": CLIP_MODEL_ID,
             "preprocessing": REAL_PREPROCESSING_ID,
@@ -653,7 +657,7 @@ class TrainingEvaluator:
                     "checkpoint_fingerprint": fingerprint,
                     "prompt_sha256": prompt_sha256,
                     "sample_count": self.evaluation.sample_count,
-                    "resolution": self.config.stage.resolution,
+                    "resolution": self.config.train.resolution,
                     "sampling_profile": self.evaluation.sampling_profile,
                     "clip_model_id": CLIP_MODEL_ID,
                     "preprocessing": REAL_PREPROCESSING_ID,
@@ -682,7 +686,7 @@ class TrainingEvaluator:
             / "cache"
             / (
                 f"real-features-v{FEATURE_CACHE_SCHEMA_VERSION}-n"
-                f"{real_sample_count}-r{self.config.stage.resolution}-"
+                f"{real_sample_count}-r{self.config.train.resolution}-"
                 f"{dataset_fingerprint[:16]}.pt"
             )
         )
@@ -690,7 +694,7 @@ class TrainingEvaluator:
             "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
             "dataset_fingerprint": dataset_fingerprint,
             "sample_count": real_sample_count,
-            "resolution": self.config.stage.resolution,
+            "resolution": self.config.train.resolution,
             "clip_model_id": CLIP_MODEL_ID,
             "preprocessing": REAL_PREPROCESSING_ID,
         }
@@ -734,7 +738,7 @@ class TrainingEvaluator:
             shard_root,
             real_sample_count,
             self.evaluation.batch_size,
-            output_size=self.config.stage.resolution,
+            output_size=self.config.train.resolution,
         ):
             feature_batches.append(self._models().extract(batch.images).cpu())
             completed += len(batch.sample_ids)
@@ -888,7 +892,7 @@ class TrainingEvaluator:
         cases = _stage_cases(
             prompt_path,
             self.evaluation.sample_count,
-            resolution=self.config.stage.resolution,
+            resolution=self.config.train.resolution,
         )
         fingerprint = self._checkpoint_fingerprint(update)
         cached = self.progress.run_on_rank(

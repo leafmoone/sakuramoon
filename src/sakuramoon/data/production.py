@@ -414,7 +414,7 @@ class ConfiguredDataLoader:
         ):
             raise ProductionDataError("resolved RuntimeConfig is required")
         return cls(
-            batch_size=config.stage.local_batch,
+            batch_size=config.train.local_batch,
             worker_count=config.data.cache.persistent_workers_per_rank,
             ready_batches=config.data.cache.ready_batches_per_rank,
             pin_memory=config.data.loader.pin_memory,
@@ -806,7 +806,7 @@ class ProductionPipelineFactory:
         )
         buckets = scale_buckets(
             generate_base_buckets(self.config.data.buckets),
-            self.config.stage.resolution,
+            self.config.train.resolution,
         )
         spatial_policy = SpatialCropPolicy.from_config(
             self.config.data.spatial_crop,
@@ -826,7 +826,7 @@ class ProductionPipelineFactory:
             caption_fields_parser=parse_modelscope_caption_fields,
             rejection_observer=self.rejection_observer,
             base_seed=self.config.run.seed,
-            stage=self.config.stage.name,
+            stage=self.config.run.label or self.config.run.run_id,
             cycle_index=descriptor.cycle_index,
             spatial_policy=spatial_policy,
             transparent_policy=self.config.data.transparent_background,

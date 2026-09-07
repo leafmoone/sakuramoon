@@ -167,8 +167,8 @@ def generate_base_buckets(config: DataBucketsConfig) -> tuple[BucketShape, ...]:
         shapes.add(BucketShape(height=long, width=short))
         shapes.add(BucketShape(height=short, width=long))
     ordered = tuple(sorted(shapes, key=lambda shape: (shape.aspect_log2, shape.height)))
-    if len(ordered) != config.shape_count:
-        raise BucketError("bucket parameters do not generate the configured shape count")
+    if not ordered:
+        raise BucketError("bucket geometry produced no shapes")
     if any(BucketShape(shape.width, shape.height) not in shapes for shape in ordered):
         raise BucketError("bucket shapes are not transpose closed")
     return ordered

@@ -369,16 +369,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("update must be nonnegative")
     alpha = _resolve_alpha(checkpoint, args.growth_alpha)
 
-    resolution = config.stage.resolution
+    resolution = config.train.resolution
     if resolution <= 0 or resolution % 16:
         raise ValueError("stage resolution must be a positive multiple of 16")
     if args.generation_batch_size <= 0:
         raise ValueError("generation batch size must be positive")
 
-    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-        raise ValueError(
-            "the concept suite requires exactly one visible CUDA device"
-        )
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+        raise ValueError("the concept suite requires a visible CUDA device")
     device = torch.device("cuda", 0)
     torch.cuda.set_device(device)
 

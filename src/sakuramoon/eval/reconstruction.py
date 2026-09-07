@@ -120,7 +120,7 @@ def evaluate_vae_reconstruction(
         raise ValueError("reconstruction comparison count is invalid")
     if device.type != "cuda" or not torch.cuda.is_available():
         raise ValueError("VAE reconstruction evaluation requires CUDA")
-    resolution = config.stage.resolution
+    resolution = config.train.resolution
     if resolution % 16:
         raise ValueError("VAE reconstruction resolution must be divisible by 16")
 

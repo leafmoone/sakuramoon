@@ -166,7 +166,7 @@ def run_concept_suite(
 
     evaluation = evaluator.evaluation
     config = evaluator.config
-    resolution = config.stage.resolution
+    resolution = config.train.resolution
 
     print(f"[concept-suite] 参考图缓存: {refs_root}", flush=True)
     ref_paths = resolve_reference_images(manifest, refs_root)

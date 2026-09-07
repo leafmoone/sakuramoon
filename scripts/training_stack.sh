@@ -26,7 +26,6 @@ TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-8}"
 export TORCHINDUCTOR_COMPILE_THREADS
 PUBLISH_STATE_ROOT="${PUBLISH_STATE_ROOT:-${RUNTIME_ROOT}/.sm-train-state-publisher}"
 PUBLISH_LAST_PUBLISHED="${PUBLISH_LAST_PUBLISHED:-/root/private_data/.sm-train-state-publisher/last-published-s0.txt}"
-REQUIRED_HOST_SUBSTRING="${REQUIRED_HOST_SUBSTRING:-leaf10}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
 START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-180}"
 STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-30}"
@@ -77,13 +76,6 @@ EOF
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command is unavailable: $1"
-}
-
-require_leaf_host() {
-  local host
-  host="$(hostname)"
-  [[ "${host}" == *"${REQUIRED_HOST_SUBSTRING}"* ]] \
-    || die "wrong host: ${host} does not contain ${REQUIRED_HOST_SUBSTRING}"
 }
 
 validate_integer() {
@@ -688,7 +680,6 @@ main() {
       ;;
   esac
 
-  require_leaf_host
   require_command flock
   require_command seq
   require_command awk

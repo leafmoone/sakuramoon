@@ -1,4 +1,4 @@
-"""Fixed-profile sampling solvers and generation identities."""
+"""Sampling solvers, resolved profiles and generation identities."""
 
 from sakuramoon.sampling.heun import (
     EulerResult,
@@ -8,12 +8,9 @@ from sakuramoon.sampling.heun import (
     heun_final_euler,
 )
 from sakuramoon.sampling.profiles import (
-    SAMPLING_PROFILES,
     SamplingProfile,
-    SamplingProfileName,
     SamplingSolver,
     TimeSchedule,
-    resolve_sampling_profile,
 )
 from sakuramoon.sampling.sampler import (
     GenerationMetadata,
@@ -23,19 +20,16 @@ from sakuramoon.sampling.sampler import (
 )
 
 __all__ = [
-    "SAMPLING_PROFILES",
     "EulerResult",
     "GenerationMetadata",
     "HeunResult",
     "ProfileSamplingResult",
     "SamplingProfile",
-    "SamplingProfileName",
     "SamplingSolver",
     "TimeSchedule",
     "VelocityFunction",
     "build_generation_metadata",
     "euler",
     "heun_final_euler",
-    "resolve_sampling_profile",
     "sample_profile",
 ]

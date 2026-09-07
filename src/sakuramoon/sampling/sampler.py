@@ -1,7 +1,8 @@
-"""Profile-only sampling dispatch and immutable generation metadata."""
+"""Config-profile sampling dispatch and immutable generation metadata."""
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -9,11 +10,7 @@ from typing import Literal
 import torch
 
 from sakuramoon.sampling.heun import VelocityFunction, euler, heun_final_euler
-from sakuramoon.sampling.profiles import (
-    SamplingProfile,
-    SamplingProfileName,
-    resolve_sampling_profile,
-)
+from sakuramoon.sampling.profiles import SamplingProfile
 
 CheckpointKind = Literal["raw", "model-only", "pma", "release"]
 ObjectiveProvenance = Literal["strict_jlt", "pre_fix"]
@@ -33,11 +30,15 @@ class ProfileSamplingResult:
 
 @dataclass(frozen=True, slots=True)
 class GenerationMetadata:
+    """Identity of one generation batch; every value is config-bound."""
+
     checkpoint_id: str
     checkpoint_kind: CheckpointKind
     objective_provenance: ObjectiveProvenance
-    profile: SamplingProfileName
+    profile: SamplingProfile
     cfg_scale: float
+    noise_scale: float
+    t_eps: float
 
     def __post_init__(self) -> None:
         if (
@@ -56,27 +57,42 @@ class GenerationMetadata:
             raise ValueError(
                 "pre-fix weights are only valid as model-only inference input"
             )
-        if type(self.cfg_scale) is not float or self.cfg_scale != 2.9:
-            raise ValueError("generation CFG must equal 2.9")
-        resolve_sampling_profile(self.profile)
+        if (
+            type(self.cfg_scale) is not float
+            or not math.isfinite(self.cfg_scale)
+            or self.cfg_scale < 0.0
+        ):
+            raise ValueError("generation CFG scale must be a finite nonnegative float")
+        if (
+            type(self.noise_scale) is not float
+            or not math.isfinite(self.noise_scale)
+            or self.noise_scale <= 0.0
+        ):
+            raise ValueError("generation noise scale must be a positive finite float")
+        if (
+            type(self.t_eps) is not float
+            or not math.isfinite(self.t_eps)
+            or not 0.0 < self.t_eps < 1.0
+        ):
+            raise ValueError("generation t_eps must lie in (0, 1)")
 
     def as_mapping(self) -> dict[str, object]:
-        selected = resolve_sampling_profile(self.profile)
+        profile = self.profile
         return {
             "cfg_scale": self.cfg_scale,
             "checkpoint_id": self.checkpoint_id,
             "checkpoint_kind": self.checkpoint_kind,
-            "nfe": selected.nfe,
-            "noise_scale": 1.0,
+            "nfe": profile.nfe,
+            "noise_scale": self.noise_scale,
             "objective_provenance": self.objective_provenance,
             "prediction_type": "x",
-            "profile": selected.name,
+            "profile": profile.name,
             "schema_version": 1,
-            "solver": selected.solver,
+            "solver": profile.solver,
             "state_dtype": "float32",
-            "steps": selected.steps,
-            "t_eps": 0.05,
-            "time_schedule": selected.time_schedule,
+            "steps": profile.steps,
+            "t_eps": self.t_eps,
+            "time_schedule": profile.time_schedule,
         }
 
 
@@ -87,6 +103,8 @@ def build_generation_metadata(
     checkpoint_kind: CheckpointKind,
     objective_provenance: ObjectiveProvenance,
     cfg_scale: float,
+    noise_scale: float,
+    t_eps: float,
 ) -> GenerationMetadata:
     """Bind metadata to the profile that produced the sampled state."""
 
@@ -94,8 +112,10 @@ def build_generation_metadata(
         checkpoint_id=checkpoint_id,
         checkpoint_kind=checkpoint_kind,
         objective_provenance=objective_provenance,
-        profile=sampled.profile.name,
+        profile=sampled.profile,
         cfg_scale=cfg_scale,
+        noise_scale=noise_scale,
+        t_eps=t_eps,
     )
 
 
@@ -103,20 +123,19 @@ def sample_profile(
     velocity_function: VelocityFunction,
     initial_noise: torch.Tensor,
     *,
-    profile: SamplingProfileName,
+    profile: SamplingProfile,
 ) -> ProfileSamplingResult:
-    """Integrate one of the three canonical profiles and verify its NFE."""
+    """Integrate one resolved sampling profile and verify its NFE."""
 
-    selected = resolve_sampling_profile(profile)
-    if selected.solver == "euler":
-        result = euler(velocity_function, initial_noise, steps=selected.steps)
+    if profile.solver == "euler":
+        result = euler(velocity_function, initial_noise, steps=profile.steps)
     else:
         result = heun_final_euler(
             velocity_function,
             initial_noise,
-            steps=selected.steps,
+            steps=profile.steps,
         )
-    return ProfileSamplingResult(result.state, selected, result.nfe)
+    return ProfileSamplingResult(result.state, profile, result.nfe)
 
 
 __all__ = [
