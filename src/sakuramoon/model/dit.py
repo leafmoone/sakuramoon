@@ -30,8 +30,8 @@ from sakuramoon.model.growth import (
     slot_growth,
     slot_name,
 )
-from sakuramoon.model.slots import active_slot_ids
 from sakuramoon.model.output_head import FinalOutputHead
+from sakuramoon.model.slots import active_slot_ids as slots_for_depth
 
 ActivationCheckpointMode = Literal["none", "alternating", "all"]
 _ACTIVATION_CHECKPOINT_MODES = frozenset({"none", "alternating", "all"})
@@ -223,7 +223,11 @@ class DenseDiT(nn.Module):
         output_bias_zero_init: bool,
     ) -> None:
         super().__init__()
-        slots = active_slot_ids(depth) if active_slot_ids is None else tuple(active_slot_ids)
+        slots = (
+            slots_for_depth(depth)
+            if active_slot_ids is None
+            else tuple(active_slot_ids)
+        )
         new_slots = tuple(new_slot_ids)
         if not slots or len(set(slots)) != len(slots) or any(s < 0 for s in slots):
             raise ValueError("DiT active_slot_ids must be unique non-negative ids")
@@ -660,7 +664,11 @@ class PackedDiT(nn.Module):
         output_bias_zero_init: bool,
     ) -> None:
         super().__init__()
-        slots = active_slot_ids(depth) if active_slot_ids is None else tuple(active_slot_ids)
+        slots = (
+            slots_for_depth(depth)
+            if active_slot_ids is None
+            else tuple(active_slot_ids)
+        )
         new_slots = tuple(new_slot_ids)
         if not slots or len(set(slots)) != len(slots) or any(s < 0 for s in slots):
             raise ValueError("DiT active_slot_ids must be unique non-negative ids")

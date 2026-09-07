@@ -34,10 +34,6 @@ def new_slot_ids(
     return tuple(sorted(added))
 
 
-def slot_name(slot_id: int) -> str:
-    if type(slot_id) is not int or slot_id < 0:
-        raise ValueError("slot id must be a nonnegative integer")
-    return f"slot_{slot_id:02d}"
 
 
 def slot_growth(

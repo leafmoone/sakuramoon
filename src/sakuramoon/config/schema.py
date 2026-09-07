@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import re
+from itertools import pairwise
 from pathlib import PurePosixPath
 from typing import Annotated, Literal, cast
 
@@ -45,7 +46,7 @@ def _toml_number_to_float(value: object) -> object:
     """
 
     if isinstance(value, bool):
-        raise ValueError("boolean is not a valid numeric value")
+        raise TypeError("boolean is not a valid numeric value")
     if type(value) is float:
         if not math.isfinite(value):
             raise ValueError("numeric value must be finite")
@@ -430,7 +431,7 @@ class CaptionConfig(StrictModel):
             if (
                 not values
                 or any(type(v) is not int or v <= 0 for v in values)
-                or any(later <= earlier for earlier, later in zip(values, values[1:]))
+                or any(later <= earlier for earlier, later in pairwise(values))
             ):
                 raise ValueError(
                     f"caption {name} must be strictly increasing positive integers"
@@ -470,7 +471,7 @@ class TextModelConfig(StrictModel):
         if (
             not blocks
             or any(type(b) is not int or b < 1 for b in blocks)
-            or any(later <= earlier for earlier, later in zip(blocks, blocks[1:]))
+            or any(later <= earlier for earlier, later in pairwise(blocks))
         ):
             raise ValueError(
                 "text hidden_state_blocks must be strictly increasing positive block indices"

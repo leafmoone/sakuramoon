@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import tomllib
 from pathlib import Path
@@ -34,6 +33,7 @@ from sakuramoon.checkpoint.schema import (
     manifest_from_dict,
     raw_state_from_dicts,
 )
+from sakuramoon.model.growth import new_slot_fqn_prefixes, new_slot_ids
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
 from sakuramoon.optim.cmuon import HybridCMuon
 from sakuramoon.optim.groups import ParameterAudit, ParameterSpec
@@ -229,6 +229,52 @@ def _model_index(path: Path) -> tuple[dict[str, str], int]:
     return cast(dict[str, str], weight_map), total_size
 
 
+def _module_new_slot_prefixes(module: nn.Module) -> tuple[str, ...]:
+    """FQN prefixes of the module's in-flight growth slots (empty if none)."""
+
+    dit = getattr(module, "dit", None)
+    new_slots = getattr(dit, "new_slot_ids", ())
+    if not new_slots:
+        return ()
+    return new_slot_fqn_prefixes(tuple(new_slots))
+
+
+def _verify_fqn_sets(
+    checkpoint_fqns: set[str], current_fqns: set[str], new_prefixes: tuple[str, ...]
+) -> None:
+    """Strict add/remove-set check between the checkpoint and the module.
+
+    The checkpoint may never contain FQNs the module lacks.  FQNs the module
+    has but the checkpoint lacks are legal only when every one of them
+    belongs to an in-flight growth slot (the module constructor initialises
+    them; the saved run simply predates them).
+    """
+
+    unexpected = checkpoint_fqns - current_fqns
+    if unexpected:
+        sample = sorted(unexpected)[:8]
+        raise CheckpointError(
+            "checkpoint contains FQNs the module does not have: "
+            + ", ".join(sample)
+            + (f" (+{len(unexpected) - 8} more)" if len(unexpected) > 8 else "")
+        )
+    missing = current_fqns - checkpoint_fqns
+    if not missing:
+        return
+    if not new_prefixes:
+        sample = sorted(missing)[:8]
+        raise CheckpointError(
+            "module FQNs are missing from the checkpoint (no growth in "
+            "flight): " + ", ".join(sample)
+        )
+    for fqn in sorted(missing):
+        if not any(fqn.startswith(prefix) for prefix in new_prefixes):
+            raise CheckpointError(
+                f"module FQN {fqn} is missing from the checkpoint and is not "
+                "a growth slot parameter"
+            )
+
+
 def _validate_model_config(
     path: Path,
     expected: CheckpointIdentity,
@@ -276,8 +322,9 @@ def _validate_model_tensors(
         raise CheckpointError("target is not the artifact trainable composite") from None
     weight_map, declared_size = _model_index(model_dir / "model.safetensors.index.json")
     current = module.state_dict(keep_vars=True)
-    if set(weight_map) != set(current):
-        raise CheckpointError("checkpoint model FQNs do not match current model")
+    _verify_fqn_sets(
+        set(weight_map), set(current), _module_new_slot_prefixes(module)
+    )
     shard_names = set(weight_map.values())
     if any("/" in name or not name.endswith(".safetensors") for name in shard_names):
         raise CheckpointError("model shard name is invalid")
@@ -331,7 +378,15 @@ def _validate_optimizer_schema(
     value: object,
     optimizer: IsolatedAdamW8bit,
     expected: CheckpointIdentity,
+    *,
+    new_fqns: frozenset[str] = frozenset(),
 ) -> None:
+    """Validate saved canonical groups against the current optimizer.
+
+    ``new_fqns`` marks growth-slot parameters: they are legal to be absent
+    from the saved groups (fresh optimizer state) and nothing else.
+    """
+
     del expected
     document = _mapping(value, "optimizer schema")
     if type(document.get("schema_version")) is not int or document["schema_version"] != 1:
@@ -356,8 +411,7 @@ def _validate_optimizer_schema(
         if not isinstance(group_name, str) or not isinstance(names, list):
             raise CheckpointError("current optimizer lacks canonical parameter names")
         current.append((group_name, tuple(cast(list[str], names))))
-    if saved != current:
-        raise CheckpointError("optimizer canonical parameter groups do not match")
+    _verify_group_diff(saved, current, new_fqns)
 
 
 def _load_optimizer_state(path: Path) -> dict[str, object]:
@@ -482,6 +536,41 @@ def _remap_state_to_current_ids(
             )
         remapped_state[current_id] = entry
     return {"state": remapped_state, "param_groups": current_groups}
+
+
+def _verify_group_diff(
+    saved: list[tuple[str, tuple[str, ...]]],
+    current: list[tuple[str, tuple[str, ...]]],
+    new_fqns: frozenset[str],
+) -> None:
+    """Exact group/param-name comparison with growth-slot tolerance.
+
+    The saved groups must be the current groups minus exactly the
+    growth-slot FQNs (nothing more, nothing less, same order).
+    """
+
+    if len(saved) != len(current):
+        raise CheckpointError("optimizer state group count does not match")
+    for (saved_name, saved_names), (current_name, current_names) in zip(
+        saved, current, strict=True
+    ):
+        if saved_name != current_name:
+            raise CheckpointError(f"optimizer group name differs: {saved_name}")
+        saved_set = set(saved_names)
+        current_set = set(current_names)
+        if saved_set - current_set:
+            raise CheckpointError(
+                f"optimizer group {saved_name} contains FQNs the current "
+                "optimizer does not have"
+            )
+        diff = current_set - saved_set
+        if not diff <= new_fqns:
+            raise CheckpointError(
+                f"optimizer group {saved_name} is missing non-growth FQNs"
+            )
+        expected_saved = tuple(name for name in current_names if name not in diff)
+        if tuple(saved_names) != expected_saved:
+            raise CheckpointError(f"optimizer group {saved_name} order differs")
 
 
 def _validate_optimizer_state(
@@ -619,7 +708,10 @@ def _hybrid_ns_map(value: object) -> dict[str, int] | None:
 
 
 def _validate_hybrid_optimizer_schema(
-    value: object, optimizer: HybridCMuon
+    value: object,
+    optimizer: HybridCMuon,
+    *,
+    new_fqns: frozenset[str] = frozenset(),
 ) -> None:
     """Schema v2: inner AdamW groups + the CMuon algorithm contract."""
     from sakuramoon.optim.guarded_canonical import (
@@ -704,8 +796,7 @@ def _validate_hybrid_optimizer_schema(
         if not isinstance(group_name, str) or not isinstance(names, list):
             raise CheckpointError("current optimizer lacks canonical parameter names")
         current.append((group_name, tuple(cast(list[str], names))))
-    if saved != current:
-        raise CheckpointError("hybrid inner optimizer parameter groups do not match")
+    _verify_group_diff(saved, current, new_fqns)
     block = _mapping(document["hybrid_cmuon"], "hybrid_cmuon schema block")
     _exact_keys(
         block,
@@ -887,10 +978,16 @@ def _validate_hybrid_cmuon_state(
         )
 
 
-def _validate_transition_optimizer_schema(value: object, audit: ParameterAudit) -> None:
+def _validate_transition_optimizer_schema(
+    value: object,
+    audit: ParameterAudit,
+    *,
+    new_fqns: frozenset[str] = frozenset(),
+) -> None:
     """v1 schema whose groups are the FULL audit (the source checkpoint was a
     pure full-parameter AdamW8bit run); the hybrid will keep the AdamW subset
-    and fork the CMuon allowlist from it."""
+    and fork the CMuon allowlist from it.  Growth-slot FQNs may be absent
+    from the saved groups (fresh fork state)."""
     document = _mapping(value, "optimizer schema")
     if type(document.get("schema_version")) is not int or document["schema_version"] != 1:
         raise CheckpointError("optimizer parameter schema version is invalid")
@@ -911,10 +1008,7 @@ def _validate_transition_optimizer_schema(value: object, audit: ParameterAudit) 
         ("matrix_decay", tuple(spec.name for spec in audit.decay)),
         ("sensitive_no_decay", tuple(spec.name for spec in audit.sensitive)),
     ]
-    if saved != expected:
-        raise CheckpointError(
-            "transition source optimizer groups differ from the full parameter audit"
-        )
+    _verify_group_diff(saved, expected, new_fqns)
 
 
 def _validate_transition_optimizer_state(
@@ -1189,14 +1283,34 @@ def load_raw_checkpoint(
     schema_version = _mapping(schema, "optimizer schema").get("schema_version")
     if expected.update != state.trainer.successful_updates:
         raise CheckpointError("checkpoint update differs from trainer successful updates")
-    if state.growth.active_slot_ids != active_slot_ids_from_module(module):
+    module_slots = active_slot_ids_from_module(module)
+    saved_slots = state.growth.active_slot_ids
+    if saved_slots == module_slots:
+        pass
+    elif set(saved_slots) < set(module_slots):
+        # Growth cutover: the module must be built with exactly the added
+        # slots as its in-flight new slots.
+        if not _module_new_slot_prefixes(module):
+            raise CheckpointError(
+                "growth cutover checkpoint requires a module built with the "
+                "added slots as new_slot_ids"
+            )
+        expected_new = new_slot_ids(tuple(module_slots), saved_slots)
+        dit_new = tuple(getattr(module.dit, "new_slot_ids", ()))
+        if expected_new != dit_new:
+            raise CheckpointError(
+                "module growth slots differ from the checkpoint slot diff"
+            )
+    else:
         raise CheckpointError("checkpoint growth state differs from model active slots")
     try:
         rank_rng = load_file(train_state / "rng" / "rank-0.safetensors", device="cpu")
     except Exception:  # noqa: BLE001 - normalize Safetensors loader errors
         raise CheckpointError("rank RNG file is unreadable") from None
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    if local_rank > 0 and torch.cuda.is_available():
+    # The persisted device ordinal is source-run metadata: every rank always
+    # rebinds the saved generator state to its own device, so a resume may
+    # move to any topology (there is no single special-cased transition).
+    if torch.cuda.is_available():
         rank_rng = dict(rank_rng)
         rank_rng["cuda_device_index"] = torch.tensor(
             torch.cuda.current_device(), dtype=torch.int64

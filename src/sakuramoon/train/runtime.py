@@ -1503,8 +1503,8 @@ __all__ = [
     "SuccessfulTrainingObservation",
     "compile_packed_dit_blocks",
     "require_checkpoint_cadence_binding",
-    "require_distributed_forward_module",
     "require_checkpoint_resume_binding",
+    "require_distributed_forward_module",
     "require_train_topology",
     "run_single_gpu_training",
 ]
