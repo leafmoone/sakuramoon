@@ -3,7 +3,7 @@
 ## 交付坐标
 
 - **BASE**: `8593a684b2fbb9fe65971c6c69a12ccedaae8950`（dev，repo leafmoone/sakuramoon）
-- **FINAL_HEAD**: `be1c1a58`（本地，见下方提交列表）
+- **FINAL_HEAD**: `4ef62408`（本地，见下方提交列表）
 - **BRANCH**: `refactor/config-driven-training`
 - **WORKTREE**: come6 `/sakuramoon-runtime/sakuramoon-config-driven-training`
   （本地镜像 `D:\sakruamoon\config-cleanup`，bundle 同步，零 push）
@@ -22,6 +22,7 @@
 | `76bf0e0` | chore: shebang CLI 脚本可执行位（ruff EXE001） |
 | `0984c38` | docs: 配置驱动接口与恢复契约（docs/config-and-resume.md） |
 | `be1c1a5` | fix: 清除残留 stage/shape_count 日志读取 + pyright 漂移清理 |
+| `4ef6240` | fix: timing 禁用时 per-update 循环计时器保持无事件（NoopPhaseTimer 保持）+ 最终报告 |
 
 ## REMOVED_POLICIES（已删除的历史策略/伪配置/硬编码）
 
@@ -89,11 +90,17 @@
 
 ## TESTS（come6 权威门，FINAL_HEAD）
 
-- **pytest tests/unit**: 见下方门结果（对比 BASE 基线 4 failed / 975 passed，
-  唯一失败集 = `test_cmuon_fp32_forensic.py` ×4，预存环境问题）。
+- **pytest tests/unit**（come6，FINAL_HEAD）: **4 failed / 971 passed**
+  （失败集 = BASE 基线的同 4 个 `test_cmuon_fp32_forensic.py` 预存环境失败，
+  基线为 4 failed / 975 passed，无新增失败；测试数差 4 = 重写的
+  symlink/绝对路径旧用例替换）。
 - **ruff**: `All checks passed!`（src/tests/scripts，ruff 0.16.1）。
 - **pyright**（config/checkpoint/model/train/objective 五核心目录）：
-  与 BASE 同范围对照，无新增错误类别（详见门日志）。
+  **313 errors vs BASE 324**（去重后 195 vs 213）；逐条 diff 确认无新增
+  错误类别——差异全部为：删除 migrate_growth.py（-22）、既有
+  dict[str, object]/优化器构建器噪音的别名改名（ExactFloat→Float、
+  depth→new_slot_ids）与新增的同类 dict 操作噪音（+6）。
+  BASE 本身即非 pyright-clean（预存 324 条）。
 - Windows 本机残留失败均为平台差异（`os.O_NOFOLLOW`/`os.O_DIRECTORY`/fcntl/
   symlink 缺失），已在 BASE 提交同环境复现确认非回归。
 
@@ -150,10 +157,11 @@
 
 ## VERDICT
 
-**PASS（本地交付完成，待人工评审）**：come6 权威门 pytest/ruff/pyright
-与 BASE 基线无回归差（见 TESTS 门结果）；21 模板全部可加载；
-恢复兼容性（v3/v4/侧车/growth_migration.json）与增长切换契约由测试锁定；
-文档与示例配置齐备。
+**PASS（本地交付完成，待人工评审）**：come6 权威门 @ `4ef62408`：
+pytest 4 failed / 971 passed（失败集 = BASE 基线同 4 个预存 cmuon 环境
+失败）、ruff All checks passed、pyright 313（BASE 324，无新错误类别）；
+21 模板全部可加载；恢复兼容性（v3/v4/侧车/growth_migration.json）与
+增长切换契约由测试锁定；文档与示例配置齐备。
 
 ## NEXT
 
