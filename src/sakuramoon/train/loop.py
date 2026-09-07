@@ -20,7 +20,7 @@ from sakuramoon.checkpoint.policy import (
 )
 from sakuramoon.optim.guard_calibration import GuardCalibrationComplete
 from sakuramoon.optim.structural_calibration import StructuralCalibrationComplete
-from sakuramoon.telemetry.timers import PhaseTimer
+from sakuramoon.telemetry.timers import AnyPhaseTimer, NoopPhaseTimer, PhaseTimer
 from sakuramoon.train.failures import FailureSnapshot, write_failure_bundle
 from sakuramoon.train.scheduler import CheckpointScheduler
 from sakuramoon.train.step import (
@@ -45,7 +45,7 @@ class SuccessfulLoopObservation:
     data_wait_seconds: float
     checkpoint_seconds: float
     update_wall_seconds: float
-    phase_timer: PhaseTimer | None
+    phase_timer: AnyPhaseTimer | None
 
     def __post_init__(self) -> None:
         if (
@@ -84,8 +84,8 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
             [SingleGpuUpdateState, CheckpointReason, CheckpointCadence], None
         ]
         | None = None,
-        phase_timer: PhaseTimer | None = None,
-        update_started: Callable[[PhaseTimer | None], None] | None = None,
+        phase_timer: AnyPhaseTimer | None = None,
+        update_started: Callable[[AnyPhaseTimer | None], None] | None = None,
         successful_update_observer: Callable[[SuccessfulLoopObservation], None]
         | None = None,
         effective_sample_multiplier: int = 1,
@@ -178,7 +178,7 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         ) from None
 
     @staticmethod
-    def _record(timer: PhaseTimer | None, phase: str) -> AbstractContextManager[None]:
+    def _record(timer: AnyPhaseTimer | None, phase: str) -> AbstractContextManager[None]:
         if timer is None:
             return nullcontext()
         return timer.record(phase)
@@ -189,11 +189,14 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         checkpoint_scheduler = self._checkpoint_scheduler
         while self.state.successful_updates < self.target_successful_updates:
             update_wall_started = time.perf_counter_ns()
-            phase_timer = (
-                PhaseTimer(device=self._phase_timer.device)
-                if self._phase_timer is not None
-                else None
-            )
+            if self._phase_timer is None:
+                phase_timer: AnyPhaseTimer | None = None
+            elif isinstance(self._phase_timer, NoopPhaseTimer):
+                # Timing-disabled runs stay event-free: the per-update timer
+                # must not create CUDA events.
+                phase_timer = NoopPhaseTimer(device=self._phase_timer.device)
+            else:
+                phase_timer = PhaseTimer(device=self._phase_timer.device)
             if self._update_started is not None:
                 self._update_started(phase_timer)
             data_wait_seconds = 0.0

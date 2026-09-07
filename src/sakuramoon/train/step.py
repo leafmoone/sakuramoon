@@ -19,11 +19,11 @@ from sakuramoon.model.dit import DenseDiT, PackedDiT
 from sakuramoon.model.growth import new_slot_fqn_prefixes
 from sakuramoon.model.irepa import IRepaAlignment
 from sakuramoon.optim.clip import ClipResult, clip_grad_norm_fp32
-from sakuramoon.telemetry.timers import PhaseTimer
+from sakuramoon.telemetry.timers import AnyPhaseTimer
 
 
 @contextmanager
-def _record_phase(timer: PhaseTimer | None, phase: str) -> Generator[None]:
+def _record_phase(timer: AnyPhaseTimer | None, phase: str) -> Generator[None]:
     if timer is None:
         yield
         return
@@ -254,7 +254,7 @@ class TrainableComposite(nn.Module):
         self,
         inputs: TrainableCompositeInputs,
         *,
-        phase_timer: PhaseTimer | None = None,
+        phase_timer: AnyPhaseTimer | None = None,
     ) -> tuple[torch.Tensor, ...] | TrainableCompositeIRepaOutput:
         with _record_phase(phase_timer, "conditioning"):
             conditioning = self.forward_conditioning(inputs)
@@ -517,7 +517,7 @@ class SingleGpuStep:
     def finish_update(
         self,
         *,
-        phase_timer: PhaseTimer | None = None,
+        phase_timer: AnyPhaseTimer | None = None,
     ) -> SingleGpuUpdateResult:
         if self._failed:
             raise RuntimeError("failed update state cannot continue")
