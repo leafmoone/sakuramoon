@@ -517,3 +517,60 @@ def test_size_conditions_count_override_for_physical_views() -> None:
     # One value per physical view, identical broadcast for a uniform batch.
     assert (size_scale == size_scale[0]).all().item()
     assert (aspect == aspect[0]).all().item()
+
+
+# ---------------------------------------------------------------------------
+# Active-condition device routing (canary readiness fix A)
+#
+# The mirror branch of prepare() must remap the ALREADY device-local
+# active-condition indices (the batch attribute is CPU-side). The helper
+# must preserve the input device, stay 1-D long, and work for the empty
+# active set.
+# ---------------------------------------------------------------------------
+
+
+def test_active_condition_remap_preserves_cpu_device() -> None:
+    layout = MirrorPhysicalLayout.build((True, False, True))
+    active = torch.tensor([0, 2], dtype=torch.long)  # CPU input
+    physical = _physical_active_condition_indices(active, layout)
+    assert physical.device.type == "cpu"
+    assert physical.dtype == torch.long
+    assert physical.ndim == 1
+    # Logical active rows {0,2} with mirror flags {T,F,T}: logical 0
+    # expands to physical 0 (original) + 1 (mirror), logical 2 expands to
+    # physical 3 (original) + 4 (mirror).
+    assert tuple(physical.tolist()) == (0, 1, 3, 4)
+
+
+def test_active_condition_remap_empty_set_stays_on_device() -> None:
+    layout = MirrorPhysicalLayout.build((True, True))
+    active = torch.zeros(0, dtype=torch.long)
+    physical = _physical_active_condition_indices(active, layout)
+    assert physical.device.type == "cpu"
+    assert physical.dtype == torch.long
+    assert physical.ndim == 1
+    assert physical.numel() == 0
+
+
+def test_active_condition_remap_rejects_bad_input() -> None:
+    layout = MirrorPhysicalLayout.build((True,))
+    with pytest.raises(ValueError):
+        _physical_active_condition_indices(
+            torch.zeros(2, 1, dtype=torch.long), layout
+        )
+    with pytest.raises(ValueError):
+        _physical_active_condition_indices(torch.tensor([0.0]), layout)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA/HCU device required"
+)
+def test_active_condition_remap_preserves_cuda_device() -> None:
+    layout = MirrorPhysicalLayout.build((True, False, True))
+    active = torch.tensor([0, 2], dtype=torch.long, device="cuda")
+    physical = _physical_active_condition_indices(active, layout)
+    # Device parity with the input (and therefore with qwen_states in the
+    # runtime, where both live on self.device).
+    assert physical.device == active.device
+    assert physical.device.type == "cuda"
+    assert tuple(physical.cpu().tolist()) == (0, 1, 3, 4)

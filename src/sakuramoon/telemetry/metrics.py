@@ -64,7 +64,7 @@ NOISE_T_BIN_LABELS = tuple(
     f"bin_{index:02d}_t{index * 5:03d}_{(index + 1) * 5:03d}"
     for index in range(NOISE_T_BIN_COUNT)
 )
-TRAINING_METRIC_SCHEMA_VERSION = 11
+TRAINING_METRIC_SCHEMA_VERSION = 12
 DROPOUT_KEYS = CAPTION_DROPOUT_KEYS
 def _spatial_default_fallback_reasons(effective_batch: int) -> Mapping[str, int]:
     """Default spatial-crop table for an update with no spatial activity.
@@ -221,6 +221,30 @@ class TrainingMetric:
     # completion channel; None is filled with the strict-zero fixed-key
     # table in __post_init__ (post-init the field is never None or empty).
     transparent_rejection_totals: Mapping[str, int] | None = None
+    # Camera-mirror fixed fields (schema v12).  The two population fields
+    # default to None and are filled in __post_init__ so that the
+    # feature-absent record is exactly the spec default: logical and
+    # physical both equal the effective batch and every activity counter is
+    # zero.  An update that ran the intervention passes the aggregated
+    # values explicitly; the conservation checks below make silent
+    # regressions impossible (a dropped counter is a schema violation, not a
+    # silent zero).
+    camera_mirror_logical_samples: int | None = None
+    camera_mirror_vertical_applied: int = 0
+    camera_mirror_eligible: int = 0
+    camera_mirror_selected: int = 0
+    camera_mirror_applied: int = 0
+    camera_mirror_severity_lt2: int = 0
+    camera_mirror_severity_2to4: int = 0
+    camera_mirror_severity_ge4: int = 0
+    camera_mirror_original_start: int = 0
+    camera_mirror_original_center: int = 0
+    camera_mirror_original_end: int = 0
+    camera_mirror_mirror_start: int = 0
+    camera_mirror_mirror_center: int = 0
+    camera_mirror_mirror_end: int = 0
+    camera_mirror_extra_views: int = 0
+    camera_mirror_physical_views: int | None = None
 
     def __post_init__(self) -> None:
         _nonnegative_int("successful_update", self.successful_update, positive=True)
@@ -609,6 +633,103 @@ class TrainingMetric:
             )
         for key, value in rejection_totals.items():
             _nonnegative_int(f"transparent_rejection_totals.{key}", value)
+        # None population fields mean "the feature produced no mirror
+        # facts": fill the exact spec default (logical == physical ==
+        # effective batch, zero activity) before validating.
+        if self.camera_mirror_logical_samples is None:
+            object.__setattr__(
+                self, "camera_mirror_logical_samples", self.effective_batch
+            )
+        if self.camera_mirror_physical_views is None:
+            object.__setattr__(
+                self,
+                "camera_mirror_physical_views",
+                self.effective_batch + self.camera_mirror_extra_views,
+            )
+        for name in (
+            "camera_mirror_logical_samples",
+            "camera_mirror_vertical_applied",
+            "camera_mirror_eligible",
+            "camera_mirror_selected",
+            "camera_mirror_applied",
+            "camera_mirror_severity_lt2",
+            "camera_mirror_severity_2to4",
+            "camera_mirror_severity_ge4",
+            "camera_mirror_original_start",
+            "camera_mirror_original_center",
+            "camera_mirror_original_end",
+            "camera_mirror_mirror_start",
+            "camera_mirror_mirror_center",
+            "camera_mirror_mirror_end",
+            "camera_mirror_extra_views",
+            "camera_mirror_physical_views",
+        ):
+            _nonnegative_int(name, getattr(self, name))
+        # The logical population is the effective batch (one logical sample
+        # per source, regardless of physical-view expansion) -- the same
+        # effective-batch anchoring already applied to the t-bin and
+        # condition-route tables. The observer aggregation enforces the
+        # same anchor independently, so a dropped counter fails closed at
+        # both layers.
+        if self.camera_mirror_logical_samples != self.effective_batch:
+            raise ValueError(
+                "camera mirror logical samples must equal the effective batch"
+            )
+        if (
+            self.camera_mirror_applied
+            > self.camera_mirror_selected
+            or self.camera_mirror_selected
+            > self.camera_mirror_eligible
+            or self.camera_mirror_eligible
+            > self.camera_mirror_vertical_applied
+            or self.camera_mirror_vertical_applied
+            > self.camera_mirror_logical_samples
+        ):
+            raise ValueError(
+                "camera mirror counts violate the "
+                "applied <= selected <= eligible <= vertical <= logical chain"
+            )
+        if (
+            self.camera_mirror_severity_lt2
+            + self.camera_mirror_severity_2to4
+            + self.camera_mirror_severity_ge4
+            != self.camera_mirror_vertical_applied
+        ):
+            raise ValueError(
+                "camera mirror severity bands must cover the vertical-applied "
+                "population"
+            )
+        if (
+            self.camera_mirror_original_start
+            + self.camera_mirror_original_center
+            + self.camera_mirror_original_end
+            != self.camera_mirror_applied
+        ):
+            raise ValueError(
+                "camera mirror original side counts must cover applied pairs"
+            )
+        if (
+            self.camera_mirror_mirror_start
+            + self.camera_mirror_mirror_center
+            + self.camera_mirror_mirror_end
+            != self.camera_mirror_applied
+        ):
+            raise ValueError(
+                "camera mirror mirror side counts must cover applied pairs"
+            )
+        if self.camera_mirror_extra_views != self.camera_mirror_applied:
+            raise ValueError(
+                "camera mirror extra views must equal applied pairs"
+            )
+        if (
+            self.camera_mirror_physical_views
+            != self.camera_mirror_logical_samples
+            + self.camera_mirror_extra_views
+        ):
+            raise ValueError(
+                "camera mirror physical views must equal logical samples "
+                "plus extra views"
+            )
         object.__setattr__(
             self, "dropout_hits", MappingProxyType(dict(self.dropout_hits))
         )
@@ -722,6 +843,22 @@ class TrainingMetric:
             "transparent_rejection_totals": dict(
                 self.transparent_rejection_totals or {}
             ),
+            "camera_mirror_logical_samples": self.camera_mirror_logical_samples,
+            "camera_mirror_vertical_applied": self.camera_mirror_vertical_applied,
+            "camera_mirror_eligible": self.camera_mirror_eligible,
+            "camera_mirror_selected": self.camera_mirror_selected,
+            "camera_mirror_applied": self.camera_mirror_applied,
+            "camera_mirror_severity_lt2": self.camera_mirror_severity_lt2,
+            "camera_mirror_severity_2to4": self.camera_mirror_severity_2to4,
+            "camera_mirror_severity_ge4": self.camera_mirror_severity_ge4,
+            "camera_mirror_original_start": self.camera_mirror_original_start,
+            "camera_mirror_original_center": self.camera_mirror_original_center,
+            "camera_mirror_original_end": self.camera_mirror_original_end,
+            "camera_mirror_mirror_start": self.camera_mirror_mirror_start,
+            "camera_mirror_mirror_center": self.camera_mirror_mirror_center,
+            "camera_mirror_mirror_end": self.camera_mirror_mirror_end,
+            "camera_mirror_extra_views": self.camera_mirror_extra_views,
+            "camera_mirror_physical_views": self.camera_mirror_physical_views,
         }
 
     def as_wandb_mapping(self) -> dict[str, int | float]:

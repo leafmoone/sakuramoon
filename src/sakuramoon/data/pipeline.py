@@ -685,10 +685,12 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                             ):
                                 # A mirror-branch failure degrades to the
                                 # original-only view; it never rejects an
-                                # otherwise valid sample.
+                                # otherwise valid sample.  The eligibility
+                                # and selection decisions are PRESERVED so
+                                # that (selected - applied) is the exact
+                                # deterministic degraded-pair count in the
+                                # fixed camera_mirror counters.
                                 mirror_payload = None
-                                mirror_selected = False
-                                mirror_eligible = False
                                 _trace_sample(
                                     shard_record.path,
                                     metadata.id,

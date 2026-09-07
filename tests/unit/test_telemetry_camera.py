@@ -96,8 +96,11 @@ def _base_metric(**camera: object) -> TrainingMetric:
     )
 
 
-def test_schema_version_is_11() -> None:
-    assert TRAINING_METRIC_SCHEMA_VERSION == 11
+def test_schema_version_is_12() -> None:
+    # v12 adds the 16 fixed camera_mirror_* fields (canary readiness
+    # review); the legacy v11 records stay readable through the schema
+    # version field.
+    assert TRAINING_METRIC_SCHEMA_VERSION == 12
 
 
 def test_legacy_metric_is_strict_zero_outside_ordinary_band() -> None:

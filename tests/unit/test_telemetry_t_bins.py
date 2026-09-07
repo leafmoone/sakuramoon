@@ -133,6 +133,9 @@ def test_training_metric_omits_empty_t_bin_loss_from_wandb() -> None:
         metric,
         effective_batch=19,
         high_noise_sample_count=19,
+        # Schema 12: the mirror population fields track the effective batch.
+        camera_mirror_logical_samples=19,
+        camera_mirror_physical_views=19,
         camera_ordinary_loss_count=19,
         camera_fallback_reasons={
             reason: (19 if reason == "none" else 0)

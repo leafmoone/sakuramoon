@@ -107,13 +107,14 @@ def _applied_metric() -> TrainingMetric:
 
 
 class TestSchema:
-    def test_schema_version_is_eleven(self) -> None:
-        # Schema 10 (spatial) -> 11 (camera-viewport C1).
-        assert TRAINING_METRIC_SCHEMA_VERSION == 11
+    def test_schema_version_is_twelve(self) -> None:
+        # Schema 10 (spatial) -> 11 (camera-viewport C1) -> 12
+        # (camera-mirror canary readiness: 16 fixed camera_mirror_* fields).
+        assert TRAINING_METRIC_SCHEMA_VERSION == 12
 
     def test_json_payload_exposes_nested_spatial_tables(self) -> None:
         payload = _applied_metric().as_json_mapping()
-        assert payload["schema_version"] == 11
+        assert payload["schema_version"] == 12
         assert payload["spatial_crop_selected"] == 5
         assert payload["spatial_crop_applied"] == 4
         assert payload["spatial_both_axes_count"] == 2

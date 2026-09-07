@@ -1308,3 +1308,66 @@ def test_legacy_batches_keep_pre_mirror_contract() -> None:
     assert batch.mirror == (None, None)
     assert all(payload is None for payload in batch.mirror)
     assert batch.camera_mirror == zero_camera_mirror_counts(2)
+
+
+# ---------------------------------------------------------------------------
+# Degrade semantics (canary readiness fix C): a mirror-branch failure must
+# preserve the eligibility/selection decision history so that
+# (selected - applied) is the deterministic degraded count, and the
+# original sample always survives.
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_degrade_preserves_decision_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sakuramoon.data.pipeline as pipeline_module
+
+    def _boom(_plan):  # type: ignore[no-redef]
+        raise ValueError("synthetic mirror construction failure")
+
+    monkeypatch.setattr(pipeline_module, "plan_mirror_geometry", _boom)
+    image_bytes = _gradient_png(512, 1024)
+    pipeline = _pipeline(
+        camera_policy=_camera_policy(),
+        mirror_policy=_mirror_policy(pair_probability=1.0),
+    )
+    saw_degrade = False
+    for sample_id in range(1, 129):
+        result = _process_sample(pipeline, image_bytes, sample_id=sample_id)
+        if not (result.mirror_eligible and result.mirror_selected):
+            continue
+        saw_degrade = True
+        assert result.mirror is None
+        # The decision history is preserved, not reset.
+        assert result.mirror_eligible is True
+        assert result.mirror_selected is True
+        # The original sample continues: camera still applied, original
+        # crop emitted.
+        assert result.audit.camera_applied
+        assert result.image is not None
+    assert saw_degrade, "no eligible+selected sample was exercised"
+
+
+def test_collate_selected_degraded_keeps_decision_history() -> None:
+    # eligible=1, selected=1, payload=None must produce eligible 1,
+    # selected 1, applied 0 -- NOT 0/0/0.
+    samples = (
+        _collate_sample(1),
+        _collate_sample(
+            2,
+            mirror=None,
+            eligible=True,
+            selected=True,
+            camera_vertical=True,
+        ),
+    )
+    batch = collate_samples(samples)
+    assert batch.mirror == (None, None)
+    counts = batch.camera_mirror
+    assert counts is not None
+    assert counts.mirror_eligible == 1
+    assert counts.mirror_selected == 1
+    assert counts.mirror_applied == 0
+    assert counts.mirror_extra_views == 0
+    assert counts.physical_views == 2

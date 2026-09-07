@@ -1231,10 +1231,26 @@ class SingleGpuBatchRuntime:
             )
             condition_mask = condition_mask.index_select(0, expand)
             use_null_condition = use_null_condition.index_select(0, expand)
+            # The device-local tensor from the H2D block is the input: the
+            # batch attribute is still CPU-side, and the condition-token
+            # path below requires the remapped indices on the same device
+            # as qwen_states.
             active_condition_sample_indices = (
                 _physical_active_condition_indices(
-                    batch.active_condition_sample_indices, mirror_layout
+                    active_condition_sample_indices, mirror_layout
                 )
+            )
+        # Fail closed on a device/dtype/ndim mismatch instead of letting a
+        # CPU index tensor reach the condition-token path, where the
+        # failure would surface as an opaque downstream device error.
+        if mirror_layout is not None and (
+            active_condition_sample_indices.device != qwen_states.device
+            or active_condition_sample_indices.dtype != torch.long
+            or active_condition_sample_indices.ndim != 1
+        ):
+            raise ValueError(
+                "mirror batch active-condition indices must be a 1-D "
+                "long tensor on the conditioning device"
             )
         state = interpolate_state(clean, noise, timestep)
         size_scale, aspect = _size_conditions(

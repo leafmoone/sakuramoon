@@ -18,6 +18,7 @@ from sakuramoon.data.camera_viewport import (
     CAMERA_ORIENTATION_KEYS,
     CAMERA_SHIFT_TOKEN_BIN_LABELS,
     CAMERA_ZOOM_BAND_LABELS,
+    CameraMirrorCounts,
     CameraViewportCounts,
 )
 from sakuramoon.data.spatial_crop import (
@@ -479,6 +480,129 @@ def _camera_viewport_metrics(
         ordinary_loss_sum=ordinary_loss_sum,
         ordinary_loss_count=ordinary_loss_count,
     )
+@dataclass(frozen=True, slots=True)
+class _CameraMirrorMetrics:
+    """Aggregated camera-mirror facts for one successful update.
+
+    The 16 fixed fields of :class:`TrainingMetric`, aggregated across the
+    update's microbatches with the batch-level conservation already enforced
+    per microbatch by :class:`CameraMirrorCounts`.
+    """
+
+    logical_samples: int
+    vertical_applied: int
+    eligible: int
+    selected: int
+    applied: int
+    severity_lt2: int
+    severity_2to4: int
+    severity_ge4: int
+    original_start: int
+    original_center: int
+    original_end: int
+    mirror_start: int
+    mirror_center: int
+    mirror_end: int
+    extra_views: int
+    physical_views: int
+
+
+def _camera_mirror_metrics(
+    observation: SuccessfulTrainingObservation,
+) -> _CameraMirrorMetrics:
+    """Aggregate the per-microbatch camera-mirror counters for one update.
+
+    A microbatch whose measurement carries ``camera_mirror is None``
+    contributed no mirror activity: every one of its logical samples stayed
+    on the ordinary path (``logical == physical`` per sample).  The
+    update-level population invariant (logical samples == effective batch)
+    is re-checked here so a silent drop of the counters fails closed.
+    """
+
+    totals = {
+        "logical_samples": 0,
+        "vertical_applied": 0,
+        "eligible": 0,
+        "selected": 0,
+        "applied": 0,
+        "severity_lt2": 0,
+        "severity_2to4": 0,
+        "severity_ge4": 0,
+        "original_start": 0,
+        "original_center": 0,
+        "original_end": 0,
+        "mirror_start": 0,
+        "mirror_center": 0,
+        "mirror_end": 0,
+        "extra_views": 0,
+        "physical_views": 0,
+    }
+    source = {
+        "logical_samples": "logical_samples",
+        "vertical_applied": "vertical_applied",
+        "eligible": "mirror_eligible",
+        "selected": "mirror_selected",
+        "applied": "mirror_applied",
+        "severity_lt2": "severity_lt2",
+        "severity_2to4": "severity_2to4",
+        "severity_ge4": "severity_ge4",
+        "original_start": "original_start",
+        "original_center": "original_center",
+        "original_end": "original_end",
+        "mirror_start": "mirror_start",
+        "mirror_center": "mirror_center",
+        "mirror_end": "mirror_end",
+        "extra_views": "mirror_extra_views",
+        "physical_views": "physical_views",
+    }
+    for index, measurement in enumerate(observation.microbatches):
+        counts = measurement.camera_mirror
+        if counts is None:
+            # Feature absent (or no mirror fields) in this microbatch: the
+            # per-sample loss vector is the logical population and every
+            # physical view is an original.
+            logical = measurement.per_sample_loss.numel()
+            totals["logical_samples"] += logical
+            totals["physical_views"] += logical
+            continue
+        if type(counts) is not CameraMirrorCounts:
+            raise TypeError(
+                f"microbatches[{index}].camera_mirror must be a "
+                "CameraMirrorCounts"
+            )
+        for total_key, count_key in source.items():
+            value = getattr(counts, count_key)
+            if type(value) is not int or value < 0:
+                raise TypeError(
+                    f"microbatches[{index}].camera_mirror.{count_key} "
+                    "must be a nonnegative integer"
+                )
+            totals[total_key] += value
+    effective = observation.loop.update.effective_samples
+    if totals["logical_samples"] != effective:
+        raise ValueError(
+            "camera mirror logical samples differ from effective batch"
+        )
+    return _CameraMirrorMetrics(
+        logical_samples=totals["logical_samples"],
+        vertical_applied=totals["vertical_applied"],
+        eligible=totals["eligible"],
+        selected=totals["selected"],
+        applied=totals["applied"],
+        severity_lt2=totals["severity_lt2"],
+        severity_2to4=totals["severity_2to4"],
+        severity_ge4=totals["severity_ge4"],
+        original_start=totals["original_start"],
+        original_center=totals["original_center"],
+        original_end=totals["original_end"],
+        mirror_start=totals["mirror_start"],
+        mirror_center=totals["mirror_center"],
+        mirror_end=totals["mirror_end"],
+        extra_views=totals["extra_views"],
+        physical_views=totals["physical_views"],
+    )
+
+
 def _transparent_white_metrics(
     observation: SuccessfulTrainingObservation,
 ) -> tuple[int, int, int]:
@@ -598,6 +722,7 @@ def build_training_metric(
         raise ValueError("clip coefficient must be in [0,1]")
     spatial = _spatial_crop_metrics(observation)
     camera = _camera_viewport_metrics(observation)
+    mirror = _camera_mirror_metrics(observation)
     transparent_tagged, transparent_composited, transparent_nl_suppressed = (
         _transparent_white_metrics(observation)
     )
@@ -702,6 +827,22 @@ def build_training_metric(
         transparent_composited=transparent_composited,
         transparent_nl_suppressed=transparent_nl_suppressed,
         transparent_rejection_totals=context.transparent_rejection_totals,
+        camera_mirror_logical_samples=mirror.logical_samples,
+        camera_mirror_vertical_applied=mirror.vertical_applied,
+        camera_mirror_eligible=mirror.eligible,
+        camera_mirror_selected=mirror.selected,
+        camera_mirror_applied=mirror.applied,
+        camera_mirror_severity_lt2=mirror.severity_lt2,
+        camera_mirror_severity_2to4=mirror.severity_2to4,
+        camera_mirror_severity_ge4=mirror.severity_ge4,
+        camera_mirror_original_start=mirror.original_start,
+        camera_mirror_original_center=mirror.original_center,
+        camera_mirror_original_end=mirror.original_end,
+        camera_mirror_mirror_start=mirror.mirror_start,
+        camera_mirror_mirror_center=mirror.mirror_center,
+        camera_mirror_mirror_end=mirror.mirror_end,
+        camera_mirror_extra_views=mirror.extra_views,
+        camera_mirror_physical_views=mirror.physical_views,
     )
 
 
