@@ -2,7 +2,8 @@
 
 Date: 2026-09-07 · Machine: come6 (2× DCU 64 GiB, DTK torch 2.9.0) ·
 Branch: `fix/cmuon-fingerprint-no-grad` (parent a88c20c) ·
-Commit: `fix: avoid autograd graphs in CMuon parameter fingerprints`
+Implementation commit: `38f877812b4ff81642585ca78bf729b86dc8baf7`
+(`fix: avoid autograd graphs in CMuon parameter fingerprints`)
 
 ## IDENTITY
 
@@ -14,8 +15,12 @@ Commit: `fix: avoid autograd graphs in CMuon parameter fingerprints`
   statement order, dtypes and the error message are verbatim.
 - File sha256: BASE `cf26f316ce43e92f3038701c82ff33689c62c27a28a40b9073347bfebc940dd7`
   → FIX `7d9b4ccc57bd192fab939d0ed6f44f11cd4efc3e5f4897f40b4d31119dff1b65`.
-- Committed files (exactly 5): src fix, unit test, 2-rank HCU test,
-  memprobe tool, this report.
+- Committed files in 38f8778 (exactly 5): src fix, unit test, 2-rank HCU
+  test, memprobe tool, this report (v1).
+- This report's measurement-scope and number corrections (v2) are appended by
+  a SEPARATE documentation commit on top of 38f8778. Integration target is
+  FINAL_HEAD (the branch tip at merge time); the implementation code is
+  38f8778's `src/` blob and is byte-identical in FINAL_HEAD.
 
 ## ROOT_CAUSE
 
@@ -64,7 +69,8 @@ evidence: 2rank-result.json / 2rank-run.log):
   a consensus failure, as designed — and BOTH ranks raise
   `CMuonSafetyError` with the EXACT same message:
   `fp32-rescue rank invariant violated: cross-rank parameter fingerprint
-  diff 1.000e-03 after commit`; step completed on neither rank.
+  diff 1.000e-03 after commit`; step returned unsuccessfully on neither rank
+  (see failure-timing note in SAFETY).
 - `torchrun` exit 0 (2RANK_PASS), re-verified on the final lint-clean test
   file (sha 800e1be6…).
 
@@ -79,34 +85,57 @@ evidence: 2rank-result.json / 2rank-run.log):
   detached worktree and running job unaffected).
 - The fix only narrows autograd scope around a read-only diagnostic; commit
   order, collective order, dtypes and messages are unchanged.
+- Failure timing: the fingerprint check is POST-COMMIT. When it raises on a
+  mismatch, the step does not return successfully, but the parameter update
+  for that step has ALREADY been applied on every rank — the mismatch path
+  is NOT a zero-commit path. The pre-commit hard-fail contracts (nonfinite
+  gradients / above-ceiling delta) keep their original semantics unchanged
+  and are separate from this check.
 
 ## MEASUREMENT
 
-Fingerprint-phase only, isolated, NO production trainer, NO full Qwen/VAE/DiT,
-NO production ckpt read. Separate process per version (BASE: PYTHONPATH =
-main clone src @a88c20c on cuda:0; FIX: worktree src on cuda:1, parallel).
-Temporary parameter set at the GO-estimate scale: 1,547,567,104 bf16 elements
-(3.145 GB params, 36 cmuon specs, production FQN layout); real HCU NS;
+MEASUREMENT SCOPE: SYNTHETIC_PARAMETER_F3_OPTIMIZER_STEP — the timed/peak
+window wraps the REAL F3 `opt.step()` call (the full optimizer step,
+including Newton-Schulz) run on a synthetic parameter set. Because the
+window covers the full step, this is NOT a fingerprint-block-only
+measurement, even though the code change is in the fingerprint block.
+Isolated: NO production trainer, NO full Qwen/VAE/DiT, NO production ckpt
+read. Separate process per version (BASE: PYTHONPATH = main clone src
+@a88c20c on cuda:0; FIX: worktree src on cuda:1; the two processes ran in
+parallel on the two separate DCUs).
+Temporary parameter set at the GO-estimate scale: 1,547,567,104 bf16
+elements (3.145 GB params, 36 cmuon specs, production FQN layout) — a
+synthetic set, not the full production training model; real HCU NS;
 world_size=2 with identity collective mocks (the fingerprint block runs only
-for ws>1; the collective itself does not affect the fingerprint's autograd
-retention); 2 warm-up + 3 measured steps each; `synchronize` before/after;
-`reset_peak_memory_stats` per measured step; no `empty_cache` and no heavy
-hooks in the timed windows.
+for ws>1; the mock exists so a single process can exercise the ws=2 path —
+its performance does NOT represent real NCCL); 2 warm-up + 3 measured steps
+each; `synchronize` before/after; `reset_peak_memory_stats` per measured
+step; no `empty_cache` and no heavy hooks in the timed windows.
 
 | metric (3/3 runs bit-stable) | BASE | FIX | delta |
 |---|---|---|---|
-| peak_allocated | 28,215,760,384 B (26.24 GiB) | 17,238,217,728 B (16.05 GiB) | **−10,977,542,656 B = −10.22 GiB** |
-| post-step allocated | 9,508,552,704 B | 9,508,552,704 B | 0 (no steady-state change) |
-| step wall time | 0.733 / 0.732 / 0.742 s | 0.734 / 0.733 / 0.745 s | ≈ 0 (±2 ms noise; no systematic change) |
+| peak_allocated | 28,215,760,384 B (≈26.278 GiB) | 17,238,217,728 B (≈16.054 GiB) | **−10,977,542,656 B (≈10.224 GiB)** |
+| post-step allocated | 9,508,552,704 B (≈8.856 GiB) | 9,508,552,704 B (≈8.856 GiB) | 0 (identical on BASE and FIX; no steady-state change) |
+| step wall time (3 raw runs) | 0.733 / 0.732 / 0.742 s | 0.734 / 0.733 / 0.745 s | no obvious change observed (see limitations) |
 
-Expected retention: 8 B/element × 1.5476e9 = 12,380,536,832 B (11.53 GiB at
-this scale; 11.39 GiB at the GO-estimate scale). Measured peak reduction
-10.22 GiB = 88.7% of the raw estimate — the caching allocator does not
-materialize every retained fragment simultaneously at the peak; the 11.39 GiB
-is an estimate, not a threshold (per GO).
+Timing limitations: BASE and FIX were measured in parallel on DIFFERENT
+DCUs (cuda:0 vs cuda:1); only 3 measured steps per side; no obvious time
+change was observed in these windows. This is not a strict proof of zero
+time cost, and no training-throughput improvement is claimed.
+
+Expected retention: 8 B/element × 1,547,567,104 = 12,380,536,832 B
+(≈11.53 GiB at this run's parameter scale). The measured peak reduction
+(≈10.224 GiB) is ≈88.7% of THIS run's ≈11.53 GiB estimate — the percentage
+is stated only to indicate order of magnitude; it is not a correctness
+threshold, and no additional measurement is required to match the theoretical
+value. (The GO's 11.39 GiB corresponds to the 1.5288e9-element scale, not
+this run's 1,547,567,104-element set.) The measured peak difference and the
+theoretical saved-tensor retention are not the same metric; peak timing and
+other transient allocations may affect the difference; no further
+attribution was made in this round.
 
 WHOLE_TRAINING_MEMORY_DELTA = NOT_MEASURED ·
-WHOLE_TRAINING_STEP_TIME_DELTA = NOT_MEASURED.
+WHOLE_TRAINING_SPEEDUP = NOT_MEASURED.
 
 ## REGRESSION
 
@@ -123,25 +152,29 @@ WHOLE_TRAINING_STEP_TIME_DELTA = NOT_MEASURED.
 
 - Scope: one optimizer method's diagnostic block. Other optimizers and code
   paths unchanged.
+- The 36-spec synthetic parameter benchmark is NOT the full production
+  training model; the identity collective mock's performance does NOT
+  represent real NCCL; real 2-rank correctness is provided by the separate
+  NCCL test (S1/S2 above).
 - The 2-rank test uses the production-layout mock model (15 cmuon specs) —
   it verifies the safety semantics on real NCCL/HCU, not production scale.
-- The memprobe's cross-rank identity mocks the collective only; cross-rank
-  correctness of the fingerprint itself is separately proven by the real
-  2-rank NCCL run.
-- No production-scale end-to-end training measurement (see NOT_MEASURED above).
+- No production-scale end-to-end training measurement (see NOT_MEASURED
+  above).
 
 ## VERDICT
 
 **PASS.** The post-commit parameter fingerprint no longer builds autograd
 graphs (RED→GREEN), with bit-exact semantic parity, identical regression
-behavior, verified 2-rank NCCL safety (including the consensus-failure path),
-and a measured fingerprint-peak memory reduction of 10.22 GiB (≈89% of the
-11.39 GiB estimate) at no measurable time cost. Single local commit made;
-branch synced to the come2 local clone (ref-only fast-forward). STOP.
+behavior, verified 2-rank NCCL safety (including the consensus-failure
+path), and a measured peak-memory reduction of ≈10.224 GiB on the synthetic
+full-step window (≈88.7% of this run's ≈11.53 GiB estimate), with no obvious
+time change observed. Implementation commit 38f8778 made; report corrections
+appended by a documentation commit; branch synced to the come2 local clone
+(ref-only fast-forward). STOP.
 
 ## NEXT
 
-1. User review of the commit + evidence directory
+1. User review of the commits + evidence directory
    (`/sakuramoon-runtime/cmuon-fp-nograd-evidence/`).
 2. Deployment (canary → production) is a SEPARATE GO — not performed here.
 3. Unrelated pending: iREPA 256-resume decision awaits user GO (ckpt_115500
