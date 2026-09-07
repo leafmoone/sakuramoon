@@ -880,10 +880,11 @@ def _verify_routing_manifest(
 
     saved_document = _mapping(saved, "hybrid routing manifest")
     for key in ("cmuon", "adamw"):
-        saved_entries = cast(list[object], saved_document.get(key))
-        current_entries = cast(list[object], current[key])
-        if not isinstance(saved_entries, list):
+        raw_saved_entries = saved_document.get(key)
+        if not isinstance(raw_saved_entries, list):
             raise CheckpointError(f"hybrid routing manifest {key} list is invalid")
+        saved_entries = list(raw_saved_entries)
+        current_entries = cast(list[object], current[key])
         saved_by_name = {
             _mapping(entry, f"routing {key} entry")["name"]: _mapping(
                 entry, f"routing {key} entry"

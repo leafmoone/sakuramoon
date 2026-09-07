@@ -555,7 +555,8 @@ class DitModelConfig(StrictModel):
     def derive_topology(cls, value: object) -> object:
         if type(value) is not dict:
             return value
-        payload = cast(dict[str, object], dict(value))
+        value = cast("dict[str, object]", value)
+        payload = dict(value)
         depth = payload.get("depth")
         slots = payload.get("active_slot_ids")
         if type(slots) is list:

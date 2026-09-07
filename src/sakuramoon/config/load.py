@@ -270,15 +270,16 @@ def _assign_or_conflict(
     *,
     notices: list[str],
 ) -> None:
-    table = payload
+    table: dict[str, Any] = payload
     parts = table_path.split(".")
     for part in parts[:-1]:
         child = table.get(part)
         if type(child) is not dict:
-            table[part] = {}
-            table = table[part]
+            fresh: dict[str, Any] = {}
+            table[part] = fresh
+            table = fresh
         else:
-            table = child
+            table = cast("dict[str, Any]", child)
     if key in table and table[key] != value:
         raise ConfigurationError(
             f"config conflict: legacy stage value for {table_path}.{key} "
@@ -300,12 +301,12 @@ def _remove_with_notice(
     invariant: str | None = None,
 ) -> None:
     parts = location.split(".")
-    table = payload
+    table: dict[str, Any] = payload
     for part in parts[:-1]:
         child = table.get(part)
         if type(child) is not dict:
             return
-        table = child
+        table = cast("dict[str, Any]", child)
     if parts[-1] not in table:
         return
     if expected is not None and table[parts[-1]] is not expected:
@@ -349,8 +350,9 @@ def normalize_legacy_config(payload: dict[str, Any]) -> tuple[dict[str, Any], tu
         stage = cast(dict[str, Any], stage)
         run = data.get("run")
         if not isinstance(run, dict):
-            run = {}
-            data["run"] = run
+            fresh_run: dict[str, Any] = {}
+            data["run"] = fresh_run
+            run = fresh_run
         depth_target: Any = None
         for source_key, target_key in _STAGE_TO_TRAIN:
             if source_key in stage:
@@ -364,12 +366,14 @@ def normalize_legacy_config(payload: dict[str, Any]) -> tuple[dict[str, Any], tu
         if "depth" in stage:
             dit = data.get("model")
             if not isinstance(dit, dict):
-                data["model"] = {}
-                dit = data["model"]
-            dit_table = dit.get("dit")
+                fresh_model: dict[str, Any] = {}
+                data["model"] = fresh_model
+                dit = fresh_model
+            dit_table = cast("dict[str, Any]", dit).get("dit")
             if not isinstance(dit_table, dict):
-                dit["dit"] = {}
-                dit_table = dit["dit"]
+                fresh_dit: dict[str, Any] = {}
+                cast("dict[str, Any]", dit)["dit"] = fresh_dit
+                dit_table = fresh_dit
             depth_target = stage["depth"]
             if "depth" in dit_table and dit_table["depth"] != depth_target:
                 raise ConfigurationError(

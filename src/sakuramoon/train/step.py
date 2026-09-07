@@ -573,9 +573,11 @@ class SingleGpuStep:
                     device=self._device,
                 )
                 try:
-                    prefixes = new_slot_fqn_prefixes(
-                        self.module.dit.new_slot_ids
-                    )
+                    # Duck-typed access: the module may be a DDP wrapper or a
+                    # pre-growth composite without new_slot_ids (-> empty).
+                    _dit = getattr(self.module, "dit", None)
+                    _new_slots = getattr(_dit, "new_slot_ids", ())
+                    prefixes = new_slot_fqn_prefixes(_new_slots)
                 except (AttributeError, ValueError):
                     prefixes = ()
                 block_prefixes = tuple(
