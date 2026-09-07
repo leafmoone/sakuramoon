@@ -36,6 +36,7 @@ from sakuramoon.config.assembly import (
 )
 from sakuramoon.config.resolve import write_resolved_config
 from sakuramoon.config.schema import EvaluationEnabledConfig, RuntimeConfig
+from sakuramoon.data.buckets import generate_base_buckets
 from sakuramoon.data.client import DataServiceClient, RankedDataServiceClient
 from sakuramoon.data.production import ProductionPipelineFactory
 from sakuramoon.data.serialize import (
@@ -446,7 +447,7 @@ def _build_optimizer(
             telemetry_kwargs["ns_telemetry_roles"] = tuple(telemetry.roles)
         # Forensic routing ablation (empty for the candidate under test): the
         # excluded roles route to the AdamW8bit fallback, split stays complete.
-        telemetry_kwargs["exclude_roles"] = optimizer.cmuon_routing_exclude
+        telemetry_kwargs["exclude_roles"] = tuple(optimizer.cmuon_routing_exclude)
         if optimizer.cmuon_forensic is not None and optimizer.cmuon_forensic.enabled:
             from sakuramoon.optim.cmuon_forensic import ForensicConfig
 
@@ -1214,7 +1215,7 @@ def _run_accepted_lifecycle(
             "learning-rate scaling: "
             f"base_lr={config.optimizer.base_lr:.8g}, "
             f"reference_batch={config.optimizer.reference_batch}, "
-            f"effective_global_batch={config.stage.global_batch}, "
+            f"effective_global_batch={config.effective_global_batch()}, "
             f"actual_lr={config.scaled_learning_rate():.8g}"
         )
 
@@ -1508,7 +1509,7 @@ def _run_accepted_lifecycle(
         rejection_observer=_reject_sample,
     )
     _log(
-        f"数据分桶已就绪: {config.data.buckets.shape_count} 个形状，"
+        f"数据分桶已就绪: {len(generate_base_buckets(config.data.buckets))} 个形状，"
         f"batch={config.train.local_batch}，accumulation={config.train.accumulation}"
     )
     batches = factory.batches(client)

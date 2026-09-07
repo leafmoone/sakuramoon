@@ -1292,7 +1292,10 @@ class RuntimeConfig(StrictModel):
     @model_validator(mode="after")
     def validate_evaluation_profile(self) -> RuntimeConfig:
         evaluation = self.evaluation
-        if evaluation.enabled and evaluation.sampling_profile not in self.sampling.profiles:
+        if (
+            isinstance(evaluation, EvaluationEnabledConfig)
+            and evaluation.sampling_profile not in self.sampling.profiles
+        ):
             raise ValueError(
                 "evaluation.sampling_profile must name a [sampling.profiles] entry"
             )

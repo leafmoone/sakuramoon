@@ -62,7 +62,7 @@ from sakuramoon.objective.irepa import (
     irepa_alignment_loss,
     spatial_zscore_target,
 )
-from sakuramoon.telemetry.timers import PhaseTimer
+from sakuramoon.telemetry.timers import AnyPhaseTimer
 from sakuramoon.train.loop import (
     LoopResult,
     SingleGpuTrainingLoop,
@@ -457,7 +457,7 @@ class SuccessfulTrainingObservation:
 
     loop: SuccessfulLoopObservation
     microbatches: tuple[RuntimeMeasurement, ...]
-    phase_timer: PhaseTimer
+    phase_timer: AnyPhaseTimer
     learning_rate: float
     gpu_memory_allocated_bytes: int
     gpu_memory_reserved_bytes: int
@@ -756,7 +756,7 @@ class SingleGpuBatchRuntime:
         )
 
     def prepare(
-        self, batch: TrainingBatch, *, phase_timer: PhaseTimer | None = None
+        self, batch: TrainingBatch, *, phase_timer: AnyPhaseTimer | None = None
     ) -> PreparedTrainingBatch:
         _require_batch(batch)
         if phase_timer is None:
@@ -913,7 +913,7 @@ class SingleGpuBatchRuntime:
         )
 
     def measure(
-        self, batch: TrainingBatch, *, phase_timer: PhaseTimer | None = None
+        self, batch: TrainingBatch, *, phase_timer: AnyPhaseTimer | None = None
     ) -> RuntimeMeasurement:
         prepared = self.prepare(batch, phase_timer=phase_timer)
         dit_flops = self.dit_flop_counter.count(prepared.inputs)
@@ -1225,7 +1225,7 @@ def _run_single_gpu_training(
     diagnostic_root: Path,
     failure_id: Callable[[str, SingleGpuUpdateState], str],
     restored_checkpoint: RestoredSingleGpuCheckpoint,
-    phase_timer: PhaseTimer,
+    phase_timer: AnyPhaseTimer,
     successful_update_observer: Callable[[SuccessfulTrainingObservation], None],
     verified_checkpoint_observer: Callable[[Path], None] | None = None,
     forced_checkpoint: Callable[[int], CheckpointReason | None] | None = None,
@@ -1270,11 +1270,11 @@ def _run_single_gpu_training(
         # checkpoint snapshot only records the budget that existed at save.
         target_successful_updates = config.train.max_updates
         pending_measurements: list[RuntimeMeasurement] = []
-        active_phase_timer: PhaseTimer | None = None
+        active_phase_timer: AnyPhaseTimer | None = None
         active_learning_rate: float | None = None
         next_growth_update = state.successful_updates + 1
 
-        def update_started(timer: PhaseTimer | None) -> None:
+        def update_started(timer: AnyPhaseTimer | None) -> None:
             nonlocal active_learning_rate, active_phase_timer
             active_phase_timer = timer
             active_learning_rate = _optimizer_learning_rate(optimizer)
@@ -1443,7 +1443,7 @@ def run_single_gpu_training(
     diagnostic_root: Path,
     failure_id: Callable[[str, SingleGpuUpdateState], str],
     restored_checkpoint: RestoredSingleGpuCheckpoint,
-    phase_timer: PhaseTimer,
+    phase_timer: AnyPhaseTimer,
     successful_update_observer: Callable[[SuccessfulTrainingObservation], None],
     verified_checkpoint_observer: Callable[[Path], None] | None = None,
     forced_checkpoint: Callable[[int], CheckpointReason | None] | None = None,

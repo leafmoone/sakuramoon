@@ -125,4 +125,6 @@ class NoopPhaseTimer:
         return 0
 
 
-__all__ = ["NoopPhaseTimer", "PhaseTimer"]
+AnyPhaseTimer = PhaseTimer | NoopPhaseTimer
+
+__all__ = ["AnyPhaseTimer", "NoopPhaseTimer", "PhaseTimer"]

@@ -954,6 +954,7 @@ def _validate_hybrid_cmuon_state(
     momenta = block.get("momenta")
     if not isinstance(momenta, dict):
         raise CheckpointError("hybrid CMuon momenta must be a mapping")
+    momenta = cast(dict[str, object], momenta)
     seen: set[str] = set()
     for spec in optimizer.routing.cmuon_specs:
         tensor = momenta.get(spec.name)
@@ -1423,11 +1424,8 @@ def _load_hybrid_state_exact(
         ],
     )
     if new_fqns:
-        inner = cast(
-            dict[str, object],
-            _remap_state_to_current_ids(
-                inner, [cast(dict[str, object], g) for g in inner_groups]
-            ),
+        inner = _remap_state_to_current_ids(
+            inner, [cast(dict[str, object], g) for g in inner_groups]
         )
     _validate_optimizer_state(inner, optimizer.adamw, successful_updates)
     # Learning rate and weight decay are runtime-controlled: replace the

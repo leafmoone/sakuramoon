@@ -409,7 +409,7 @@ def normalize_legacy_config(payload: dict[str, Any]) -> tuple[dict[str, Any], tu
             )
             del run["stage"]
 
-    for table_path, key, expected_text, expected, invariant in _DROP_WITH_VALUE_CHECK:
+    for table_path, key, _expected_text, expected, invariant in _DROP_WITH_VALUE_CHECK:
         _remove_with_notice(
             data,
             f"{table_path}.{key}",
