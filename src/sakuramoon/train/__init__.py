@@ -21,7 +21,7 @@ from sakuramoon.train.runtime import (
     RuntimeMeasurement,
     SingleGpuBatchRuntime,
     SuccessfulTrainingObservation,
-    require_single_gpu_config,
+    require_train_topology,
     run_single_gpu_training,
 )
 from sakuramoon.train.scheduler import CheckpointDecision, CheckpointScheduler
@@ -58,7 +58,7 @@ __all__ = [
     "TrainableCompositeInputs",
     "build_single_gpu_preflight_checks",
     "require_accepted_preflight",
-    "require_single_gpu_config",
+    "require_train_topology",
     "restore_single_gpu_checkpoint",
     "run_single_gpu_preflight",
     "run_single_gpu_training",

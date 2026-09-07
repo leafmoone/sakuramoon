@@ -38,8 +38,8 @@ from sakuramoon.eval.features import require_local_inception_weights
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
 from sakuramoon.storage import repository_directory, repository_file_parent
 from sakuramoon.train.runtime import (
-    require_single_gpu_checkpoint_binding,
-    require_single_gpu_config,
+    require_checkpoint_resume_binding,
+    require_train_topology,
 )
 from sakuramoon.train.stage import canonical_growth_alpha
 
@@ -181,7 +181,7 @@ def require_logging_checkpoint_contracts(
 ) -> tuple[Path, Path, Path]:
     """Create the configured model and log directories."""
 
-    require_single_gpu_config(config)
+    require_train_topology(config)
     checkpoint_root = repository_directory(repository_root, config.paths.checkpoint_dir)
     local_parent = repository_file_parent(
         repository_root, config.logging.local_jsonl_path
@@ -558,8 +558,8 @@ def build_single_gpu_preflight_checks(
         print(f"[preflight] ready_batches={depth}", flush=True)
 
     def single_gpu_runtime() -> None:
-        require_single_gpu_config(loaded.config)
-        require_single_gpu_checkpoint_binding(
+        require_train_topology(loaded.config)
+        require_checkpoint_resume_binding(
             loaded.config,
             restored_checkpoint.state,
             runtime_growth_alpha=runtime.growth_alpha,
@@ -590,7 +590,7 @@ def build_single_gpu_preflight_checks(
         if not isinstance(qwen, FrozenQwenEncoder):
             raise PreflightError("the production qwen binding is not a FrozenQwenEncoder")
         facts = require_qwen_fast_path(qwen)
-        probe_rows = loaded.config.stage.local_batch
+        probe_rows = loaded.config.train.local_batch
         seconds = probe_qwen_fast_path(qwen, probe_rows)
         print(
             "[preflight] qwen_fast_path gate "

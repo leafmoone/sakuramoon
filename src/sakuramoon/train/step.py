@@ -573,7 +573,9 @@ class SingleGpuStep:
                     device=self._device,
                 )
                 try:
-                    prefixes = new_slot_fqn_prefixes(self.module.dit.depth)
+                    prefixes = new_slot_fqn_prefixes(
+                        self.module.dit.new_slot_ids
+                    )
                 except (AttributeError, ValueError):
                     prefixes = ()
                 block_prefixes = tuple(

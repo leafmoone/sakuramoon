@@ -52,7 +52,7 @@ from sakuramoon.encoders.mage_vae import (
 from sakuramoon.encoders.pe_spatial import FrozenPESpatialEncoder
 from sakuramoon.encoders.qwen import QwenRuntime, load_local_qwen
 from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
-from sakuramoon.model.growth import active_slot_ids, growth_ramp_updates
+from sakuramoon.model.growth import new_slot_ids as growth_new_slot_ids
 from sakuramoon.objective.irepa import IRepaLambdaSchedule
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
 from sakuramoon.optim.dtk import configure_tunableop
@@ -87,9 +87,8 @@ from sakuramoon.train.runtime import (
     SuccessfulTrainingObservation,
     compile_packed_dit_blocks,
     require_distributed_forward_module,
-    require_single_gpu_checkpoint_binding,
-    require_single_gpu_checkpoint_compatibility,
-    require_single_gpu_config,
+    require_checkpoint_resume_binding,
+    require_train_topology,
     run_single_gpu_training,
 )
 from sakuramoon.train.sampling import TrainingSampler
@@ -634,24 +633,30 @@ def _set_optimizer_learning_rate(
                 current.fill_(learning_rate)
 
 
-def _s0_linear_warmup_learning_rate(config: RuntimeConfig, update: int) -> float:
-    """Return the TOML-bound S0 LR for the next successful-update attempt."""
+def _config_learning_rate(config: RuntimeConfig, update: int) -> float:
+    """Return the config-bound LR for the next successful-update attempt.
+
+    linear_warmup_constant ramps base_lr (rescaled by the global-batch
+    scaling rule) from zero to its maximum over the configured warmup and
+    then holds it; constant holds base_lr from update one.
+    """
 
     scheduler = config.scheduler
     max_lr = config.scaled_learning_rate()
-    warmup_updates = scheduler.warmup_updates
     if (
-        scheduler.name != "linear_warmup_constant"
-        or scheduler.after_warmup != "constant"
+        scheduler.name not in {"linear_warmup_constant", "constant"}
         or type(max_lr) is not float
         or not math.isfinite(max_lr)
         or max_lr <= 0.0
-        or type(warmup_updates) is not int
-        or warmup_updates <= 0
     ):
-        raise ValueError("resolved S0 linear-warmup schedule is invalid")
+        raise ValueError("resolved scheduler or learning rate is invalid")
     if type(update) is not int or update <= 0:
         raise ValueError("scheduled update must be a positive integer")
+    if scheduler.name == "constant":
+        return max_lr
+    warmup_updates = scheduler.warmup_updates
+    if type(warmup_updates) is not int or warmup_updates <= 0:
+        raise ValueError("resolved warmup length is invalid")
     if update >= warmup_updates:
         return max_lr
     return max_lr * (update / warmup_updates)
@@ -701,24 +706,32 @@ class _SuccessfulUpdateLrScheduler:
         self.last_successful_update = successful_update
 
 
+def _resolved_target_slots(config: RuntimeConfig) -> tuple[int, ...]:
+    slots = config.model.dit.active_slot_ids
+    if slots is None:
+        raise ConfigurationError("model.dit did not resolve to active slots")
+    return tuple(slots)
+
+
 def _initial_raw_state(
     config: RuntimeConfig, *, wall_clock: float
 ) -> RawCheckpointState:
+    slots = _resolved_target_slots(config)
     growth_enabled = config.growth.enabled
     return RawCheckpointState(
         trainer=SingleGpuUpdateState.initial(),
         growth=GrowthCheckpointState(
-            active_slot_ids(config.stage.depth),
-            0.0 if growth_enabled else 1.0,
-            config.stage.name,
-            config.stage.world_size,
-            config.stage.resolution,
-            0 if growth_enabled else None,
-            growth_ramp_updates(config.stage.planned_updates)
-            if growth_enabled
-            else None,
+            active_slot_ids=slots,
+            alpha=0.0 if growth_enabled else 1.0,
+            stage=config.run.label or "",
+            world_size=config.distributed.world_size,
+            resolution=config.train.resolution,
+            ramp_start_successful_update=0 if growth_enabled else None,
+            ramp_updates=config.growth.ramp_updates if growth_enabled else None,
+            # A fresh model with growth enabled ramps every active slot.
+            new_slot_ids=slots if growth_enabled else (),
         ),
-        stage_budget=StageBudgetCheckpointState(0, config.stage.planned_updates),
+        stage_budget=StageBudgetCheckpointState(0, config.train.max_updates),
         checkpoint_cadence=CheckpointCadence(
             0,
             wall_clock,
@@ -732,10 +745,19 @@ def _forced_production_checkpoint_reason(
     *,
     initial_update: int,
     update: int,
+    terminal_update: int,
 ) -> CheckpointReason | None:
-    """Resolve durable G1 ramp points without duplicating cadence saves."""
+    """Resolve durable ramp/terminal points without duplicating cadence saves.
 
-    if type(initial_update) is not int or type(update) is not int:
+    ``terminal_update`` is the live config terminal (train.max_updates); the
+    checkpoint snapshot of the budget is only what existed at save time.
+    """
+
+    if (
+        type(initial_update) is not int
+        or type(update) is not int
+        or type(terminal_update) is not int
+    ):
         raise TypeError("forced checkpoint updates must be integers")
     if update <= initial_update:
         return None
@@ -743,7 +765,7 @@ def _forced_production_checkpoint_reason(
         forced = GrowthProgress.from_checkpoint(state).forced_checkpoint(update)
         if forced is not None and forced.value != "post-transition":
             return checkpoint_reason(forced)
-    if update == state.stage_budget.terminal_successful_update:
+    if update == terminal_update:
         return CheckpointReason.STAGE_FINALIZE
     return None
 
@@ -781,26 +803,29 @@ def _resume_state_for_config(
     config: RuntimeConfig,
     state: RawCheckpointState,
 ) -> RawCheckpointState:
-    """Apply explicit governed resume-policy changes to a validated RAW state."""
+    """Apply the config-driven rebindings to a validated RAW state.
+
+    Every value here comes from the resolved config: the absolute terminal
+    (extend-only; shrinking fails closed), the DDP world size (the optimizer
+    state is rank-redundant), the checkpoint cadence interval, and the
+    in-flight growth anchor for a slot cutover.
+    """
 
     terminal = state.stage_budget.terminal_successful_update
-    # stage.planned_updates is the absolute successful-update terminal; the
-    # restored stage_budget reads this value live on every resume.
-    configured_terminal = config.stage.planned_updates
+    configured_terminal = config.train.max_updates
     if configured_terminal < terminal:
-        raise ValueError("configured planned updates cannot shrink checkpoint budget")
+        raise ValueError(
+            "configured max_updates cannot shrink the checkpoint terminal"
+        )
     resumed = state
-    if state.growth.world_size != config.stage.world_size:
-        if not (
-            state.growth.world_size == 1
-            and config.distributed.backend == "accelerate"
-            and config.stage.world_size == 2
-        ):
-            raise ValueError("unsupported checkpoint world-size transition")
-        _log("迁移检查点拓扑: world_size 1 -> 2")
+    if state.growth.world_size != config.distributed.world_size:
+        _log(
+            f"迁移检查点拓扑: world_size {state.growth.world_size} -> "
+            f"{config.distributed.world_size}"
+        )
         resumed = replace(
             resumed,
-            growth=replace(state.growth, world_size=config.stage.world_size),
+            growth=replace(state.growth, world_size=config.distributed.world_size),
         )
     if configured_terminal != terminal:
         _log(f"扩展训练总步数: {terminal} -> {configured_terminal}")
@@ -823,6 +848,31 @@ def _resume_state_for_config(
             checkpoint_cadence=replace(
                 resumed.checkpoint_cadence,
                 every_successful_updates=configured_interval,
+            ),
+        )
+    target_slots = _resolved_target_slots(config)
+    if resumed.growth.active_slot_ids != target_slots:
+        # Growth cutover: the source ramp is complete (checked at binding),
+        # so the new slots start ramping from the restored update.
+        new_slots = growth_new_slot_ids(
+            target_slots, resumed.growth.active_slot_ids
+        )
+        current_update = state.trainer.successful_updates
+        _log(
+            f"生长切换: {len(resumed.growth.active_slot_ids)} -> "
+            f"{len(target_slots)} 槽位, 新槽位 {new_slots}, "
+            f"ramp={config.growth.ramp_updates} updates 自 update {current_update}"
+        )
+        resumed = replace(
+            resumed,
+            growth=replace(
+                resumed.growth,
+                active_slot_ids=target_slots,
+                alpha=0.0,
+                stage=config.run.label or "",
+                ramp_start_successful_update=current_update,
+                ramp_updates=config.growth.ramp_updates,
+                new_slot_ids=new_slots,
             ),
         )
     return resumed
@@ -1193,8 +1243,44 @@ def _run_accepted_lifecycle(
     if config.kernels.vae_torch_compile:
         vae = compile_vae_methods(vae)
         _log("Mage VAE encode/decode 已启用 torch.compile (opt-in)")
-    _log(f"构建 {config.stage.depth} 层 DiT")
-    module = build_trainable_composite_from_config(config, device=device)
+    target_slots = _resolved_target_slots(config)
+    if resume is None:
+        new_growth_slots = target_slots if config.growth.enabled else ()
+    else:
+        _, source_state = read_raw_checkpoint_state(resume)
+        source_slots = source_state.growth.active_slot_ids
+        if source_slots == target_slots:
+            in_flight = (
+                source_state.growth.ramp_start_successful_update is not None
+            )
+            new_growth_slots = (
+                source_state.growth.new_slot_ids if in_flight else ()
+            )
+        else:
+            if not config.growth.enabled:
+                raise ConfigurationError(
+                    "growth cutover checkpoint requires growth.enabled = true"
+                )
+            if not set(source_slots) < set(target_slots):
+                raise ConfigurationError(
+                    "growth cutover requires the checkpoint slots to be a "
+                    "strict subset of the resolved slots"
+                )
+            if (
+                source_state.growth.ramp_start_successful_update is not None
+                or source_state.growth.alpha != 1.0
+            ):
+                raise ConfigurationError(
+                    "a growth cutover requires the source ramp to be complete"
+                )
+            new_growth_slots = growth_new_slot_ids(target_slots, source_slots)
+    _log(
+        f"构建 {config.model.dit.depth} 层 DiT "
+        f"(新槽位: {list(new_growth_slots) or '无'})"
+    )
+    module = build_trainable_composite_from_config(
+        config, device=device, new_slot_ids=new_growth_slots
+    )
     _log("构建优化器")
     optimizer = _build_optimizer(
         config,
@@ -1214,7 +1300,7 @@ def _run_accepted_lifecycle(
         scheduler = _SuccessfulUpdateLrScheduler(
             config,
             optimizer,
-            _s0_linear_warmup_learning_rate,
+            _config_learning_rate,
             restored_successful_update=0,
             fresh=True,
         )
@@ -1232,12 +1318,12 @@ def _run_accepted_lifecycle(
             checkpoint=resume,
             module=module,
             optimizer=optimizer,
-            learning_rate_for_update=_s0_linear_warmup_learning_rate,
+            learning_rate_for_update=_config_learning_rate,
         )
         scheduler = _SuccessfulUpdateLrScheduler(
             config,
             optimizer,
-            _s0_linear_warmup_learning_rate,
+            _config_learning_rate,
             restored_successful_update=restored.state.trainer.successful_updates,
             fresh=False,
         )
@@ -1338,7 +1424,7 @@ def _run_accepted_lifecycle(
                 f"{optimizer.forensic.update_offset} dump_dir="
                 f"{optimizer.forensic.fcfg.dump_dir}"
             )
-    require_single_gpu_checkpoint_binding(
+    require_checkpoint_resume_binding(
         config,
         restored.state,
         runtime_growth_alpha=restored.state.growth.alpha,
@@ -1423,7 +1509,7 @@ def _run_accepted_lifecycle(
     )
     _log(
         f"数据分桶已就绪: {config.data.buckets.shape_count} 个形状，"
-        f"batch={config.stage.local_batch}，accumulation={config.stage.accumulation}"
+        f"batch={config.train.local_batch}，accumulation={config.train.accumulation}"
     )
     batches = factory.batches(client)
     primary: BaseException | None = None
@@ -1486,6 +1572,9 @@ def _run_accepted_lifecycle(
         accepted = run_single_gpu_preflight(plan, preflight_report)
         _log("训练前检查通过")
         initial_update = restored.state.trainer.successful_updates
+        # The live config terminal (R14): a resume at or beyond it completes
+        # with zero updates instead of failing.
+        terminal_completed = config.train.max_updates <= initial_update
         if preflight_only:
             result = ProductionTrainingResult(
                 resolved_config_path,
@@ -1494,6 +1583,20 @@ def _run_accepted_lifecycle(
                 initial_update,
                 initial_update,
                 True,
+            )
+        elif terminal_completed:
+            if is_main_process:
+                _log(
+                    f"配置终端 {config.train.max_updates} 未超过恢复 update "
+                    f"{initial_update}; 零 update 完成"
+                )
+            result = ProductionTrainingResult(
+                resolved_config_path,
+                preflight_report.resolve(strict=True),
+                restored.path,
+                initial_update,
+                initial_update,
+                False,
             )
         else:
             verified_checkpoints: list[Path] = []
@@ -1655,7 +1758,7 @@ def _run_accepted_lifecycle(
                 with telemetry:
                     _log(
                         f"开始训练: update {initial_update + 1} -> "
-                        f"{config.stage.planned_updates}"
+                        f"{config.train.max_updates}"
                     )
                     loop_result = run_single_gpu_training(
                         config,
@@ -1680,6 +1783,7 @@ def _run_accepted_lifecycle(
                                 restored.state,
                                 initial_update=initial_update,
                                 update=update,
+                                terminal_update=config.train.max_updates,
                             )
                         ),
                         verified_checkpoint_observer=verified_checkpoints.append,
@@ -1779,10 +1883,10 @@ def run_production_single_gpu(
         config_root=_config_root(root, config_root),
     )
     try:
-        require_single_gpu_config(loaded.config)
+        require_train_topology(loaded.config)
     except ValueError as error:
         raise ConfigurationError(
-            "resolved config is not an enabled production single-GPU S0 run"
+            "resolved config is not an executable production train run"
         ) from error
     exact_resume = None if resume is None else _require_exact_checkpoint_path(resume)
     try:
@@ -1822,10 +1926,10 @@ def run_production_evaluation(
     )
     config = loaded.config
     try:
-        require_single_gpu_config(config)
+        require_train_topology(config)
     except ValueError as error:
         raise ConfigurationError(
-            "evaluation requires the enabled single-GPU S0 config"
+            "evaluation requires an executable train-topology config"
         ) from error
     if config.evaluation.enabled is not True:
         raise ConfigurationError("evaluation is disabled in the resolved config")
@@ -1869,7 +1973,7 @@ def run_production_evaluation(
 
     print(f"[eval] 检查最终模型: {exact_checkpoint}", flush=True)
     manifest, state = read_raw_checkpoint_state(exact_checkpoint)
-    require_single_gpu_checkpoint_compatibility(
+    require_checkpoint_resume_binding(
         config,
         state,
         runtime_growth_alpha=state.growth.alpha,

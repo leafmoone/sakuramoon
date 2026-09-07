@@ -51,7 +51,6 @@ from sakuramoon.model.attention import (
 )
 from sakuramoon.model.block import DiTBlock, PackedDiTBlock
 from sakuramoon.model.dit import DenseDiT, PackedDiT
-from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.objective.flow import (
     flow_matching_loss,
     interpolate_state,
@@ -1084,87 +1083,89 @@ class SingleGpuBatchRuntime:
         )
 
 
-def require_single_gpu_config(config: RuntimeConfig) -> None:
-    """Accept the governed S0/G1 native or Accelerate topology."""
+def require_train_topology(config: RuntimeConfig) -> None:
+    """Check that the resolved topology is implementable by this runtime.
 
-    if (
-        config.run.intent != "train"
-        or config.run.stage not in {"S0", "G1"}
-        or not config.stage.enabled
-        or config.stage.world_size not in {1, 2}
-    ):
+    This is a capability check on the launcher topology, not a run policy:
+    any depth/resolution/budget combo from the config is accepted as long as
+    the backend can run it here (native = single process, accelerate = DDP).
+    """
+
+    if config.run.intent != "train":
+        raise ValueError("the production runtime requires train intent")
+    backend = config.distributed.backend
+    world_size = config.distributed.world_size
+    if backend == "native" and world_size != 1:
         raise ValueError(
-            "the production runtime accepts only governed train-intent S0/G1 topology"
+            "the native backend runs a single process (world_size must be 1)"
         )
-    topology = (config.distributed.backend, config.distributed.world_size)
-    if topology not in {("native", 1), ("accelerate", 2)}:
-        raise ValueError("production runtime requires native/1 or accelerate/2")
-    if config.failure.allow_force_bypass:
-        raise ValueError("single-GPU runtime cannot enable preflight bypass")
+    if backend == "accelerate" and world_size < 2:
+        raise ValueError(
+            "the accelerate backend requires a DDP world of at least 2"
+        )
+    if backend == "ddp":
+        raise ValueError("the ddp backend is not implemented by this runtime")
 
 
-def require_single_gpu_checkpoint_compatibility(
+def _resolved_active_slots(config: RuntimeConfig) -> tuple[int, ...]:
+    slots = config.model.dit.active_slot_ids
+    if slots is None:
+        raise ValueError("model.dit must resolve to an active slot set")
+    return slots
+
+
+def require_checkpoint_resume_binding(
     config: RuntimeConfig,
     state: RawCheckpointState,
     *,
     runtime_growth_alpha: float,
 ) -> None:
-    """Bind a RAW checkpoint to the resolved S0/G1 model and stage."""
+    """Bind a RAW checkpoint to the resolved config for a resume.
 
-    require_single_gpu_config(config)
+    The checkpoint's run/stage metadata is informational only.  The binding
+    is structural: slot topology (equal, or a strict subset for a growth
+    cutover with ``growth.enabled = true`` and a complete source ramp),
+    update-state integrity, checkpoint cadence, and the deterministic growth
+    alpha at the restored update.  World size and resolution may differ
+    freely between the source run and this config: the DDP optimizer state
+    is rank-redundant and the resolution only drives data and positional
+    scaling.
+    """
+
+    require_train_topology(config)
     require_checkpoint_cadence_binding(config, state)
     growth = state.growth
-    if (
-        growth.stage != config.stage.name
-        or growth.world_size != config.stage.world_size
-        or growth.resolution != config.stage.resolution
-    ):
-        raise ValueError("restored checkpoint axes differ from resolved stage")
-    if growth.active_slot_ids != active_slot_ids(config.stage.depth):
-        raise ValueError("restored checkpoint slots differ from resolved stage depth")
-    has_ramp = growth.ramp_start_successful_update is not None
-    if has_ramp != config.growth.enabled:
-        raise ValueError(
-            "restored checkpoint ramp presence differs from resolved growth"
-        )
+    target_slots = _resolved_active_slots(config)
+    in_flight = growth.ramp_start_successful_update is not None
+    if growth.active_slot_ids == target_slots:
+        if in_flight and not config.growth.enabled:
+            raise ValueError(
+                "checkpoint has an in-flight growth ramp; the config must set "
+                "growth.enabled = true to resume it"
+            )
+    else:
+        if not config.growth.enabled:
+            raise ValueError(
+                "restored checkpoint slot topology differs from the resolved "
+                "config and growth is disabled"
+            )
+        if not set(growth.active_slot_ids) < set(target_slots):
+            raise ValueError(
+                "restored checkpoint slot topology must be a strict subset "
+                "of the resolved slots for a growth cutover"
+            )
+        if in_flight or growth.alpha != 1.0:
+            raise ValueError(
+                "a growth cutover requires the source ramp to be complete"
+            )
     if growth.alpha != runtime_growth_alpha:
         raise ValueError("runtime growth alpha differs from restored checkpoint")
-    stage_budget = state.stage_budget
     trainer = state.trainer
-    if not (
-        stage_budget.start_successful_update
-        <= trainer.successful_updates
-        <= stage_budget.terminal_successful_update
-    ):
-        raise ValueError("restored stage budget is inconsistent with trainer state")
-    if config.stage.name == "S0" and stage_budget.start_successful_update != 0:
-        raise ValueError("restored S0 stage budget must start at update zero")
-    if config.stage.name == "G1" and stage_budget.start_successful_update <= 0:
-        raise ValueError("restored G1 stage budget must start at its transition update")
-    if stage_budget.terminal_successful_update != config.stage.planned_updates:
-        raise ValueError("restored stage budget differs from resolved config")
-    if state.checkpoint_cadence.last_successful_update != trainer.successful_updates:
-        raise ValueError("checkpoint cadence update does not match trainer state")
-
-
-def require_single_gpu_checkpoint_binding(
-    config: RuntimeConfig,
-    state: RawCheckpointState,
-    *,
-    runtime_growth_alpha: float,
-) -> None:
-    """Require a compatible checkpoint that still has training updates left."""
-
-    require_single_gpu_checkpoint_compatibility(
-        config,
-        state,
-        runtime_growth_alpha=runtime_growth_alpha,
-    )
     if (
-        state.trainer.successful_updates
-        >= state.stage_budget.terminal_successful_update
+        state.checkpoint_cadence.last_successful_update
+        != trainer.successful_updates
     ):
-        raise ValueError("stage successful-update budget is already exhausted")
+        raise ValueError("checkpoint cadence update does not match trainer state")
 
 
 def require_checkpoint_cadence_binding(
@@ -1253,7 +1254,7 @@ def _run_single_gpu_training(
             restored=restored_checkpoint,
             checkpoint_publisher=checkpoint_publisher,
         )
-        require_single_gpu_checkpoint_binding(
+        require_checkpoint_resume_binding(
             config,
             restored_checkpoint.state,
             runtime_growth_alpha=runtime.growth_alpha,
@@ -1263,10 +1264,11 @@ def _run_single_gpu_training(
         if phase_timer.device != runtime.device:
             raise ValueError("phase timer device differs from the training runtime")
         raw_state = restored_checkpoint.state
-        stage_budget = raw_state.stage_budget
         state = raw_state.trainer
         cadence = raw_state.checkpoint_cadence
-        target_successful_updates = stage_budget.terminal_successful_update
+        # The terminal is read live from the resolved config (R14); the
+        # checkpoint snapshot only records the budget that existed at save.
+        target_successful_updates = config.train.max_updates
         pending_measurements: list[RuntimeMeasurement] = []
         active_phase_timer: PhaseTimer | None = None
         active_learning_rate: float | None = None
@@ -1363,7 +1365,7 @@ def _run_single_gpu_training(
                         raw_state.growth, update_state.successful_updates
                     ),
                 ),
-                stage_budget=stage_budget,
+                stage_budget=raw_state.stage_budget,
                 checkpoint_cadence=replace(
                     proposed_cadence,
                     last_wall_clock_unix_seconds=(
@@ -1385,7 +1387,7 @@ def _run_single_gpu_training(
             module=module,
             optimizer=optimizer,
             loss_fn=measure_batch,
-            accumulation_steps=config.stage.accumulation,
+            accumulation_steps=config.train.accumulation,
             target_successful_updates=target_successful_updates,
             checkpoint_every_successful_updates=config.checkpoint.full_every_updates,
             scheduler_step=scheduler_step,
@@ -1502,8 +1504,7 @@ __all__ = [
     "compile_packed_dit_blocks",
     "require_checkpoint_cadence_binding",
     "require_distributed_forward_module",
-    "require_single_gpu_checkpoint_binding",
-    "require_single_gpu_checkpoint_compatibility",
-    "require_single_gpu_config",
+    "require_checkpoint_resume_binding",
+    "require_train_topology",
     "run_single_gpu_training",
 ]
