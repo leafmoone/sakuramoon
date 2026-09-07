@@ -13,7 +13,6 @@ from sakuramoon.checkpoint.artifact import (
     export_trainable_composite,
 )
 from sakuramoon.config.schema import RuntimeConfig
-from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.model.irepa import irepa_alignment_metadata
 from sakuramoon.storage import repository_directory, repository_file_parent
 from sakuramoon.telemetry.metrics import (
@@ -27,7 +26,7 @@ from sakuramoon.telemetry.observer import (
     AsyncTrainingMetricObserver,
     UpdateMetricContext,
 )
-from sakuramoon.telemetry.timers import PhaseTimer
+from sakuramoon.telemetry.timers import NoopPhaseTimer, PhaseTimer
 from sakuramoon.telemetry.wandb_sink import (
     AsyncWandbSink,
     RemoteRun,
@@ -194,7 +193,7 @@ class TrainingTelemetryAssembly:
     def __init__(
         self,
         *,
-        phase_timer: PhaseTimer,
+        phase_timer: PhaseTimer | NoopPhaseTimer,
         observer: AsyncTrainingMetricObserver,
         remote: AsyncWandbSink | None,
         local: DurableJsonlSink,
@@ -284,14 +283,12 @@ def _artifact_file(repository_root: Path, configured: str) -> Path:
     return parent / Path(configured).name
 
 
-def _require_timing_phase_binding(config: RuntimeConfig) -> None:
+def _require_timing_vocabulary() -> None:
+    """The timing phase vocabulary has one source of truth (telemetry/metrics.py)."""
+
     expected = (*CORE_TIMING_PHASES, *DETAILED_TIMING_PHASES)
     if len(expected) != len(TIMING_PHASES) or frozenset(expected) != TIMING_PHASES:
         raise RuntimeError("telemetry timing vocabulary is internally inconsistent")
-    if config.timing.phases != expected:
-        raise ValueError(
-            "resolved timing phases do not match the telemetry timing vocabulary"
-        )
 
 
 def build_training_telemetry_from_config(
@@ -309,9 +306,7 @@ def build_training_telemetry_from_config(
         raise TypeError("resolved RuntimeConfig is required for telemetry assembly")
     if config.run.intent != "train":
         raise ValueError("training telemetry requires train intent")
-    if not config.timing.enabled:
-        raise ValueError("training timing is disabled")
-    _require_timing_phase_binding(config)
+    _require_timing_vocabulary()
     if not callable(context_provider):
         raise TypeError("metric context provider must be callable")
 
@@ -364,7 +359,11 @@ def build_training_telemetry_from_config(
             queue_capacity=config.logging.observer_queue_capacity,
             event_timeout_seconds=config.logging.observer_event_timeout_seconds,
         )
-        phase_timer = PhaseTimer(device=device)
+        phase_timer = (
+            PhaseTimer(device=device)
+            if config.timing.enabled
+            else NoopPhaseTimer(device=device)
+        )
         return TrainingTelemetryAssembly(
             phase_timer=phase_timer,
             observer=observer,
@@ -392,13 +391,28 @@ def build_training_telemetry_from_config(
         _raise_preserving(error, cleanup)
 
 
-def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
-    """Bind every trainable constructor argument to one strict config field."""
+def trainable_composite_spec(
+    config: RuntimeConfig,
+    *,
+    new_slot_ids: tuple[int, ...] = (),
+) -> dict[str, object]:
+    """Bind every trainable constructor argument to one strict config field.
+
+    ``new_slot_ids`` marks the slots that a growth step adds relative to the
+    source checkpoint (runtime growth state; empty for a fresh model or when
+    no growth is in flight).
+    """
 
     if not isinstance(config, RuntimeConfig):  # pyright: ignore[reportUnnecessaryIsInstance]
         raise TypeError("resolved RuntimeConfig is required for production assembly")
     model = config.model
     dit = model.dit
+    slots = dit.active_slot_ids
+    if slots is None:
+        raise ValueError("model.dit must resolve to an active slot set")
+    new_slots = tuple(new_slot_ids)
+    if any(s not in slots for s in new_slots):
+        raise ValueError("new_slot_ids must be a subset of the active slot set")
     rope = model.rope
     condition = model.condition
     head = model.head
@@ -415,13 +429,13 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
         "schema_version": 4 if irepa_enabled else 3,
         "class": "TrainableComposite",
         "dit": {
-            "active_slot_ids": list(active_slot_ids(config.stage.depth)),
+            "active_slot_ids": list(slots),
             "aspect_dim": condition.aspect_dim,
             "attention_backend": backend,
             "attention_dropout": dit.attention_dropout,
             "condition_hidden_size": condition.hidden_dim,
             "condition_token_count": condition_tokens.token_count,
-            "depth": config.stage.depth,
+            "depth": dit.depth,
             "final_modulation_size": head.final_modulation_size,
             "head_dim": dit.head_dim,
             "hidden_size": dit.hidden_size,
@@ -432,6 +446,7 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
             "mlp_dropout": dit.mlp_dropout,
             "modality_init_std": model.packing.modality_init_std,
             "modulation_chunks": condition.block_modulation_chunks,
+            "new_slot_ids": list(new_slots),
             "norm_eps": dit.norm_eps,
             "out_channels": head.out_channels,
             "output_bias_zero_init": head.bias_zero_init,
@@ -445,7 +460,7 @@ def trainable_composite_spec(config: RuntimeConfig) -> dict[str, object]:
             "rope_y_dim": rope.y_dim,
             "sensitive_dtype": dit.norm_accumulation,
             "size_dim": condition.size_dim,
-            "stable_slot_count": dit.stable_slot_count,
+            "stable_slot_count": max(slots) + 1,
             "timestep_dim": condition.timestep_dim,
         },
         "text": {
@@ -488,10 +503,11 @@ def build_trainable_composite_from_config(
     config: RuntimeConfig,
     *,
     device: torch.device | str,
+    new_slot_ids: tuple[int, ...] = (),
 ) -> TrainableComposite:
     """Construct and round-trip-check the exact config-bound trainable module."""
 
-    document = trainable_composite_spec(config)
+    document = trainable_composite_spec(config, new_slot_ids=new_slot_ids)
     module = build_trainable_composite(document, device=device)
     observed: dict[str, Any] = export_trainable_composite(module)
     if observed != document:
@@ -508,7 +524,7 @@ def build_trainable_composite_from_config(
             )
     elif module.irepa_tap_slot_id is not None:
         raise ValueError("tap is bound while iREPA is absent or disabled")
-    module.dit.set_activation_checkpoint_mode(config.stage.activation_checkpoint_mode)
+    module.dit.set_activation_checkpoint_mode(config.train.activation_checkpoint_mode)
     return module
 
 

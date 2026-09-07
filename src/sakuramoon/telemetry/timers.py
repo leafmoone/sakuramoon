@@ -89,4 +89,40 @@ class PhaseTimer:
         )
 
 
-__all__ = ["PhaseTimer"]
+class NoopPhaseTimer:
+    """No-op timer for ``timing.enabled = false`` runs.
+
+    Phase names are still validated, but no CUDA events are created, no
+    synchronization is forced, and unmeasured phases are simply absent from
+    telemetry (never reported as 0 seconds).
+    """
+
+    device: torch.device
+
+    def __init__(self, *, device: torch.device) -> None:
+        self.device = device
+
+    @contextmanager
+    def record(self, phase: str) -> Generator[None]:
+        if phase not in TIMING_PHASES:
+            raise ValueError(f"unknown timing phase: {phase}")
+        yield
+
+    def collect_ready(self) -> dict[str, float]:
+        return {}
+
+    @property
+    def pending_cuda_pairs(self) -> int:
+        return 0
+
+    @property
+    def recorded_phases(self) -> frozenset[str]:
+        return frozenset()
+
+    def recorded_count(self, phase: str) -> int:
+        if phase not in TIMING_PHASES:
+            raise ValueError(f"unknown timing phase: {phase}")
+        return 0
+
+
+__all__ = ["NoopPhaseTimer", "PhaseTimer"]

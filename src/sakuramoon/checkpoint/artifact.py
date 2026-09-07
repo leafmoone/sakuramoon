@@ -101,8 +101,8 @@ def export_trainable_composite(module: nn.Module) -> dict[str, object]:
     ):
         raise ValueError("checkpoint parameter is outside the trainable composite")
     metadata = composite.dit.model_metadata()
-    if metadata.get("prediction_type") != "x" or metadata.get("out_channels") != 128:
-        raise ValueError("checkpoint model must use the locked x-prediction head")
+    if metadata.get("prediction_type") != "x":
+        raise ValueError("checkpoint model must use the x-prediction head")
     document: dict[str, object] = {
         "schema_version": (
             _ARCHITECTURE_SCHEMA_VERSION_V4
@@ -229,9 +229,16 @@ def build_trainable_composite(
         dit_class = DenseDiT
     else:
         raise ValueError("model artifact attention backend is invalid")
+    # ``new_slot_ids`` is runtime growth state, part of the artifact since the
+    # config-driven contract; pre-existing v3 documents omit it (=> no in-flight
+    # growth slots at load).
+    if "new_slot_ids" not in dit_config:
+        document["dit"] = {**dit_config, "new_slot_ids": []}
+        dit_config = cast(dict[str, Any], document["dit"])
     dit_arguments = {
         key: item for key, item in dit_config.items() if key not in _DIT_META_KEYS
     }
+    dit_arguments["active_slot_ids"] = tuple(cast(list[int], recorded_slots))
     text_arguments = _decode_dtypes(
         _mapping(document["text"], "text architecture"), "text"
     )
@@ -270,7 +277,12 @@ def build_trainable_composite(
 
 
 def architectures_share_parameter_contract(left: object, right: object) -> bool:
-    """Compare artifacts while treating parameter-free attention backends alike."""
+    """Compare artifacts while treating parameter-free attention backends alike.
+
+    ``new_slot_ids`` is runtime growth state, not parameter structure: it is
+    stripped from both sides so pre-existing v3 documents (without the key)
+    still share the parameter contract with current modules.
+    """
 
     try:
         left_document = _mapping(left, "left model architecture")
@@ -288,11 +300,21 @@ def architectures_share_parameter_contract(left: object, right: object) -> bool:
         return False
     normalized_left = {
         **left_document,
-        "dit": {**left_dit, "attention_backend": "state_compatible_gqa"},
+        "dit": {
+            key: value
+            for key, value in left_dit.items()
+            if key != "new_slot_ids"
+        }
+        | {"attention_backend": "state_compatible_gqa"},
     }
     normalized_right = {
         **right_document,
-        "dit": {**right_dit, "attention_backend": "state_compatible_gqa"},
+        "dit": {
+            key: value
+            for key, value in right_dit.items()
+            if key != "new_slot_ids"
+        }
+        | {"attention_backend": "state_compatible_gqa"},
     }
     return normalized_left == normalized_right
 

@@ -26,12 +26,11 @@ from sakuramoon.model.attention import (
 )
 from sakuramoon.model.block import DiTBlock, PackedDiTBlock
 from sakuramoon.model.growth import (
-    active_slot_ids,
-    new_slot_ids,
     packed_growth_alpha,
     slot_growth,
     slot_name,
 )
+from sakuramoon.model.slots import active_slot_ids
 from sakuramoon.model.output_head import FinalOutputHead
 
 ActivationCheckpointMode = Literal["none", "alternating", "all"]
@@ -208,6 +207,8 @@ class DenseDiT(nn.Module):
         aspect_dim: int,
         condition_hidden_size: int,
         stable_slot_count: int,
+        active_slot_ids: tuple[int, ...] | None = None,
+        new_slot_ids: tuple[int, ...] = (),
         modulation_chunks: int,
         final_modulation_size: int,
         out_channels: int,
@@ -222,9 +223,20 @@ class DenseDiT(nn.Module):
         output_bias_zero_init: bool,
     ) -> None:
         super().__init__()
-        slots = active_slot_ids(depth)
-        if input_channels != out_channels or stable_slot_count != 24:
-            raise ValueError("DiT requires 128-channel latent I/O and 24 stable slots")
+        slots = active_slot_ids(depth) if active_slot_ids is None else tuple(active_slot_ids)
+        new_slots = tuple(new_slot_ids)
+        if not slots or len(set(slots)) != len(slots) or any(s < 0 for s in slots):
+            raise ValueError("DiT active_slot_ids must be unique non-negative ids")
+        if len(slots) != depth:
+            raise ValueError("DiT depth must equal the active slot count")
+        if stable_slot_count != max(slots) + 1:
+            raise ValueError(
+                "DiT stable_slot_count must be the exclusive slot-id bound"
+            )
+        if any(s >= stable_slot_count or s not in slots for s in new_slots):
+            raise ValueError("DiT new_slot_ids must be a subset of active slots")
+        if input_channels != out_channels:
+            raise ValueError("DiT latent I/O channel counts must match")
         if type(condition_token_count) is not int or condition_token_count <= 0:
             raise ValueError("condition_token_count must be a positive integer")
         if linear_dtype not in (torch.float32, torch.bfloat16):
@@ -235,6 +247,8 @@ class DenseDiT(nn.Module):
         self.hidden_size = hidden_size
         self.condition_token_count = condition_token_count
         self.active_slot_ids = slots
+        self.new_slot_ids = new_slots
+        self.stable_slot_count = stable_slot_count
         self._activation_checkpoint_mode: ActivationCheckpointMode = "none"
         self._artifact_config: dict[str, object] = {
             "active_slot_ids": list(slots),
@@ -254,6 +268,7 @@ class DenseDiT(nn.Module):
             "mlp_dropout": mlp_dropout,
             "modality_init_std": modality_init_std,
             "modulation_chunks": modulation_chunks,
+            "new_slot_ids": list(new_slots),
             "norm_eps": norm_eps,
             "out_channels": out_channels,
             "output_bias_zero_init": output_bias_zero_init,
@@ -439,7 +454,12 @@ class DenseDiT(nn.Module):
         attention_mask = dense_attention_mask(token_mask)
         capture_hidden: torch.Tensor | None = None
         for active_index, slot_id in enumerate(self.active_slot_ids):
-            growth = slot_growth(self.depth, slot_id, growth_alpha)
+            growth = slot_growth(
+                self.active_slot_ids,
+                self.new_slot_ids,
+                slot_id,
+                growth_alpha,
+            )
             block = self.blocks[slot_name(slot_id)]
             modulation = condition.block.for_active_index(active_index)
             if _checkpoint_block_at(
@@ -593,7 +613,7 @@ class DenseDiT(nn.Module):
             "prediction_type": "x",
             "out_channels": self.output_head.out_channels,
             "depth": self.depth,
-            "stable_slot_count": 24,
+            "stable_slot_count": self.stable_slot_count,
         }
 
     def artifact_config(self) -> dict[str, object]:
@@ -624,6 +644,8 @@ class PackedDiT(nn.Module):
         aspect_dim: int,
         condition_hidden_size: int,
         stable_slot_count: int,
+        active_slot_ids: tuple[int, ...] | None = None,
+        new_slot_ids: tuple[int, ...] = (),
         modulation_chunks: int,
         final_modulation_size: int,
         out_channels: int,
@@ -638,9 +660,20 @@ class PackedDiT(nn.Module):
         output_bias_zero_init: bool,
     ) -> None:
         super().__init__()
-        slots = active_slot_ids(depth)
-        if input_channels != out_channels or stable_slot_count != 24:
-            raise ValueError("DiT requires 128-channel latent I/O and 24 stable slots")
+        slots = active_slot_ids(depth) if active_slot_ids is None else tuple(active_slot_ids)
+        new_slots = tuple(new_slot_ids)
+        if not slots or len(set(slots)) != len(slots) or any(s < 0 for s in slots):
+            raise ValueError("DiT active_slot_ids must be unique non-negative ids")
+        if len(slots) != depth:
+            raise ValueError("DiT depth must equal the active slot count")
+        if stable_slot_count != max(slots) + 1:
+            raise ValueError(
+                "DiT stable_slot_count must be the exclusive slot-id bound"
+            )
+        if any(s >= stable_slot_count or s not in slots for s in new_slots):
+            raise ValueError("DiT new_slot_ids must be a subset of active slots")
+        if input_channels != out_channels:
+            raise ValueError("DiT latent I/O channel counts must match")
         if type(condition_token_count) is not int or condition_token_count <= 0:
             raise ValueError("condition_token_count must be a positive integer")
         if linear_dtype != torch.bfloat16:
@@ -651,6 +684,8 @@ class PackedDiT(nn.Module):
         self.hidden_size = hidden_size
         self.condition_token_count = condition_token_count
         self.active_slot_ids = slots
+        self.new_slot_ids = new_slots
+        self.stable_slot_count = stable_slot_count
         self._activation_checkpoint_mode: ActivationCheckpointMode = "none"
         self._artifact_config: dict[str, object] = {
             "active_slot_ids": list(slots),
@@ -670,6 +705,7 @@ class PackedDiT(nn.Module):
             "mlp_dropout": mlp_dropout,
             "modality_init_std": modality_init_std,
             "modulation_chunks": modulation_chunks,
+            "new_slot_ids": list(new_slots),
             "norm_eps": norm_eps,
             "out_channels": out_channels,
             "output_bias_zero_init": output_bias_zero_init,
@@ -866,9 +902,9 @@ class PackedDiT(nn.Module):
             self.active_slot_ids,
         )
         joint = packed.tokens
-        growth_slots = new_slot_ids(self.depth)
+        growth_slots = self.new_slot_ids
         dynamic_growth = (
-            packed_growth_alpha(self.depth, growth_alpha, packed.tokens)
+            packed_growth_alpha(self.active_slot_ids, growth_alpha, packed.tokens)
             if growth_slots
             else None
         )
@@ -877,7 +913,12 @@ class PackedDiT(nn.Module):
             growth = (
                 dynamic_growth
                 if slot_id in growth_slots
-                else slot_growth(self.depth, slot_id, growth_alpha)
+                else slot_growth(
+                    self.active_slot_ids,
+                    growth_slots,
+                    slot_id,
+                    growth_alpha,
+                )
             )
             if growth is None:
                 raise RuntimeError("new growth slots require a device growth scalar")
@@ -1074,7 +1115,7 @@ class PackedDiT(nn.Module):
             "prediction_type": "x",
             "out_channels": self.output_head.out_channels,
             "depth": self.depth,
-            "stable_slot_count": 24,
+            "stable_slot_count": self.stable_slot_count,
             "attention_backend": "das_fa2_varlen",
         }
 
