@@ -52,15 +52,17 @@ def test_recursive_merge_replaces_arrays_before_strict_validation(
     secret_environment: dict[str, str],
 ) -> None:
     _write_toml(tmp_path / "base.toml", valid_payload)
-    reversed_phases = list(reversed(valid_payload["timing"]["phases"]))
+    base_slots = list(valid_payload["model"]["dit"]["active_slot_ids"])
+    broken_slots = list(base_slots)
+    broken_slots[1] = broken_slots[0]  # duplicate id -> schema failure
     overlay = {
         "extends": ["base.toml"],
         "run": {"run_id": "merged"},
-        "timing": {"phases": reversed_phases},
+        "model": {"dit": {"active_slot_ids": broken_slots}},
     }
     _write_toml(tmp_path / "overlay.toml", overlay)
 
-    with pytest.raises(ConfigurationError, match="fixed ordered vocabulary") as first:
+    with pytest.raises(ConfigurationError, match="unique non-negative ids") as first:
         load_config(
             Path("overlay.toml"),
             config_root=tmp_path,
@@ -106,9 +108,12 @@ def test_jlt_learning_rate_scales_with_effective_global_batch(
     )
 
     optimizer = valid_payload["optimizer"]
-    stage = valid_payload["stage"]
+    train = valid_payload["train"]
+    distributed = valid_payload["distributed"]
     expected_global_batch = (
-        stage["local_batch"] * stage["accumulation"] * stage["world_size"]
+        train["local_batch"]
+        * train["accumulation"]
+        * distributed["world_size"]
     )
     expected_learning_rate = (
         optimizer["base_lr"]
@@ -116,7 +121,7 @@ def test_jlt_learning_rate_scales_with_effective_global_batch(
         / optimizer["reference_batch"]
     )
 
-    assert loaded.config.stage.global_batch == expected_global_batch
+    assert loaded.config.effective_global_batch() == expected_global_batch
     assert loaded.config.scaled_learning_rate() == expected_learning_rate
 
 
@@ -136,7 +141,7 @@ def test_jlt_learning_rate_scales_with_effective_global_batch(
         (
             {"a.toml": {"extends": ["../outside.toml"]}},
             "a.toml",
-            "may not traverse",
+            "config file does not exist",
         ),
         (
             {"a.toml": {"run": "bad"}, "b.toml": {"extends": ["a.toml"], "run": {}}},
@@ -158,49 +163,52 @@ def test_invalid_include_graphs_fail_before_schema_validation(
         load_config(Path(entry), config_root=tmp_path, environment={})
 
 
-def test_symlinked_config_file_is_rejected(tmp_path: Path) -> None:
+def _symlink_available() -> bool:
+    probe = Path(__file__).with_suffix(".probe")
+    try:
+        os.symlink(__file__, str(probe))
+    except (OSError, NotImplementedError):
+        return False
+    probe.unlink(missing_ok=True)
+    return True
+
+
+@pytest.mark.skipif(not _symlink_available(), reason="symlink creation unavailable")
+def test_symlinked_config_file_is_trusted_and_loads(
+    tmp_path: Path,
+    valid_payload: dict[str, Any],
+    secret_environment: dict[str, str],
+) -> None:
+    """Config inputs are trusted paths: a symlinked .toml loads like a file."""
+
     target = tmp_path / "target.toml"
-    target.write_text("schema_version = 1\n", encoding="utf-8")
+    _write_toml(target, valid_payload)
     (tmp_path / "link.toml").symlink_to(target)
 
-    with pytest.raises(ConfigurationError, match="symlink"):
-        load_config(Path("link.toml"), config_root=tmp_path, environment={})
+    loaded = load_config(
+        Path("link.toml"),
+        config_root=tmp_path,
+        environment=secret_environment,
+    )
+    assert loaded.config.run.run_id == valid_payload["run"]["run_id"]
 
 
-def test_symlinked_config_root_is_rejected_before_resolution(tmp_path: Path) -> None:
-    real_root = tmp_path / "real"
-    real_root.mkdir()
-    (tmp_path / "root-link").symlink_to(real_root, target_is_directory=True)
+def test_absolute_config_path_is_used_as_given(
+    tmp_path: Path,
+    valid_payload: dict[str, Any],
+    secret_environment: dict[str, str],
+) -> None:
+    """A top-level config path may be absolute and is used as given."""
 
-    with pytest.raises(ConfigurationError, match="config root.*symlink"):
-        load_config(
-            Path("missing.toml"),
-            config_root=tmp_path / "root-link",
-            environment={},
-        )
-
-
-def test_symlinked_config_root_ancestor_is_rejected(tmp_path: Path) -> None:
-    real_parent = tmp_path / "real-parent"
-    (real_parent / "config").mkdir(parents=True)
-    (tmp_path / "parent-link").symlink_to(real_parent, target_is_directory=True)
-
-    with pytest.raises(ConfigurationError, match="config root.*symlink"):
-        load_config(
-            Path("missing.toml"),
-            config_root=tmp_path / "parent-link/config",
-            environment={},
-        )
-
-
-def test_absolute_path_outside_root_is_rejected(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside.toml"
-    outside.write_text("schema_version = 1\n", encoding="utf-8")
     try:
-        with pytest.raises(ConfigurationError, match="escapes"):
-            load_config(outside, config_root=tmp_path, environment={})
+        _write_toml(outside, valid_payload)
+        loaded = load_config(
+            outside, config_root=tmp_path, environment=secret_environment
+        )
+        assert loaded.config.run.run_id == valid_payload["run"]["run_id"]
     finally:
-        outside.unlink()
+        outside.unlink(missing_ok=True)
 
 
 def test_loader_never_reads_dotenv(

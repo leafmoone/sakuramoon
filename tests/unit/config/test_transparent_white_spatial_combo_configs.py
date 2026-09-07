@@ -47,11 +47,9 @@ def test_1dcu_combo_config_pins_single_distributed_protocol() -> None:
     )
     assert loaded.config.distributed.backend == "native"
     assert loaded.config.distributed.world_size == 1
-    stage = loaded.config.stage
-    assert stage.world_size == 1
-    assert stage.local_batch == 20
-    assert stage.accumulation == 20
-    assert stage.global_batch == 400
+    assert loaded.config.train.local_batch == 20
+    assert loaded.config.train.accumulation == 20
+    assert loaded.config.effective_global_batch() == 400
     # Inherited from the combo base: policies ON, 475 LR anchor.
     assert loaded.config.data.transparent_background.enabled is True
     assert loaded.config.data.spatial_crop.probability == 0.5
@@ -72,11 +70,10 @@ def test_dst_cutover_combo_config_keeps_g1_800_protocol_and_s0_anchor() -> None:
     assert loaded.config.run.run_id == "g1_256_bs760"
     assert loaded.config.paths.checkpoint_dir == "output_model/g1"
     # G1 800-batch protocol inherited from train_g1.toml, untouched.
-    stage = loaded.config.stage
-    assert stage.world_size == 2
-    assert stage.local_batch == 20
-    assert stage.accumulation == 20
-    assert stage.global_batch == 800
+    assert loaded.config.distributed.world_size == 2
+    assert loaded.config.train.local_batch == 20
+    assert loaded.config.train.accumulation == 20
+    assert loaded.config.effective_global_batch() == 800
     # S0 anchor inherited from base.toml (no [optimizer] override in the
     # cutover file): JLT actual rate 0.00005 * 800 / 256.
     assert loaded.config.optimizer.base_lr == 0.00005

@@ -8,6 +8,7 @@ from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 from sakuramoon.conditioning.rope import image_coordinates
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import DenseDiT
+from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.model.irepa import IRepaAlignment
 from sakuramoon.objective import flow as flow_module
 from sakuramoon.objective.irepa import irepa_alignment_loss
@@ -51,6 +52,7 @@ class _SgdAdapter:
 def _small_dit() -> DenseDiT:
     return DenseDiT(
         depth=20,
+        active_slot_ids=active_slot_ids(20),
         input_channels=INPUT_CHANNELS,
         hidden_size=HIDDEN,
         intermediate_size=32,
@@ -67,7 +69,7 @@ def _small_dit() -> DenseDiT:
         size_dim=64,
         aspect_dim=64,
         condition_hidden_size=1024,
-        stable_slot_count=24,
+        stable_slot_count=max(active_slot_ids(20)) + 1,
         modulation_chunks=6,
         final_modulation_size=32,
         out_channels=INPUT_CHANNELS,
@@ -198,8 +200,8 @@ def _main_loss(predictions: tuple[torch.Tensor, ...], seed: int) -> torch.Tensor
         state,
         clean,
         torch.tensor([0.25, 0.75], dtype=torch.float32),
-        t_eps=flow_module._T_EPS,
-        noise_observation_boundary=flow_module._NOISE_OBSERVATION_BOUNDARY,
+        t_eps=0.05,
+        noise_observation_boundary=0.95,
     )
     return result.per_sample
 

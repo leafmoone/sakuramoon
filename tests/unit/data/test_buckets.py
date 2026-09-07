@@ -26,7 +26,6 @@ def _config() -> DataBucketsConfig:
             "quantum_px": 32,
             "min_short_edge_px": 256,
             "max_aspect_ratio": 4.0,
-            "shape_count": 17,
             "transpose_closed": True,
         },
         strict=True,

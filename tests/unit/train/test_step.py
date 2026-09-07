@@ -8,6 +8,7 @@ import sakuramoon.train.step as step_module
 from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import PackedDiT
+from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.optim.clip import clip_grad_norm_fp32
 from sakuramoon.optim.groups import audit_trainable_parameters
 from sakuramoon.train.step import (
@@ -36,6 +37,7 @@ def _production_composite() -> TrainableComposite:
     return TrainableComposite(
         dit=PackedDiT(
             depth=16,
+            active_slot_ids=active_slot_ids(16),
             input_channels=128,
             hidden_size=2560,
             intermediate_size=6912,
@@ -52,7 +54,7 @@ def _production_composite() -> TrainableComposite:
             size_dim=64,
             aspect_dim=64,
             condition_hidden_size=1024,
-            stable_slot_count=24,
+            stable_slot_count=max(active_slot_ids(16)) + 1,
             modulation_chunks=6,
             final_modulation_size=5120,
             out_channels=128,

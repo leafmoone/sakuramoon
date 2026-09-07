@@ -493,6 +493,10 @@ def load_config(
         config = RuntimeConfig.model_validate(payload)
     except ValidationError as exc:
         raise _safe_validation_error(exc) from None
+    except (TypeError, ValueError) as exc:
+        # A before-validator may raise a plain type error; keep the loader
+        # contract: every load failure is a safe, value-free error.
+        raise ConfigurationError(f"configuration validation failed: {exc}") from None
     if validate_secrets:
         _validate_secret_environment(
             config,

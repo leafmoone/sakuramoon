@@ -71,15 +71,24 @@ def test_unknown_spatial_crop_key_is_rejected(
         _load(tmp_path, payload, secret_environment)
 
 
-def test_float_positions_reject_toml_integers(
+def test_probability_rejects_booleans_and_accepts_toml_integers(
     tmp_path: Path,
     valid_payload: dict[str, Any],
     secret_environment: dict[str, str],
 ) -> None:
+    """TOML 1 and 1.0 are equivalent float spellings; booleans are not floats."""
+
     payload = copy.deepcopy(valid_payload)
+    payload["data"]["spatial_crop"]["enabled"] = True
     payload["data"]["spatial_crop"]["probability"] = 1
-    with pytest.raises(ConfigurationError, match="TOML float syntax"):
-        _load(tmp_path, payload, secret_environment)
+    loaded = _load(tmp_path, payload, secret_environment)
+    assert loaded.config.data.spatial_crop.probability == 1.0
+
+    bad = copy.deepcopy(valid_payload)
+    bad["data"]["spatial_crop"]["enabled"] = True
+    bad["data"]["spatial_crop"]["probability"] = True
+    with pytest.raises(ConfigurationError):
+        _load(tmp_path, bad, secret_environment)
 
 
 def test_min_zoom_must_stay_below_max_zoom(

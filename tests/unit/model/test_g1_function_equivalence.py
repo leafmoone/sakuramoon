@@ -4,11 +4,15 @@ import torch
 
 from sakuramoon.conditioning.rope import image_coordinates
 from sakuramoon.model.dit import DenseDiT
+from sakuramoon.model.growth import active_slot_ids, new_slot_ids
 
 
-def _model(depth: int) -> DenseDiT:
+def _model(depth: int, *, new_slots: tuple[int, ...] = ()) -> DenseDiT:
+    slots = active_slot_ids(depth)
     return DenseDiT(
         depth=depth,
+        active_slot_ids=slots,
+        new_slot_ids=new_slots,
         input_channels=8,
         hidden_size=8,
         intermediate_size=16,
@@ -25,7 +29,7 @@ def _model(depth: int) -> DenseDiT:
         size_dim=64,
         aspect_dim=64,
         condition_hidden_size=1024,
-        stable_slot_count=24,
+        stable_slot_count=max(slots) + 1,
         modulation_chunks=6,
         final_modulation_size=16,
         out_channels=8,
@@ -44,7 +48,10 @@ def _model(depth: int) -> DenseDiT:
 def test_alpha_zero_is_exactly_function_preserving_for_old_slots() -> None:
     torch.manual_seed(2031)
     source = _model(16)
-    target = _model(20)
+    target = _model(
+        20,
+        new_slots=new_slot_ids(active_slot_ids(20), active_slot_ids(16)),
+    )
     target_state = target.state_dict()
     for name, tensor in source.state_dict().items():
         target_state[name].copy_(tensor)

@@ -35,7 +35,28 @@ def _g1_state() -> RawCheckpointState:
 
 def test_forced_checkpoint_reasons_are_durable_and_ordered() -> None:
     state = _g1_state()
-    assert _forced_production_checkpoint_reason(state, initial_update=47_900, update=47_900) is None
-    assert _forced_production_checkpoint_reason(state, initial_update=47_900, update=48_400) is CheckpointReason.RAMP_MIDPOINT
-    assert _forced_production_checkpoint_reason(state, initial_update=47_900, update=48_900) is CheckpointReason.RAMP_END
-    assert _forced_production_checkpoint_reason(state, initial_update=47_900, update=50_000) is CheckpointReason.STAGE_FINALIZE
+    terminal = 50_000
+    assert (
+        _forced_production_checkpoint_reason(
+            state, initial_update=47_900, update=47_900, terminal_update=terminal
+        )
+        is None
+    )
+    assert (
+        _forced_production_checkpoint_reason(
+            state, initial_update=47_900, update=48_400, terminal_update=terminal
+        )
+        is CheckpointReason.RAMP_MIDPOINT
+    )
+    assert (
+        _forced_production_checkpoint_reason(
+            state, initial_update=47_900, update=48_900, terminal_update=terminal
+        )
+        is CheckpointReason.RAMP_END
+    )
+    assert (
+        _forced_production_checkpoint_reason(
+            state, initial_update=47_900, update=terminal, terminal_update=terminal
+        )
+        is CheckpointReason.STAGE_FINALIZE
+    )

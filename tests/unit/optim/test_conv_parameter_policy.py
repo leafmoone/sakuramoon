@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from sakuramoon.model.dit import PackedDiT
+from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.model.mixed_precision_conv import MixedPrecisionConv2d
 from sakuramoon.optim.cmuon import route_cmuon_parameters
 from sakuramoon.optim.groups import audit_trainable_parameters
@@ -168,6 +169,7 @@ def _production_dit_root() -> nn.Module:
     with torch.device("meta"):
         dit = PackedDiT(
             depth=16,
+            active_slot_ids=active_slot_ids(16),
             input_channels=128,
             hidden_size=2560,
             intermediate_size=6912,
@@ -184,7 +186,7 @@ def _production_dit_root() -> nn.Module:
             size_dim=64,
             aspect_dim=64,
             condition_hidden_size=1024,
-            stable_slot_count=24,
+            stable_slot_count=max(active_slot_ids(16)) + 1,
             modulation_chunks=6,
             final_modulation_size=5120,
             out_channels=128,

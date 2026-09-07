@@ -11,9 +11,12 @@ from sakuramoon.model.growth import active_slot_ids, new_slot_ids, slot_growth
 from sakuramoon.model.output_head import FinalOutputHead
 
 
-def _model(depth: int) -> DenseDiT:
+def _model(depth: int, *, new_slot_ids: tuple[int, ...] = ()) -> DenseDiT:
+    slots = active_slot_ids(depth)
     return DenseDiT(
         depth=depth,
+        active_slot_ids=slots,
+        new_slot_ids=new_slot_ids,
         input_channels=8,
         hidden_size=8,
         intermediate_size=16,
@@ -30,7 +33,7 @@ def _model(depth: int) -> DenseDiT:
         size_dim=64,
         aspect_dim=64,
         condition_hidden_size=1024,
-        stable_slot_count=24,
+        stable_slot_count=max(slots) + 1,
         modulation_chunks=6,
         final_modulation_size=16,
         out_channels=8,
@@ -47,8 +50,10 @@ def _model(depth: int) -> DenseDiT:
 
 
 def _production_kwargs() -> dict[str, object]:
+    slots = active_slot_ids(16)
     return {
         "depth": 16,
+        "active_slot_ids": slots,
         "input_channels": 128,
         "hidden_size": 2560,
         "intermediate_size": 6912,
@@ -65,7 +70,7 @@ def _production_kwargs() -> dict[str, object]:
         "size_dim": 64,
         "aspect_dim": 64,
         "condition_hidden_size": 1024,
-        "stable_slot_count": 24,
+        "stable_slot_count": max(slots) + 1,
         "modulation_chunks": 6,
         "final_modulation_size": 5120,
         "out_channels": 128,
@@ -126,16 +131,17 @@ def test_stable_slot_sets_insert_four_blocks_at_each_growth() -> None:
         21,
         22,
     )
-    assert new_slot_ids(20) == (2, 8, 14, 20)
-    assert new_slot_ids(24) == (5, 11, 17, 23)
+    assert new_slot_ids(active_slot_ids(20), active_slot_ids(16)) == (2, 8, 14, 20)
+    assert new_slot_ids(active_slot_ids(24), active_slot_ids(20)) == (5, 11, 17, 23)
     assert active_slot_ids(24) == tuple(range(24))
-    assert slot_growth(20, 2, 0.25) == 0.25
-    assert slot_growth(20, 3, 0.25) == 1.0
+    active20 = active_slot_ids(20)
+    assert slot_growth(active20, (2, 8, 14, 20), 2, 0.25) == 0.25
+    assert slot_growth(active20, (2, 8, 14, 20), 3, 0.25) == 1.0
 
 
 def test_old_block_fqns_are_stable_across_depths() -> None:
     model16 = _model(16)
-    model20 = _model(20)
+    model20 = _model(20, new_slot_ids=(2, 8, 14, 20))
     names16 = {
         name for name, _ in model16.named_parameters() if name.startswith("blocks.")
     }
@@ -146,7 +152,7 @@ def test_old_block_fqns_are_stable_across_depths() -> None:
     assert names16 < names20
     assert all(
         any(name.startswith(f"blocks.slot_{slot:02d}.") for name in names20)
-        for slot in new_slot_ids(20)
+        for slot in new_slot_ids(active_slot_ids(20), active_slot_ids(16))
     )
     parameters16 = dict(model16.named_parameters())
     parameters20 = dict(model20.named_parameters())
@@ -159,7 +165,12 @@ def test_alpha_zero_new_slots_preserve_old_hidden_function(
     source_depth: int, target_depth: int
 ) -> None:
     source_model = _model(source_depth)
-    target_model = _model(target_depth)
+    target_model = _model(
+        target_depth,
+        new_slot_ids=new_slot_ids(
+            active_slot_ids(target_depth), active_slot_ids(source_depth)
+        ),
+    )
     source = source_model.state_dict()
     target = target_model.state_dict()
     with torch.no_grad():
@@ -249,7 +260,7 @@ def test_dense_dit_predicts_only_latent_shape_and_records_metadata() -> None:
         "prediction_type": "x",
         "out_channels": 8,
         "depth": 16,
-        "stable_slot_count": 24,
+        "stable_slot_count": max(active_slot_ids(16)) + 1,
     }
 
 

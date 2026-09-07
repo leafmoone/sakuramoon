@@ -6,23 +6,19 @@ import pytest
 import torch
 
 from sakuramoon.sampling.heun import euler, heun_final_euler
-from sakuramoon.sampling.profiles import (
-    SAMPLING_PROFILES,
-    SamplingProfile,
-    SamplingProfileName,
-    resolve_sampling_profile,
-)
+from sakuramoon.sampling.profiles import SamplingProfile
 from sakuramoon.sampling.sampler import (
     GenerationMetadata,
     build_generation_metadata,
     sample_profile,
 )
 
-PROFILE_NAMES: tuple[SamplingProfileName, ...] = (
-    "preview",
-    "balanced",
-    "reference",
-)
+PREVIEW = SamplingProfile("preview", "euler", 28, "linear")
+BALANCED = SamplingProfile("balanced", "heun_final_euler", 25, "linear")
+REFERENCE = SamplingProfile("reference", "heun_final_euler", 50, "linear")
+CUSTOM = SamplingProfile("custom-77", "heun_final_euler", 77, "linear")
+
+PROFILES: tuple[SamplingProfile, ...] = (PREVIEW, BALANCED, REFERENCE, CUSTOM)
 
 
 def test_heun_50_uses_99_evaluations_and_fp32_state() -> None:
@@ -151,27 +147,24 @@ def test_euler_is_fp32_exact_for_constant_velocity_and_uses_one_nfe_per_step() -
     torch.testing.assert_close(result.state, torch.full((2, 3), 3.0))
 
 
-def test_profile_registry_is_exact_and_nfe_is_derived() -> None:
-    assert {
-        name: (profile.solver, profile.steps, profile.nfe, profile.time_schedule)
-        for name, profile in SAMPLING_PROFILES.items()
-    } == {
-        "preview": ("euler", 28, 28, "linear"),
-        "balanced": ("heun_final_euler", 25, 49, "linear"),
-        "reference": ("heun_final_euler", 50, 99, "linear"),
-    }
-
-    with pytest.raises(ValueError, match="unknown sampling profile"):
-        resolve_sampling_profile("custom")  # pyright: ignore[reportArgumentType]
-    with pytest.raises(ValueError, match="canonical registry"):
-        SamplingProfile("preview", "euler", 29, "linear")
-    with pytest.raises(ValueError, match="must be a string"):
-        resolve_sampling_profile(())  # pyright: ignore[reportArgumentType]
+def test_profile_nfe_is_derived_and_any_name_is_legal() -> None:
+    assert PREVIEW.nfe == 28
+    assert BALANCED.nfe == 49
+    assert REFERENCE.nfe == 99
+    assert CUSTOM.nfe == 153
+    with pytest.raises(ValueError, match="solver"):
+        SamplingProfile("x", "midpoint", 10, "linear")  # pyright: ignore[arg-type]
+    with pytest.raises(ValueError, match="positive"):
+        SamplingProfile("x", "euler", 0, "linear")
+    with pytest.raises(ValueError, match="name"):
+        SamplingProfile("  ", "euler", 10, "linear")
+    with pytest.raises(ValueError, match="schedule"):
+        SamplingProfile("x", "euler", 10, "quadratic")  # pyright: ignore[arg-type]
 
 
-@pytest.mark.parametrize("profile_name", PROFILE_NAMES)
+@pytest.mark.parametrize("profile", PROFILES, ids=lambda p: p.name)
 def test_profiles_use_declared_nfe_without_evaluating_clean_endpoint(
-    profile_name: SamplingProfileName,
+    profile: SamplingProfile,
 ) -> None:
     timesteps: list[float] = []
 
@@ -185,7 +178,7 @@ def test_profiles_use_declared_nfe_without_evaluating_clean_endpoint(
     result = sample_profile(
         zero_velocity,
         torch.ones(1, 2, dtype=torch.bfloat16),
-        profile=profile_name,
+        profile=profile,
     )
 
     assert result.nfe == result.profile.nfe == len(timesteps)
@@ -198,18 +191,20 @@ def test_generation_metadata_records_sampling_and_explicit_legacy_provenance() -
     sampled = sample_profile(
         lambda state, timestep: torch.zeros_like(state),
         torch.zeros(1, 1),
-        profile="balanced",
+        profile=BALANCED,
     )
     metadata = build_generation_metadata(
         sampled,
         checkpoint_id="legacy-model-only",
         checkpoint_kind="model-only",
         objective_provenance="pre_fix",
-        cfg_scale=2.9,
+        cfg_scale=4.5,
+        noise_scale=1.0,
+        t_eps=0.025,
     ).as_mapping()
 
     assert metadata == {
-        "cfg_scale": 2.9,
+        "cfg_scale": 4.5,
         "checkpoint_id": "legacy-model-only",
         "checkpoint_kind": "model-only",
         "nfe": 49,
@@ -221,7 +216,7 @@ def test_generation_metadata_records_sampling_and_explicit_legacy_provenance() -
         "solver": "heun_final_euler",
         "state_dtype": "float32",
         "steps": 25,
-        "t_eps": 0.05,
+        "t_eps": 0.025,
         "time_schedule": "linear",
     }
 
@@ -230,6 +225,18 @@ def test_generation_metadata_records_sampling_and_explicit_legacy_provenance() -
             checkpoint_id="raw-checkpoint",
             checkpoint_kind="raw",
             objective_provenance="pre_fix",
-            profile="reference",
-            cfg_scale=2.9,
+            profile=REFERENCE,
+            cfg_scale=1.0,
+            noise_scale=1.0,
+            t_eps=0.05,
+        )
+    with pytest.raises(ValueError, match="finite nonnegative"):
+        GenerationMetadata(
+            checkpoint_id="m1",
+            checkpoint_kind="raw",
+            objective_provenance="strict_jlt",
+            profile=PREVIEW,
+            cfg_scale=-0.1,
+            noise_scale=1.0,
+            t_eps=0.05,
         )

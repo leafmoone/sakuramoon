@@ -8,6 +8,7 @@ from sakuramoon.checkpoint.artifact import validate_optimizer_coverage
 from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import PackedDiT
+from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.model.irepa import IRepaAlignment
 from sakuramoon.optim.cmuon import route_cmuon_parameters
 from sakuramoon.train.step import TrainableComposite
@@ -24,6 +25,7 @@ def _production_dit() -> PackedDiT:
     with torch.device("meta"):
         return PackedDiT(
             depth=16,
+            active_slot_ids=active_slot_ids(16),
             input_channels=128,
             hidden_size=HIDDEN_SIZE,
             intermediate_size=6912,
@@ -40,7 +42,7 @@ def _production_dit() -> PackedDiT:
             size_dim=64,
             aspect_dim=64,
             condition_hidden_size=1024,
-            stable_slot_count=24,
+            stable_slot_count=max(active_slot_ids(16)) + 1,
             modulation_chunks=6,
             final_modulation_size=5120,
             out_channels=128,

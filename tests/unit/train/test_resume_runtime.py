@@ -144,17 +144,17 @@ def test_resume_rebinds_only_checkpoint_cadence_policy() -> None:
         effective_samples=13_216_000,
     )
     growth = GrowthCheckpointState(
-        active_slot_ids=active_slot_ids(config.stage.depth),
+        active_slot_ids=active_slot_ids(config.model.dit.depth),
         alpha=1.0,
-        stage=config.stage.name,
-        world_size=config.stage.world_size,
-        resolution=config.stage.resolution,
+        stage=config.run.label or "",
+        world_size=config.distributed.world_size,
+        resolution=config.train.resolution,
         ramp_start_successful_update=None,
         ramp_updates=None,
     )
     budget = StageBudgetCheckpointState(
         start_successful_update=0,
-        terminal_successful_update=config.stage.planned_updates,
+        terminal_successful_update=config.train.max_updates,
     )
     persisted = RawCheckpointState(
         trainer=trainer,

@@ -679,10 +679,7 @@ class SamplingProfileConfig(StrictModel):
 
 
 class TrainingSamplingConfig(StrictModel):
-    """Periodic image samples made from captions seen by the training loop.
-
-    ``fixed_cohort=locked`` keeps the historical locked suite as an optional
-    preset; its image count is derived from the suite content, not forced."""
+    """Periodic image samples made from captions seen by the training loop."""
 
     enabled: bool = True
     every_updates: PositiveInt = 1000
@@ -690,6 +687,15 @@ class TrainingSamplingConfig(StrictModel):
     output_subdir: Annotated[str, StringConstraints(min_length=1)] = "sample"
     fixed_cohort: Literal["neutral", "locked"] = "neutral"
     longitudinal_pin_update: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def validate_cohort_consistency(self) -> TrainingSamplingConfig:
+        if self.fixed_cohort == "locked" and self.image_count != 60:
+            raise ValueError(
+                "fixed_cohort=locked requires image_count=60 "
+                "(12 dynamic plus 4 locked condition pairs of 12 variants)"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_output_subdir(self) -> TrainingSamplingConfig:

@@ -1,5 +1,5 @@
 # pyright: reportPrivateUsage=false
-"""Regression lock: ``config.stage.planned_updates`` is the ABSOLUTE
+"""Regression lock: ``config.train.max_updates`` is the ABSOLUTE
 successful-update terminal (production cutover semantics), read live from
 the config on every resume.
 
@@ -8,7 +8,7 @@ the R2A baseline reconciliation (F2 production.py was rebased onto the
 production cutover commit so this semantics survives F2 deployment):
 
 - a persisted budget terminal below the configured terminal is live-
-  extended to EXACTLY ``config.stage.planned_updates`` — NOT
+  extended to EXACTLY ``config.train.max_updates`` — NOT
   ``start_successful_update + planned_updates`` (the legacy offset
   expression, which would yield a different value when start > 0)
 - a configured terminal below the persisted terminal stays fail-closed
@@ -39,7 +39,7 @@ from sakuramoon.train.step import SingleGpuUpdateState
 REPOSITORY_ROOT = Path(__file__).parents[3]
 
 
-def _config(planned_updates: int) -> Any:
+def _config(max_updates: int) -> Any:
     config = load_config(
         Path("train_s0.toml"),
         config_root=REPOSITORY_ROOT / "config",
@@ -48,8 +48,8 @@ def _config(planned_updates: int) -> Any:
             "WANDB_API_KEY": "synthetic-wandb-secret",
         },
     ).config
-    stage = config.stage.model_copy(update={"planned_updates": planned_updates})
-    return config.model_copy(update={"stage": stage})
+    train = config.train.model_copy(update={"max_updates": max_updates})
+    return config.model_copy(update={"train": train})
 
 
 def _state(
@@ -65,11 +65,11 @@ def _state(
         effective_samples=successful_updates * 468,
     )
     growth = GrowthCheckpointState(
-        active_slot_ids=active_slot_ids(config.stage.depth),
+        active_slot_ids=active_slot_ids(config.model.dit.depth),
         alpha=1.0,
-        stage=config.stage.name,
-        world_size=config.stage.world_size,
-        resolution=config.stage.resolution,
+        stage=config.run.label or "",
+        world_size=config.distributed.world_size,
+        resolution=config.train.resolution,
         ramp_start_successful_update=None,
         ramp_updates=None,
     )
@@ -89,7 +89,7 @@ def _state(
 
 
 def test_resume_live_extends_terminal_to_absolute_planned_updates() -> None:
-    config = _config(planned_updates=110_000)
+    config = _config(max_updates=110_000)
     state = _state(
         successful_updates=42_000,
         start_successful_update=10_000,
@@ -99,7 +99,7 @@ def test_resume_live_extends_terminal_to_absolute_planned_updates() -> None:
 
     resumed = _resume_state_for_config(config, state)
 
-    # The live read of config.stage.planned_updates is the absolute
+    # The live read of config.train.max_updates is the absolute
     # terminal: exactly the configured value, NOT start + planned
     # (the legacy offset expression would give 120_000 here).
     assert resumed.stage_budget.terminal_successful_update == 110_000
@@ -108,7 +108,7 @@ def test_resume_live_extends_terminal_to_absolute_planned_updates() -> None:
 
 
 def test_resume_configured_terminal_shrink_stays_fail_closed() -> None:
-    config = _config(planned_updates=40_000)
+    config = _config(max_updates=40_000)
     state = _state(
         successful_updates=42_000,
         start_successful_update=0,
@@ -116,5 +116,5 @@ def test_resume_configured_terminal_shrink_stays_fail_closed() -> None:
         config=config,
     )
 
-    with pytest.raises(ValueError, match="cannot shrink checkpoint budget"):
+    with pytest.raises(ValueError, match="cannot shrink the checkpoint terminal"):
         _resume_state_for_config(config, state)

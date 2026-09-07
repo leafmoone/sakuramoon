@@ -17,6 +17,7 @@ from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.config.assembly import trainable_composite_spec
 from sakuramoon.config.load import load_config
 from sakuramoon.model.dit import PackedDiT
+from sakuramoon.model.growth import active_slot_ids
 from sakuramoon.model.irepa import IRepaAlignment, irepa_alignment_metadata
 from sakuramoon.train.step import TrainableComposite
 
@@ -24,9 +25,11 @@ HIDDEN_SIZE = 2560
 
 
 def _production_dit() -> PackedDiT:
+    slots = active_slot_ids(16)
     with torch.device("meta"):
         return PackedDiT(
             depth=16,
+            active_slot_ids=slots,
             input_channels=128,
             hidden_size=HIDDEN_SIZE,
             intermediate_size=6912,
@@ -43,7 +46,7 @@ def _production_dit() -> PackedDiT:
             size_dim=64,
             aspect_dim=64,
             condition_hidden_size=1024,
-            stable_slot_count=24,
+            stable_slot_count=max(slots) + 1,
             modulation_chunks=6,
             final_modulation_size=5120,
             out_channels=128,

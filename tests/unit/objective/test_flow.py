@@ -205,26 +205,29 @@ def test_noise_observation_boundary_is_point_nine_five_with_sum_count_outputs() 
     [
         lambda: sample_jlt_timesteps(
             1,
-            p_mean=-0.7,
-            p_std=0.8,
+            p_mean=-0.8,
+            p_std=1,
             device=torch.device("cpu"),
             generator=torch.Generator(),
         ),
         lambda: sample_jlt_timesteps(
             1,
             p_mean=-0.8,
-            p_std=1,
+            p_std=0.0,
             device=torch.device("cpu"),
             generator=torch.Generator(),
         ),
         lambda: sample_noise(
             torch.zeros(1, 1), noise_scale=True, generator=torch.Generator()
         ),
+        lambda: sample_noise(
+            torch.zeros(1, 1), noise_scale=0.0, generator=torch.Generator()
+        ),
         lambda: x_prediction_to_velocity(
             torch.zeros(1, 1),
             torch.zeros(1, 1),
             torch.zeros(1, dtype=torch.float32),
-            t_eps=0.1,
+            t_eps=0.0,
         ),
         lambda: guided_velocity(
             torch.zeros(1, 1),
@@ -232,7 +235,7 @@ def test_noise_observation_boundary_is_point_nine_five_with_sum_count_outputs() 
             torch.zeros(1, 1),
             torch.zeros(1, dtype=torch.float32),
             t_eps=0.05,
-            guidance_scale=3.0,
+            guidance_scale=-0.1,
         ),
         lambda: flow_matching_loss(
             torch.zeros(1, 1),
@@ -240,14 +243,14 @@ def test_noise_observation_boundary_is_point_nine_five_with_sum_count_outputs() 
             torch.zeros(1, 1),
             torch.zeros(1, dtype=torch.float32),
             t_eps=0.05,
-            noise_observation_boundary=0.5,
+            noise_observation_boundary=1.0,
         ),
     ],
 )
 def test_objective_helpers_reject_noncanonical_semantics(
     operation: Callable[[], object],
 ) -> None:
-    with pytest.raises(ValueError, match="locked TOML float"):
+    with pytest.raises(ValueError):
         operation()
 
 
