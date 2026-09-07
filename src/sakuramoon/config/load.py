@@ -353,6 +353,8 @@ def normalize_legacy_config(payload: dict[str, Any]) -> tuple[dict[str, Any], tu
             fresh_run: dict[str, Any] = {}
             data["run"] = fresh_run
             run = fresh_run
+        else:
+            run = cast("dict[str, Any]", run)
         depth_target: Any = None
         for source_key, target_key in _STAGE_TO_TRAIN:
             if source_key in stage:
