@@ -239,3 +239,66 @@ numbers are unchanged.
 - The C2 worktree (`sakuramoon-camera-v2-c2`) is untouched by this handoff.
 - Single-file size cap respected (largest tracked file: units.csv,
   676,722 bytes).
+
+
+## POSTHOC V2 REVIEW NOTE
+
+(Appended after the external review round on
+`camera-v2-causal-posthoc-review` @ `0caf0a15`. The V1 text above is
+unchanged and remains immutable; only this note and the V2 artifacts
+below were added.)
+
+- The V1 posthoc microprobe (`posthoc-microprobe.json`, V1 reports)
+  identified real, occasional HCU repeat nondeterminism: P0 immediate
+  repeats were ~93.6% bit-exact with max relative loss delta ~5.6e-4,
+  and P1 interleave max relative delta ~1.06e-4.
+- The V1 harness incorrectly mapped `p1_rel_max > 1e-6` directly to
+  `hidden_state_detected=True`, which forced `NUMERICS_CLEAN=False` and
+  `VERDICT=BLOCKED_NUMERICS`. The external review judged this a
+  false-positive design risk: a single worst-repeat numerical outlier is
+  not evidence of hidden mutable state.
+- V2 separates the two concepts:
+  - `REPEAT_NUMERIC_JITTER_PRESENT` (A) — diagnostic runtime floor only,
+    never a gate;
+  - `HIDDEN_MUTABLE_STATE_DETECTED` (F) = coordinate-map mutation (B) OR
+    parameter mutation (C) OR persistent buffer mutation (C) OR
+    order-dependent drift (D) OR accumulating drift (E). A alone can
+    never set F.
+  - The 1e-6 cap is retained as a diagnostic flag only.
+- The primary `NUMERICS_CLEAN` basis is aggregate: camera SAME mean and
+  cluster CIs, SAME checkpoint drift (paired POST-PRE), ordinary SAME
+  replication, determinism probes, and the V2 microprobe state/order
+  gates (R1-R9, `posthoc_v2_contracts.numerics_v2_gate`).
+- V2 microprobe (32 camera + 32 ordinary units, PRE/MID/POST, strata
+  0/2, deterministic selection, bootstrap n=10000 seed 20260907):
+  B/C/D/E all False, A True,
+  `hidden_mutable_state_detected=False` → `NUMERICS_V2_CLEAN=True`.
+- V2 verdict: `POSITIVE_LOSS_PREFERENCE_LEARNING` (OPPOSITE adjusted
+  POST-PRE +3.925e-4 CI>0; SHUFFLED +7.557e-4 CI>0; IDENTITY +3.971e-3
+  plateau) with recommendation `REVIEW_VERTICAL_END_SUPERVISION_FIRST`
+  (case B): after exact geometry reweighting (11 shared cells) and 1:1
+  matching (512 pairs, post-match max SMD 1.1e-2) the BOTTOM (vertical
+  END) effect persists: TOP +1.825e-3 vs BOTTOM -6.443e-4, paired
+  TOP-BOTTOM +2.437e-3 CI>0; offset balance class
+  `EFFECT_PERSISTS_AFTER_GEOMETRY_BALANCE` (counts balanced,
+  non-definitional geometry balanced, residual is a directional/content
+  interaction, NOT a sampling-balance issue).
+- The historical V1 posthoc reports
+  (`camera-coordinate-causal-posthoc-*`) and all earlier evidence remain
+  immutable; V2 supersedes only the V1 numerics classification and the
+  downstream recommendation. Raw causal evidence (ledgers, unit bundles,
+  manifests, snapshots) is unchanged.
+- New tooling: `posthoc_v2_contracts.py`, `posthoc_v2_numerics_probe.py`
+  (writes `posthoc-v2-microprobe.json`; never the V1 JSON),
+  `offset_balance_review.py` (vertical END / physical BOTTOM balance
+  audit; `camera-coordinate-causal-offset-balance.{md,json,csv}`),
+  `posthoc_v2_review.py` (V2 causal + balance synthesis;
+  `camera-coordinate-causal-posthoc-v2-{review.md,review.json,metrics.json,copy-report.md}`).
+  Tests: `tests/dev_tools/test_camera_coordinate_causal_posthoc_v2.py`
+  (49 cases; full suite 90 = 20 audit + 21 V1 posthoc + 49 V2).
+- Reproduce:
+  - `posthoc_v2_numerics_probe.py --repo <worktree>` (1 visible HCU,
+    FA_SO_PATH exported, ~30 min)
+  - `offset_balance_review.py --repo <worktree> --evidence
+    /tmp/camera-coordinate-causal` (CPU)
+  - `posthoc_v2_review.py --repo <worktree>` (CPU)
