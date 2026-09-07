@@ -24,8 +24,8 @@ extends = ["train_g1_transparent_white_spatial_p50.toml"]
 backend = "native"
 world_size = 1
 
-[stage]
-world_size = 1
+[train]
 local_batch = 20
 accumulation = 20
+# 1-DCU canary batch: 20 * 20 * 1 = 400 (consistency assertion only).
 global_batch = 400

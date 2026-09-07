@@ -8,17 +8,6 @@ seed = 44
 [paths]
 cache_dir = "cache/data"
 
-[storage]
-mode = "server_backed"
-shared_filesystem = "nfs"
-shared_mount_source = "cs1.vast1.bz1.paratera.com:/cs1/fs1/pvc-8eb5b2a2-c80d-4c40-b28a-800fbab13752"
-nfs_version = 3
-hard_mount = true
-minimum_free_gib = 50
-measured_raw_checkpoint_bytes = 5143061370
-checkpoint_copies = 3
-atomic_publish_probe = true
-
 [security]
 modelscope_token_env = "MODELSCOPE_API_TOKEN"
 wandb_api_key_env = "WANDB_API_KEY"
@@ -96,7 +85,6 @@ base_area_px = 262144
 quantum_px = 32
 min_short_edge_px = 256
 max_aspect_ratio = 4.0
-shape_count = 17
 transpose_closed = true
 
 [data.spatial_crop]
@@ -173,7 +161,6 @@ sensitive_dtype = "float32"
 [model.packing]
 order = ["text", "condition", "image"]
 remove_text_padding = true
-cross_sample_attention = false
 modality_init_std = 0.02
 
 [model.rope]
@@ -192,8 +179,6 @@ head_dim = 128
 q_heads = 20
 kv_heads = 5
 intermediate_size = 6912
-stable_slot_count = 24
-patch_size = 1
 attention_dropout = 0.0
 mlp_dropout = 0.0
 projection_bias = false
@@ -262,13 +247,12 @@ time_schedule = "linear"
 
 [cfg]
 scale = 2.9
-full_interval = true
-rescale = false
 conversion_order = "each_x_to_v_then_cfg"
 
 [optimizer]
 name = "torchao_adamw8bit"
-# JLT-style scaling: actual_lr = base_lr * stage.global_batch / reference_batch.
+# LR scaling: actual_lr = base_lr * effective_global_batch / reference_batch
+# (linear_global_batch); lr_scaling = "none" uses base_lr as the absolute LR.
 base_lr = 0.00005
 reference_batch = 256
 lr_scaling = "linear_global_batch"
@@ -282,12 +266,10 @@ sensitive_weight_decay = 0.0
 [scheduler]
 name = "linear_warmup_constant"
 warmup_updates = 1000
-after_warmup = "constant"
 
 [gradient]
 clip_norm = 1.0
 clip_dtype = "float32"
-global_sample_mean = true
 
 [checkpoint]
 kind = "raw"
@@ -311,14 +293,6 @@ native_gqa = true
 repeat_kv_heads = false
 silent_fallback = false
 
-[failure]
-stop_on_nonfinite = true
-stop_on_oom = true
-stop_on_rank_divergence = true
-allow_force_bypass = false
-automatic_batch_change = false
-automatic_backend_change = false
-
 [logging]
 observer_queue_capacity = "BENCHMARK_METRIC_OBSERVER_QUEUE_CAPACITY"
 observer_event_timeout_seconds = "BENCHMARK_METRIC_EVENT_TIMEOUT_SECONDS"
@@ -335,15 +309,6 @@ resume_policy = "allow"
 
 [timing]
 enabled = true
-cuda_events = true
-force_synchronize_each_phase = false
-phases = [
-  "data", "qwen", "vae", "conditioning", "dit_forward", "loss",
-  "backward", "ddp", "clip", "optimizer", "checkpoint", "evaluation",
-  "irepa_teacher", "irepa_projector",
-  "cache", "tar", "json", "caption", "tokenize", "decode", "exif",
-  "crop", "bucket", "h2d", "condition", "zero_grad", "sample",
-]
 
 [evaluation]
 enabled = false

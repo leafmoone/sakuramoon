@@ -10,7 +10,7 @@
 # the shifted_bucket spatial crop stays OFF (inherited from base.toml, where it
 # is disabled). Extends the live G1 run config and overrides exactly:
 #   - run identity and fully independent run/checkpoint/artifact paths
-#   - [stage]: local_batch 19 / accum 20 -> global 760 (world 2), automatic_transition false
+#   - [train]: local_batch 19 / accum 20 -> global 760 (world 2)
 #   - [optimizer]: base_lr anchored to the live canary value (see section 17)
 #   - [data.transparent_background]: enabled + reject sets
 #
@@ -44,15 +44,14 @@ output_dir = "output_model/evaluation/g1_transparent_white"
 #   - 2-dcu canary:  0.0000475 * 760 / 256 = 0.000141015625
 #   - 1-dcu canary:  0.0000475 * 400 / 256 = 0.00007421875 (the live p50 rate)
 # Growth/budget inherit unchanged from train_g1.toml (half-cosine growth,
-# planned_updates 168000 = absolute successful-update terminal). The
+# max_updates 168000 = absolute successful-update terminal). The
 # preflight "resume_contract" check verifies at
 # cutover that the source checkpoint's saved optimizer learning rate equals
 # this configured rate exactly (no tolerance); any drift fails the run.
-[stage]
+[train]
 local_batch = 19
 accumulation = 20
 global_batch = 760
-automatic_transition = false
 
 # Live-canary LR anchor: keep the per-sample step on the p50 canary's value
 # across the transparent cut-over (see the section 17 note above).

@@ -15,19 +15,34 @@ longitudinal_pin_update = 62000
 
 [run]
 run_id = "g1_256_bs760"
-stage = "G1"
 seed = 44
+# Display-only run label; it never selects backend, depth, or growth behavior.
+label = "G1"
 
 [paths]
 run_dir = "runs/g1"
 checkpoint_dir = "output_model/g1"
 artifact_dir = "artifacts/g1"
 
+[train]
+resolution = 256
+local_batch = 20
+accumulation = 20
+# Effective global batch is local_batch * accumulation * world_size = 800;
+# the explicit value is a consistency assertion only.
+global_batch = 800
+# Absolute successful-update terminal for this run. The restored trainer reads
+# this value live on every resume (terminal := this value, extend-only,
+# fail-closed on shrink). G1: 58000 -> 168000.
+max_updates = 168000
+activation_checkpoint_mode = "none"
+
+[model.dit]
+depth = 20
+
 [distributed]
 backend = "accelerate"
 world_size = 2
-frozen_encoders_outside_wrapper = true
-automatic_backend_fallback = false
 
 [checkpoint]
 full_every_updates = 100
@@ -55,11 +70,10 @@ streams_per_shard = 4
 [growth]
 enabled = true
 alpha_schedule = "half_cosine"
-alpha_fraction = 0.02
-min_updates = 1000
-max_updates = 5000
-random_new_slots = true
-copy_old_slots = false
+# Half-cosine ramp length for a fresh growth start (the in-flight G1 anchor is
+# preserved from the source checkpoint on resume).
+ramp_updates = 3360
+init_strategy = "random"
 
 [kernels]
 torch_compile_enabled = true
@@ -76,26 +90,6 @@ torch_compile_mode = "max-autotune-no-cudagraphs"
 # (0.00005 * 800 / 256 = 0.00015625 here). base_lr is a config anchor that a
 # future run may re-tune; it is never a mechanism that pins the actual LR.
 # (base.toml provides the remaining optimizer fields via deep merge.)
-
-[stage]
-name = "G1"
-enabled = true
-predecessor = "S0"
-world_size = 2
-depth = 20
-resolution = 256
-local_batch = 20
-accumulation = 20
-# global_batch=800 with base_lr=0.00005 inherited from base.toml (see
-# [optimizer]) -> actual_lr=0.00015625 (JLT auto-scaled, reference_batch=256).
-global_batch = 800
-activation_checkpoint_mode = "none"
-# Absolute successful-update terminal for this stage. The restored trainer
-# stage_budget reads this value live on every resume (terminal := this value,
-# extend-only, fail-closed on shrink). G1: 58000 -> 168000.
-planned_updates = 168000
-manual_finalize = true
-automatic_transition = false
 
 [logging]
 local_jsonl_path = "artifacts/g1/metrics.jsonl"

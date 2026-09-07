@@ -1,10 +1,19 @@
-"""Root-confined TOML loading, deterministic merge, and strict validation."""
+"""TOML loading, deterministic merge, legacy normalization, and validation.
+
+Path rules: config inputs are trusted.  A top-level config path may be
+absolute (used as given) or relative to the deployment root; ``extends``
+entries resolve against the containing file.  Symlink components are
+allowed.  Cycles in the extends graph are still rejected (with the cycle
+chain), and the same file may be extended through multiple parents
+(diamonds) — the merge is deterministic (left-to-right).
+"""
 
 from __future__ import annotations
 
 import copy
 import os
 import re
+import sys
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -101,38 +110,16 @@ def _find_unresolved_bindings(
     return bindings
 
 
-def _validate_path_components(root: Path, relative: Path) -> Path:
-    if relative.is_absolute() or ".." in relative.parts:
-        raise ConfigurationError("config paths must be root-relative without traversal")
-    current = root
-    for part in relative.parts:
-        current /= part
-        if current.is_symlink():
-            raise ConfigurationError(
-                f"config symlink is forbidden: {relative.as_posix()}"
-            )
+def _validate_config_file(path: Path) -> Path:
+    """A config input is a trusted path: it must exist as a regular .toml file."""
+
     try:
-        resolved = current.resolve(strict=True)
+        resolved = path.resolve(strict=True)
     except OSError as exc:
-        raise ConfigurationError(
-            f"config file does not exist: {relative.as_posix()}"
-        ) from exc
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise ConfigurationError("config path escapes the configured root") from exc
+        raise ConfigurationError(f"config file does not exist: {path.as_posix()}") from exc
     if not resolved.is_file() or resolved.suffix != ".toml":
-        raise ConfigurationError("config input must be a regular .toml file")
+        raise ConfigurationError(f"config input must be a regular .toml file: {path.as_posix()}")
     return resolved
-
-
-def _requested_relative(root: Path, requested: Path) -> Path:
-    if requested.is_absolute():
-        try:
-            return requested.relative_to(root)
-        except ValueError as exc:
-            raise ConfigurationError("config path escapes the configured root") from exc
-    return requested
 
 
 def _deep_merge(
@@ -163,46 +150,47 @@ def _deep_merge(
 class _Loader:
     def __init__(self, root: Path) -> None:
         lexical_root = root if root.is_absolute() else Path.cwd() / root
-        current = Path(lexical_root.anchor)
-        for part in lexical_root.parts[1:]:
-            current /= part
-            if current.is_symlink():
-                raise ConfigurationError(
-                    "config root may not contain symlink components"
-                )
         try:
             self.root = lexical_root.resolve(strict=True)
         except OSError as exc:
             raise ConfigurationError("config root does not exist") from exc
         if not self.root.is_dir():
-            raise ConfigurationError("config root must be a non-symlink directory")
+            raise ConfigurationError("config root must be a directory")
         self._active: list[Path] = []
-        self._seen: set[Path] = set()
         self.inputs: list[InputFile] = []
 
+    def _record(self, path: Path) -> str:
+        try:
+            return path.relative_to(self.root).as_posix()
+        except ValueError:
+            return path.as_posix()
+
     def load(self, requested: Path, *, including: Path | None = None) -> dict[str, Any]:
-        relative = _requested_relative(self.root, requested)
-        if including is not None:
-            relative = including.parent.relative_to(self.root) / relative
-        path = _validate_path_components(self.root, relative)
-        if path in self._active:
-            chain = [
-                item.relative_to(self.root).as_posix() for item in (*self._active, path)
-            ]
-            raise ConfigurationError(f"extends cycle: {' -> '.join(chain)}")
-        if path in self._seen:
-            raise ConfigurationError(
-                f"config included more than once: {path.relative_to(self.root).as_posix()}"
+        if including is None:
+            path = (
+                requested
+                if requested.is_absolute()
+                else self.root / requested
             )
+        else:
+            entry = PurePath(requested.as_posix())
+            if entry.is_absolute():
+                raise ConfigurationError(
+                    "extends entries must be relative to the including file"
+                )
+            path = (including.parent / entry)
+        path = _validate_config_file(path)
+        if path in self._active:
+            chain = [self._record(item) for item in (*self._active, path)]
+            raise ConfigurationError(f"extends cycle: {' -> '.join(chain)}")
         self._active.append(path)
-        self._seen.add(path)
         try:
             raw_bytes = path.read_bytes()
             try:
                 payload = tomllib.loads(raw_bytes.decode("utf-8"))
             except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
                 raise ConfigurationError(
-                    f"invalid TOML in {path.relative_to(self.root).as_posix()}"
+                    f"invalid TOML in {self._record(path)}"
                 ) from exc
             raw_includes = payload.pop("extends", [])
             if type(raw_includes) is not list or any(
@@ -216,17 +204,223 @@ class _Loader:
                 raise ConfigurationError("extends contains duplicate paths")
             merged: dict[str, Any] = {}
             for include in includes:
-                include_path = Path(include)
-                if include_path.is_absolute() or ".." in PurePath(include).parts:
-                    raise ConfigurationError(
-                        "extends entries must be relative and may not traverse"
-                    )
-                merged = _deep_merge(merged, self.load(include_path, including=path))
+                merged = _deep_merge(merged, self.load(Path(include), including=path))
             merged = _deep_merge(merged, payload)
-            self.inputs.append(InputFile(path=path.relative_to(self.root).as_posix()))
+            self.inputs.append(InputFile(path=self._record(path)))
             return merged
         finally:
             self._active.pop()
+
+
+# ---------------------------------------------------------------------------
+# One-time legacy normalization (the only legacy translation in the codebase).
+#
+# Historical [stage] vocabulary is translated to the current interface at the
+# config-read boundary: stage.{resolution,local_batch,accumulation,
+# planned_updates,activation_checkpoint_mode,global_batch} -> [train],
+# stage.world_size -> [distributed], stage.depth -> [model.dit].depth,
+# stage.name/run.stage -> run.label (display-only).  Removed capability
+# fields (storage, failure, pinned shapes, timing phase table, ...) are
+# dropped with a one-time notice.  A new/old pair that carries the same
+# meaning but different values is a configuration conflict error.
+# ---------------------------------------------------------------------------
+
+_STAGE_TO_TRAIN: tuple[tuple[str, str], ...] = (
+    ("resolution", "resolution"),
+    ("local_batch", "local_batch"),
+    ("accumulation", "accumulation"),
+    ("planned_updates", "max_updates"),
+    ("activation_checkpoint_mode", "activation_checkpoint_mode"),
+    ("global_batch", "global_batch"),
+)
+# (table, key) -> reason; value must match the enforced invariant or error.
+_DROP_WITH_VALUE_CHECK: tuple[tuple[str, str, str, object, str], ...] = (
+    ("gradient", "global_sample_mean", "true", True, "sample-mean gradient normalization is an unconditional invariant"),
+    ("distributed", "frozen_encoders_outside_wrapper", "true", True, "frozen encoders outside the wrapper is an unconditional invariant"),
+    ("distributed", "automatic_backend_fallback", "false", False, "automatic backend fallback is not supported"),
+)
+# (table, key) pairs dropped with a notice only (no value constraint).
+_DROP_NOTICE_ONLY: tuple[tuple[str, str], ...] = (
+    ("data.buckets", "shape_count"),
+    ("model.dit", "stable_slot_count"),
+    ("model.dit", "patch_size"),
+    ("model.packing", "cross_sample_attention"),
+    ("scheduler", "after_warmup"),
+    ("cfg", "full_interval"),
+    ("cfg", "rescale"),
+    ("growth", "alpha_fraction"),
+    ("growth", "min_updates"),
+    ("growth", "max_updates"),
+    ("growth", "random_new_slots"),
+    ("growth", "copy_old_slots"),
+    ("timing", "cuda_events"),
+    ("timing", "force_synchronize_each_phase"),
+    ("timing", "phases"),
+)
+_STAGE_DROPPED_KEYS = frozenset(
+    {"name", "enabled", "predecessor", "manual_finalize", "automatic_transition"}
+)
+
+
+def _assign_or_conflict(
+    payload: dict[str, Any],
+    table_path: str,
+    key: str,
+    value: Any,
+    *,
+    notices: list[str],
+) -> None:
+    table = payload
+    parts = table_path.split(".")
+    for part in parts[:-1]:
+        child = table.get(part)
+        if type(child) is not dict:
+            table[part] = {}
+            table = table[part]
+        else:
+            table = child
+    if key in table and table[key] != value:
+        raise ConfigurationError(
+            f"config conflict: legacy stage value for {table_path}.{key} "
+            "disagrees with the current config field"
+        )
+    table[key] = value
+    notices.append(
+        f"config: legacy key stage.{key} mapped to {table_path}.{key} "
+        "(one-time migration notice)"
+    )
+
+
+def _remove_with_notice(
+    payload: dict[str, Any],
+    location: str,
+    *,
+    notices: list[str],
+    expected: object | None = None,
+    invariant: str | None = None,
+) -> None:
+    parts = location.split(".")
+    table = payload
+    for part in parts[:-1]:
+        child = table.get(part)
+        if type(child) is not dict:
+            return
+        table = child
+    if parts[-1] not in table:
+        return
+    if expected is not None and table[parts[-1]] is not expected:
+        raise ConfigurationError(
+            f"config conflict: {location} must be {expected!r} "
+            f"({invariant or 'enforced invariant'})"
+        )
+    del table[parts[-1]]
+    notices.append(f"config: deprecated key {location} ignored (one-time notice)")
+
+
+def normalize_legacy_config(payload: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Translate the historical stage vocabulary once, at the read boundary.
+
+    Returns the normalized payload and the human-readable notices that were
+    emitted.  This is the single legacy-normalization function; runtime code
+    never sees stage vocabulary.
+    """
+
+    notices: list[str] = []
+    data = copy.deepcopy(payload)
+
+    # Whole removed tables.
+    if "storage" in data:
+        del data["storage"]
+        notices.append(
+            "config: removed table [storage] ignored (deployment facts are "
+            "decided at runtime, one-time notice)"
+        )
+    if "failure" in data:
+        del data["failure"]
+        notices.append(
+            "config: removed table [failure] ignored (failure behavior is "
+            "unconditional, one-time notice)"
+        )
+
+    stage = data.get("stage")
+    if stage is not None:
+        if type(stage) is not dict:
+            raise ConfigurationError("stage must be a table")
+        stage = cast(dict[str, Any], stage)
+        run = data.get("run")
+        if not isinstance(run, dict):
+            run = {}
+            data["run"] = run
+        depth_target: Any = None
+        for source_key, target_key in _STAGE_TO_TRAIN:
+            if source_key in stage:
+                _assign_or_conflict(
+                    data, "train", target_key, stage[source_key], notices=notices
+                )
+        if "world_size" in stage:
+            _assign_or_conflict(
+                data, "distributed", "world_size", stage["world_size"], notices=notices
+            )
+        if "depth" in stage:
+            dit = data.get("model")
+            if not isinstance(dit, dict):
+                data["model"] = {}
+                dit = data["model"]
+            dit_table = dit.get("dit")
+            if not isinstance(dit_table, dict):
+                dit["dit"] = {}
+                dit_table = dit["dit"]
+            depth_target = stage["depth"]
+            if "depth" in dit_table and dit_table["depth"] != depth_target:
+                raise ConfigurationError(
+                    "config conflict: legacy stage.depth disagrees with "
+                    "model.dit.depth"
+                )
+            dit_table["depth"] = depth_target
+            notices.append(
+                "config: legacy key stage.depth mapped to model.dit.depth "
+                "(one-time migration notice)"
+            )
+        if "name" in stage and isinstance(run.get("label"), (str, type(None))):
+            if run.get("label") is not None and run["label"] != stage["name"]:
+                raise ConfigurationError(
+                    "config conflict: legacy stage.name disagrees with run.label"
+                )
+            run["label"] = stage["name"]
+            notices.append(
+                "config: legacy key stage.name mapped to run.label "
+                "(display-only, one-time migration notice)"
+            )
+        for key in stage:
+            if key in _STAGE_DROPPED_KEYS:
+                notices.append(
+                    f"config: deprecated key stage.{key} ignored (one-time notice)"
+                )
+        del data["stage"]
+        if "stage" in run:
+            if run.get("label") is not None and run["label"] != run["stage"]:
+                raise ConfigurationError(
+                    "config conflict: run.stage disagrees with run.label"
+                )
+            run["label"] = run["stage"]
+            notices.append(
+                "config: deprecated key run.stage mapped to run.label "
+                "(display-only, one-time notice)"
+            )
+            del run["stage"]
+
+    for table_path, key, expected_text, expected, invariant in _DROP_WITH_VALUE_CHECK:
+        _remove_with_notice(
+            data,
+            f"{table_path}.{key}",
+            notices=notices,
+            expected=expected,
+            invariant=invariant,
+        )
+    for table_path, key in _DROP_NOTICE_ONLY:
+        _remove_with_notice(data, f"{table_path}.{key}", notices=notices)
+
+    return data, tuple(notices)
 
 
 def _validate_secret_environment(
@@ -266,7 +460,7 @@ def unresolved_config_bindings(
     """Inspect merged TOML bindings without resolving secrets or validating fallbacks."""
 
     loader = _Loader(config_root)
-    payload = loader.load(config_path)
+    payload, _ = normalize_legacy_config(loader.load(config_path))
     return tuple(sorted(_find_unresolved_bindings(payload)))
 
 
@@ -277,13 +471,15 @@ def load_config(
     environment: Mapping[str, str] | None = None,
     validate_secrets: bool = True,
 ) -> LoadedConfig:
-    """Load, merge, validate, and redact a runtime config."""
+    """Load, merge, normalize legacy keys, validate, and redact a runtime config."""
 
     if type(validate_secrets) is not bool:
         raise TypeError("validate_secrets must be a bool")
 
     loader = _Loader(config_root)
-    payload = loader.load(config_path)
+    payload, notices = normalize_legacy_config(loader.load(config_path))
+    for notice in notices:
+        print(notice, file=sys.stderr)
     unresolved = tuple(sorted(_find_unresolved_bindings(payload)))
     if unresolved:
         rendered = ", ".join(
