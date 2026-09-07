@@ -1,0 +1,377 @@
+{
+  "anchor_parity": {
+    "maxabs_worst": 0.0,
+    "n_bitexact": 480,
+    "n_checked": 480,
+    "n_skipped_existing": 32,
+    "rel_rms_worst": 0.0
+  },
+  "arms": [
+    "TT",
+    "TB",
+    "BT",
+    "BB",
+    "T_SAME",
+    "B_SAME",
+    "T_ID",
+    "B_ID"
+  ],
+  "bootstrap_seed": 20260907,
+  "ckpt_gates": {
+    "0": {
+      "MID": {
+        "ckpt": "MID",
+        "growth_alpha": 1.0,
+        "identity": {
+          "checkpoint_id": "raw-117100-update-cadence",
+          "update": 117100
+        },
+        "manifest_sha256": "ac1193931337f37ef2ac1b98e943ced02b628c5c6a1b511e351497202290f71a",
+        "model_tree_sha256": "036fbb43ff4a5413786b3dab50850e24c2285fb2ce944f89384da9f3f1907445",
+        "path": "/tmp/camera-coordinate-causal/ckpts/MID/ckpt_117100_raw-117100-update-cadence",
+        "update": 117100
+      },
+      "POST": {
+        "ckpt": "POST",
+        "growth_alpha": 1.0,
+        "identity": {
+          "checkpoint_id": "raw-118100-update-cadence",
+          "update": 118100
+        },
+        "manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+        "model_tree_sha256": "dfbe25e4ada0ad69abc1b6fbeaf0eace561f8b8a14f322d8afa91f974018a80e",
+        "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+        "update": 118100
+      },
+      "PRE": {
+        "ckpt": "PRE",
+        "growth_alpha": 1.0,
+        "identity": {
+          "checkpoint_id": "raw-116100-update-cadence",
+          "update": 116100
+        },
+        "manifest_sha256": "7edc89cfaf832cc68ad1019a7b8391310aad0bbc0ed3ae6b937cf1993fa20dc5",
+        "model_tree_sha256": "4f8efca407e692caa52fa4bad6db8fbfbb2a93d21dcb6d9ea964abd65d507b56",
+        "path": "/sakuramoon-runtime/output_model/g1/ckpt_116100_raw-116100-update-cadence",
+        "update": 116100
+      }
+    },
+    "1": {
+      "MID": {
+        "ckpt": "MID",
+        "growth_alpha": 1.0,
+        "identity": {
+          "checkpoint_id": "raw-117100-update-cadence",
+          "update": 117100
+        },
+        "manifest_sha256": "ac1193931337f37ef2ac1b98e943ced02b628c5c6a1b511e351497202290f71a",
+        "model_tree_sha256": "036fbb43ff4a5413786b3dab50850e24c2285fb2ce944f89384da9f3f1907445",
+        "path": "/tmp/camera-coordinate-causal/ckpts/MID/ckpt_117100_raw-117100-update-cadence",
+        "update": 117100
+      },
+      "POST": {
+        "ckpt": "POST",
+        "growth_alpha": 1.0,
+        "identity": {
+          "checkpoint_id": "raw-118100-update-cadence",
+          "update": 118100
+        },
+        "manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+        "model_tree_sha256": "dfbe25e4ada0ad69abc1b6fbeaf0eace561f8b8a14f322d8afa91f974018a80e",
+        "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+        "update": 118100
+      },
+      "PRE": {
+        "ckpt": "PRE",
+        "growth_alpha": 1.0,
+        "identity": {
+          "checkpoint_id": "raw-116100-update-cadence",
+          "update": 116100
+        },
+        "manifest_sha256": "7edc89cfaf832cc68ad1019a7b8391310aad0bbc0ed3ae6b937cf1993fa20dc5",
+        "model_tree_sha256": "4f8efca407e692caa52fa4bad6db8fbfbb2a93d21dcb6d9ea964abd65d507b56",
+        "path": "/sakuramoon-runtime/output_model/g1/ckpt_116100_raw-116100-update-cadence",
+        "update": 116100
+      }
+    }
+  },
+  "correct_loss_baseline": {
+    "MID": {
+      "ci95": [
+        -0.005139820349540969,
+        0.0023703680551989234
+      ],
+      "n": 512,
+      "point": -0.0013292731673573144
+    },
+    "POST": {
+      "ci95": [
+        -0.005279285654432897,
+        0.0022599016054300584
+      ],
+      "n": 512,
+      "point": -0.0014719849204993807
+    },
+    "PRE": {
+      "ci95": [
+        -0.005109674759660265,
+        0.002418044268233643
+      ],
+      "n": 512,
+      "point": -0.001291701446461957
+    }
+  },
+  "created_utc": "2026-09-07T07:40:14Z",
+  "label": "VERTICAL BOTTOM SUPERVISION METRICS",
+  "margins_per_ckpt": {
+    "m_bot": {
+      "MID": {
+        "ci95": [
+          0.0032539147139686976,
+          0.00412114777154784
+        ],
+        "point": 0.003677021239127498
+      },
+      "POST": {
+        "ci95": [
+          0.00311532241776149,
+          0.003996338107936026
+        ],
+        "point": 0.003546690451912582
+      },
+      "PRE": {
+        "ci95": [
+          0.0038375891186660737,
+          0.004829417293512961
+        ],
+        "point": 0.0043263635379844345
+      }
+    },
+    "m_top": {
+      "MID": {
+        "ci95": [
+          0.0014862254520267015,
+          0.002141146200847288
+        ],
+        "point": 0.0018077646600431763
+      },
+      "POST": {
+        "ci95": [
+          0.001770646184195357,
+          0.002489803071694041
+        ],
+        "point": 0.002115014685841743
+      },
+      "PRE": {
+        "ci95": [
+          5.948043744865573e-05,
+          0.0007243849911901634
+        ],
+        "point": 0.00038973541813902557
+      }
+    }
+  },
+  "mirror_estimator_fix": {
+    "bootstrap_seed_invariant_point": true,
+    "old_pooled_sign_formula_fixture": 1.0,
+    "old_pooled_sign_formula_used": false,
+    "paired_fixture_point": 2.0,
+    "paired_fixture_point_is_2": true,
+    "point_definition": "mean(TOP - BOTTOM) over paired values",
+    "unequal_count_rule": "mean(low) - mean(high) = 2.25 - 0.0 = 2.25 (never a pooled sign mean)",
+    "unequal_count_two_sample": 2.25
+  },
+  "n_boot": 10000,
+  "numerics_floor": {
+    "MID": {
+      "f_bot": {
+        "ci95": [
+          -1.1413503671064973e-06,
+          4.277208063285792e-08
+        ],
+        "mean": -5.162582965567708e-07
+      },
+      "f_top": {
+        "ci95": [
+          9.531358955428004e-08,
+          9.704006515676152e-07
+        ],
+        "mean": 5.170004442334175e-07
+      }
+    },
+    "POST": {
+      "f_bot": {
+        "ci95": [
+          -3.793536961893551e-07,
+          6.739681339240628e-07
+        ],
+        "mean": 1.4765100786462426e-07
+      },
+      "f_top": {
+        "ci95": [
+          -3.1017207220429554e-07,
+          6.060925443307496e-07
+        ],
+        "mean": 1.3151293387636542e-07
+      }
+    },
+    "PRE": {
+      "f_bot": {
+        "ci95": [
+          -8.815030014375225e-07,
+          4.3971667764708334e-07
+        ],
+        "mean": -2.087908796966076e-07
+      },
+      "f_top": {
+        "ci95": [
+          -1.7338898032903672e-07,
+          4.782399628311395e-07
+        ],
+        "mean": 1.5260593499988317e-07
+      }
+    }
+  },
+  "transition_stats_all": {
+    "MID|POST": {
+      "D_BOTTOM": {
+        "ci95": [
+          -0.0002887341010136879,
+          2.263936257804741e-05
+        ],
+        "point": -0.0001309946965193376
+      },
+      "D_TOP": {
+        "ci95": [
+          0.0001118156522352365,
+          0.0005052147003880235
+        ],
+        "point": 0.0003076355133089237
+      },
+      "G": {
+        "ci95": [
+          0.00018476108853064945,
+          0.0007055783366013201
+        ],
+        "point": 0.0004386302098282613
+      }
+    },
+    "PRE|MID": {
+      "D_BOTTOM": {
+        "ci95": [
+          -0.0009968529042453157,
+          -0.00031006709850771595
+        ],
+        "point": -0.0006490348314400762
+      },
+      "D_TOP": {
+        "ci95": [
+          0.0011189753262442538,
+          0.0017271036291276686
+        ],
+        "point": 0.0014176648473949172
+      },
+      "G": {
+        "ci95": [
+          0.0015556285594357177,
+          0.0026040592509161795
+        ],
+        "point": 0.0020666996788349934
+      }
+    },
+    "PRE|POST": {
+      "D_BOTTOM": {
+        "ci95": [
+          -0.0011564565978915199,
+          -0.0004217241832520813
+        ],
+        "point": -0.0007800295279594138
+      },
+      "D_TOP": {
+        "ci95": [
+          0.0013610393247290632,
+          0.0021274187272865676
+        ],
+        "point": 0.0017253003607038409
+      },
+      "G": {
+        "ci95": [
+          0.0019198855759896105,
+          0.003167194028719677
+        ],
+        "point": 0.0025053298886632547
+      }
+    }
+  },
+  "transition_stats_balanced": {
+    "MID|POST": {
+      "D_BOTTOM": {
+        "ci95": [
+          -0.00019100671561318448,
+          0.0001650383499509189
+        ],
+        "point": -1.2624994269572198e-05
+      },
+      "D_TOP": {
+        "ci95": [
+          -9.142102862824673e-06,
+          0.0007269325458764797
+        ],
+        "point": 0.0003538037708494812
+      },
+      "G": {
+        "ci95": [
+          -4.639664039132184e-05,
+          0.0008193233832571421
+        ],
+        "point": 0.0003664287651190534
+      }
+    },
+    "PRE|MID": {
+      "D_BOTTOM": {
+        "ci95": [
+          -0.0011484614478831645,
+          -0.00015292204989236793
+        ],
+        "point": -0.0006380360573530197
+      },
+      "D_TOP": {
+        "ci95": [
+          0.0008086728721536929,
+          0.0015271842210495378
+        ],
+        "point": 0.0011587976914597675
+      },
+      "G": {
+        "ci95": [
+          0.001101517314236844,
+          0.0025617193321522784
+        ],
+        "point": 0.0017968337488127872
+      }
+    },
+    "PRE|POST": {
+      "D_BOTTOM": {
+        "ci95": [
+          -0.001203458207237418,
+          -0.0001323319422226634
+        ],
+        "point": -0.0006506610516225919
+      },
+      "D_TOP": {
+        "ci95": [
+          0.000990125320458901,
+          0.002123858839695458
+        ],
+        "point": 0.0015126014623092487
+      },
+      "G": {
+        "ci95": [
+          0.001282634921153658,
+          0.003215458272461546
+        ],
+        "point": 0.0021632625139318407
+      }
+    }
+  }
+}
