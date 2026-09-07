@@ -1,0 +1,305 @@
+{
+  "report": "camera-mirror-balanced-supervision-fix-review",
+  "round": "MBS canary-readiness fix review",
+  "mode": {
+    "training": false,
+    "backward": false,
+    "optimizer_step": false,
+    "resume": false,
+    "checkpoint_write": false,
+    "force_push": false,
+    "hard_stop": true
+  },
+  "base": {
+    "repository": "leafmoone/sakuramoon",
+    "base_sha": "f814e1cd285d2f4bc86775af525ade2a699f52a5",
+    "branch": "camera-v2-mirror-balanced-supervision-fix-review",
+    "worktree": "/sakuramoon-runtime/sakuramoon-camera-mirror-balance-fix-review",
+    "mirror_fix_tooling_head": "98d9a5839f2fbc12b23a9da1a8e6cf9d6f09186a",
+    "mirror_fix_evidence_head_recorded_in_transcript": true
+  },
+  "external_review_fixes": {
+    "A_device_routing": {
+      "bug": "mirror branch re-derived active_condition_sample_indices from the CPU batch attribute, overwriting the already device-local H2D tensor; the condition-token path requires indices on qwen_states.device",
+      "root_cause": "prepare() used batch.active_condition_sample_indices (CPU) instead of the already H2D-copied local tensor when calling _physical_active_condition_indices",
+      "fix": "helper now receives the already device-local tensor (no extra copy); output is 1-D torch.long on qwen_states.device, empty set stays on device; fail-closed ValueError guard (device/dtype/ndim) before TrainableCompositeInputs construction",
+      "files": ["src/sakuramoon/train/runtime.py", "tests/unit/train/test_mirror_pair_training.py"],
+      "regression_tests": [
+        "CPU input -> CPU output (device preserved)",
+        "mirror logical routing: logical active rows {0,2} with flags {True,False,True} -> physical rows {0,1,3,4}, device unchanged",
+        "fail-closed guard trips on device mismatch"
+      ]
+    },
+    "B_mirror_telemetry": {
+      "training_metric_schema_version": 12,
+      "previous_schema_version": 11,
+      "fields": [
+        "camera_mirror_logical_samples",
+        "camera_mirror_vertical_applied",
+        "camera_mirror_eligible",
+        "camera_mirror_selected",
+        "camera_mirror_applied",
+        "camera_mirror_severity_lt2",
+        "camera_mirror_severity_2to4",
+        "camera_mirror_severity_ge4",
+        "camera_mirror_original_start",
+        "camera_mirror_original_center",
+        "camera_mirror_original_end",
+        "camera_mirror_mirror_start",
+        "camera_mirror_mirror_center",
+        "camera_mirror_mirror_end",
+        "camera_mirror_extra_views",
+        "camera_mirror_physical_views"
+      ],
+      "feature_absent_default": {
+        "logical_samples": "effective_batch",
+        "physical_views": "effective_batch",
+        "activity_counters": 0
+      },
+      "conservation": [
+        "logical_samples == effective_batch",
+        "applied <= selected <= eligible <= vertical_applied <= logical_samples",
+        "severity_lt2 + severity_2to4 + severity_ge4 == vertical_applied",
+        "original_start + original_center + original_end == applied",
+        "mirror_start + mirror_center + mirror_end == applied",
+        "extra_views == applied",
+        "physical_views == logical_samples + extra_views"
+      ],
+      "durable_paths": ["local metrics.jsonl", "W&B mapping"],
+      "files": [
+        "src/sakuramoon/telemetry/metrics.py",
+        "src/sakuramoon/telemetry/observer.py",
+        "tests/unit/test_telemetry_camera_mirror.py",
+        "tests/unit/test_g1_telemetry.py",
+        "tests/unit/test_telemetry_camera.py",
+        "tests/unit/test_telemetry_spatial.py",
+        "tests/unit/test_telemetry_t_bins.py"
+      ]
+    },
+    "C_degrade_semantics": {
+      "behavior": "on mirror payload construction failure after eligible+selected: keep mirror_eligible=True and mirror_selected=True, set mirror=None, original sample continues, mirror_degraded trace preserved",
+      "accounting": "selected - applied is the exact deterministic degraded-pair count",
+      "test": "eligible=1, selected=1, payload=None -> eligible 1 / selected 1 / applied 0 (NOT 0/0/0)",
+      "files": ["src/sakuramoon/data/pipeline.py", "tests/unit/data/test_camera_mirror_balance.py"]
+    },
+    "D_retention25_erratum": {
+      "wrong_historical_wording": "RETENTION_25 = 0.908927... interpreted as canvas/crop retention",
+      "correct_meaning": "CAUSAL GAP RETENTION after VISUAL_GEO_BALANCED_25 selection: |G_VISUAL_GEO_BALANCED_25| / |G_ALL|",
+      "canvas_retention_claimed": false,
+      "camera_crop_retention_separately_defined": "1 / zoom^2 (camera geometry, never mixed with causal-gap retention)",
+      "design_report_modified": false,
+      "erratum_recorded_in": "reports/camera-mirror-balanced-supervision-fix-review.{md,json}"
+    }
+  },
+  "hcu_forward_smoke": {
+    "status": "PASS",
+    "device": "Hygon DCU (device name 'BW'), cuda:0, 2 devices available",
+    "torch": "2.9.0 (DTK venv)",
+    "script": "/sakuramoon-runtime/mbs-smoke/hcu_mbs_forward_smoke.py",
+    "script_sha256": "e5b81c11b9e74e764e9f395e65769e623d90b0ff1beac77daca77280cad77fd6",
+    "evidence": "/sakuramoon-runtime/mbs-smoke/smoke-evidence.json",
+    "checks_passed": "24/24",
+    "process_exit": 0,
+    "models": {
+      "dit": {
+        "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+        "update": 118100,
+        "kind": "raw",
+        "parameter_tensors": 289
+      },
+      "qwen": {"root": "/sakuramoon-runtime/model/qwen_3.5_2B", "attention_backend": "sdpa", "parameter_tensors": 320},
+      "vae": {"root": "/sakuramoon-runtime/model/vae", "parameter_tensors": 644}
+    },
+    "hyperparameters": {
+      "p_mean": -0.8,
+      "p_std": 0.8,
+      "noise_scale": 1.0,
+      "t_eps": 0.05,
+      "noise_observation_boundary": 0.95,
+      "growth_alpha": 1.0,
+      "no_grad": true,
+      "torch_compile": false
+    },
+    "batch": {
+      "logical_samples": 2,
+      "row_0": {
+        "sample_id": 1,
+        "orientation": "vertical",
+        "camera_applied": true,
+        "latent_center_shift": 5.1875,
+        "mirror_eligible": true,
+        "mirror_selected": true,
+        "mirror_applied": true,
+        "condition": "active artist condition",
+        "dense_length": 98
+      },
+      "row_1": {
+        "sample_id": 2,
+        "orientation": "vertical",
+        "camera_applied": true,
+        "latent_center_shift": 1.75,
+        "mirror_eligible": false,
+        "mirror_applied": false,
+        "condition": "null condition",
+        "dense_length": 98
+      },
+      "physical_views": 3
+    },
+    "measurements": {
+      "qwen_calls": 1,
+      "qwen_input_shape": [2, 98],
+      "vae_encode_calls": 1,
+      "vae_input_shape": [3, 3, 256, 256],
+      "pair_timestep": {
+        "bit_equal": true,
+        "t_pair": 0.46219295263290405,
+        "t_row1": 0.5086652636528015
+      },
+      "pair_noise": {
+        "bit_equal": true,
+        "dtype": "bfloat16",
+        "max_abs_cross_row_diff": 6.3125
+      },
+      "device_parity": {
+        "qwen_states_device": "cuda:0",
+        "active_condition_indices_device": "cuda:0",
+        "fail_closed_guard_tripped": false
+      },
+      "per_sample_loss": {
+        "shape": [2],
+        "pair_loss": 0.08668571710586548,
+        "ordinary_loss": 0.09503582119941711,
+        "finite_positive": true
+      },
+      "high_low_noise_sums": {
+        "high_sum": 0.1817215383052826,
+        "low_sum": 0.0,
+        "high_count": 2,
+        "low_count": 0,
+        "finite": true
+      },
+      "image_tokens": 768,
+      "camera_zoom_bands": [2, 2],
+      "mirror_view_latent_differs_from_original": true,
+      "mirror_view_latent_max_abs_diff_bf16": 1.5703125,
+      "parameter_buffer_mutation": "none (sha256 + data_ptr + grad-None identical before/after across all 1253 tensors)",
+      "camera_mirror_table": {
+        "logical_samples": 2,
+        "vertical_applied": 2,
+        "mirror_eligible": 1,
+        "mirror_selected": 1,
+        "mirror_applied": 1,
+        "severity_lt2": 1,
+        "severity_2to4": 0,
+        "severity_ge4": 1,
+        "original_start": 1,
+        "original_center": 0,
+        "original_end": 0,
+        "mirror_start": 0,
+        "mirror_center": 0,
+        "mirror_end": 1,
+        "mirror_extra_views": 1,
+        "physical_views": 3,
+        "conservation_holds": true
+      },
+      "walltime": {"measure_seconds": 14.72, "total_seconds": 65.3, "peak_alloc_GiB": 6.992}
+    },
+    "qwen_claim": "Qwen is executed once over the logical batch before physical-row expansion; source inspection + runtime smoke confirms no second mirror Qwen call (measured qwen_calls == 1)."
+  },
+  "compute_estimate": {
+    "previous_report_error": "mixed the 2048 camera audit units + 512 ordinary controls (an 80/20 audit construction) as if it were the production P25 population",
+    "real_p25_camera_applied_fraction": 0.19777,
+    "severe_vertical_eligible_conditional_on_applied": {"count": 630, "total": 2048, "fraction": 0.3076, "provenance": "frozen P25 camera audit"},
+    "expected_extra_physical_view_fraction": 0.0608,
+    "estimate": true,
+    "note": "no better full-run joint orientation x latent-shift distribution available locally",
+    "whole_training_physical_inflation": 1.061,
+    "camera_conditional_physical_inflation": 1.308,
+    "previous_wrong_whole_training_inflation": 1.246,
+    "walltime_multiplier_measured": "UNKNOWN until canary"
+  },
+  "identity_wording": {
+    "claim": "NUMERICAL / DATA-PATH IDENTITY",
+    "python_object_byte_identity_claimed": false,
+    "holds_when_mirror_config_absent": [
+      "caption RNG stream unchanged",
+      "crop RNG stream unchanged",
+      "camera policy RNG unchanged",
+      "camera offset RNG unchanged",
+      "emitted ordinary/camera image tensor unchanged",
+      "coordinate tensor unchanged",
+      "Qwen/VAE/DiT numerical training path unchanged",
+      "optimizer/update semantics unchanged"
+    ]
+  },
+  "resume_read_only_audit": {
+    "source_checkpoint": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+    "complete": true,
+    "manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+    "checkpoint_id": "raw-118100-update-cadence",
+    "successful_updates": 118100,
+    "stage_budget": {"start_successful_update": 58000, "terminal_successful_update": 168000},
+    "resolved_stage_planned_updates": 168000,
+    "checkpoint_cadence_every_successful_updates": 100,
+    "remaining_updates": 49900,
+    "resume_budget_status": "READY",
+    "canary_terminal_invented_this_round": false,
+    "checkpoint_modified": false
+  },
+  "scope": {
+    "vertical_only": true,
+    "horizontal_changed": false,
+    "rope_changed": false,
+    "coordinate_math_changed": false,
+    "dit_architecture_changed": false,
+    "qwen_architecture_changed": false,
+    "cmuon_changed": false,
+    "scheduler_lr_changed": false,
+    "design_report_modified": false,
+    "f814_history_rewritten": false
+  },
+  "validation": {
+    "relevant_suites": {"files": 7, "passed": 120, "failed": 0, "skipped": 0, "xfailed": 0},
+    "full_tests": {
+      "command": "python -m pytest tests/unit -q --no-header -p no:cacheprovider --ignore=tests/unit/data/test_deepghs_quality_pipeline.py --ignore=tests/unit/data/test_run_deepghs_quality_pipeline.py",
+      "fixreview_tree": "**937 passed / 4 failed / 0 skipped / 0 xfailed** (253.46 s)",
+      "base_tree": "**905 passed / 4 failed / 0 skipped / 0 xfailed** (253.53 s)",
+      "baseline_failures_comparison": "the 4 failures are the SAME 4 pre-existing cmuon_fp32_forensic environment failures on both trees (test_bcd_hard_fail_captures_fp32_reason[below_floor-below_floor], test_e_writer_failure_still_raises_original_error, test_f_serialization_failure_still_raises_and_leaves_no_capsule, test_m2_mirror_failure_keeps_local_capsule_and_original_error); fix-review additionally passes +32 tests (this round's new deterministic tests); 0 new failures, 0 new skips, 0 new xfails",
+      "environment_note": "DTK venv on come3 lacks onnxruntime; the two deepghs script tests fail at collection in BOTH trees and are excluded identically (identical --ignore flags); both files are outside this fix's diff scope"
+    },
+    "new_deterministic_tests": {"skips": 0, "xfails": 0},
+    "static_gates": {
+      "py_compile": "PASS (all 11 modified/new python files)",
+      "ruff_changed_scope": "All checks passed (0 new findings)",
+      "ruff_full_scope": "exactly 1 pre-existing baseline finding (EXE001, tests/gpu/optim/cmuon_capsule_teardown.py); identical on pristine base; 0 introduced",
+      "git_diff_check": "clean",
+      "security_scan": "0 secret hits",
+      "staged": "only the 11 whitelisted source/test files (commit 1) + 2 report files (commit 2); no checkpoints/datasets/images/*.pt/safetensors//tmp/logs"
+    }
+  },
+  "readiness": {
+    "device_routing_fixed": true,
+    "device_regression_tests_pass": true,
+    "hcu_real_mirror_forward_smoke_pass": true,
+    "mirror_telemetry_durable_jsonl_wandb_path_pass": true,
+    "degraded_decision_semantics_pass": true,
+    "logical_loss_weighting_pass": true,
+    "same_t_noise_pass": true,
+    "source_checkpoint_resume_budget_status_known": "READY",
+    "no_new_test_regression": true,
+    "security_clean": true,
+    "CANARY_READY": "TRUE",
+    "training_authorized": false
+  },
+  "authorization": {
+    "training_started": false,
+    "resume_started": false,
+    "p50_started": false,
+    "production_changed": false
+  },
+  "external_review_target": {
+    "branch": "camera-v2-mirror-balanced-supervision-fix-review",
+    "exact_sha_recorded_after_push": true
+  },
+  "next": ["HARD STOP", "SEND EXACT SHA TO EXTERNAL REVIEWER", "NO CANARY UNTIL EXTERNAL REVIEW"]
+}
