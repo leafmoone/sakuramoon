@@ -23,6 +23,7 @@
 | `0984c38` | docs: 配置驱动接口与恢复契约（docs/config-and-resume.md） |
 | `be1c1a5` | fix: 清除残留 stage/shape_count 日志读取 + pyright 漂移清理 |
 | `4ef6240` | fix: timing 禁用时 per-update 循环计时器保持无事件（NoopPhaseTimer 保持）+ 最终报告 |
+| `f2c5705` | docs: 最终门结果写入报告（本报告定稿） |
 
 ## REMOVED_POLICIES（已删除的历史策略/伪配置/硬编码）
 
