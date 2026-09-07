@@ -1,0 +1,126 @@
+{
+  "schema_version": "mbs-design-1",
+  "title": "SakuraMoon Camera v2 - Vertical Mirror-Balanced Supervision (V1) design",
+  "repository": "leafmoone/sakuramoon",
+  "base_sha": "ff020ad5ae02859f1c853b5ecb80fb3b523a4baf",
+  "branch": "camera-v2-mirror-balanced-supervision-design",
+  "status": "REVIEW_ONLY_NOT_AUTHORIZED_TO_RUN",
+  "authorization": {
+    "training_started": false,
+    "canary_launched": false,
+    "resume_started": false,
+    "longer_p25_p50_started": false,
+    "production_changed": false,
+    "checkpoint_modified": false,
+    "rope_changed": false,
+    "conditioning_architecture_changed": false,
+    "optimizer_changed": false
+  },
+  "current_problem": {
+    "evidence_source": "camera-vertical-bottom-visual-content-residual audit (VCR round, frozen, forward-only)",
+    "evidence_base_sha": "f3d183a35b3123e0b9c2a301fbc68ff5a276d345",
+    "evidence_created_utc": "2026-09-07T08:47:18Z",
+    "pairs": 512,
+    "bootstrap_iterations": 10000,
+    "seed": 20260907,
+    "directional_residual": "CONFIRMED",
+    "gap_pre_post": {
+      "ALL": { "point": 0.0025053298886632547, "ci95": [0.0019198855759896105, 0.003167194028719677], "n": 512 },
+      "V25": { "point": 0.002277164254337549, "ci95": [0.001325262965838192, 0.003338025472476147], "n": 128 },
+      "V50": { "point": 0.002008644281886518, "ci95": [0.0013410804680461298, 0.0027141570797539314], "n": 256 }
+    },
+    "clip_image_signed_bottom_preserves_more": { "point": 0.0015332977195362469, "ci95": [0.0006540860223409894, 0.0024548638325471144], "n": 91 },
+    "latent_ge4_subset_mean_gap": 0.012526541948318481,
+    "retention_25": 0.9089279079141767,
+    "interpretation": "a directional residual persists after visual-content balancing; the strongest-shifted vertical crops carry the most residual",
+    "audit_recommendation": "DESIGN_VERTICAL_MIRROR_BALANCED_SUPERVISION_WITH_CONTENT_GUARDS"
+  },
+  "intervention": {
+    "config_table": "data.camera_mirror_balance",
+    "mode": "vertical_mirror_pair_v1",
+    "min_latent_shift": 2.0,
+    "pair_probability_canary": 1.0,
+    "pair_weight": 1.0,
+    "disabled_by_default": true,
+    "eligibility": [
+      "camera viewport plan applied",
+      "orientation == vertical",
+      "viewport edge even",
+      "latent_center_shift >= min_latent_shift (exact)"
+    ],
+    "rng_domain": "camera-mirror-policy",
+    "degrade_on_failure": "sample falls back to the ordinary path (audit mirror_degraded); never rejected"
+  },
+  "geometry": {
+    "mirror_top": "available - k, where available = F - R",
+    "mirror_crop_box": "(0, k_mirror, R, k_mirror + R)",
+    "signed_shift": "(k + R/2) - F/2 (exact float, integer-valued for even R)",
+    "antisymmetry": "signed(k_mirror) == -signed(k) exactly; enforced, None on violation",
+    "canvas": "one LANCZOS resize to the full canvas; original and mirror are two crop windows of the same canvas"
+  },
+  "logical_weight": {
+    "pair_formula": "0.5 * L_original + 0.5 * L_mirror",
+    "ordinary_formula": "L_original",
+    "total_source_weight_per_pair": 1.0,
+    "step_py_changed": false,
+    "synthetic_fixture": { "physical_losses": [10.0, 0.0, 2.0], "logical_losses": [10.0, 1.0], "logical_mean": 5.5, "naive_physical_mean": 4.0 }
+  },
+  "timestep_noise": {
+    "timesteps_per_logical_sample": 1,
+    "noise_per_logical_sample": 1,
+    "expansion": "index_select by phys_to_log",
+    "pair_shares_t": true,
+    "pair_shares_noise": true,
+    "disabled_path_bit_identical_streams": true
+  },
+  "conditioning": {
+    "qwen_forward_per_logical_sample": 1,
+    "conditioning_rows": "row-duplicated by index_select(phys_to_log), never re-encoded",
+    "new_position_encoding": false,
+    "new_camera_embedding": false,
+    "new_direction_token": false,
+    "top_bottom_label": false,
+    "rope_py_changed": false
+  },
+  "compute_estimate": {
+    "label": "ESTIMATE from frozen P25 audit (2560 units: 2048 camera + 512 ordinary), pair_probability = 1.0",
+    "vertical_fraction_of_camera": 0.7603,
+    "eligible_fraction_of_camera": 0.3076,
+    "eligible_fraction_of_all_units": 0.2461,
+    "eligible_count_camera_cohort": 630,
+    "vertical_latent_shift_median": 1.688,
+    "vertical_latent_shift_mean": 1.8014,
+    "vertical_latent_shift_max": 7.562,
+    "expected_physical_view_inflation_camera_cohort": 1.3076,
+    "expected_physical_view_inflation_mixed_population": 1.2461,
+    "expected_vae_overhead_camera_cohort": "+30.8% encodes",
+    "expected_dit_overhead_camera_cohort": "+30.8% forward/backward rows; Qwen unchanged",
+    "expected_walltime_multiplier": "1.25-1.31x on the forward/backward path (estimate)",
+    "measured": false
+  },
+  "content_guard": {
+    "online_clip": false,
+    "online_pe": false,
+    "semantic_rejection": false,
+    "telemetry_only": true,
+    "batch_counts_keys": 16,
+    "conservation": "applied <= selected <= eligible <= vertical <= logical; severity sum = vertical; side sums = applied; physical = logical + extra",
+    "training_metric_pinned_key_set_untouched": true,
+    "per_sample_audit_fields": ["eligibility", "selection", "mirror_crop_box", "signed_shift", "camera_shift_y", "normalized_offset", "mirror_degraded trace"],
+    "known_limitation": "mirroring balances supervision direction, not content relevance; post-hoc audit loop is the V1 guard"
+  },
+  "risks": [
+    "increased physical-view compute (up to ~+31% forward/backward rows on the camera cohort, bounded by pair_probability)",
+    "pair correlation: views share source/caption/timestep/noise; 0.5/0.5 weighting keeps effective sample count honest",
+    "content mismatch still exists (kept side vs caption relevance unverified)",
+    "possible overcorrection of genuinely side-dominant subjects; min_latent_shift=2.0 restricts V1 to strong-shift crops",
+    "DDP denominator / batch semantics: step.py untouched, loss reduced to logical length before reduction, pinned by the 5.5-vs-4.0 fixture"
+  ],
+  "canary": {
+    "config": "config/train_g1_camera_v2_p25_mirror_canary.toml",
+    "derives_from": "train_g1_camera_v2_p25.toml",
+    "changes_only": ["run/artifact identity", "data.camera_mirror_balance"],
+    "authorized_to_run": false,
+    "launched": false
+  }
+}
