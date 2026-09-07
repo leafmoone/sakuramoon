@@ -404,9 +404,10 @@ def test_canary_config_changes_only_mirror_and_identity() -> None:
     after = tomllib.loads(canary.resolved_toml)
     diff = _config_diff_keys(before, after)
 
-    # The canary may ONLY touch run/artifact identity and the mirror table:
-    # no LR, batch, optimizer, scheduler, checkpoint cadence, architecture
-    # or camera-policy leaf may differ.
+    # The canary may ONLY touch run/artifact identity, the mirror table, and
+    # the governed runtime stop cap (launch-readiness: an invocation stop,
+    # never a stage-budget shrink): no LR, batch, optimizer, scheduler,
+    # checkpoint cadence, architecture or camera-policy leaf may differ.
     identity_keys = {
         "run.run_id",
         "paths.run_dir",
@@ -420,8 +421,15 @@ def test_canary_config_changes_only_mirror_and_identity() -> None:
     # (exclude_none), so its whole section path shows up as the single
     # mirror-related diff key; its leaf values are pinned below.
     mirror_section = "data.camera_mirror_balance"
-    assert diff <= identity_keys | {mirror_section}, diff
+    # The stop cap is a new stage leaf absent from the baseline resolved
+    # TOML (exclude_none), so it surfaces as one leaf diff key; every other
+    # stage leaf (planned_updates et al.) must remain inherited.
+    stop_cap_key = "stage.canary_stop_successful_update"
+    assert diff <= identity_keys | {mirror_section, stop_cap_key}, diff
     assert mirror_section in diff, diff
+    assert stop_cap_key in diff, diff
+    assert after["stage"]["canary_stop_successful_update"] == 118200
+    assert after["stage"]["planned_updates"] == before["stage"]["planned_updates"]
     assert "camera_mirror_balance" not in before["data"]
 
     mirror = after["data"]["camera_mirror_balance"]

@@ -11,6 +11,14 @@
 #   - run identity and fully independent run/checkpoint/artifact paths
 #   - [data.camera_mirror_balance]: enabled, v1 mode, min_latent_shift
 #     exactly 2.0, pair_probability 1.0, pair_weight exactly 1.0
+#   - [stage].canary_stop_successful_update: 118200 -- a RUNTIME-ONLY
+#     invocation stop cap (100 successful updates from the U118100 source).
+#     It is NOT a stage terminal and does NOT rewrite the checkpoint stage
+#     budget: the inherited stage.planned_updates stays 168000 and the
+#     persisted stage budget stays 58000 -> 168000. A resumed invocation of
+#     this config is rejected before training because the stop cap no longer
+#     exceeds the restored successful update (118200 % 100 == 0, so U118200
+#     is a normal update-cadence checkpoint, not a stage finalize).
 #
 # The camera viewport policy itself (p=0.25, zoom 1.10-1.50) is unchanged:
 # the mirror policy only reuses already-applied vertical plans and adds a
@@ -39,6 +47,9 @@ retry_jsonl_path = "artifacts/g1_camera_v2_p25_mirror/wandb-retry.jsonl"
 
 [evaluation]
 output_dir = "output_model/evaluation/g1_camera_v2_p25_mirror"
+
+[stage]
+canary_stop_successful_update = 118200
 
 [data.camera_mirror_balance]
 enabled = true

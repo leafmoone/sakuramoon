@@ -1511,6 +1511,43 @@ def require_checkpoint_cadence_binding(
         raise ValueError("restored checkpoint cadence differs from resolved config")
 
 
+def resolve_single_gpu_stop_cap_target(
+    config: RuntimeConfig,
+    state: RawCheckpointState,
+) -> int:
+    """Resolve this invocation's successful-update target.
+
+    The production target is the restored stage-budget terminal. An optional
+    governed canary stop cap (``stage.canary_stop_successful_update``) may
+    shorten THIS invocation's target to ``min(terminal, cap)`` without
+    touching the checkpoint stage budget: it is a runtime invocation stop
+    cap, not a new stage terminal, and ``RawCheckpointState.stage_budget``
+    is never mutated. Fail closed on any cap that is not a positive int
+    strictly inside ``(restored successful update, stage terminal]``; the
+    cap additionally requires ``automatic_transition`` false so it can never
+    interact with stage-finalization semantics.
+    """
+    terminal = state.stage_budget.terminal_successful_update
+    stop_cap = config.stage.canary_stop_successful_update
+    if stop_cap is None:
+        return terminal
+    if type(stop_cap) is not int or stop_cap <= 0:
+        raise ValueError("canary stop cap must be a positive integer")
+    if stop_cap <= state.trainer.successful_updates:
+        raise ValueError(
+            "canary stop cap must exceed the restored successful update"
+        )
+    if stop_cap > terminal:
+        raise ValueError(
+            "canary stop cap must not exceed the stage budget terminal"
+        )
+    if config.stage.automatic_transition is not False:
+        raise ValueError(
+            "canary stop cap requires automatic_transition false"
+        )
+    return min(terminal, stop_cap)
+
+
 def _optimizer_learning_rate(optimizer: StepOptimizer) -> float:
     wrapped = getattr(optimizer, "optimizer", None)
     groups = getattr(wrapped, "param_groups", None)
@@ -1597,7 +1634,11 @@ def _run_single_gpu_training(
         stage_budget = raw_state.stage_budget
         state = raw_state.trainer
         cadence = raw_state.checkpoint_cadence
-        target_successful_updates = stage_budget.terminal_successful_update
+        # Governed invocation target: the stage terminal, optionally capped
+        # by the runtime-only canary stop cap (never a budget rewrite).
+        target_successful_updates = resolve_single_gpu_stop_cap_target(
+            config, raw_state
+        )
         pending_measurements: list[RuntimeMeasurement] = []
         active_phase_timer: PhaseTimer | None = None
         active_learning_rate: float | None = None

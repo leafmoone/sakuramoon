@@ -1026,6 +1026,13 @@ class StageConfig(StrictModel):
     planned_updates: PositiveInt
     manual_finalize: Literal[True]
     automatic_transition: Literal[False]
+    # Optional governed runtime invocation stop cap (successful updates).
+    # Runtime-only: when present, THIS invocation's successful-update target
+    # becomes min(stage terminal, cap), but the checkpoint stage budget is
+    # never rewritten -- it is an invocation stop cap, not a new stage
+    # terminal, and RawCheckpointState.stage_budget is never mutated.
+    # Absent (default) = unchanged production behavior.
+    canary_stop_successful_update: Annotated[int | None, Field(ge=1)] = None
 
     @model_validator(mode="after")
     def validate_global_batch(self) -> StageConfig:
