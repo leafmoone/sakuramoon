@@ -310,6 +310,28 @@ class DataSpatialCropConfig(StrictModel):
         return self
 
 
+class DataCameraMirrorBalanceConfig(StrictModel):
+    """Strict optional vertical mirror-balanced camera supervision (v1).
+
+    Default: base runs keep ``camera_mirror_balance`` absent (None) so the
+    resolved TOML stays byte-identical to the pre-mirror tree; the canary
+    opts in with one isolated sibling table. When enabled it requires
+    ``camera_viewport.enabled``: the mirror branch reuses the exact applied
+    camera plan (same full canvas, zoom, retention, |shift|) and only the
+    crop position changes (``k_mirror = available - k``). The pair trains as
+    ONE logical sample: ``0.5 * L_original + 0.5 * L_mirror`` with the same
+    diffusion timestep and the same noise for both views. ``pair_weight`` is
+    locked to exactly 1.0 (total logical source weight) and
+    ``min_latent_shift`` to the v1 experiment value exactly 2.0.
+    """
+
+    enabled: bool
+    mode: Literal["vertical_mirror_pair_v1"]
+    min_latent_shift: Annotated[ExactFloat, Field(ge=2.0, le=2.0)]
+    pair_probability: Annotated[ExactFloat, Field(ge=0.0, le=1.0)]
+    pair_weight: Annotated[ExactFloat, Field(ge=1.0, le=1.0)]
+
+
 class DataCameraViewportConfig(StrictModel):
     """Strict HDM-style shifted-square camera viewport policy (data-strategy only).
 
@@ -407,6 +429,7 @@ class DataConfig(StrictModel):
     spatial_crop: DataSpatialCropConfig
     transparent_background: DataTransparentBackgroundConfig
     camera_viewport: DataCameraViewportConfig | None = None
+    camera_mirror_balance: DataCameraMirrorBalanceConfig | None = None
 
     @model_validator(mode="after")
     def validate_spatial_crop_retention(self) -> DataConfig:
@@ -429,6 +452,17 @@ class DataConfig(StrictModel):
             raise ValueError(
                 "camera_viewport.enabled and spatial_crop.enabled are mutually exclusive"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_camera_mirror_balance(self) -> DataConfig:
+        mirror = self.camera_mirror_balance
+        if mirror is not None and mirror.enabled:
+            viewport = self.camera_viewport
+            if viewport is None or not viewport.enabled:
+                raise ValueError(
+                    "camera_mirror_balance.enabled requires camera_viewport.enabled"
+                )
         return self
 
     @model_validator(mode="after")

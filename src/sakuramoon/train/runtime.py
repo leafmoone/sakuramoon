@@ -29,6 +29,7 @@ from sakuramoon.checkpoint.schema import CheckpointManifest, RawCheckpointState
 from sakuramoon.conditioning.rope import full_canvas_crop_coordinates
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.camera_viewport import (
+    CameraMirrorCounts,
     CameraViewportCounts,
     camera_zoom_band,
 )
@@ -376,12 +377,184 @@ class ActualDitFlopCounter:
 
 
 @dataclass(frozen=True, slots=True)
+class MirrorPhysicalLayout:
+    """Pure CPU index layout expanding one logical batch into physical views.
+
+    Every logical row keeps its original view in place; a mirror pair
+    inserts its mirror view in the physical row immediately after its
+    original view. No logical row is ever reordered, dropped, or rescaled,
+    so a batch without mirror pairs takes the exact pre-mirror path.
+    """
+
+    logical_count: int
+    physical_count: int
+    # phys_to_log[p]: the logical row that produced physical row p.
+    phys_to_log: tuple[int, ...]
+    # logical_orig_phys[i]: the physical row of logical row i's original view.
+    logical_orig_phys: tuple[int, ...]
+    # Per mirror pair (in logical row order): the physical row of the pair's
+    # original view and of its mirror view.
+    pair_orig_phys: tuple[int, ...]
+    mirror_phys: tuple[int, ...]
+    # physical_source_order[p]: the row of the concatenation
+    # [logical views; mirror views] that fills physical row p.
+    physical_source_order: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        pair_count = len(self.pair_orig_phys)
+        if (
+            type(self.logical_count) is not int
+            or self.logical_count <= 0
+            or type(self.physical_count) is not int
+            or self.physical_count < self.logical_count
+            or len(self.phys_to_log) != self.physical_count
+            or len(self.logical_orig_phys) != self.logical_count
+            or len(self.pair_orig_phys) != len(self.mirror_phys)
+            or len(self.physical_source_order) != self.physical_count
+        ):
+            raise ValueError("mirror physical layout has inconsistent counts")
+        if self.physical_count != self.logical_count + pair_count:
+            raise ValueError(
+                "mirror physical layout row count differs from logical + pairs"
+            )
+        source_bound = self.logical_count + pair_count
+        for value in self.physical_source_order:
+            if type(value) is not int or not 0 <= value < source_bound:
+                raise ValueError("mirror physical source order is invalid")
+        if sorted(self.physical_source_order) != list(range(source_bound)):
+            raise ValueError(
+                "mirror physical source order must cover every view exactly once"
+            )
+        previous = -1
+        for logical in self.phys_to_log:
+            if type(logical) is not int or not 0 <= logical < self.logical_count:
+                raise ValueError("mirror physical layout maps to an invalid row")
+            if logical < previous:
+                raise ValueError(
+                    "mirror physical layout must keep ascending logical order"
+                )
+            previous = logical
+        for logical, orig in enumerate(self.logical_orig_phys):
+            if type(orig) is not int or not 0 <= orig < self.physical_count:
+                raise ValueError("mirror original view points to an invalid row")
+            if self.phys_to_log[orig] != logical:
+                raise ValueError(
+                    "mirror original view points at the wrong logical row"
+                )
+        for orig, mirror in zip(self.pair_orig_phys, self.mirror_phys):
+            if (
+                type(orig) is not int
+                or type(mirror) is not int
+                or not 0 <= orig < self.physical_count - 1
+                or mirror != orig + 1
+                or self.phys_to_log[orig] != self.phys_to_log[mirror]
+            ):
+                raise ValueError(
+                    "mirror view must immediately follow its original view"
+                )
+            logical = self.phys_to_log[mirror]
+            if self.logical_orig_phys[logical] != orig:
+                raise ValueError(
+                    "mirror view original pointer differs from the layout"
+                )
+
+    @property
+    def pair_logical_rows(self) -> tuple[int, ...]:
+        """Logical rows that are mirror pairs, in logical row order."""
+
+        return tuple(self.phys_to_log[mirror] for mirror in self.mirror_phys)
+
+    @classmethod
+    def build(cls, has_mirror: tuple[bool, ...]) -> MirrorPhysicalLayout:
+        """Build the layout for one logical batch; mirrors follow originals."""
+
+        phys_to_log: list[int] = []
+        logical_orig_phys: list[int] = []
+        pair_orig_phys: list[int] = []
+        mirror_phys: list[int] = []
+        physical_source_order: list[int] = []
+        for logical, mirrored in enumerate(has_mirror):
+            if type(mirrored) is not bool:
+                raise ValueError("mirror layout flags must be boolean")
+            logical_orig_phys.append(len(phys_to_log))
+            phys_to_log.append(logical)
+            physical_source_order.append(logical)
+            if mirrored:
+                pair_orig_phys.append(len(phys_to_log) - 1)
+                mirror_phys.append(len(phys_to_log))
+                phys_to_log.append(logical)
+                physical_source_order.append(
+                    len(has_mirror) + len(mirror_phys) - 1
+                )
+        return cls(
+            logical_count=len(has_mirror),
+            physical_count=len(phys_to_log),
+            phys_to_log=tuple(phys_to_log),
+            logical_orig_phys=tuple(logical_orig_phys),
+            pair_orig_phys=tuple(pair_orig_phys),
+            mirror_phys=tuple(mirror_phys),
+            physical_source_order=tuple(physical_source_order),
+        )
+
+
+def reduce_mirror_pair_loss(
+    per_physical: torch.Tensor,
+    layout: MirrorPhysicalLayout,
+) -> torch.Tensor:
+    """Reduce one physical per-view loss to one logical per-sample loss.
+
+    An ordinary logical row keeps ``L_original``; a mirror logical row
+    becomes ``0.5 * L_original + 0.5 * L_mirror``, so one mirror pair
+    represents exactly one logical source sample (total source weight 1.0)
+    and the existing logical-sample reduction keeps its meaning.
+    """
+
+    if per_physical.ndim != 1:
+        raise ValueError(
+            "mirror pair reduction requires a one-dimensional loss"
+        )
+    if per_physical.numel() != layout.physical_count:
+        raise ValueError(
+            "mirror pair loss length differs from the physical layout"
+        )
+    device = per_physical.device
+    logical = per_physical.index_select(
+        0,
+        torch.as_tensor(
+            layout.logical_orig_phys, dtype=torch.long, device=device
+        ),
+    )
+    if not layout.mirror_phys:
+        return logical
+    pair_logical = torch.as_tensor(
+        layout.pair_logical_rows, dtype=torch.long, device=device
+    )
+    pair_loss = (
+        0.5 * logical.index_select(0, pair_logical)
+        + 0.5
+        * per_physical.index_select(
+            0,
+            torch.as_tensor(
+                layout.mirror_phys, dtype=torch.long, device=device
+            ),
+        )
+    )
+    return logical.index_copy(0, pair_logical, pair_loss)
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedTrainingBatch:
     """The immutable tensors needed by one objective evaluation."""
 
     inputs: TrainableCompositeInputs
     clean_latents: tuple[torch.Tensor, ...]
     states: tuple[torch.Tensor, ...]
+    # Mirror-pair physical layout for this batch; None when the batch has no
+    # mirror pairs (the exact pre-mirror path).
+    mirror_layout: MirrorPhysicalLayout | None = None
+    # Logical (per-source-sample) timesteps; None without mirror pairs, where
+    # inputs.timestep is already the logical vector.
+    timestep_logical: torch.Tensor | None = None
 
 
 def _camera_zoom_band_index(audit: ImageAudit) -> int:
@@ -418,6 +591,9 @@ class RuntimeMeasurement:
     # length must equal per_sample_loss.numel().
     camera_zoom_bands: tuple[int, ...]
     transparent: TransparentWhiteCounts
+    # Fixed camera-mirror counters for the batch (None = pre-mirror batch);
+    # they carry the logical-vs-physical view distinction for telemetry.
+    camera_mirror: CameraMirrorCounts | None = None
 
     def detached(self) -> RuntimeMeasurement:
         """Drop the autograd graph before handing facts to an async observer."""
@@ -442,6 +618,7 @@ class RuntimeMeasurement:
             camera_viewport=self.camera_viewport,
             camera_zoom_bands=self.camera_zoom_bands,
             transparent=self.transparent,
+            camera_mirror=self.camera_mirror,
         )
 
 
@@ -499,6 +676,37 @@ class _RuntimeLoss:
     low_noise_sample_count: torch.Tensor
 
 
+def _reduce_mirror_observation(
+    physical: _RuntimeLoss,
+    layout: MirrorPhysicalLayout,
+    timestep_logical: torch.Tensor,
+    noise_observation_boundary: float,
+) -> _RuntimeLoss:
+    """Move one physical per-view observation to the logical domain.
+
+    The per-sample loss uses the pair weighting contract (0.5 * L_original
+    + 0.5 * L_mirror per logical pair). The high/low noise buckets are
+    re-bucketed on the LOGICAL timesteps — a pair shares one timestep, so
+    both views of a pair fall into the same bucket — keeping
+    high + low == total loss in the logical-sample domain.
+    """
+
+    if timestep_logical.numel() != layout.logical_count:
+        raise ValueError(
+            "logical timestep count differs from the mirror layout"
+        )
+    per_logical = reduce_mirror_pair_loss(physical.per_sample, layout)
+    high = timestep_logical < noise_observation_boundary
+    low = ~high
+    return _RuntimeLoss(
+        per_logical,
+        (per_logical * high).sum(),
+        high.sum(),
+        (per_logical * low).sum(),
+        low.sum(),
+    )
+
+
 def _require_batch(batch: TrainingBatch) -> None:
     if type(batch) is not TrainingBatch:
         raise TypeError("single-GPU runtime requires a typed TrainingBatch")
@@ -530,13 +738,17 @@ def _require_batch(batch: TrainingBatch) -> None:
 
 
 def _size_conditions(
-    batch: TrainingBatch, *, device: torch.device
+    batch: TrainingBatch,
+    *,
+    device: torch.device,
+    count: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     height = float(batch.target_height)
     width = float(batch.target_width)
     size_scale = 0.5 * math.log2((height * width) / float(512 * 512))
     aspect = math.log2(width / height)
-    count = batch.images.shape[0]
+    if count is None:
+        count = batch.images.shape[0]
     return (
         torch.full((count,), size_scale, device=device, dtype=torch.float32),
         torch.full((count,), aspect, device=device, dtype=torch.float32),
@@ -575,6 +787,128 @@ def _full_canvas_coordinate_maps(
             )
         maps.append(coordinates)
     return tuple(maps)
+
+
+def _mirror_view_images(
+    batch: TrainingBatch, *, device: torch.device
+) -> torch.Tensor | None:
+    """Stack the batch's mirror views on-device, normalized like originals.
+
+    Returns None when the batch carries no mirror payloads; otherwise a
+    [P,3,H,W] bfloat16 tensor (P = pair count) produced from the uint8
+    payloads with the exact ordinary training normalization
+    (uint8 -> bf16 -> /127.5 -> -1).
+    """
+
+    payloads = tuple(
+        payload for payload in batch.mirror if payload is not None
+    )
+    if not payloads:
+        return None
+    stacked = torch.stack(tuple(payload.mirror_image for payload in payloads))
+    if stacked.ndim != 4 or stacked.shape[1] != 3:
+        raise ValueError("mirror view images must be [3,H,W] uint8 tensors")
+    return (
+        stacked.to(device, dtype=torch.bfloat16, non_blocking=True)
+        .div(127.5)
+        .sub(1.0)
+    )
+
+
+def _physical_view_images(
+    images: torch.Tensor,
+    mirror_images: torch.Tensor,
+    layout: MirrorPhysicalLayout,
+) -> torch.Tensor:
+    """Interleave original and mirror views into one physical batch."""
+
+    if images.ndim != 4 or images.shape[0] != layout.logical_count:
+        raise ValueError("logical view count differs from the mirror layout")
+    if mirror_images.shape[0] != len(layout.mirror_phys):
+        raise ValueError("mirror view count differs from the mirror layout")
+    if mirror_images.shape[1:] != images.shape[1:]:
+        raise ValueError("mirror views must match the logical view shape")
+    source = torch.cat((images, mirror_images), dim=0)
+    return source.index_select(
+        0,
+        torch.as_tensor(
+            layout.physical_source_order,
+            dtype=torch.long,
+            device=images.device,
+        ),
+    )
+
+
+def _mirror_view_coordinate_maps(
+    batch: TrainingBatch,
+    logical_maps: tuple[torch.Tensor, ...],
+    layout: MirrorPhysicalLayout,
+    *,
+    token_height: int,
+    token_width: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, ...]:
+    """Physical-order full-canvas coordinate maps including mirror views.
+
+    Original views reuse the logical maps (existing production camera
+    coordinates); mirror views map their mirror crop box inside the SAME
+    full canvas of their logical sample through the unchanged
+    ``full_canvas_crop_coordinates`` math — no new position encoding,
+    camera embedding, direction token, or TOP/BOTTOM label.
+    """
+
+    if len(logical_maps) != layout.logical_count:
+        raise ValueError(
+            "logical coordinate map count differs from the mirror layout"
+        )
+    mirror_maps: dict[int, torch.Tensor] = {}
+    for logical in layout.pair_logical_rows:
+        payload = batch.mirror[logical]
+        if payload is None:
+            raise ValueError("mirror layout pair row has no mirror payload")
+        audit = batch.audits[logical]
+        try:
+            mirror_maps[logical] = full_canvas_crop_coordinates(
+                token_height,
+                token_width,
+                full_height=audit.resized_height,
+                full_width=audit.resized_width,
+                crop_box=payload.crop_box,
+                device=device,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"mirror view {logical} cannot define full-canvas coordinates"
+            ) from error
+    mirror_at = set(layout.mirror_phys)
+    return tuple(
+        mirror_maps[logical] if phys in mirror_at else logical_maps[logical]
+        for phys, logical in enumerate(layout.phys_to_log)
+    )
+
+
+def _physical_active_condition_indices(
+    active: torch.Tensor, layout: MirrorPhysicalLayout
+) -> torch.Tensor:
+    """Remap logical active-condition row indices to physical rows.
+
+    A mirror pair shares its caption and condition routing, so both views
+    of a pair are active exactly when the logical row is active. The result
+    is strictly ascending physical row order (the collate convention).
+    """
+
+    if active.ndim != 1 or active.dtype != torch.long:
+        raise ValueError("active condition indices must be a 1-D long tensor")
+    active_mask = torch.zeros(
+        layout.logical_count, dtype=torch.bool, device=active.device
+    )
+    active_mask.scatter_(0, active, True)
+    physical_mask = active_mask[
+        torch.as_tensor(
+            layout.phys_to_log, dtype=torch.long, device=active.device
+        )
+    ]
+    return torch.nonzero(physical_mask, as_tuple=True)[0]
 
 
 class SingleGpuBatchRuntime:
@@ -695,6 +1029,21 @@ class SingleGpuBatchRuntime:
         self, batch: TrainingBatch, *, phase_timer: PhaseTimer | None = None
     ) -> PreparedTrainingBatch:
         _require_batch(batch)
+        logical_count = batch.images.shape[0]
+        if len(batch.mirror) not in (0, logical_count):
+            raise ValueError(
+                "mirror payload row count differs from the logical batch"
+            )
+        mirror_flags = (
+            tuple(payload is not None for payload in batch.mirror)
+            if batch.mirror
+            else ()
+        )
+        mirror_layout = (
+            MirrorPhysicalLayout.build(mirror_flags)
+            if any(mirror_flags)
+            else None
+        )
         if phase_timer is None:
             input_ids = batch.input_ids.to(
                 self.device, dtype=torch.long, non_blocking=True
@@ -771,45 +1120,131 @@ class SingleGpuBatchRuntime:
         if hidden_states.ndim != 4 or hidden_states.shape[0] != input_ids.shape[0]:
             raise ValueError("Qwen hidden states have an invalid batch shape")
 
-        if phase_timer is None:
-            clean = self.vae.encode(images)
-        else:
-            with phase_timer.record("vae"):
+        if mirror_layout is None:
+            if phase_timer is None:
                 clean = self.vae.encode(images)
+            else:
+                with phase_timer.record("vae"):
+                    clean = self.vae.encode(images)
+            row_count = logical_count
+            clean_logical = clean
+        else:
+            # One VAE call over the physical views (original + mirror); the
+            # source decode, canvas resize, caption and Qwen work already
+            # happened once per logical sample.
+            if phase_timer is None:
+                mirror_views = _mirror_view_images(
+                    batch, device=self.device
+                )
+                physical_images = _physical_view_images(
+                    images, mirror_views, mirror_layout
+                )
+                clean = self.vae.encode(physical_images)
+            else:
+                with phase_timer.record("h2d"):
+                    mirror_views = _mirror_view_images(
+                        batch, device=self.device
+                    )
+                    physical_images = _physical_view_images(
+                        images, mirror_views, mirror_layout
+                    )
+                with phase_timer.record("vae"):
+                    clean = self.vae.encode(physical_images)
+            row_count = mirror_layout.physical_count
+            clean_logical = clean.index_select(
+                0,
+                torch.as_tensor(
+                    mirror_layout.logical_orig_phys,
+                    dtype=torch.long,
+                    device=clean.device,
+                ),
+            )
         expected = (
-            batch.images.shape[0],
+            row_count,
             128,
             batch.target_height // 16,
             batch.target_width // 16,
         )
         if tuple(clean.shape) != expected or clean.dtype != torch.bfloat16:
             raise ValueError("Mage-VAE returned an unexpected latent contract")
-        image_coordinates = _full_canvas_coordinate_maps(
+        token_height = clean.shape[-2]
+        token_width = clean.shape[-1]
+        logical_coordinates = _full_canvas_coordinate_maps(
             batch,
-            token_height=clean.shape[-2],
-            token_width=clean.shape[-1],
+            token_height=token_height,
+            token_width=token_width,
             device=clean.device,
         )
+        if mirror_layout is None:
+            image_coordinates = logical_coordinates
+        else:
+            image_coordinates = _mirror_view_coordinate_maps(
+                batch,
+                logical_coordinates,
+                mirror_layout,
+                token_height=token_height,
+                token_width=token_width,
+                device=clean.device,
+            )
 
-        timestep = sample_jlt_timesteps(
-            clean.shape[0],
+        # Timesteps and noise are drawn ONCE per logical sample (the exact
+        # pre-mirror RNG consumption) and expanded to the physical views, so
+        # both views of a pair share the same timestep and the same noise
+        # tensor while logical samples stay independent.
+        timestep_logical = sample_jlt_timesteps(
+            logical_count,
             p_mean=self.p_mean,
             p_std=self.p_std,
             device=self.device,
             generator=self.generator,
         )
-        noise = sample_noise(
-            clean,
+        noise_logical = sample_noise(
+            clean_logical,
             noise_scale=self.noise_scale,
             generator=self.generator,
         )
+        if mirror_layout is None:
+            timestep = timestep_logical
+            noise = noise_logical
+            qwen_states = hidden_states
+            main_token_lengths = batch.main_token_lengths
+        else:
+            expand = torch.as_tensor(
+                mirror_layout.phys_to_log,
+                dtype=torch.long,
+                device=self.device,
+            )
+            timestep = timestep_logical.index_select(0, expand)
+            noise = noise_logical.index_select(0, expand)
+            # Conditioning is row-wise and pair-shared: repeating the logical
+            # rows (one Qwen forward per logical sample) is numerically
+            # identical to re-running the encoders for the mirror views.
+            qwen_states = hidden_states.index_select(0, expand)
+            main_token_indices = main_token_indices.index_select(0, expand)
+            main_mask = main_mask.index_select(0, expand)
+            main_token_lengths = tuple(
+                batch.main_token_lengths[logical]
+                for logical in mirror_layout.phys_to_log
+            )
+            condition_token_indices = condition_token_indices.index_select(
+                0, expand
+            )
+            condition_mask = condition_mask.index_select(0, expand)
+            use_null_condition = use_null_condition.index_select(0, expand)
+            active_condition_sample_indices = (
+                _physical_active_condition_indices(
+                    batch.active_condition_sample_indices, mirror_layout
+                )
+            )
         state = interpolate_state(clean, noise, timestep)
-        size_scale, aspect = _size_conditions(batch, device=self.device)
+        size_scale, aspect = _size_conditions(
+            batch, device=self.device, count=row_count
+        )
         inputs = TrainableCompositeInputs(
-            qwen_states=hidden_states,
+            qwen_states=qwen_states,
             main_token_indices=main_token_indices,
             main_mask=main_mask,
-            main_token_lengths=batch.main_token_lengths,
+            main_token_lengths=main_token_lengths,
             condition_token_indices=condition_token_indices,
             condition_mask=condition_mask,
             use_null_condition=use_null_condition,
@@ -825,6 +1260,10 @@ class SingleGpuBatchRuntime:
             inputs=inputs,
             clean_latents=tuple(item for item in clean.unbind(0)),
             states=tuple(item for item in state.unbind(0)),
+            mirror_layout=mirror_layout,
+            timestep_logical=(
+                timestep_logical if mirror_layout is not None else None
+            ),
         )
 
     def measure(
@@ -843,8 +1282,16 @@ class SingleGpuBatchRuntime:
         else:
             with phase_timer.record("loss"):
                 loss = self._loss(predictions, prepared)
+        # Compute facts (image tokens / DiT flops) count the physical views
+        # the DiT actually processed; the logical/physical distinction is
+        # carried by the camera_mirror counters.
+        view_count = (
+            prepared.mirror_layout.physical_count
+            if prepared.mirror_layout is not None
+            else batch.images.shape[0]
+        )
         image_tokens = (
-            batch.images.shape[0]
+            view_count
             * (batch.target_height // 16)
             * (batch.target_width // 16)
         )
@@ -870,7 +1317,13 @@ class SingleGpuBatchRuntime:
             high_noise_sample_count=loss.high_noise_sample_count,
             low_noise_loss_sum=loss.low_noise_loss_sum,
             low_noise_sample_count=loss.low_noise_sample_count,
-            timesteps=prepared.inputs.timestep,
+            # The observed timesteps stay in the logical-sample domain (one
+            # value per source sample); mirror pairs share one timestep.
+            timesteps=(
+                prepared.timestep_logical
+                if prepared.timestep_logical is not None
+                else prepared.inputs.timestep
+            ),
             dropout_hits=batch.dropout_hits,
             condition_routes=batch.condition_routes,
             captions=batch.captions,
@@ -879,6 +1332,7 @@ class SingleGpuBatchRuntime:
             camera_viewport=batch.camera_viewport,
             camera_zoom_bands=camera_bands,
             transparent=batch.transparent,
+            camera_mirror=batch.camera_mirror,
         )
 
     def _loss(
@@ -898,38 +1352,50 @@ class SingleGpuBatchRuntime:
                 t_eps=self.t_eps,
                 noise_observation_boundary=self.noise_observation_boundary,
             )
-            return _RuntimeLoss(
+            physical = _RuntimeLoss(
                 result.per_sample,
                 result.high_noise_loss_sum,
                 result.high_noise_sample_count,
                 result.low_noise_loss_sum,
                 result.low_noise_sample_count,
             )
-        values: list[torch.Tensor] = []
-        high_loss: list[torch.Tensor] = []
-        high_count: list[torch.Tensor] = []
-        low_loss: list[torch.Tensor] = []
-        low_count: list[torch.Tensor] = []
-        for index, prediction in enumerate(predictions):
-            result = flow_matching_loss(
-                prediction.unsqueeze(0),
-                prepared.states[index].unsqueeze(0),
-                prepared.clean_latents[index].unsqueeze(0),
-                prepared.inputs.timestep[index : index + 1],
-                t_eps=self.t_eps,
-                noise_observation_boundary=self.noise_observation_boundary,
+        else:
+            values: list[torch.Tensor] = []
+            high_loss: list[torch.Tensor] = []
+            high_count: list[torch.Tensor] = []
+            low_loss: list[torch.Tensor] = []
+            low_count: list[torch.Tensor] = []
+            for index, prediction in enumerate(predictions):
+                result = flow_matching_loss(
+                    prediction.unsqueeze(0),
+                    prepared.states[index].unsqueeze(0),
+                    prepared.clean_latents[index].unsqueeze(0),
+                    prepared.inputs.timestep[index : index + 1],
+                    t_eps=self.t_eps,
+                    noise_observation_boundary=self.noise_observation_boundary,
+                )
+                values.append(result.per_sample[0])
+                high_loss.append(result.high_noise_loss_sum)
+                high_count.append(result.high_noise_sample_count)
+                low_loss.append(result.low_noise_loss_sum)
+                low_count.append(result.low_noise_sample_count)
+            physical = _RuntimeLoss(
+                torch.stack(values),
+                torch.stack(high_loss).sum(),
+                torch.stack(high_count).sum(),
+                torch.stack(low_loss).sum(),
+                torch.stack(low_count).sum(),
             )
-            values.append(result.per_sample[0])
-            high_loss.append(result.high_noise_loss_sum)
-            high_count.append(result.high_noise_sample_count)
-            low_loss.append(result.low_noise_loss_sum)
-            low_count.append(result.low_noise_sample_count)
-        return _RuntimeLoss(
-            torch.stack(values),
-            torch.stack(high_loss).sum(),
-            torch.stack(high_count).sum(),
-            torch.stack(low_loss).sum(),
-            torch.stack(low_count).sum(),
+        layout = prepared.mirror_layout
+        if layout is None or not layout.mirror_phys:
+            return physical
+        if prepared.timestep_logical is None:
+            raise ValueError("mirror batch is missing its logical timesteps")
+        return _reduce_mirror_observation(
+            physical,
+            layout,
+            prepared.timestep_logical,
+            self.noise_observation_boundary,
         )
 
 

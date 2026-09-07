@@ -21,13 +21,28 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import torch
+
 from sakuramoon.data.buckets import BucketAssignment, BucketShape
 
 if TYPE_CHECKING:
-    from sakuramoon.config.schema import DataCameraViewportConfig
+    from sakuramoon.config.schema import (
+        DataCameraMirrorBalanceConfig,
+        DataCameraViewportConfig,
+    )
 
 CAMERA_POLICY_DOMAIN = "camera-policy"
 CAMERA_OFFSET_DOMAIN = "camera-offset"
+# Isolated deterministic RNG domain for the mirror-balance selection draw.
+# It is a separate domain so an enabled/disabled mirror policy can never
+# perturb the caption, crop, camera-selection, or camera-offset streams.
+MIRROR_POLICY_DOMAIN = "camera-mirror-policy"
+
+MIRROR_MODE_V1 = "vertical_mirror_pair_v1"
+
+MIRROR_SEVERITY_BAND_LABELS: tuple[str, ...] = ("lt2", "2to4", "ge4")
+
+MIRROR_SIDE_LABELS: tuple[str, ...] = ("start", "center", "end")
 
 CAMERA_VAE_SCALE = 16
 
@@ -688,6 +703,400 @@ def aggregate_camera_viewport(audits: Iterable[object]) -> CameraViewportCounts:
     )
 
 
+@dataclass(frozen=True)
+class CameraMirrorPolicy:
+    """Validated vertical mirror-balanced supervision policy (exact floats).
+
+    Data-strategy only: the policy decides whether an eligible vertical camera
+    sample also trains a mirrored crop of the SAME full canvas, with exactly
+    the same source, zoom, retention, |shift|, caption and conditioning. The
+    training objective weights the pair as one logical sample
+    (0.5 * L_original + 0.5 * L_mirror). The payload it authorizes carries one
+    mirror image tensor; the geometry and RNG domain stay here.
+    """
+
+    enabled: bool
+    mode: str
+    min_latent_shift: float
+    pair_probability: float
+    pair_weight: float
+
+    def __post_init__(self) -> None:
+        if type(self.enabled) is not bool:
+            raise CameraViewportError("mirror policy enabled must be a bool")
+        if self.mode != MIRROR_MODE_V1:
+            raise CameraViewportError(
+                f"mirror policy mode must be {MIRROR_MODE_V1!r}"
+            )
+        if (
+            type(self.min_latent_shift) is not float
+            or not math.isfinite(self.min_latent_shift)
+            or not 0.0 < self.min_latent_shift <= 4.0
+        ):
+            raise CameraViewportError(
+                "mirror policy min_latent_shift must be a finite float in (0, 4]"
+            )
+        if (
+            type(self.pair_probability) is not float
+            or not math.isfinite(self.pair_probability)
+            or not 0.0 <= self.pair_probability <= 1.0
+        ):
+            raise CameraViewportError(
+                "mirror policy pair_probability must be a finite float in [0, 1]"
+            )
+        if (
+            type(self.pair_weight) is not float
+            or not math.isfinite(self.pair_weight)
+            or self.pair_weight != 1.0
+        ):
+            raise CameraViewportError(
+                "mirror policy pair_weight must be exactly 1.0 "
+                "(one logical sample, two 0.5-weighted physical views)"
+            )
+
+    @classmethod
+    def from_config(
+        cls, config: DataCameraMirrorBalanceConfig | None
+    ) -> CameraMirrorPolicy | None:
+        if config is None:
+            return None
+        return cls(
+            enabled=config.enabled,
+            mode=config.mode,
+            min_latent_shift=config.min_latent_shift,
+            pair_probability=config.pair_probability,
+            pair_weight=config.pair_weight,
+        )
+
+
+@dataclass(frozen=True)
+class CameraMirrorPayload:
+    """The mirror branch of one logical mirror pair (worker-level data).
+
+    Carries only what is needed to train the mirror view: the mirror crop
+    image (same R x R target as the original view) plus the mirror geometry
+    needed to rebuild its full-canvas coordinates. The source, full canvas,
+    zoom, retention, |shift|, caption tokens, Qwen states and condition routing
+    are shared with the original row by construction and are NOT duplicated
+    here.
+    """
+
+    mirror_image: torch.Tensor
+    crop_box: tuple[int, int, int, int]
+    signed_pixel_center_shift: float
+    camera_shift_y: float
+    normalized_offset: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mirror_image, torch.Tensor) or self.mirror_image.ndim != 3:
+            raise CameraViewportError("mirror payload image must be a [3, R, R] tensor")
+        if self.mirror_image.shape[0] != 3:
+            raise CameraViewportError("mirror payload image must be RGB")
+        if self.mirror_image.shape[-2] != self.mirror_image.shape[-1]:
+            raise CameraViewportError("mirror payload image must be square")
+        if self.mirror_image.dtype != torch.uint8:
+            raise CameraViewportError("mirror payload image must be uint8")
+        if len(self.crop_box) != 4 or any(type(edge) is not int or edge < 0 for edge in self.crop_box):
+            raise CameraViewportError("mirror payload crop box must be four nonnegative ints")
+        left, top, right, bottom = self.crop_box
+        if (
+            right - left != self.mirror_image.shape[-1]
+            or bottom - top != self.mirror_image.shape[-2]
+        ):
+            raise CameraViewportError(
+                "mirror payload crop box must match the mirror image size"
+            )
+        for name in (
+            "signed_pixel_center_shift",
+            "camera_shift_y",
+            "normalized_offset",
+        ):
+            value = getattr(self, name)
+            if type(value) is not float or not math.isfinite(value):
+                raise CameraViewportError(
+                    f"mirror payload {name} must be a finite float"
+                )
+        if not 0.0 <= self.normalized_offset <= 1.0:
+            raise CameraViewportError(
+                "mirror payload normalized_offset must be in [0, 1]"
+            )
+
+
+def mirror_severity_band(latent_shift: float) -> str:
+    """Fixed severity band label of one absolute latent-center shift."""
+
+    if (
+        type(latent_shift) is not float
+        or not math.isfinite(latent_shift)
+        or latent_shift < 0.0
+    ):
+        raise CameraViewportError(
+            "mirror severity band requires a nonnegative finite latent shift"
+        )
+    if latent_shift < 2.0:
+        return MIRROR_SEVERITY_BAND_LABELS[0]
+    if latent_shift < 4.0:
+        return MIRROR_SEVERITY_BAND_LABELS[1]
+    return MIRROR_SEVERITY_BAND_LABELS[2]
+
+
+def mirror_side(normalized_offset: float) -> str:
+    """Fixed side band of one normalized long-axis crop offset in [0, 1].
+
+    ``start`` = offset < 1/3, ``center`` = 1/3 <= offset < 2/3,
+    ``end`` = offset >= 2/3. The mirror offset is exactly 1 - offset, so
+    start and end exchange under mirroring while center maps to center.
+    """
+
+    if (
+        type(normalized_offset) is not float
+        or not math.isfinite(normalized_offset)
+        or not 0.0 <= normalized_offset <= 1.0
+    ):
+        raise CameraViewportError(
+        "mirror side requires a finite normalized offset in [0, 1]"
+    )
+    if normalized_offset < 1.0 / 3.0:
+        return MIRROR_SIDE_LABELS[0]
+    if normalized_offset < 2.0 / 3.0:
+        return MIRROR_SIDE_LABELS[1]
+    return MIRROR_SIDE_LABELS[2]
+
+
+def camera_mirror_eligible(
+    plan: CameraViewportPlan, *, min_latent_shift: float
+) -> bool:
+    """V1 eligibility: applied vertical camera with a severe long-axis shift.
+
+    Horizontal views, latent shift below the threshold, and odd viewports
+    (which cannot give the exact signed-shift antisymmetry) are ineligible.
+    Fallback / not-selected plans are ineligible by construction.
+    """
+
+    if type(min_latent_shift) is not float or not math.isfinite(min_latent_shift):
+        raise CameraViewportError("mirror eligibility requires a finite threshold")
+    if not plan.applied:
+        return False
+    if plan.orientation != "vertical":
+        return False
+    if plan.viewport % 2 != 0:
+        return False
+    return plan.latent_center_shift >= min_latent_shift
+
+
+def plan_mirror_geometry(plan: CameraViewportPlan) -> tuple[int, tuple[int, int, int, int], float, float, float] | None:
+    """Mirror crop geometry for one vertical camera plan, or None.
+
+    Returns ``(mirror_top, mirror_crop_box, mirror_signed_shift,
+    mirror_camera_shift_y, mirror_normalized_offset)``. The exact contract
+    ``signed_shift(mirror_top) == -signed_shift(top)`` is re-verified on the
+    computed geometry; a violation (defensive; even viewports satisfy it
+    exactly in float64) yields None instead of an invalid geometry.
+    """
+
+    if plan.orientation != "vertical":
+        raise CameraViewportError("mirror geometry requires a vertical plan")
+    full_height = plan.full_height
+    viewport = plan.viewport
+    if viewport % 2 != 0:
+        return None
+    available = full_height - viewport
+    original_top = plan.top
+    if not 0 <= original_top <= available:
+        raise CameraViewportError("mirror geometry requires a plan within the canvas")
+    mirror_top = available - original_top
+    mirror_box = (0, mirror_top, viewport, mirror_top + viewport)
+    original_signed = float(original_top + viewport // 2) - float(full_height) / 2.0
+    mirror_signed = float(mirror_top + viewport // 2) - float(full_height) / 2.0
+    if mirror_signed != -original_signed:
+        return None
+    mirror_shift_y = 2.0 * mirror_top / viewport + 1.0 - full_height / viewport
+    mirror_offset = mirror_top / available if available > 0 else 0.5
+    return mirror_top, mirror_box, mirror_signed, mirror_shift_y, mirror_offset
+
+
+@dataclass(frozen=True, slots=True)
+class CameraMirrorCounts:
+    """Fixed camera-mirror counters aggregated over one batch.
+
+    Conservation equations (enforced in ``__post_init__``):
+      mirror_applied <= mirror_selected <= mirror_eligible <= vertical_applied
+      severity_lt2 + severity_2to4 + severity_ge4 == vertical_applied
+      original_start + original_center + original_end == mirror_applied
+      mirror_start + mirror_center + mirror_end == mirror_applied
+      mirror_extra_views == mirror_applied
+      physical_views == logical_samples + mirror_extra_views
+
+    ``severity_*`` count the vertical-applied camera population of the batch
+    (a population statistic, so the later >=4 review can see the full
+    distribution); every other key is intervention activity and is zero when
+    the feature produced nothing (which also covers the disabled case).
+    """
+
+    logical_samples: int
+    vertical_applied: int
+    mirror_eligible: int
+    mirror_selected: int
+    mirror_applied: int
+    severity_lt2: int
+    severity_2to4: int
+    severity_ge4: int
+    original_start: int
+    original_center: int
+    original_end: int
+    mirror_start: int
+    mirror_center: int
+    mirror_end: int
+    mirror_extra_views: int
+    physical_views: int
+
+    def __post_init__(self) -> None:
+        for name in (
+            "logical_samples",
+            "vertical_applied",
+            "mirror_eligible",
+            "mirror_selected",
+            "mirror_applied",
+            "severity_lt2",
+            "severity_2to4",
+            "severity_ge4",
+            "original_start",
+            "original_center",
+            "original_end",
+            "mirror_start",
+            "mirror_center",
+            "mirror_end",
+            "mirror_extra_views",
+            "physical_views",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise CameraViewportError(
+                    f"camera mirror count {name} must be a nonnegative integer"
+                )
+        if not (
+            self.mirror_applied
+            <= self.mirror_selected
+            <= self.mirror_eligible
+            <= self.vertical_applied
+            <= self.logical_samples
+        ):
+            raise CameraViewportError(
+                "camera mirror counts violate applied<=selected<=eligible<=vertical<=logical"
+            )
+        if (
+            self.severity_lt2 + self.severity_2to4 + self.severity_ge4
+            != self.vertical_applied
+        ):
+            raise CameraViewportError(
+                "camera mirror severity bands must cover the vertical-applied population"
+            )
+        if (
+            self.original_start + self.original_center + self.original_end
+            != self.mirror_applied
+        ):
+            raise CameraViewportError(
+                "camera mirror original side counts must cover applied pairs"
+            )
+        if (
+            self.mirror_start + self.mirror_center + self.mirror_end
+            != self.mirror_applied
+        ):
+            raise CameraViewportError(
+                "camera mirror mirror side counts must cover applied pairs"
+            )
+        if self.mirror_extra_views != self.mirror_applied:
+            raise CameraViewportError(
+                "camera mirror extra views must equal applied pairs"
+            )
+        if self.physical_views != self.logical_samples + self.mirror_extra_views:
+            raise CameraViewportError(
+                "camera mirror physical views must equal logical + extra views"
+            )
+
+
+def zero_camera_mirror_counts(logical_samples: int) -> CameraMirrorCounts:
+    """The strict-zero table for a batch with no camera-mirror activity."""
+
+    return CameraMirrorCounts(
+        logical_samples=logical_samples,
+        vertical_applied=0,
+        mirror_eligible=0,
+        mirror_selected=0,
+        mirror_applied=0,
+        severity_lt2=0,
+        severity_2to4=0,
+        severity_ge4=0,
+        original_start=0,
+        original_center=0,
+        original_end=0,
+        mirror_start=0,
+        mirror_center=0,
+        mirror_end=0,
+        mirror_extra_views=0,
+        physical_views=logical_samples,
+    )
+
+
+def aggregate_camera_mirror(samples: Iterable[object]) -> CameraMirrorCounts:
+    """Aggregate the fixed camera-mirror counters from PipelineSamples.
+
+    Reads duck-typed fields: ``audit.camera_applied``,
+    ``audit.camera_orientation``, ``audit.camera_latent_center_shift``,
+    ``audit.camera_normalized_offset`` and the per-sample mirror facts
+    (``mirror`` payload, ``mirror_eligible``, ``mirror_selected``).
+    """
+
+    vertical_applied = 0
+    eligible = 0
+    selected = 0
+    applied = 0
+    severity = {label: 0 for label in MIRROR_SEVERITY_BAND_LABELS}
+    original_sides = {label: 0 for label in MIRROR_SIDE_LABELS}
+    mirror_sides = {label: 0 for label in MIRROR_SIDE_LABELS}
+    logical_samples = 0
+    for sample in samples:
+        logical_samples += 1
+        audit = sample.audit  # type: ignore[attr-defined]
+        if audit.camera_applied and audit.camera_orientation == "vertical":
+            vertical_applied += 1
+            severity[
+                mirror_severity_band(
+                    abs(float(audit.camera_latent_center_shift))
+                )
+            ] += 1
+        if sample.mirror_eligible:  # type: ignore[attr-defined]
+            eligible += 1
+        if sample.mirror_selected:  # type: ignore[attr-defined]
+            selected += 1
+        payload = sample.mirror  # type: ignore[attr-defined]
+        if payload is None:
+            continue
+        applied += 1
+        original_sides[mirror_side(float(audit.camera_normalized_offset))] += 1
+        mirror_sides[mirror_side(payload.normalized_offset)] += 1
+    if vertical_applied == 0 and eligible == 0 and selected == 0 and applied == 0:
+        return zero_camera_mirror_counts(logical_samples)
+    return CameraMirrorCounts(
+        logical_samples=logical_samples,
+        vertical_applied=vertical_applied,
+        mirror_eligible=eligible,
+        mirror_selected=selected,
+        mirror_applied=applied,
+        severity_lt2=severity[MIRROR_SEVERITY_BAND_LABELS[0]],
+        severity_2to4=severity[MIRROR_SEVERITY_BAND_LABELS[1]],
+        severity_ge4=severity[MIRROR_SEVERITY_BAND_LABELS[2]],
+        original_start=original_sides[MIRROR_SIDE_LABELS[0]],
+        original_center=original_sides[MIRROR_SIDE_LABELS[1]],
+        original_end=original_sides[MIRROR_SIDE_LABELS[2]],
+        mirror_start=mirror_sides[MIRROR_SIDE_LABELS[0]],
+        mirror_center=mirror_sides[MIRROR_SIDE_LABELS[1]],
+        mirror_end=mirror_sides[MIRROR_SIDE_LABELS[2]],
+        mirror_extra_views=applied,
+        physical_views=logical_samples + applied,
+    )
+
+
 __all__ = [
     "CAMERA_FALLBACK_REASONS",
     "CAMERA_MAX_EQUIVALENT_ZOOM_CEILING",
@@ -697,14 +1106,27 @@ __all__ = [
     "CAMERA_SHIFT_TOKEN_BIN_LABELS",
     "CAMERA_VAE_SCALE",
     "CAMERA_ZOOM_BAND_LABELS",
+    "MIRROR_MODE_V1",
+    "MIRROR_POLICY_DOMAIN",
+    "MIRROR_SEVERITY_BAND_LABELS",
+    "MIRROR_SIDE_LABELS",
+    "CameraMirrorCounts",
+    "CameraMirrorPayload",
+    "CameraMirrorPolicy",
     "CameraViewportCounts",
     "CameraViewportError",
     "CameraViewportPlan",
     "CameraViewportPolicy",
+    "aggregate_camera_mirror",
     "aggregate_camera_viewport",
+    "camera_mirror_eligible",
     "camera_shift_token_bin",
     "camera_stage_edge",
     "camera_zoom_band",
     "discover_square_bucket",
+    "mirror_severity_band",
+    "mirror_side",
     "plan_camera_viewport",
+    "plan_mirror_geometry",
+    "zero_camera_mirror_counts",
 ]

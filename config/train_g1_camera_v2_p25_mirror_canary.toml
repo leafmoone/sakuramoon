@@ -1,0 +1,48 @@
+# vertical_mirror_pair_v1 canary on top of the p25 camera line: eligible
+# severe vertical camera samples (latent center shift >= 2.0) additionally
+# train the exact mirrored crop of the SAME full canvas as ONE logical
+# source sample (0.5 * L_original + 0.5 * L_mirror, same timestep, same
+# noise, shared caption/conditioning).
+#
+# Data strategy change only -- model architecture, optimizer, LR, batch,
+# objective, scheduler and checkpoint schema are untouched. Extends the
+# p25 canary (train_g1_camera_v2_p25.toml, which extends the production
+# G1 config) and overrides exactly:
+#   - run identity and fully independent run/checkpoint/artifact paths
+#   - [data.camera_mirror_balance]: enabled, v1 mode, min_latent_shift
+#     exactly 2.0, pair_probability 1.0, pair_weight exactly 1.0
+#
+# The camera viewport policy itself (p=0.25, zoom 1.10-1.50) is unchanged:
+# the mirror policy only reuses already-applied vertical plans and adds a
+# second physical view from the same normalized full canvas.
+#
+# REVIEW ONLY: this config is NOT deployed and NOT launched. The canary
+# starts only after external review of the design branch and an explicit
+# user GO; it then resumes from a COMPLETE production checkpoint via
+# scripts/training_stack.sh (see AGENTS.md launch contract).
+
+extends = ["train_g1_camera_v2_p25.toml"]
+
+[run]
+run_id = "g1_camera_v2_p25_mirror"
+
+[paths]
+run_dir = "runs/g1_camera_v2_p25_mirror"
+checkpoint_dir = "output_model/g1_camera_v2_p25_mirror"
+artifact_dir = "artifacts/g1_camera_v2_p25_mirror"
+
+[logging]
+local_jsonl_path = "artifacts/g1_camera_v2_p25_mirror/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/g1_camera_v2_p25_mirror/wandb-retry.jsonl"
+
+[evaluation]
+output_dir = "output_model/evaluation/g1_camera_v2_p25_mirror"
+
+[data.camera_mirror_balance]
+enabled = true
+mode = "vertical_mirror_pair_v1"
+min_latent_shift = 2.0
+pair_probability = 1.0
+pair_weight = 1.0

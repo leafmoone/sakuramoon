@@ -336,7 +336,16 @@ def _record_data_policy_resume_transition(
         config.data.camera_viewport is not None
         and config.data.camera_viewport.enabled
     )
-    if not spatial_enabled and not transparent_enabled and not camera_enabled:
+    mirror_enabled = (
+        config.data.camera_mirror_balance is not None
+        and config.data.camera_mirror_balance.enabled
+    )
+    if (
+        not spatial_enabled
+        and not transparent_enabled
+        and not camera_enabled
+        and not mirror_enabled
+    ):
         return
     changed: tuple[str, ...] = ()
     sidecar = resume / "resolved_config.toml"
@@ -372,6 +381,11 @@ def _record_data_policy_resume_transition(
             config.data.camera_viewport.model_dump(mode="json")
         )
         skip_keys = (*skip_keys, "camera_viewport")
+    if config.data.camera_mirror_balance is not None and mirror_enabled:
+        record["camera_mirror_balance"] = (
+            config.data.camera_mirror_balance.model_dump(mode="json")
+        )
+        skip_keys = (*skip_keys, "camera_mirror_balance")
     if changed:
         record["resolved_config_changed_toml_paths"] = list(changed)
         skip_keys = (*skip_keys, "resolved_config_changed_toml_paths")

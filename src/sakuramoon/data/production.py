@@ -14,7 +14,7 @@ from typing import Never, SupportsIndex, cast
 
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.buckets import generate_base_buckets, scale_buckets
-from sakuramoon.data.camera_viewport import CameraViewportPolicy
+from sakuramoon.data.camera_viewport import CameraMirrorPolicy, CameraViewportPolicy
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
@@ -818,6 +818,11 @@ class ProductionPipelineFactory:
             if self.config.data.camera_viewport is not None
             else None
         )
+        mirror_policy = (
+            CameraMirrorPolicy.from_config(self.config.data.camera_mirror_balance)
+            if self.config.data.camera_mirror_balance is not None
+            else None
+        )
         pipeline = WebDatasetPipeline(
             shard_paths=(descriptor.local_path,),
             shard_records=(descriptor.record,),
@@ -836,6 +841,7 @@ class ProductionPipelineFactory:
             cycle_index=descriptor.cycle_index,
             spatial_policy=spatial_policy,
             camera_policy=camera_policy,
+            mirror_policy=mirror_policy,
             transparent_policy=self.config.data.transparent_background,
         )
         _require_spawn_serializable(pipeline, "production pipeline")

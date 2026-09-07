@@ -17,7 +17,10 @@ import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from sakuramoon.data.camera_viewport import (
+    CameraMirrorCounts,
+    CameraMirrorPayload,
     CameraViewportCounts,
+    aggregate_camera_mirror,
     aggregate_camera_viewport,
 )
 from sakuramoon.data.caption import (
@@ -96,6 +99,12 @@ class TrainingBatch:
     transparent: TransparentWhiteCounts
     # Exact post-dropout/post-assembly captions are retained for periodic samples.
     captions: tuple[SerializedCaption, ...] = ()
+    # Row-aligned optional mirror payloads (None for non-pair rows). The
+    # defaults keep every pre-mirror batch bit-identical.
+    mirror: tuple[CameraMirrorPayload | None, ...] = ()
+    # Fixed-key camera-mirror counters for the batch (None = pre-mirror batch;
+    # consumers treat it as the strict-zero table for len(samples) rows).
+    camera_mirror: CameraMirrorCounts | None = None
 
     def pin_memory(self) -> TrainingBatch:
         return replace(
@@ -453,6 +462,46 @@ def _active_condition_sample_indices(
     return torch.tensor(active_samples, dtype=torch.long)
 
 
+def _require_mirror_payloads(
+    samples: tuple[PipelineSample, ...],
+    *,
+    height: int,
+    width: int,
+) -> None:
+    """Mirror payloads must be the exact vertical mirror of the batch target.
+
+    Every non-None payload carries a mirror image at the batch's target square
+    (uint8 RGB) and a mirror crop box anchored at the canvas left edge
+    (vertical orientation only).
+    """
+
+    for row, sample in enumerate(samples):
+        payload = sample.mirror
+        if payload is None:
+            continue
+        if payload.mirror_image.shape != (3, height, width):
+            raise CollateError(
+                f"mirror payload row {row} differs from the batch target square"
+            )
+        if payload.mirror_image.dtype != torch.uint8:
+            raise CollateError(
+                f"mirror payload row {row} must be a uint8 RGB tensor"
+            )
+        left, top, right, bottom = payload.crop_box
+        if (left, right, bottom - top, right - left) != (0, width, height, width):
+            raise CollateError(
+                f"mirror payload row {row} crop box is not the vertical mirror box"
+            )
+        if not sample.mirror_eligible:
+            raise CollateError(
+                f"mirror payload row {row} is not camera-mirror eligible"
+            )
+        if not sample.mirror_selected:
+            raise CollateError(
+                f"mirror payload row {row} was not selected by the mirror policy"
+            )
+
+
 def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
     if not samples:
         raise CollateError("collate requires samples")
@@ -476,6 +525,11 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         for sample in samples
     ):
         raise CollateError("batch images must be RGB uint8 tensors at the target size")
+    _require_mirror_payloads(
+        samples,
+        height=first.target_height,
+        width=first.target_width,
+    )
     _validate_main_indices(samples)
     active_condition_sample_indices = _active_condition_sample_indices(samples)
 
@@ -553,6 +607,8 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         ),
         transparent=aggregate_transparent_white(samples),
         captions=tuple(sample.caption for sample in samples),
+        mirror=tuple(sample.mirror for sample in samples),
+        camera_mirror=aggregate_camera_mirror(samples),
     )
 
 

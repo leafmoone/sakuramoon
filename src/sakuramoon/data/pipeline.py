@@ -20,10 +20,15 @@ from torch.utils.data import IterableDataset, get_worker_info
 from sakuramoon.config.schema import DataTransparentBackgroundConfig
 from sakuramoon.data.buckets import BucketShape
 from sakuramoon.data.camera_viewport import (
+    MIRROR_POLICY_DOMAIN,
+    CameraMirrorPayload,
+    CameraMirrorPolicy,
     CameraViewportPlan,
     CameraViewportPolicy,
+    camera_mirror_eligible,
     camera_stage_edge,
     plan_camera_viewport,
+    plan_mirror_geometry,
 )
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
@@ -162,6 +167,8 @@ class RngIdentity:
     spatial_offset_y_seed: int = 0
     camera_policy_seed: int = 0
     camera_offset_seed: int = 0
+    # Mirror-balance selection draw (isolated domain; 0 = pre-mirror identity).
+    mirror_policy_seed: int = 0
 
 
 @dataclass(frozen=True)
@@ -216,6 +223,13 @@ class PipelineSample:
     # NOT_TAGGED or COMPOSITED (rejects never reach this object); the default
     # keeps the ordinary (untagged) path bit-identical.
     transparent_outcome: TransparentWhiteOutcome = TransparentWhiteOutcome.NOT_TAGGED
+    # Optional vertical mirror-balanced supervision payload (v1). None for
+    # every non-pair sample; the defaults keep the pre-mirror path
+    # bit-identical. A non-None payload marks this sample as ONE logical
+    # source sample with two physical views (original + mirror).
+    mirror: CameraMirrorPayload | None = None
+    mirror_eligible: bool = False
+    mirror_selected: bool = False
 
 
 def _validate_local_shard_paths(shard_paths: tuple[Path, ...]) -> None:
@@ -309,6 +323,9 @@ def rng_identity(
         camera_offset_seed=_domain_seed(
             base_seed, stage, cycle_index, sample_id, "camera-offset"
         ),
+        mirror_policy_seed=_domain_seed(
+            base_seed, stage, cycle_index, sample_id, MIRROR_POLICY_DOMAIN
+        ),
     )
 
 
@@ -353,6 +370,9 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
     """Decode and serialize each sample from service-approved training shards."""
 
     condition_mode: ConditionMode
+    # Class-level default so hand-built (object.__new__) pipelines used by the
+    # test suite keep the exact pre-mirror behavior without the field.
+    mirror_policy: CameraMirrorPolicy | None = None
 
     def __init__(
         self,
@@ -374,6 +394,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         cycle_index: int,
         spatial_policy: SpatialCropPolicy | None = None,
         camera_policy: CameraViewportPolicy | None = None,
+        mirror_policy: CameraMirrorPolicy | None = None,
         transparent_policy: DataTransparentBackgroundConfig | None = None,
         transparent_telemetry: TransparentWhiteTelemetry | None = None,
     ) -> None:
@@ -421,6 +442,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 or isinstance(camera_policy, CameraViewportPolicy)  # pyright: ignore[reportUnnecessaryIsInstance]
             )
             or not (
+                mirror_policy is None
+                or isinstance(mirror_policy, CameraMirrorPolicy)  # pyright: ignore[reportUnnecessaryIsInstance]
+            )
+            or not (
                 transparent_policy is None
                 or isinstance(transparent_policy, DataTransparentBackgroundConfig)  # pyright: ignore[reportUnnecessaryIsInstance]
             )
@@ -443,6 +468,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.cycle_index = cycle_index
         self.spatial_policy = spatial_policy
         self.camera_policy = camera_policy
+        self.mirror_policy = mirror_policy
         self._camera_stage_edge = camera_stage_edge(buckets)
         self.transparent_policy = transparent_policy
         self.transparent_telemetry = (
@@ -601,6 +627,9 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                     ).crop(spatial_plan.crop_box)
             camera_plan: CameraViewportPlan | None = None
             camera_image: Image.Image | None = None
+            mirror_payload: CameraMirrorPayload | None = None
+            mirror_eligible = False
+            mirror_selected = False
             if self.camera_policy is not None and self.camera_policy.enabled:
                 camera_plan = plan_camera_viewport(
                     processed.assignment,
@@ -613,10 +642,58 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 )
                 if camera_plan.applied:
                     normalized = normalize_image(work_image)
-                    camera_image = normalized.resize(
+                    # One LANCZOS canvas shared by the original crop and, when
+                    # the mirror policy selects this sample, the mirror crop
+                    # (the source image is never decoded or resized twice).
+                    camera_canvas = normalized.resize(
                         (camera_plan.full_width, camera_plan.full_height),
                         resample=Image.Resampling.LANCZOS,
-                    ).crop(camera_plan.crop_box)
+                    )
+                    camera_image = camera_canvas.crop(camera_plan.crop_box)
+                    if self.mirror_policy is not None and self.mirror_policy.enabled:
+                        mirror_eligible = camera_mirror_eligible(
+                            camera_plan,
+                            min_latent_shift=self.mirror_policy.min_latent_shift,
+                        )
+                        if mirror_eligible and random.Random(
+                            identity.mirror_policy_seed
+                        ).random() < self.mirror_policy.pair_probability:
+                            mirror_selected = True
+                            try:
+                                geometry = plan_mirror_geometry(camera_plan)
+                                if geometry is not None:
+                                    (
+                                        _mirror_top,
+                                        mirror_box,
+                                        mirror_signed,
+                                        mirror_shift_y,
+                                        mirror_offset,
+                                    ) = geometry
+                                    mirror_image = camera_canvas.crop(mirror_box)
+                                    mirror_payload = CameraMirrorPayload(
+                                        mirror_image=_uint8_chw(mirror_image),
+                                        crop_box=mirror_box,
+                                        signed_pixel_center_shift=mirror_signed,
+                                        camera_shift_y=mirror_shift_y,
+                                        normalized_offset=mirror_offset,
+                                    )
+                            except (
+                                ValueError,
+                                OSError,
+                                MemoryError,
+                                Image.DecompressionBombError,
+                            ):
+                                # A mirror-branch failure degrades to the
+                                # original-only view; it never rejects an
+                                # otherwise valid sample.
+                                mirror_payload = None
+                                mirror_selected = False
+                                mirror_eligible = False
+                                _trace_sample(
+                                    shard_record.path,
+                                    metadata.id,
+                                    "mirror_degraded",
+                                )
         except ImageRejected as error:
             _trace_sample(shard_record.path, metadata.id, f"reject:{error.reason}")
             self.rejection_observer(error.reason)
@@ -772,6 +849,9 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             rng=identity,
             padding_token_id=self.framing.padding_token_id,
             transparent_outcome=transparent_outcome,
+            mirror=mirror_payload,
+            mirror_eligible=mirror_eligible,
+            mirror_selected=mirror_selected,
         )
 
 
