@@ -1,0 +1,235 @@
+{
+  "round": "MBS 100U CANARY LAUNCH-READINESS — SAFE STOP-CAP + COMPILE-ON HCU SMOKE",
+  "training_started": false,
+  "base": {
+    "repository": "leafmoone/sakuramoon",
+    "base_sha": "18a5e87f3c092065f0ce50c9f9c94df4fd64d201",
+    "base_reviewed": true,
+    "branch": "camera-v2-mbs-canary-launch-readiness",
+    "worktree": "/sakuramoon-runtime/sakuramoon-camera-mbs-canary-launch-readiness",
+    "host": "come3",
+    "force_push": false,
+    "tooling_commit": "dec876b8b685a8cf8f3301958f7dd1056c49fee0",
+    "evidence_commit": "(this commit — recorded in the round transcript / FINAL COPY)",
+    "remote_sha": null
+  },
+  "source_checkpoint": {
+    "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+    "complete": true,
+    "successful_updates": 118100,
+    "attempted_updates": 118100,
+    "stage_budget_start": 58000,
+    "stage_budget_terminal": 168000,
+    "cadence": 100,
+    "manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+    "fingerprint_matches_fix_review_audit": true,
+    "modifications": "none"
+  },
+  "section4_facts": {
+    "A_target_is_stage_terminal_when_no_cap": true,
+    "B_loop_stops_at_target_with_ctor_fail_closed": true,
+    "C_post_update_before_recheck": true,
+    "D_118200_is_normal_cadence_point": true,
+    "resume_rejects_terminal_shrink": true
+  },
+  "stop_cap": {
+    "config_field": "stage.canary_stop_successful_update",
+    "config_type": "int | None (StageConfig, default None = unchanged)",
+    "stage_terminal": 168000,
+    "source_update": 118100,
+    "canary_invocation_stop": 118200,
+    "canary_length": 100,
+    "runtime_target": 118200,
+    "stage_budget_mutated": false,
+    "cadence_aligned": true,
+    "fail_closed_rejections": [
+      "non-int",
+      "zero_or_negative",
+      "lte_restored_successful_update",
+      "gt_stage_terminal",
+      "automatic_transition_not_false"
+    ],
+    "resume_from_stop_blocked": true,
+    "terminal_checkpoint_reason": "UPDATE_CADENCE",
+    "stage_finalize": false
+  },
+  "resolved_config_proof": {
+    "p25_stage": {
+      "planned_updates": 168000,
+      "automatic_transition": false
+    },
+    "canary_stage": {
+      "planned_updates": 168000,
+      "automatic_transition": false,
+      "canary_stop_successful_update": 118200
+    },
+    "canary_only_added_stage_leaf": "canary_stop_successful_update"
+  },
+  "compile_on_hcu_smoke": {
+    "script": "/sakuramoon-runtime/mbs-smoke/hcu_mbs_compile_smoke.py",
+    "evidence": "/sakuramoon-runtime/mbs-smoke/compile-smoke-evidence.json",
+    "device": "BW (Hygon DCU) cuda:0",
+    "torch": "2.9.0 (DTK venv)",
+    "compile": {
+      "enabled": true,
+      "backend": "inductor",
+      "mode": "max-autotune-no-cudagraphs",
+      "dynamic": true,
+      "resolved_from_real_canary_config": true,
+      "identical_to_u118100_production_resolved": true,
+      "compiled_blocks": 20,
+      "fail_on_recompile_limit_hit": true,
+      "suppress_errors": false
+    },
+    "layout_sequence": ["A", "B", "A"],
+    "cases": {
+      "A": {
+        "logical": 2,
+        "mirror_pairs": 0,
+        "physical": 2,
+        "rows": "two sub-threshold vertical null-condition rows (shifts 1.75 / 1.8125)"
+      },
+      "B": {
+        "logical": 2,
+        "mirror_pairs": 1,
+        "physical": 3,
+        "row0": "applied vertical shift 5.1875, mirror selected, active artist condition",
+        "row1": "sub-threshold shift 1.75, null condition",
+        "mirror_table": {
+          "logical_samples": 2,
+          "vertical_applied": 2,
+          "mirror_eligible": 1,
+          "mirror_selected": 1,
+          "mirror_applied": 1,
+          "mirror_extra_views": 1,
+          "physical_views": 3
+        }
+      }
+    },
+    "qwen_input_shape": [2, 98],
+    "qwen_calls_per_measure": 1,
+    "vae_input_shape_by_case": {
+      "A": [2, 3, 256, 256],
+      "B": [3, 3, 256, 256],
+      "A2": [2, 3, 256, 256]
+    },
+    "vae_calls_per_measure": 1,
+    "coordinate_map_counts": {
+      "A": 2,
+      "B": 3,
+      "A2": 2
+    },
+    "mirror_applied_by_case": {
+      "A": 0,
+      "B": 1,
+      "A2": 0
+    },
+    "losses_finite_positive_logical": {
+      "A": [0.0791, 0.0826],
+      "B": [0.0687, 0.0686],
+      "A2": [0.0911, 0.1029]
+    },
+    "pair_timestep_bitwise_equal": true,
+    "pair_noise_bitwise_equal": true,
+    "rows_distinct": true,
+    "active_condition_device_parity": "cuda:0",
+    "measure_seconds": {
+      "A_first_forward_includes_compilation": 32.686,
+      "B_second_physical_shape": 3.199,
+      "A2_warm_reentry": 0.137
+    },
+    "total_seconds": 84.267,
+    "compile_exception": false,
+    "recompile_limit_failure": false,
+    "eager_fallback": false,
+    "parameter_buffer_mutation": false,
+    "optimizer_used": false,
+    "checkpoint_write": false,
+    "peak_alloc_GiB": 6.992,
+    "checks_total": 41,
+    "checks_passed": 41,
+    "verdict": "PASS"
+  },
+  "mbs_camera_policy": {
+    "mirror_mode": "vertical_mirror_pair_v1",
+    "min_latent_shift": 2.0,
+    "pair_probability": 1.0,
+    "pair_weight": 1.0,
+    "horizontal_mirror": false,
+    "camera_mode": "hdm_shifted_square_v2",
+    "camera_probability": 0.25,
+    "camera_zoom_range": [1.1, 1.5],
+    "unchanged": true
+  },
+  "validation": {
+    "new_tests": 18,
+    "new_tests_skip": 0,
+    "new_tests_xfail": 0,
+    "new_tests_passed": "18/18 (21.26s, come3 DTK venv)",
+    "affected_suites": "53/53 (test_camera_mirror_balance.py + test_mbs_canary_stop_cap.py)",
+    "full_unit_new_tree": "955 passed / 4 failed (251.65s)",
+    "full_unit_base_tree": "937 passed / 4 failed (255.94s)",
+    "failure_sets_identical": true,
+    "new_failures": 0,
+    "preexisting_failures": "4 x tests/unit/optim/test_cmuon_fp32_forensic.py (same set both trees)",
+    "environment_note": "both trees run identical command with --ignore of 2 deepghs tests (DTK venv lacks onnxruntime, pre-existing gap, out of diff scope)",
+    "ruff_changed_scope": "clean (schema.py, runtime.py, both test files; repo py311 config)",
+    "py_compile": "clean (4 changed/new files)",
+    "git_diff_check": "clean",
+    "secrets": 0
+  },
+  "test_updates": [
+    {
+      "file": "tests/unit/data/test_camera_mirror_balance.py",
+      "test": "test_canary_config_changes_only_mirror_and_identity",
+      "reason": "section 9 legitimately adds stage.canary_stop_successful_update to the canary diff surface",
+      "change": "allowlist admits the one new leaf AND pins cap == 118200 and asserts planned_updates inheritance — strengthened, not weakened"
+    }
+  ],
+  "diff_scope": {
+    "files": [
+      "config/train_g1_camera_v2_p25_mirror_canary.toml",
+      "src/sakuramoon/config/schema.py",
+      "src/sakuramoon/train/runtime.py",
+      "tests/unit/train/test_mbs_canary_stop_cap.py",
+      "tests/unit/data/test_camera_mirror_balance.py"
+    ],
+    "tracked_diff_stat": "4 files changed, 72 insertions(+), 5 deletions(-) (new test file untracked until commit)",
+    "untouched": [
+      "RoPE",
+      "DiT",
+      "conditioner",
+      "Qwen",
+      "VAE",
+      "camera geometry",
+      "mirror geometry",
+      "objective",
+      "optimizer",
+      "CMuon",
+      "scheduler implementation",
+      "checkpoint schema"
+    ]
+  },
+  "security": {
+    "secrets": 0,
+    "checkpoint_staged": false,
+    "dataset_staged": false,
+    "binary_staged": false
+  },
+  "readiness_conditions": {
+    "stop_cap_semantics_correct": true,
+    "no_stage_budget_shrink": true,
+    "resolved_canary_planned_updates_stays_168000": true,
+    "runtime_stop_exactly_118200": true,
+    "resume_at_118200_blocked": true,
+    "cadence_checkpoint_at_118200_proven": true,
+    "compile_on_real_hcu_smoke_pass": true,
+    "dynamic_physical_2_3_layouts_pass": true,
+    "no_new_relevant_test_failure": true,
+    "security_clean": true,
+    "u118100_provenance_pass": true
+  },
+  "CANARY_LAUNCH_READY": true,
+  "authorizes_training": false,
+  "next": "HARD STOP; send exact pushed evidence SHA to external reviewer; NO TRAINING UNTIL EXTERNAL REVIEW"
+}
