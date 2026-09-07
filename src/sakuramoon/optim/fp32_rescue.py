@@ -700,23 +700,30 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
         # Optional per-step rank invariant: post-commit parameter fingerprints
         # must be identical on every rank (rescued deltas included).
         if self.guard_cfg.invariant_check and self.world_size > 1:
-            fp = []
-            for spec in specs:
-                pf = spec.parameter.float()
-                fp.append(pf.pow(2).mean().sqrt())
-                fp.append(pf.abs().max())
-            flat = torch.stack(fp)
-            lo = flat.clone()
-            hi = flat.clone()
-            dist.all_reduce(lo, op=dist.ReduceOp.MIN)
-            dist.all_reduce(hi, op=dist.ReduceOp.MAX)
-            diff = float((hi - lo).max().item())
-            self.max_param_rank_diff = max(self.max_param_rank_diff, diff)
-            if diff != 0.0:
-                raise CMuonSafetyError(
-                    "fp32-rescue rank invariant violated: "
-                    f"cross-rank parameter fingerprint diff {diff:.3e} after commit"
-                )
+            # Graph-free diagnostic: step() runs with grad mode enabled (the
+            # trainer does not wrap optimizer steps) and the specs' parameters
+            # carry requires_grad=True; without this context the fingerprint
+            # math would build an autograd graph and save large FP32 parameter
+            # copies for backward. no_grad changes no values, dtypes,
+            # communication, or control flow.
+            with torch.no_grad():
+                fp = []
+                for spec in specs:
+                    pf = spec.parameter.float()
+                    fp.append(pf.pow(2).mean().sqrt())
+                    fp.append(pf.abs().max())
+                flat = torch.stack(fp)
+                lo = flat.clone()
+                hi = flat.clone()
+                dist.all_reduce(lo, op=dist.ReduceOp.MIN)
+                dist.all_reduce(hi, op=dist.ReduceOp.MAX)
+                diff = float((hi - lo).max().item())
+                self.max_param_rank_diff = max(self.max_param_rank_diff, diff)
+                if diff != 0.0:
+                    raise CMuonSafetyError(
+                        "fp32-rescue rank invariant violated: "
+                        f"cross-rank parameter fingerprint diff {diff:.3e} after commit"
+                    )
 
         if self.stats_logger is not None and (
             self.observations % self.stats_log_every_n == 0
