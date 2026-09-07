@@ -433,6 +433,57 @@ def _validate_optimizer_moment(
         raise CheckpointError("optimizer moment dtype or class is invalid")
 
 
+def _remap_state_to_current_ids(
+    state_document: dict[str, object],
+    current_groups: list[dict[str, object]],
+) -> dict[str, object]:
+    """Re-key a saved optimizer state into the current id space by FQN name.
+
+    torch's native load_state_dict remaps per-parameter state positionally
+    within each group, which silently misassigns moments when a growth
+    cutover inserts new parameters mid-group.  The remap is identity when
+    the FQN sets match; for a cutover it pairs every saved entry with the
+    current parameter of the same canonical name and drops nothing else.
+    """
+
+    current_id_by_name: dict[str, int] = {}
+    for group in current_groups:
+        for parameter_id, name in zip(
+            cast(list[int], group["params"]), cast(list[str], group["param_names"])
+        ):
+            current_id_by_name[name] = parameter_id
+    saved_id_by_name: dict[str, int] = {}
+    saved_groups = cast(list[object], state_document["param_groups"])
+    for raw_group in saved_groups:
+        group = _mapping(raw_group, "saved optimizer group")
+        for parameter_id, name in zip(
+            cast(list[object], group["params"]),
+            cast(list[object], group["param_names"]),
+        ):
+            if type(parameter_id) is not int or not isinstance(name, str):
+                raise CheckpointError("saved optimizer group identity is invalid")
+            saved_id_by_name[name] = parameter_id
+    saved_name_by_id = {
+        parameter_id: name for name, parameter_id in saved_id_by_name.items()
+    }
+    saved_state = cast(dict[object, object], state_document["state"])
+    remapped_state: dict[int, object] = {}
+    for saved_id, entry in saved_state.items():
+        if type(saved_id) is not int:
+            raise CheckpointError("saved optimizer state id is invalid")
+        name = saved_name_by_id.get(saved_id)
+        if name is None:
+            raise CheckpointError("saved optimizer state references an unknown id")
+        current_id = current_id_by_name.get(name)
+        if current_id is None:
+            raise CheckpointError(
+                f"saved optimizer state FQN {name} is absent from the current "
+                "optimizer"
+            )
+        remapped_state[current_id] = entry
+    return {"state": remapped_state, "param_groups": current_groups}
+
+
 def _validate_optimizer_state(
     document: dict[str, object],
     optimizer: IsolatedAdamW8bit,
@@ -541,12 +592,10 @@ def _load_sr_rng(
         raise CheckpointError("optimizer SR RNG state is invalid")
     saved_index = int(device_index.item())
     current_index = optimizer.sr_rng.device.index
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    remapping_rank_zero = (
-        local_rank > 0 and saved_index == 0 and current_index == local_rank
-    )
-    if saved_index != current_index and not remapping_rank_zero:
-        raise CheckpointError("optimizer SR RNG device does not match")
+    # The saved ordinal is source-run metadata: a resume may land on any
+    # device, so the state is always rebound to the current rank's device
+    # (no single special-cased transition).
+    del saved_index
     if state.shape != optimizer.sr_rng.state.shape:
         raise CheckpointError("optimizer SR RNG shape does not match")
     return {"device_type": "cuda", "device_index": current_index, "state": state}
@@ -727,7 +776,53 @@ def _load_hybrid_optimizer_state(path: Path) -> dict[str, object]:
     return document
 
 
-def _validate_hybrid_cmuon_state(cmuon_state: object, optimizer: HybridCMuon) -> None:
+def _verify_routing_manifest(
+    saved: object,
+    current: dict[str, object],
+    new_fqns: frozenset[str],
+) -> None:
+    """State-exact routing manifest, with growth-slot entries allowed absent.
+
+    Every saved entry must match the current manifest exactly; current
+    entries that the saved manifest lacks must all be growth-slot FQNs.
+    """
+
+    saved_document = _mapping(saved, "hybrid routing manifest")
+    for key in ("cmuon", "adamw"):
+        saved_entries = cast(list[object], saved_document.get(key))
+        current_entries = cast(list[object], current[key])
+        if not isinstance(saved_entries, list):
+            raise CheckpointError(f"hybrid routing manifest {key} list is invalid")
+        saved_by_name = {
+            _mapping(entry, f"routing {key} entry")["name"]: _mapping(
+                entry, f"routing {key} entry"
+            )
+            for entry in saved_entries
+        }
+        current_by_name = {
+            _mapping(entry, f"routing {key} entry")["name"]: _mapping(
+                entry, f"routing {key} entry"
+            )
+            for entry in current_entries
+        }
+        for name, entry in saved_by_name.items():
+            if name not in current_by_name or current_by_name[name] != entry:
+                raise CheckpointError(
+                    f"hybrid routing manifest entry differs: {name}"
+                )
+        for name in current_by_name:
+            if name not in saved_by_name and name not in new_fqns:
+                raise CheckpointError(
+                    f"hybrid routing manifest is missing non-growth FQN: {name}"
+                )
+
+
+def _validate_hybrid_cmuon_state(
+    cmuon_state: object,
+    optimizer: HybridCMuon,
+    *,
+    new_fqns: frozenset[str] = frozenset(),
+) -> None:
     """State-exact check of the CMuon block against the runtime routing/cfg."""
     block = _mapping(cmuon_state, "cmuon state")
     meta_keys = (
@@ -780,8 +875,16 @@ def _validate_hybrid_cmuon_state(cmuon_state: object, optimizer: HybridCMuon) ->
         if not bool(torch.isfinite(tensor.to(torch.float32)).all().item()):
             raise CheckpointError(f"hybrid CMuon momentum has nonfinite values: {spec.name}")
         seen.add(spec.name)
-    if set(momenta) != seen:
-        raise CheckpointError("hybrid CMuon momenta set differs from routing")
+    unexpected_momenta = set(momenta) - seen
+    if unexpected_momenta:
+        raise CheckpointError(
+            "hybrid CMuon momenta contain FQNs outside the routing"
+        )
+    missing_momenta = seen - set(momenta)
+    if missing_momenta and not missing_momenta <= new_fqns:
+        raise CheckpointError(
+            "hybrid CMuon momenta are missing for non-growth FQNs"
+        )
 
 
 def _validate_transition_optimizer_schema(value: object, audit: ParameterAudit) -> None:
@@ -1066,11 +1169,24 @@ def load_raw_checkpoint(
     )
     train_state = checkpoint / "train_state"
     schema = _read_json(train_state / "optimizer_schema.json", "optimizer schema")
-    schema_version = _mapping(schema, "optimizer schema").get("schema_version")
+    # Growth-cutover tolerance set: the FQNs that exist in the module but
+    # predate no checkpoint entry (legal additions only; the strict
+    # add/remove-set check above already bounded them to the new slots).
+    new_prefixes = _module_new_slot_prefixes(module)
     state = raw_state_from_dicts(
         _read_json(train_state / "trainer_state.json", "trainer state"),
         _read_json(train_state / "growth_state.json", "growth state"),
     )
+    cutover_new_fqns: frozenset[str] = frozenset()
+    if state.growth.active_slot_ids != tuple(
+        active_slot_ids_from_module(module)
+    ) and new_prefixes:
+        cutover_new_fqns = frozenset(
+            name
+            for name in current_model
+            if any(name.startswith(prefix) for prefix in new_prefixes)
+        )
+    schema_version = _mapping(schema, "optimizer schema").get("schema_version")
     if expected.update != state.trainer.successful_updates:
         raise CheckpointError("checkpoint update differs from trainer successful updates")
     if state.growth.active_slot_ids != active_slot_ids_from_module(module):
@@ -1093,7 +1209,12 @@ def load_raw_checkpoint(
     if isinstance(optimizer, HybridCMuon):
         if type(schema_version) is int and schema_version == 2:
             _load_hybrid_state_exact(
-                train_state, schema, optimizer, sr_rng, successful_updates
+                train_state,
+                schema,
+                optimizer,
+                sr_rng,
+                successful_updates,
+                new_fqns=cutover_new_fqns,
             )
         elif type(schema_version) is int and schema_version == 1:
             _load_adamw_transition_state(
@@ -1106,14 +1227,24 @@ def load_raw_checkpoint(
             raise CheckpointError(
                 "schema v2 checkpoint requires the hybrid CMuon optimizer"
             )
-        _validate_optimizer_schema(schema, optimizer, expected)
-        optimizer_state = _load_optimizer_state(train_state / "optimizer.pt")
-        _validate_optimizer_state(
-            optimizer_state, optimizer, successful_updates
+        _validate_optimizer_schema(
+            schema, optimizer, expected, new_fqns=cutover_new_fqns
         )
+        optimizer_state = _load_optimizer_state(train_state / "optimizer.pt")
         current_groups = cast(
             list[object],
             cast(dict[str, object], optimizer.optimizer.state_dict())["param_groups"],
+        )
+        if cutover_new_fqns:
+            # Re-key the saved state into the current id space by FQN name
+            # (torch's positional remap is unsafe across a growth cutover);
+            # the remapped document is then validated state-exact.
+            optimizer_state = _remap_state_to_current_ids(
+                optimizer_state,
+                [cast(dict[str, object], group) for group in current_groups],
+            )
+        _validate_optimizer_state(
+            optimizer_state, optimizer, successful_updates
         )
         saved_groups = cast(list[object], optimizer_state["param_groups"])
         if len(saved_groups) != len(current_groups):
@@ -1147,23 +1278,43 @@ def _load_hybrid_state_exact(
     optimizer: HybridCMuon,
     sr_rng: dict[str, object],
     successful_updates: int,
+    *,
+    new_fqns: frozenset[str] = frozenset(),
 ) -> None:
     """Hybrid -> hybrid resume: outer state dict, state-exact on both parts."""
     from sakuramoon.optim.guarded_canonical import HybridCMuonGuardedCanonical
 
-    _validate_hybrid_optimizer_schema(schema, optimizer)
+    _validate_hybrid_optimizer_schema(
+        schema, optimizer, new_fqns=new_fqns
+    )
     outer = _load_hybrid_optimizer_state(train_state / "optimizer.pt")
     if "guard" in outer and not isinstance(optimizer, HybridCMuonGuardedCanonical):
         raise CheckpointError(
             "guarded optimizer state cannot be loaded into the unguarded "
             "hybrid optimizer (silent downgrade refused)"
         )
-    _validate_hybrid_cmuon_state(outer["cmuon"], optimizer)
-    if outer["routing"] != optimizer.routing.routing_manifest():
-        raise CheckpointError("hybrid CMuon routing manifest differs")
+    _validate_hybrid_cmuon_state(
+        outer["cmuon"], optimizer, new_fqns=new_fqns
+    )
+    _verify_routing_manifest(
+        outer["routing"], optimizer.routing.routing_manifest(), new_fqns
+    )
     inner = cast(dict[str, object], outer["optimizer"])
     if not isinstance(inner, dict):
         raise CheckpointError("hybrid inner optimizer state is invalid")
+    inner_groups = cast(
+        list[object],
+        cast(dict[str, object], optimizer.adamw.optimizer.state_dict())[
+            "param_groups"
+        ],
+    )
+    if new_fqns:
+        inner = cast(
+            dict[str, object],
+            _remap_state_to_current_ids(
+                inner, [cast(dict[str, object], g) for g in inner_groups]
+            ),
+        )
     _validate_optimizer_state(inner, optimizer.adamw, successful_updates)
     # Learning rate and weight decay are runtime-controlled: replace the
     # saved per-group values with the current configuration values (same

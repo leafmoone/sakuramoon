@@ -9,7 +9,7 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from sakuramoon.model.growth import ACTIVE_SLOT_IDS, half_cosine_growth_alpha
+from sakuramoon.model.growth import half_cosine_growth_alpha
 from sakuramoon.train.step import SingleGpuUpdateState
 
 SCHEMA_VERSION = 1
@@ -136,6 +136,14 @@ class CheckpointIdentity:
 
 @dataclass(frozen=True, slots=True)
 class GrowthCheckpointState:
+    """Growth topology and ramp anchor of the trained model.
+
+    ``stage`` / ``world_size`` / ``resolution`` are informational metadata
+    about the source run; they do not gate a resume.  ``new_slot_ids`` marks
+    the in-flight growth slots (ramped with ``alpha``); pre-existing v4
+    documents omit it (=> empty).
+    """
+
     active_slot_ids: tuple[int, ...]
     alpha: float
     stage: str
@@ -143,16 +151,18 @@ class GrowthCheckpointState:
     resolution: int
     ramp_start_successful_update: int | None
     ramp_updates: int | None
+    new_slot_ids: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.active_slot_ids not in ACTIVE_SLOT_IDS.values():
-            raise ValueError(
-                "growth active_slot_ids must be a canonical 16/20/24 slot set"
-            )
+        slots = self.active_slot_ids
+        if not slots or len(set(slots)) != len(slots) or any(s < 0 for s in slots):
+            raise ValueError("growth active_slot_ids must be unique non-negative ids")
+        if any(s not in slots for s in self.new_slot_ids):
+            raise ValueError("growth new_slot_ids must be a subset of active slots")
         if type(self.alpha) is not float or not 0.0 <= self.alpha <= 1.0:
             raise ValueError("growth alpha must be a float in [0, 1]")
-        if not self.stage or type(self.stage) is not str:
-            raise ValueError("growth stage must be a nonempty string")
+        if type(self.stage) is not str:
+            raise ValueError("growth stage must be a string")
         if type(self.world_size) is not int or self.world_size <= 0:
             raise ValueError("growth world size must be a positive integer")
         if type(self.resolution) is not int or self.resolution <= 0:
@@ -168,11 +178,11 @@ class GrowthCheckpointState:
                 type(self.ramp_start_successful_update) is not int
                 or self.ramp_start_successful_update < 0
                 or type(self.ramp_updates) is not int
-                or not 1000 <= self.ramp_updates <= 5000
+                or self.ramp_updates <= 0
             ):
                 raise ValueError("growth ramp state is invalid")
-        elif self.alpha != 1.0:
-            raise ValueError("non-growth checkpoint alpha must be complete")
+        elif self.alpha != 1.0 or self.new_slot_ids:
+            raise ValueError("non-growth checkpoint must be complete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,6 +414,7 @@ def raw_state_to_dict(
         "active_slot_ids": list(state.growth.active_slot_ids),
         "alpha": state.growth.alpha,
         "ramp_start_successful_update": state.growth.ramp_start_successful_update,
+        "new_slot_ids": list(state.growth.new_slot_ids),
         "ramp_updates": state.growth.ramp_updates,
         "resolution": state.growth.resolution,
         "schema_version": RAW_SCHEMA_VERSION,
@@ -430,20 +441,22 @@ def raw_state_from_dicts(
         },
         "trainer state",
     )
-    _exact_keys(
-        growth,
-        {
-            "schema_version",
-            "active_slot_ids",
-            "alpha",
-            "stage",
-            "world_size",
-            "resolution",
-            "ramp_start_successful_update",
-            "ramp_updates",
-        },
-        "growth state",
-    )
+    growth_keys = set(growth)
+    expected_growth_keys = {
+        "schema_version",
+        "active_slot_ids",
+        "alpha",
+        "stage",
+        "world_size",
+        "resolution",
+        "ramp_start_successful_update",
+        "ramp_updates",
+    }
+    # Pre-existing v4 documents predate the new_slot_ids key.
+    if "new_slot_ids" in growth_keys:
+        expected_growth_keys.add("new_slot_ids")
+    if growth_keys != expected_growth_keys:
+        raise CheckpointError("growth state has unknown or missing fields")
     if not all(
         _has_schema_version(document, RAW_SCHEMA_VERSION)
         for document in (trainer, growth)
@@ -485,6 +498,9 @@ def raw_state_from_dicts(
                 resolution=growth["resolution"],
                 ramp_start_successful_update=growth["ramp_start_successful_update"],
                 ramp_updates=growth["ramp_updates"],
+                new_slot_ids=tuple(
+                    cast(tuple[int, ...], growth.get("new_slot_ids", ()))
+                ),
             ),
             stage_budget=StageBudgetCheckpointState(
                 start_successful_update=stage_budget["start_successful_update"],
