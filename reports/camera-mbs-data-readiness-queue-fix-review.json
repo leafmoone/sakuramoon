@@ -1,0 +1,64 @@
+{
+  "report": "camera-mbs-data-readiness-queue-fix-review",
+  "date": "2026-09-08",
+  "phase": "C (infrastructure fix round, user Option B GO)",
+  "host": "come7",
+  "branch": "camera-v2-mbs-data-readiness-queue-fix-review",
+  "base_sha": "b78ba023f781535a9d8fd98b0fc543925e5f04a6",
+  "training_this_round": false,
+  "fix_head_sha": "663d2e9bf14b68c3c060acfcaf5660c96a343653",
+  "defects": [
+    {
+      "id": "D1-readiness-contract",
+      "summary": "training_stack.sh treated Unix-socket existence as data-ready, but the server bound the socket before its 16-shard warmup barrier; on a cold cache the barrier took ~4 min and the trainer's 30s health timeout expired, killing both ranks in production preflight (0U FAIL #2).",
+      "fix": "serve() now creates the socket only after wait_until_ready() passes; stack gets dedicated DATA_READY_TIMEOUT_SECONDS=900 (only gate relaxed; START_TIMEOUT_SECONDS=180 unchanged for all other components)."
+    },
+    {
+      "id": "D2-queue-cross-process-nondeterminism",
+      "summary": "_QueueStore.new started the seeded shuffle from list(frozenset); frozenset iteration order is per-process (string hash randomization), so fresh cycle-0 orders differed across processes/arms despite identical manifest+seed. Observed: Phase B vs rerun first-8 queue entries completely different.",
+      "fix": "paths = sorted(self.paths) before random.Random(0x9E3779B9*(cycle+1)).shuffle(paths); cross-process bit-identical cycle order; no PYTHONHASHSEED dependency in production."
+    }
+  ],
+  "changed_files": {
+    "modified": ["src/sakuramoon/data/service.py", "scripts/training_stack.sh"],
+    "added": ["tests/unit/data/test_queue_order_canonicalization.py", "tests/unit/data/test_service_readiness_contract.py", "reports/camera-mbs-data-readiness-queue-fix-review.md", "reports/camera-mbs-data-readiness-queue-fix-review.json"]
+  },
+  "unchanged": "no camera/MBS/model/optimizer/config changes; request_timeout_seconds stays 30.0; frozen Phase-A/Phase-B reports untouched",
+  "tests": {
+    "new": 5,
+    "focused_fix_tree": "5/5 pass",
+    "regression_capture_on_base": "3 fail / 2 pass (D1 and D2 both captured; warm cache cannot make the constructed-barrier tests pass)",
+    "broad": {
+      "base_b78ba02": "4 failed / 1008 passed (272.94s)",
+      "fix": "4 failed / 1013 passed (286.18s)",
+      "failure_sets_identical": true,
+      "preexisting_failures": "4 x tests/unit/optim/test_cmuon_fp32_forensic.py",
+      "environmental_ignores": ["tests/unit/data/test_deepghs_quality_pipeline.py", "tests/unit/data/test_run_deepghs_quality_pipeline.py"]
+    }
+  },
+  "static_gates": {
+    "ruff_check_changed_scope": "clean",
+    "py_compile": "OK",
+    "bash_n_training_stack": "OK",
+    "git_diff_check": "clean"
+  },
+  "scientific_framing": {
+    "old_u118200_control": "VALID, but relabeled: same-distribution independent-sequence camera-only continuation control (NOT exact matched-data)",
+    "three_way": "PRE U118100 -> {camera-only 100U (historical queue) = CONTROL, MBS 100U (canonical queue) = TREATMENT}",
+    "conditional_control_plan": "no control rerun now; only if the later three-way audit is borderline spend an extra 100U on a canonical camera-only control sharing the post-fix deterministic cycle-0 sequence"
+  },
+  "user_decision": {
+    "training_state_damage": "NONE",
+    "source_damage": "NONE",
+    "control_damage": "NONE",
+    "startup_race_root_cause": "ACCEPTED",
+    "queue_cross_process_nondeterminism": "CONFIRMED",
+    "option_a_prewarm_retry": "NO-GO FOR NOW",
+    "option_b_code_fix": "GO",
+    "option_c_hold": "NO"
+  },
+  "next_steps": [
+    "external review of this branch",
+    "on GO: rerun corrected MBS 100U (U118100 -> U118200) from the reviewed SHA, fresh worktree, fresh operational paths, frozen queue reset (backup of sha 797e8164f7e74724332cd37f790063d6cf6f3e4e46b36edb7ab659cf28c7b2c3 + delete), tracked supervisor mandatory, HARD STOP at U118200, no auto-restart, no U118201"
+  ]
+}
