@@ -1,0 +1,226 @@
+{
+  "report": "camera-mbs-recompile-limit-fix-review",
+  "date": "2026-09-08",
+  "host": "come7 (2x Hygon BW DCU)",
+  "status": "FIX IMPLEMENTED + SATURATION VERIFIED (review branch; NO training authorized this round)",
+  "identity": {
+    "base_sha": "e6d7b10310c3e32408d312add788b44545da0c71",
+    "base_commit": "docs: record corrected MBS 100U treatment 0-update FAIL evidence (dynamo recompile-limit root cause)",
+    "branch": "camera-v2-mbs-recompile-limit-fix-review",
+    "worktree": "/sakuramoon-runtime/sakuramoon-camera-mbs-recompile-limit-fix",
+    "commits": {
+      "h1_message": "fix: govern packed compile recompile limit",
+      "h2_message": "docs: record MBS compile saturation fix",
+      "graph": "e6d7b10 -> H1 -> H2",
+      "rev_list_count": 2
+    }
+  },
+  "fix": {
+    "field": "kernels.torch_compile_recompile_limit",
+    "schema": "Annotated[int, Field(ge=1, le=256)] = 8 (StrictModel: strict int, bool/float/string/None rejected)",
+    "default": 8,
+    "bounds": [
+      1,
+      256
+    ],
+    "v2_canary_override": 64,
+    "only_non_identity_behavioral_diff": true,
+    "fail_on_recompile_limit_hit": true,
+    "fail_on_kept": true,
+    "env_override": false,
+    "magic_constant_at_call_site": false,
+    "production_binding": "recompile_limit=config.kernels.torch_compile_recompile_limit",
+    "accumulated_recompile_limit_changed": false,
+    "files": [
+      "src/sakuramoon/config/schema.py",
+      "src/sakuramoon/train/runtime.py",
+      "src/sakuramoon/train/production.py",
+      "config/train_g1_camera_v2_p25_mirror_v2_canary.toml",
+      "scripts/mbs_corrected_treatment_supervisor.py",
+      "scripts/mbs_compile_saturation_smoke.py",
+      "tests/unit/config/test_kernels_recompile_limit.py",
+      "tests/unit/config/test_camera_viewport_config.py (updated: resolved-TOML anchor regenerated; diff = exactly one added line)",
+      "tests/unit/data/test_camera_mirror_worker_clone.py (updated: v2 diff contract now includes the governed override 8->64)",
+      "tests/unit/train/test_distributed_compile.py (3 call sites pinned at 8 + 4 new tests)",
+      "tests/unit/train/test_production_compile_binding.py",
+      "tests/unit/scripts/test_mbs_corrected_treatment_supervisor.py"
+    ]
+  },
+  "supervisor": {
+    "path": "scripts/mbs_corrected_treatment_supervisor.py",
+    "now_tracked": true,
+    "stop_env_keys": 15,
+    "stop_env_keys_include": [
+      "PROJECT_ROOT",
+      "RUNTIME_ROOT",
+      "CONFIG_ROOT",
+      "CONFIG_NAME",
+      "LOG_ROOT",
+      "RUN_ROOT",
+      "WORKLOAD_ENV_FILE",
+      "RESUME_CHECKPOINT",
+      "PUBLISH_STATE_ROOT",
+      "PUBLISH_LAST_PUBLISHED",
+      "REPO_PATH",
+      "INTERVAL_SECONDS",
+      "REQUIRED_HOST_SUBSTRING",
+      "MAIN_PROCESS_PORT",
+      "VENV_ROOT"
+    ],
+    "venv_root_fix": "VENV_ROOT explicitly included (the key whose absence fast-failed the Phase B stop)",
+    "self_test_stop_env": {
+      "side_effect_free": true,
+      "live_pass_on_come7_values": true,
+      "planted_failures_caught": [
+        "missing VENV_ROOT",
+        "env file mode 644",
+        "symlinked env file",
+        "port 70000",
+        "interval 0"
+      ]
+    },
+    "auto_restart": false,
+    "failure_action": "scripts/training_stack.sh stop (source-pinned; 'start' asserted absent)"
+  },
+  "saturation": {
+    "smoke": "scripts/mbs_compile_saturation_smoke.py (forward-only; no backward/optimizer/scheduler/publisher/ckpt-write)",
+    "config": "train_g1_camera_v2_p25_mirror_v2_canary.toml (exact v2 canary)",
+    "data_path": "ProductionPipelineFactory.from_config -> factory.batches -> spawned persistent workers (8) over 8 local real danbooru-v2 shards",
+    "checkpoint": "U118100 read-only inference artifact",
+    "models": "local Qwen3.5-2B (flash_attention_2) + local Mage-VAE",
+    "runtime_readback": {
+      "recompile_limit": 64,
+      "fail_on_recompile_limit_hit": true,
+      "suppress_errors": false,
+      "accumulated_recompile_limit_unchanged": true
+    },
+    "torch_logs": "recompiles (set in process env before python import; fail-closed check)",
+    "inductor_cache": "production dir /sakuramoon-runtime/torchinductor-cache (931 MiB warm from Phase B run), TORCHINDUCTOR_COMPILE_THREADS=8",
+    "batches_run": 64,
+    "distinct_physical_sequence_counts": [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      30
+    ],
+    "distinct_count": 10,
+    "SATURATION_COVERAGE": "SUFFICIENT",
+    "CANARY_READY": true,
+    "recompile_limit_failure": false,
+    "accumulated_limit_failure": false,
+    "eager_fallback": false,
+    "traceback": false,
+    "nonfinite_loss": false,
+    "parameter_mutation": false,
+    "grad_none_before_and_after": true,
+    "aggregate_mirror_applied_gt_0": true,
+    "recompile_event_count": 29,
+    "guard_reason_taxonomy": [
+      "one-off type/growth refinement (___check_type_id(mlp_growth,...), attention_growth float refinement)",
+      "len(boundaries.sequence_lengths) == N per distinct physical row count (Phase B root cause, now bounded)"
+    ],
+    "peak_memory_GiB": 8.835,
+    "total_seconds": 360.206,
+    "extended": false,
+    "aggregate_mirror": {
+      "logical_samples": 1280,
+      "mirror_eligible": 138,
+      "mirror_selected": 138,
+      "mirror_applied": 138,
+      "mirror_extra_views": 138,
+      "physical_views": 1418,
+      "severity_2to4": 111,
+      "severity_ge4": 27
+    },
+    "guard_reason_lines": 236,
+    "distinct_guard_reasons": 11,
+    "sequence_length_guard_values": [
+      20,
+      21,
+      22,
+      23,
+      24,
+      26,
+      27,
+      28,
+      30
+    ],
+    "max_per_frame_recompile_index": 19,
+    "unique_graphs_total": 33,
+    "calls_captured_total": 1695,
+    "loss_finite_all": true,
+    "loss_mean_range": [
+      0.4507,
+      0.6186
+    ],
+    "prefer_ge12_note": "hard gate (>=9) met with 10 distinct values; preferred >=12 not reached (real-data distribution over 64 batches); no shapes fabricated"
+  },
+  "tests": {
+    "focused_this_change": "58/58 PASS (22.7s)",
+    "full_fix_tree": "4 failed, 1008 passed (271.6s)",
+    "full_base_tree": "4 failed, 962 passed (277.6s)",
+    "pre_existing_failures": [
+      "tests/unit/optim/test_cmuon_fp32_forensic.py::test_bcd_hard_fail_captures_fp32_reason[below_floor-below_floor]",
+      "tests/unit/optim/test_cmuon_fp32_forensic.py::test_e_writer_failure_still_raises_original_error",
+      "tests/unit/optim/test_cmuon_fp32_forensic.py::test_f_serialization_failure_still_raises_and_leaves_no_capsule",
+      "tests/unit/optim/test_cmuon_fp32_forensic.py::test_m2_mirror_failure_keeps_local_capsule_and_original_error"
+    ],
+    "failure_set_identical_to_base": true,
+    "new_failures": 0,
+    "new_tests_skip": 0,
+    "new_tests_xfail": 0,
+    "environmental_ignore_identical_both_trees": [
+      "tests/unit/data/test_deepghs_quality_pipeline.py",
+      "tests/unit/data/test_run_deepghs_quality_pipeline.py"
+    ],
+    "environmental_ignore_reason": "onnxruntime not installed in the come7 DTK venv (both trees fail collection identically)"
+  },
+  "static": {
+    "ruff": "0.16.1 repo config; All checks passed over all 12 changed files",
+    "py_compile": "OK (both scripts)",
+    "git_diff_check": "clean",
+    "staging": "explicit git add of the 12 whitelisted files only; no secrets/env/ckpt/binary"
+  },
+  "immutability": {
+    "source_u118100_manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+    "control_u118200_manifest_sha256": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+    "rehashed_after_all_activity": true,
+    "treatment_output_root": "empty (no checkpoint, no file)",
+    "smoke_internal_rehash_gate": "both manifests re-hashed before and after the long run; equality gated"
+  },
+  "red_lines_this_round": {
+    "training": false,
+    "backward": false,
+    "optimizer_object": false,
+    "scheduler_step": false,
+    "checkpoint_write": false,
+    "publisher": false,
+    "u118101": false,
+    "p50": false,
+    "production_stack_started": false
+  },
+  "canary_rerun": {
+    "CANARY_RERUN_READY": "TRUE",
+    "authorization": "none - a later explicit GO starts the corrected canary; nothing in this round authorizes training"
+  },
+  "evidence_hashes": {
+    "smoke_script": "ffb7885888cf33e4805328e62e5184a23024c1ba22bab16e6b4609d50a89cd4f",
+    "supervisor_script": "e86a209d7fa4b8e31aa3d54d5eb7be65d642cb201a80b68bc9437a8ba4066e51",
+    "long_stderr_log": "f2b30730ce9f3a9fb565fb9eb978d21085c004c7fe5edcb29d565883f8f61974",
+    "long_stdout_log": "85f8c91d31ce30e6daccda1dc61445273f65cb9813c85790d11079ff702e03ee",
+    "long_evidence_json": "3cbadaa376cb14266cf77a5292f93ca443658e9162ddcdcac632755a0430c0dc",
+    "logs_location": "/sakuramoon-runtime/mbs-recompile-fix/long/ (come7, untracked host paths)"
+  },
+  "probe_history": [
+    "probe-1: default inductor cache; capture bug found (DiT forward first arg is the per-view latents tuple; main_token_lengths is positional arg 4 from TrainableCompositeInputs)",
+    "probe-2: production cache; all gates green except the capture; physical counts real (26/24/23)",
+    "probe-3: capture verified (len(latents) and len(main_token_lengths) both equal physical_views)",
+    "teardown: one spawned DataLoader worker wrote a 2.5GiB core (core.67129, multiprocessing.spawn child) at stream close 15:28:49 (kernel core_pattern=core) - DTK/HIP teardown race; main process completed all 64 batches, all gates, and the evidence write; no mid-run worker failure; untracked core binary removed from worktree, never staged"
+  ]
+}
