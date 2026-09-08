@@ -707,7 +707,15 @@ def test_v2_canary_config_differs_only_in_identity() -> None:
         "wandb.retry_jsonl_path",
         "evaluation.output_dir",
     }
-    assert diff == identity_keys, diff
+    # The recompile-limit fix adds exactly one governed behavioral
+    # override: the v2 canary lifts the torch.compile recompile ceiling
+    # from the default 8 to 64 (fail_on_recompile_limit_hit stays True).
+    # It is the only non-identity difference besides the reviewed worker
+    # propagation code (a code change, invisible to the config diff).
+    expected_diff = identity_keys | {"kernels.torch_compile_recompile_limit"}
+    assert diff == expected_diff, diff
+    assert before["kernels"]["torch_compile_recompile_limit"] == 8
+    assert after["kernels"]["torch_compile_recompile_limit"] == 64
     # Everything the treatment inherits stays byte-identical.
     assert after["data"]["camera_mirror_balance"] == before["data"][
         "camera_mirror_balance"

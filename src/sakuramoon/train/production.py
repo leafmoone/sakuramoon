@@ -1327,6 +1327,7 @@ def _run_accepted_lifecycle(
             backend=config.kernels.torch_compile_backend,
             mode=config.kernels.torch_compile_mode,
             dynamic=config.kernels.torch_compile_dynamic,
+            recompile_limit=config.kernels.torch_compile_recompile_limit,
         )
         if is_main_process:
             _log(

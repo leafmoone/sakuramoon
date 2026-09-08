@@ -125,6 +125,7 @@ def compile_packed_dit_blocks(
     backend: str,
     mode: str,
     dynamic: bool,
+    recompile_limit: int,
 ) -> tuple[PackedDiTBlock, ...]:
     """Install fail-closed regional compilation after DDP construction."""
 
@@ -136,8 +137,11 @@ def compile_packed_dit_blocks(
         raise ValueError("regional torch.compile configuration is invalid")
     if not dynamic:
         raise ValueError("packed regional torch.compile requires dynamic=true")
+    if type(recompile_limit) is not int or recompile_limit <= 0:
+        raise ValueError("recompile_limit must be a positive integer")
     if dynamo_config.suppress_errors:
         raise RuntimeError("torch.compile error suppression must remain disabled")
+    dynamo_config.recompile_limit = recompile_limit
     dynamo_config.fail_on_recompile_limit_hit = True
     if not getattr(fa4_varlen_attention, "_torchdynamo_disable", False):
         raise RuntimeError("DAS FA2 must remain an explicit eager compiler boundary")

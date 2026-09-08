@@ -10,8 +10,15 @@
 # policy (v1 mode, min_latent_shift 2.0, pair_probability 1.0, pair_weight
 # 1.0), the governed stop cap 118200, the camera viewport policy
 # (p=0.25, zoom 1.10-1.50), optimizer, LR, batch, scheduler, compile and
-# architecture -- and overrides ONLY the experiment identity and output
-# locations, so a corrected-treatment canary can run side by side from the
+# architecture -- and overrides ONLY the experiment identity, output
+# locations, and the governed compile recompile ceiling (see [kernels]).
+# The [kernels] override is the ONLY non-identity behavioral difference
+# from the reviewed v1 MBS canary besides the already-reviewed worker
+# propagation code: it lifts the per-code torch.compile recompile ceiling
+# from the default 8 to 64 so the corrected mirror's variable packed
+# physical row count (20..40, at most 21 distinct values) stays under the
+# fail-closed recompile limit (fail_on_recompile_limit_hit stays True).
+# A corrected-treatment canary runs side by side from the
 # same U118100 source:
 #   output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence
 # (manifest 821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892).
@@ -30,6 +37,17 @@ run_id = "g1_camera_v2_p25_mirror_v2"
 run_dir = "runs/g1_camera_v2_p25_mirror_v2"
 checkpoint_dir = "output_model/g1_camera_v2_p25_mirror_v2"
 artifact_dir = "artifacts/g1_camera_v2_p25_mirror_v2"
+
+[kernels]
+# Governed per-code torch.compile recompile ceiling. The corrected mirror
+# produces a variable number of physical rows per batch (20 logical +
+# 0..20 mirror extras = 20..40, at most 21 distinct packed sequence
+# counts). Dynamo specializes on that Python tuple length and recompiles
+# per distinct value, so the default ceiling of 8 is hit before the first
+# successful update. 64 gives ~3x headroom over the 21-value bound while
+# fail_on_recompile_limit_hit stays True (a hit is still a HARD failure).
+# See reports/camera-mbs-corrected-100u-treatment.md (frozen FAIL evidence).
+torch_compile_recompile_limit = 64
 
 [logging]
 local_jsonl_path = "artifacts/g1_camera_v2_p25_mirror_v2/metrics.jsonl"

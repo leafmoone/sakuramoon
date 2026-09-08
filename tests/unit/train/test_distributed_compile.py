@@ -168,18 +168,25 @@ def test_regional_compile_preserves_parameters_and_state_keys(
     monkeypatch.setattr(nn.Module, "compile", fake_compile)
     monkeypatch.setattr(dynamo_config, "suppress_errors", False)
     monkeypatch.setattr(dynamo_config, "fail_on_recompile_limit_hit", False)
+    # pin the global recompile_limit so teardown restores it (the
+    # install path mutates the global dynamo config directly)
+    monkeypatch.setattr(
+        dynamo_config, "recompile_limit", dynamo_config.recompile_limit
+    )
 
     blocks = compile_packed_dit_blocks(
         composite,
         backend="inductor",
         mode="default",
         dynamic=True,
+        recompile_limit=8,
     )
 
     assert blocks == tuple(composite.dit.blocks.values())
     assert before_parameter_ids == tuple(id(item) for item in composite.parameters())
     assert before_state_keys == tuple(composite.state_dict())
     assert dynamo_config.fail_on_recompile_limit_hit is True
+    assert dynamo_config.recompile_limit == 8
     assert observed == [
         (
             block,
@@ -201,6 +208,7 @@ def test_regional_compile_requires_dynamic_shapes() -> None:
             backend="inductor",
             mode="default",
             dynamic=False,
+            recompile_limit=8,
         )
 
 
@@ -218,6 +226,7 @@ def test_regional_compile_rejects_python_forward_hooks(
             backend="inductor",
             mode="default",
             dynamic=True,
+            recompile_limit=8,
         )
 
 
@@ -279,3 +288,124 @@ def test_runtime_source_contains_no_whole_model_compile_path() -> None:
 
     assert "_compiled_dit_forward" not in source
     assert "torch.compile(" not in source
+def _pin_dynamo_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the current global dynamo values so monkeypatch teardown
+    restores them even though compile_packed_dit_blocks mutates them
+    directly."""
+
+    monkeypatch.setattr(
+        dynamo_config, "recompile_limit", dynamo_config.recompile_limit
+    )
+    monkeypatch.setattr(
+        dynamo_config,
+        "fail_on_recompile_limit_hit",
+        dynamo_config.fail_on_recompile_limit_hit,
+    )
+
+
+@pytest.mark.parametrize("limit", [8, 64])
+def test_regional_compile_binds_configured_recompile_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    limit: int,
+) -> None:
+    composite = _composite()
+
+    def fake_compile(
+        module: nn.Module,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        assert not args
+        module._compiled_call_impl = module.forward
+
+    monkeypatch.setattr(nn.Module, "compile", fake_compile)
+    monkeypatch.setattr(dynamo_config, "suppress_errors", False)
+    _pin_dynamo_config(monkeypatch)
+
+    compile_packed_dit_blocks(
+        composite,
+        backend="inductor",
+        mode="default",
+        dynamic=True,
+        recompile_limit=limit,
+    )
+
+    assert dynamo_config.recompile_limit == limit
+    assert dynamo_config.fail_on_recompile_limit_hit is True
+    assert dynamo_config.suppress_errors is False
+
+
+@pytest.mark.parametrize(
+    "limit",
+    [0, -3, True, False, 8.0, 64.5, "8", "64", None],
+)
+def test_regional_compile_rejects_invalid_recompile_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    limit: object,
+) -> None:
+    monkeypatch.setattr(dynamo_config, "suppress_errors", False)
+    _pin_dynamo_config(monkeypatch)
+    original = dynamo_config.recompile_limit
+
+    with pytest.raises(
+        ValueError, match="recompile_limit must be a positive integer"
+    ):
+        compile_packed_dit_blocks(
+            _composite(),
+            backend="inductor",
+            mode="default",
+            dynamic=True,
+            recompile_limit=limit,  # type: ignore[arg-type]
+        )
+
+    # fail-closed: a rejected call must not touch the global config
+    assert dynamo_config.recompile_limit == original
+
+
+def test_regional_compile_preserves_accumulated_recompile_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = 256
+    monkeypatch.setattr(dynamo_config, "accumulated_recompile_limit", sentinel)
+    monkeypatch.setattr(dynamo_config, "suppress_errors", False)
+    _pin_dynamo_config(monkeypatch)
+
+    def fake_compile(
+        module: nn.Module,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        module._compiled_call_impl = module.forward
+
+    monkeypatch.setattr(nn.Module, "compile", fake_compile)
+
+    compile_packed_dit_blocks(
+        _composite(),
+        backend="inductor",
+        mode="default",
+        dynamic=True,
+        recompile_limit=64,
+    )
+
+    # the governed field is recompile_limit only; the accumulated counter
+    # is a runtime-only record and must never be written by the install
+    assert dynamo_config.accumulated_recompile_limit == sentinel
+    assert dynamo_config.recompile_limit == 64
+
+
+def test_regional_compile_requires_suppress_errors_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dynamo_config, "suppress_errors", True)
+    _pin_dynamo_config(monkeypatch)
+
+    with pytest.raises(
+        RuntimeError, match="error suppression must remain disabled"
+    ):
+        compile_packed_dit_blocks(
+            _composite(),
+            backend="inductor",
+            mode="default",
+            dynamic=True,
+            recompile_limit=8,
+        )

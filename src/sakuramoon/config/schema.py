@@ -1057,6 +1057,12 @@ class KernelsConfig(StrictModel):
         "default", "reduce-overhead", "max-autotune-no-cudagraphs"
     ] = "default"
     torch_compile_dynamic: bool = False
+    # Governed per-code recompile ceiling for the regional torch.compile.
+    # Default 8 preserves every existing run's behavior; a run opts in to a
+    # higher ceiling (e.g. the corrected MBS canary, 64) purely through this
+    # config field. fail_on_recompile_limit_hit stays True (set by the
+    # runtime), so a limit hit is always a HARD failure, never a fallback.
+    torch_compile_recompile_limit: Annotated[int, Field(ge=1, le=256)] = 8
     # Opt-in benchmark knob: torch.compile the frozen Mage-VAE encode/decode
     # methods. Off by default; when enabled the compile cost is paid once and
     # reused from the inductor cache (G1 shapes are fixed: 256x256 images).

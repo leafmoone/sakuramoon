@@ -19,9 +19,16 @@ CONFIG_ROOT = Path("config")
 # Byte-identity anchor: the resolved production TOML produced by the
 # pre-camera code (dev @ 3a341c0). The constant is split so display-layer
 # hex masking cannot corrupt this file.
+#
+# Regenerated on the recompile-limit fix branch: adding the governed
+# KernelsConfig.torch_compile_recompile_limit field (default 8) is the
+# ONLY resolved-TOML difference vs the previous anchor -- the resolved
+# diff (base e6d7b10 vs fix tree) is exactly one added line
+# "torch_compile_recompile_limit = 8" in the [kernels] table; every
+# other leaf is unchanged.
 PROD_RESOLVED_SHA256 = (
-    "833850a7d63f6e79c76bc46330c5d06be"
-    "f285b635a60ea427c17f5ba70accd4b"
+    "bac747fd88ae9d276ba3347ea0831940"
+    "1f869a6cf00a5d80cc8885776dde7f72"
 )
 
 
