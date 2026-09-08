@@ -1,0 +1,161 @@
+{
+ "schema": "camera_mbs_corrected_100u_rerun2_evidence_v1",
+ "status": "PASS",
+ "supervisor_result": {
+  "status": "PASS",
+  "reason": "terminal 118200 reached; ckpt COMPLETE; no U118201; records=100",
+  "first_update": 118101,
+  "terminal_update": 118200,
+  "early_exposure_gate": "PASS",
+  "timestamp_iso": "2026-09-08T18:55:02+0800"
+ },
+ "host": "come7",
+ "run_cst": {
+  "start": "2026-09-08T18:22:51",
+  "stop": "2026-09-08T18:55:10"
+ },
+ "go": "user 2026-09-08 17:42 (RERUN #2 post Phase-C)",
+ "code": {
+  "branch": "camera-v2-mbs-corrected-100u-rerun2-evidence",
+  "base_reviewed": "b78ba023f781535a9d8fd98b0fc543925e5f04a6",
+  "h1_fix": "663d2e9bf14b68c3c060acfcaf5660c96a343653",
+  "head_pushed": "ef05e937aefa890b38e7cb7e0808ee26f9f768b3",
+  "rev_list_base_to_head": 2,
+  "supervisor_sha256": "e86a209d7fa4b8e31aa3d54d5eb7be65d642cb201a80b68bc9437a8ba4066e51",
+  "config": "train_g1_camera_v2_p25_mirror_v2_canary.toml (23/23 checks, no edits)",
+  "env_snapshot_sha256": "4a79e8914dd6c1575a60449c30ae0086e288e3b28222d8838ba674671989597a",
+  "run_root": "/run/sakuramoon-mbs-corrected-treatment-rerun2",
+  "run_root_fix": "RUN_ROOT exported in stack start env (setup-abort root cause); train.pid observed in tracked RUN_ROOT"
+ },
+ "attempt_ledger": [
+  {
+   "attempt": "0U FAIL #1",
+   "time_cst": "09-08 12:48",
+   "code": "73d419c6",
+   "outcome": "0 updates: dynamo recompile-limit compile incompatibility",
+   "archive": "failed-attempts/corrected-mbs-0u-e6d7b103/"
+  },
+  {
+   "attempt": "0U FAIL #2 (rerun #1)",
+   "time_cst": "09-08 16:45",
+   "code": "b78ba02",
+   "outcome": "0 updates: data cold-start race + queue order not cross-process reproducible",
+   "archive": "failed-attempts/corrected-mbs-0u-fail2-20260908-1645/"
+  },
+  {
+   "attempt": "rerun2 setup-abort",
+   "time_cst": "09-08 17:52-18:09",
+   "code": "ef05e93",
+   "outcome": "stopped by operator: missing RUN_ROOT export; 34 metric records evidence-only; no ckpt, no queue state consumed",
+   "archive": "failed-attempts/camera-mbs-rerun2-setup-abort-20260908-1752/"
+  },
+  {
+   "attempt": "rerun2 (this run)",
+   "time_cst": "09-08 18:22-18:55",
+   "code": "ef05e93",
+   "outcome": "PASS 100/100",
+   "archive": null
+  }
+ ],
+ "identities": {
+  "source_ckpt_118100_manifest_sha256_pre_post": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+  "control_ckpt_118200_mirror_manifest_sha256_pre_post": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+  "canonical_cycle0_full_order_sha256": "d9d7081a782cf12bc9cfd2b28a5f6e791a66716932eec5e930b114e03203b8b5",
+  "canonical_cycle0_probe_seeds": [
+   7,
+   12345
+  ],
+  "canonical_cycle0_total_rows": 2956,
+  "terminal_ckpt_tree_sha256": "d2673914eba014ca389178f9bff191df4db31431b5de373ecabbfdfed4206c74",
+  "metrics_jsonl_sha256": "085840c082600b8a23d7a08291d2ba68336389335a5c4e85a0607d49e7e4ade4",
+  "supervisor_result_sha256": "3f660e7d6b079d7c9363037e3fa206682d139ce44bba9ca84e1acb3a8875e6bf",
+  "queue_state_post_run_sha256": "7ad0ca0afb90cba95548026977109f4bb94e14f75e6f90b0e7f06036ba43415c",
+  "queue_state_post_run_cycle": 0,
+  "queue_first16_32_match_canonical_probe": true
+ },
+ "training": {
+  "records": 100,
+  "contiguous": true,
+  "missing": 0,
+  "dup": 0,
+  "schema_version": 12,
+  "nonfinite_total": 0,
+  "total_loss": {
+   "mean": 0.5854130047559738,
+   "min": 0.5513288378715515,
+   "max": 0.6267048716545105
+  },
+  "post_clip_grad_norm": {
+   "mean": 0.043933345582336185,
+   "min": 0.02124350145459175,
+   "max": 0.10076043009757996
+  },
+  "clip_fraction_max": 0.0,
+  "learning_rate": 0.00015624999650754035,
+  "effective_batch": 400,
+  "samples_per_second_mean": 50.4788379419551,
+  "update_interval_s_mean": 16.13,
+  "wall_span_s_first_to_terminal": 1597.0,
+  "gpu_memory_allocated_bytes_max": 13627120640,
+  "gpu_memory_reserved_bytes_max": 65944944640,
+  "compile": {
+   "fail_on_limit_hit": false,
+   "limit_reached": false,
+   "eager_fallback": false,
+   "compile_traceback": false,
+   "max_dynamo_recompile_index": 23,
+   "limit": 64
+  }
+ },
+ "mbs_exposure": {
+  "eligible": 1740,
+  "selected": 1740,
+  "applied": 1740,
+  "extra_views": 1740,
+  "physical_views": 41740,
+  "logical_samples": 40000,
+  "vertical_applied": 4505,
+  "severity": {
+   "lt2": 2765,
+   "2to4": 1499,
+   "ge4": 241
+  },
+  "per_record_conservation": true,
+  "degraded": 0
+ },
+ "readiness_behavior": {
+  "phase_c_socket_gated_on_warmup": true,
+  "barrier_shards": 16,
+  "barrier_cache_hit": 16,
+  "socket_before_trainer": true,
+  "data_service_client_errors": 0
+ },
+ "terminal_ckpt": {
+  "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror_v2/ckpt_118200_raw-118200-update-cadence",
+  "complete": true,
+  "update": 118200,
+  "kind": "raw",
+  "schema_version": 4,
+  "stage_budget": {
+   "start": 58000,
+   "terminal": 168000,
+   "unchanged": true
+  },
+  "reason": "update-cadence",
+  "stage_finalize": false,
+  "no_u118201_in_metrics_and_trainlog": true
+ },
+ "scientific_wording": {
+  "treatment_sequence": "canonical cycle-0 (bit-identical cross-process)",
+  "control": "SAME-DISTRIBUTION INDEPENDENT-SEQUENCE camera-only continuation control (v1 canary U118200 terminal; different hash-randomized cycle-0 order; zero mirror pairs)",
+  "exact_matched_data_claim": false,
+  "vertical_asymmetry_fixed_claim": false,
+  "eval_fid_3way_audit_this_round": false
+ },
+ "teardown": {
+  "processes": 0,
+  "socket_absent": true,
+  "stack_stop_rc": 0
+ },
+ "hard_stop_after_push": true
+}
