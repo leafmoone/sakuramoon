@@ -1,0 +1,177 @@
+# SakuraMoon canonical training-performance benchmarking (P0 observatory)
+
+Status: **P0 — measurement infrastructure only.** This document defines how
+the canonical logical-update performance baseline is produced on the
+current production code. It is not a claim that the current system is
+optimal; it is the fixed reference against which any later (P1)
+optimization work may be compared.
+
+## What is measured
+
+The primary unit is **one logical update** of the production training
+loop: `train.accumulation` microbatches of `train.local_batch` samples,
+one backward/optimizer cycle — exactly the production
+`SingleGpuTrainingLoop` update. One measured run is
+
+- `--warmup-updates 5` warmup updates (model load, `torch.compile`
+  compilation, first-allocation, lazy optimizer-state initialization are
+  all excluded), followed by
+- `--measure-updates 10` measured updates (the window that is reported).
+
+The benchmark reuses the production components with zero production code
+changes:
+
+| component | source |
+| --- | --- |
+| DiT composite (config-driven, growth slots) | `config.assembly.build_trainable_composite_from_config` |
+| objective + timestep sampling + encoders in the measure path | `train.runtime.SingleGpuBatchRuntime.measure` |
+| update/step state machine (clip, optimizer, nonfinite handling) | `train.step.SingleGpuStep` / `train.loop.SingleGpuTrainingLoop` |
+| optimizer (hybrid CMuon) + LR schedule | `train.production._build_optimizer` / `_SuccessfulUpdateLrScheduler` |
+| DDP wrapping (2-GPU run) | `accelerate.Accelerator.prepare` with the production `DistributedDataParallelKwargs(find_unused_parameters=True)` |
+| Qwen text encoder (2B, frozen) | `encoders.qwen.load_local_qwen` |
+| Mage VAE (frozen) | `encoders.mage_vae.load_local_mage_vae` |
+
+Data is the only non-production input: deterministic in-memory synthetic
+batches built through the **real** caption serialization
+(`data.serialize.serialize_caption`, real Qwen tokenizer, 34/5 framing
+contract) and the **real** collator (`data.collate.collate_samples`), with
+the canonical 256×256 bucket (256 image tokens per sample, the dominant
+G1 bucket) and deterministic caption-density variation so multiple Qwen
+dense-length buckets are exercised.
+
+## Benchmark assumptions (documented, not hidden)
+
+1. **Steady growth state.** `growth_alpha` is held at the ramp-complete
+   steady value **1.0** for every update. The measured run represents a
+   mature G1 run (growth finished), not a fresh ramp.
+2. **In-memory data.** Batches are pregenerated before timing; the
+   `data` phase measures an in-memory batch handoff (≈ 0 s). Production
+   shard download/decode/prefetch is **not** measured and must not be
+   inferred from these numbers.
+3. **Per-rank determinism.** Rank `r` uses seed `seed + r * 1_000_003`
+   for images, captions and the JLT noise generator
+   (`torch.cuda.default_generators[local_index]`), so two runs on the
+   same machine are bit-identical in inputs and the comparison is
+   variance-only.
+4. **1-GPU mode is a rank-local compute baseline.** The in-memory config
+   copy derives `distributed = native/1` and
+   `global_batch = local_batch * accumulation`. It measures what one
+   rank computes; it is NOT the same effective training batch as the
+   2-GPU run and must be labeled as such in every report.
+5. **No persistence.** The loop runs with `cadence=None` and a no-op
+   checkpoint callback: no model, state, metrics, W&B or publisher I/O
+   ever happens.
+
+## Running the benchmark
+
+Environment (DTK/DCU host):
+
+```bash
+source /opt/dtk/env.sh
+export OMP_NUM_THREADS=32 MKL_NUM_THREADS=32
+export FA_SO_PATH=<venv site-packages>/flash_attn_2_cuda*.so
+PY=<venv>/bin/python
+```
+
+`FA_SO_PATH` must point at the DAS flash-attn 2 shared object (the DTK
+runtime does not scan site-packages). Run the benchmark **from a
+scratch directory**, e.g. `/sakuramoon-runtime/infra-bench/p0/<sha>/<timestamp>/` —
+benchmark artifacts are never committed.
+
+### RUN A — 1-GPU rank-local compute baseline
+
+```bash
+CUDA_VISIBLE_DEVICES=0 $PY scripts/benchmark_training_perf.py \
+    --config train_g1_cmuon_production.toml \
+    --config-root config \
+    --repository-root <worktree> \
+    --output-root /sakuramoon-runtime/infra-bench/p0/<sha>/<ts>/run-a \
+    --gpus 1 --label baseline-1gpu
+```
+
+### RUN B — 2-GPU real DDP (the canonical distributed baseline)
+
+```bash
+accelerate launch --multi_gpu --num_processes 2 --num_machines 1 \
+    --mixed_precision no --dynamo_backend no --main_process_port 29511 \
+    scripts/benchmark_training_perf.py \
+    --config train_g1_cmuon_production.toml \
+    --config-root config \
+    --repository-root <worktree> \
+    --output-root /sakuramoon-runtime/infra-bench/p0/<sha>/<ts>/run-b \
+    --gpus 2 --label baseline-2gpu
+```
+
+### RUN C — profiler snapshot (opt-in kernel view)
+
+Add `--profiler` to either command (2-GPU preferred). The profiler window
+is the measured updates only (post-warmup). A cheap device-event probe runs
+before capture: if it reports no device events, the measured window executes
+WITHOUT a profiler context (capturing the full workload in that state has
+been observed to hang the DTK runtime — CPU spin, device idle) and the
+summary records `device_trace_available = false`; no kernel rows are
+invented.
+
+## Outputs
+
+```
+<output-root>/
+  samples-<label>-rank<r>.json     # strict per-update samples per rank
+  <label>.json                     # aggregated summary (rank 0)
+  <label>.md                       # human report
+  runtime-fingerprint.json         # exact machine/software identity
+  profiler-summary.json            # RUN C only
+  profiler-trace-rank0.json        # RUN C, trace export (rank 0)
+  diagnostics-rank<r>/             # loop diagnostics (empty unless a fault)
+```
+
+Summary conventions (exact):
+
+- `global_step_seconds` = statistics over all rank-measured update walls;
+  the derived global step time used for throughput is the **max across
+  ranks of the per-rank mean** (distributed ranks are lock-step at the
+  allreduce boundary).
+- `global_samples_per_second` = `(local_samples_per_update * world_size)
+  / global_step_time`.
+- `rank_step_skew_pct` = `(slowest_rank_mean - fastest_rank_mean) /
+  slowest_rank_mean * 100`.
+- `phase_seconds[name].share_of_step` is defined only when the phase was
+  measured in **every** sample; otherwise it is `null` (absent phases are
+  never reported as fake 0.0 s).
+- `dit_forward_matmul_tflops_per_second` = the exact DiT **forward
+  matmul** FLOP counter (`ActualDitFlopCounter`) divided by the measured
+  `dit_forward` phase seconds. It is NOT MFU and NOT a whole-step
+  training FLOPS model. No other "TFLOPS"/"MFU" figure may be derived
+  from this observatory.
+- `memory` = per-rank peak allocated/reserved (reset at the start of the
+  measured window) plus final values; peak = the maximum across the
+  window (the window ends right after the last measured update, so the
+  peak covers forward+backward+optimizer state of the steady state).
+
+## BASE vs CANDIDATE comparison protocol
+
+1. Same machine, same fingerprint fields (git sha, torch/DTK/flash
+   versions, device, visible devices). Record the fingerprint delta.
+2. Same config, seed, warmup/measure sizes, same run label layout.
+3. Compare `global_step_seconds.p50` (primary) and `p95` (stability),
+   per-phase `share_of_step` (where a candidate shifts time between
+   phases), `rank_step_skew_pct`, peak memory, and the DiT forward
+   matmul TFLOP/s.
+4. A candidate claim requires the full summary pair (JSON), not a
+   single-number delta.
+
+## P0 boundary (what this observatory does NOT do)
+
+- No optimization work, no custom kernels, no math changes to model /
+  objective / optimizer / CMuon / DDP.
+- No production data service, no real checkpoint, no W&B, no FID/eval.
+- No "communication bottleneck" conclusions: with `find_unused_parameters`
+  DDP overlap is not measured or characterized here
+  (`overlap_claim = NOT_EVALUATED_IN_P0`).
+- No committed artifacts: scratch roots only.
+
+## Tests
+
+- `tests/unit/perf/` — fingerprint, sample/summary semantics (CPU).
+- `tests/gpu/perf/test_benchmark_harness.py` — small-model, real-encoder
+  two-stage harness smoke test (skips when no DCU / no local assets).
