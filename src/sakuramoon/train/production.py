@@ -741,6 +741,18 @@ def _initial_raw_state(
     )
 
 
+def _terminal_completed(config: RuntimeConfig, initial_update: int) -> bool:
+    """Whether this invocation completes with zero updates.
+
+    The live config terminal (``train.max_updates``) is the only input: a
+    resume at or beyond it completes cleanly (a successful no-op, not a
+    failure and not a rollback).  The historical checkpoint terminal never
+    participates in this decision.
+    """
+
+    return config.train.max_updates <= initial_update
+
+
 def _forced_production_checkpoint_reason(
     state: RawCheckpointState,
     *,
@@ -806,18 +818,23 @@ def _resume_state_for_config(
 ) -> RawCheckpointState:
     """Apply the config-driven rebindings to a validated RAW state.
 
-    Every value here comes from the resolved config: the absolute terminal
-    (extend-only; shrinking fails closed), the DDP world size (the optimizer
-    state is rank-redundant), the checkpoint cadence interval, and the
-    in-flight growth anchor for a slot cutover.
+    Every value here comes from the resolved config: the absolute terminal,
+    the DDP world size (the optimizer state is rank-redundant), the
+    checkpoint cadence interval, and the in-flight growth anchor for a slot
+    cutover.
+
+    ``config.train.max_updates`` is the execution authority of the CURRENT
+    invocation, in both directions.  The persisted stage-budget terminal is
+    historical compatibility metadata, never a resume permission: it is
+    enlarged only when the configured terminal is higher, because later
+    saved updates must stay representable inside the persisted envelope; it
+    is never shrunk, so a shortened (or already-reached) invocation keeps
+    the historical envelope while the live training loop and the forced
+    final checkpoint stop at the configured terminal.
     """
 
     terminal = state.stage_budget.terminal_successful_update
     configured_terminal = config.train.max_updates
-    if configured_terminal < terminal:
-        raise ValueError(
-            "configured max_updates cannot shrink the checkpoint terminal"
-        )
     resumed = state
     if state.growth.world_size != config.distributed.world_size:
         _log(
@@ -828,7 +845,7 @@ def _resume_state_for_config(
             resumed,
             growth=replace(state.growth, world_size=config.distributed.world_size),
         )
-    if configured_terminal != terminal:
+    if configured_terminal > terminal:
         _log(f"扩展训练总步数: {terminal} -> {configured_terminal}")
         resumed = replace(
             resumed,
@@ -836,6 +853,11 @@ def _resume_state_for_config(
                 state.stage_budget.start_successful_update,
                 configured_terminal,
             ),
+        )
+    elif configured_terminal < terminal:
+        _log(
+            f"训练终点按当前配置重绑定: {terminal} -> {configured_terminal}"
+            "（checkpoint terminal 仅保留为历史元数据）"
         )
     persisted_interval = state.checkpoint_cadence.every_successful_updates
     configured_interval = config.checkpoint.full_every_updates
@@ -1575,7 +1597,7 @@ def _run_accepted_lifecycle(
         initial_update = restored.state.trainer.successful_updates
         # The live config terminal (R14): a resume at or beyond it completes
         # with zero updates instead of failing.
-        terminal_completed = config.train.max_updates <= initial_update
+        terminal_completed = _terminal_completed(config, initial_update)
         if preflight_only:
             result = ProductionTrainingResult(
                 resolved_config_path,

@@ -32,8 +32,9 @@ accumulation = 20
 # the explicit value is a consistency assertion only.
 global_batch = 800
 # Absolute successful-update terminal for this run. The restored trainer reads
-# this value live on every resume (terminal := this value, extend-only,
-# fail-closed on shrink). G1: 58000 -> 168000.
+# this value live on every resume: it is the execution authority of the
+# current invocation in both directions (the checkpoint's historical
+# terminal is compatibility metadata, never a permission). G1: 58000 -> 168000.
 max_updates = 168000
 activation_checkpoint_mode = "none"
 

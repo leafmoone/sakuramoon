@@ -187,6 +187,16 @@ class GrowthCheckpointState:
 
 @dataclass(frozen=True, slots=True)
 class StageBudgetCheckpointState:
+    """Persisted legacy training-budget envelope of one RAW checkpoint.
+
+    ``terminal_successful_update`` is historical compatibility metadata: it
+    bounds what later saves of this envelope must represent, but it never
+    grants or denies execution permission.  The current invocation's
+    terminal is ``config.train.max_updates`` (read live on every resume); a
+    resume rebinds the envelope UPWARD only when the configured terminal is
+    higher, and otherwise keeps this value verbatim.
+    """
+
     start_successful_update: int
     terminal_successful_update: int
 

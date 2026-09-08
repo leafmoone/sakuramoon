@@ -35,7 +35,7 @@
 | --- | --- |
 | `train.resolution` | 训练分辨率（桶几何由此派生形状集合，无外部 `shape_count` 锁） |
 | `train.local_batch` × `train.accumulation` × `distributed.world_size` | 有效全局批（`effective_global_batch()`，`[train]` 内部断言） |
-| `train.max_updates` | **绝对**成功更新终点；每个 resume 实时读取，只允许延长、收缩 fail-closed |
+| `train.max_updates` | **当前调用的绝对**成功更新终点；每个 resume 实时读取、双向权威（见 §3 第 6 条） |
 | `train.activation_checkpoint_mode` | 激活检查点模式 |
 | `model.dit.depth` | DiT 层数；必须等于 `active_slot_ids` 长度 |
 | `model.dit.active_slot_ids` | 活跃槽 id 集合（拓扑唯一来源；缺省时按 depth 派生历史拓扑） |
@@ -64,18 +64,32 @@
 checkpoint 与配置之间的绑定分两类：
 
 - **信息性**（不门控）：`growth.stage` / `growth.world_size` / `growth.resolution`
-  元数据、run label、分辨率变化。
+  元数据、run label、分辨率变化、checkpoint 的历史 terminal
+  （`stage_budget.terminal_successful_update`，仅作兼容性包络）。
 - **结构性**（严格校验，违规 fail-closed）：
   1. 槽拓扑：相等 = 普通 resume；严格子集 = 扩容切换（要求 `growth.enabled = true`、
      源 ramp 已完成、模块 `new_slot_ids` 与差集一致）。
   2. 身份完整性：checkpoint identity 与设备 ordinal 每次重绑到本 rank 设备。
   3. 节拍完整性：cadence 状态重绑到当前 `checkpoint.full_every_updates`。
   4. 确定性 alpha：ramp 锚点与 `ramp_updates` 一致。
-  5. FQN 集合：当前模型相对 checkpoint 的**新增** FQN 必须全部落在新槽前缀内
-     （`_verify_fqn_sets`），**不允许任何移除**；优化器 group diff 同理
-     （`_verify_group_diff`，顺序敏感）。
-  6. 预算：`train.max_updates` 只允许延长 checkpoint 记录的 terminal；
-     收缩抛 `ValueError`（fail-closed）。
+  5. FQN 集合：默认 = 精确结构契约（不允许任何移除）；扩容切换可**新增**明确声明的
+     新槽前缀 FQN（`_verify_fqn_sets`）；规范化 iREPA v4 → OFF 直接恢复可移除
+     **恰好**已声明 locked-v1 iREPA 辅助的 2 个 FQN 及其优化器/路由状态
+     （声明仅限 locked iREPA v1 元数据，任何其它移除仍 fail-closed）；
+     优化器 group diff 同理（`_verify_group_diff`，顺序敏感）。
+  6. 预算：`train.max_updates` 是**当前调用的唯一执行权威**（双向）：
+     - `max_updates > 历史 terminal`：持久化 terminal 向上扩展到
+       `max_updates`（后续保存的 update 必须仍在包络内可表示）；
+     - `max_updates ≤ 历史 terminal`：历史 terminal 原样保留（不收缩、不改写
+       源 checkpoint）；训练循环与强制终检点仍停在 `max_updates`；
+     - 调低 `max_updates` 永不回滚模型/优化器/计数——它只表示“本次调用不超过
+       该点继续训练”；
+     - `max_updates ≤ 恢复 update`：零 update 干净完成（成功的 no-op，不是失败、
+       不是回滚；无数据消费、无 forward/backward/optimizer.step）。
+
+     例（checkpoint @130k，历史 terminal 168k）：
+     `max_updates=200k` → 训练到 200k；`150k` → 训练到 150k；`135k` → 训练到
+     135k；`130k` / `120k` → 零 update 成功。
 
 旧 v3/v4 checkpoint（无 `new_slot_ids`、growth 侧车、`growth_migration.json`）
 均可加载：`new_slot_ids` 缺省为空元组，`stable_slot_count` 由活跃拓扑派生。

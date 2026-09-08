@@ -64,6 +64,25 @@ cd /root/private_data/sakuramoon
 
 查看日志：`tail -F /root/sakuramoon-logs/train-accelerate.log`
 
+## 配置驱动训练与断点恢复
+
+- 当前 `config/*.toml` 决定执行；`train.max_updates` 是**当前调用的绝对**成功更新终点，
+  每个 resume 实时读取。
+- checkpoint 里记录的历史 terminal 不是权限：它不会允许也不会阻止继续训练。
+- 调低 `max_updates` **不会回滚**模型/优化器/计数——只表示本次调用不超过该点。
+- `max_updates ≤ checkpoint update` 时训练零新 update 干净退出（成功的 no-op）。
+- 分辨率/world size 变化在结构兼容时允许；checkpoint 模型/优化器的结构完整性
+  校验保持 fail-closed。
+
+例（checkpoint update = 130000，历史计划 terminal = 168000）：
+
+```text
+max_updates = 135000  ->  +5000 updates
+max_updates = 120000  ->  +0 updates（零 update 完成）
+```
+
+规范契约见 `docs/config-and-resume.md`。
+
 ## 3. 上传 checkpoint 到 ModelScope（终端 3）
 
 发布器每 `INTERVAL_SECONDS`（默认 600 秒）把 `SOURCE_ROOT` 下带 `COMPLETE` 的完整

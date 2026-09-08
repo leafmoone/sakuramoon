@@ -363,6 +363,12 @@ class ProductionSingleGpuCheckpointPublisher:
         from sakuramoon.checkpoint.save import save_raw_checkpoint
 
         restored = self._restored_state
+        # Envelope guard, NOT a run-terminal permission: ``restored`` already
+        # carries the config-rebound budget (expanded to train.max_updates
+        # when it is higher, historical otherwise).  Every update this run
+        # saves is <= the live config terminal, so it stays inside the
+        # envelope in both directions — shortened runs (live terminal below
+        # the historical one) publish their final checkpoint normally.
         if (
             state.successful_updates <= restored.trainer.successful_updates
             or state.successful_updates

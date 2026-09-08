@@ -168,3 +168,19 @@ pytest 4 failed / 971 passed（失败集 = BASE 基线同 4 个预存 cmuon 环�
 
 **STOP** — 本地交付完毕，等待用户评审。不 push、不 merge、不启动任何训练；
 2-DCU 小规模集成验证待用户 GO 后执行。
+
+## POST-MERGE ERRATUM — max_updates authority
+
+- 本报告的原始实现保留了 **extend-only** 的 terminal 规则（`max_updates`
+  只允许延长 checkpoint terminal、收缩 fail-closed）；外部评审确认这与
+  配置权威的原始要求（当前配置决定本次执行）相矛盾。
+- 该规则已在后续跟进 commit（`fix: make max_updates config-authoritative`）
+  中修正：`train.max_updates` 是**当前调用的唯一执行权威**（双向）；
+  checkpoint terminal 是非约束的历史兼容元数据（仅在 `max_updates` 更高时
+  向上扩展，永不收缩、不改写源 checkpoint）；低于/等于当前恢复 update 的
+  `max_updates` 产生干净的零 update 完成。
+- 当前规范契约以 `docs/config-and-resume.md` 为准。
+- 另注：上文“不允许任何移除”的 FQN 表述为历史快照。其后已落地
+  规范化 iREPA v4 → OFF 直接恢复的精确例外：仅当源 artifact 声明
+  locked-v1 iREPA 辅助元数据时，允许移除**恰好**那 2 个投影器 FQN 及其
+  优化器/路由状态；任何其它移除仍然 fail-closed。
