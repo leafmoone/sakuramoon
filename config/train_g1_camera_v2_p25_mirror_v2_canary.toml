@@ -1,0 +1,41 @@
+# vertical_mirror_pair_v1 corrected-exposure canary (v2) -- post-100U
+# worker-clone propagation fix (camera-v2-mbs-worker-clone-fix-review).
+#
+# The v1 canary output root already contains the accidental CONTROL
+# terminal (output_model/g1_camera_v2_p25_mirror/
+# ckpt_118200_raw-118200-update-cadence, manifest
+# f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7,
+# interpretation CONTROL_100U_CAMERA_ONLY) which stays immutable.  This
+# config therefore extends the v1 canary -- inheriting the exact mirror
+# policy (v1 mode, min_latent_shift 2.0, pair_probability 1.0, pair_weight
+# 1.0), the governed stop cap 118200, the camera viewport policy
+# (p=0.25, zoom 1.10-1.50), optimizer, LR, batch, scheduler, compile and
+# architecture -- and overrides ONLY the experiment identity and output
+# locations, so a corrected-treatment canary can run side by side from the
+# same U118100 source:
+#   output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence
+# (manifest 821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892).
+#
+# REVIEW ONLY: this config is NOT deployed and NOT launched.  A corrected
+# MBS 100U treatment starts only after external review of this fix branch
+# and an explicit user GO; it then resumes from the COMPLETE U118100
+# checkpoint via scripts/training_stack.sh (see AGENTS.md launch contract).
+
+extends = ["train_g1_camera_v2_p25_mirror_canary.toml"]
+
+[run]
+run_id = "g1_camera_v2_p25_mirror_v2"
+
+[paths]
+run_dir = "runs/g1_camera_v2_p25_mirror_v2"
+checkpoint_dir = "output_model/g1_camera_v2_p25_mirror_v2"
+artifact_dir = "artifacts/g1_camera_v2_p25_mirror_v2"
+
+[logging]
+local_jsonl_path = "artifacts/g1_camera_v2_p25_mirror_v2/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/g1_camera_v2_p25_mirror_v2/wandb-retry.jsonl"
+
+[evaluation]
+output_dir = "output_model/evaluation/g1_camera_v2_p25_mirror_v2"

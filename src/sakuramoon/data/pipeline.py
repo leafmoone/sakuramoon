@@ -915,6 +915,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             cycle_index=cycle_index,
             spatial_policy=self.spatial_policy,
             camera_policy=self.camera_policy,
+            mirror_policy=self.mirror_policy,
             transparent_policy=self.transparent_policy,
             transparent_telemetry=self.transparent_telemetry,
         )
