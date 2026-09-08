@@ -10,6 +10,7 @@ import torch
 from sakuramoon.perf import profiler as perf_profiler
 from sakuramoon.perf.profiler import (
     DEFAULT_PROFILER_UPDATES,
+    probe_consensus_decision,
     unavailable_snapshot,
     validate_profiler_updates,
 )
@@ -111,8 +112,76 @@ class TestCaptureUnavailableExecutesNoWorkload:
         )
         snapshot = perf_profiler.capture_profiler_window(
             workload,
-            output_root=None,
-            rank=0,  # type: ignore[arg-type]
+            output_root=None,  # type: ignore[arg-type]
+            rank=0,
+            availability_verified=False,
         )
         assert snapshot.device_trace_available is False
         assert called["workload"] is False
+
+
+class TestPreverifiedCaptureNeverReprobes:
+    """Liveness: availability_verified=True must skip the internal probe.
+
+    A second per-rank probe after the all-rank consensus could
+    transiently disagree and let one rank skip the DDP workload while
+    another enters it (collective hang).
+    """
+
+    def test_preverified_capture_does_not_probe(self, monkeypatch, tmp_path) -> None:
+        def boom() -> bool:
+            raise AssertionError("second probe must not run")
+
+        monkeypatch.setattr(perf_profiler, "profiler_device_trace_available", boom)
+        calls = {"n": 0}
+
+        def workload() -> None:
+            calls["n"] += 1
+
+        snapshot = perf_profiler.capture_profiler_window(
+            workload,
+            output_root=tmp_path,
+            rank=0,
+            availability_verified=True,
+        )
+        assert calls["n"] == 1  # workload entered deterministically
+        assert snapshot.profiler_updates == 1
+
+    def test_non_preverified_still_probes_once(self, monkeypatch, tmp_path) -> None:
+        probe_calls = {"n": 0}
+
+        def probe() -> bool:
+            probe_calls["n"] += 1
+            return False
+
+        monkeypatch.setattr(perf_profiler, "profiler_device_trace_available", probe)
+        calls = {"n": 0}
+
+        def workload() -> None:
+            calls["n"] += 1
+
+        snapshot = perf_profiler.capture_profiler_window(
+            workload,
+            output_root=tmp_path,
+            rank=0,
+            availability_verified=False,
+        )
+        assert probe_calls["n"] == 1
+        assert calls["n"] == 0
+        assert snapshot.device_trace_available is False
+
+
+class TestProbeConsensusDecision:
+    """The pure all-rank decision (AND; == ReduceOp.MIN semantics)."""
+
+    def test_all_true_captures_everywhere(self) -> None:
+        assert probe_consensus_decision([True, True]) is True
+
+    def test_any_false_captures_nowhere(self) -> None:
+        assert probe_consensus_decision([True, False]) is False
+        assert probe_consensus_decision([False, True]) is False
+        assert probe_consensus_decision([False]) is False
+
+    def test_empty_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="at least one rank flag"):
+            probe_consensus_decision([])

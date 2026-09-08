@@ -114,10 +114,14 @@ model/optimizer state (no persistence anyway).
 
 A cheap device-event probe runs before any capture and must yield at
 least one real CUDA device event with positive device time; importing
-torch.profiler alone never counts as available. If the probe reports
-unavailable, NO extra workload is executed (a prior ungated
-full-workload capture in that state was observed to hang the DTK
-runtime — CPU spin, device idle) and the record is
+torch.profiler alone never counts as available. In distributed mode,
+device availability is probed ONCE per rank, reduced to one all-rank
+decision (all_reduce MIN), and capture trusts that decision
+(`availability_verified=True`) — it does not re-probe, so no rank can
+independently skip the DDP workload after the consensus. If the
+(single) decision reports unavailable, NO extra workload is executed
+(a prior ungated full-workload capture in that state was observed to
+hang the DTK runtime — CPU spin, device idle) and the record is
 `device_trace_available = false` with empty operator rows and
 `trace_path = null`; no kernel rows are invented.
 

@@ -244,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     from sakuramoon.perf.profiler import (
         capture_profiler_window,
+        probe_consensus_decision,
         profiler_device_trace_available,
         render_snapshot_markdown,
         unavailable_snapshot,
@@ -354,10 +355,18 @@ def main(argv: list[str] | None = None) -> int:
     # SEPARATE post-baseline profiler scratch stage (opt-in).  It runs
     # AFTER the measured baseline, captures exactly profiler_updates
     # logical updates, appends nothing to the measured samples, and may
-    # advance scratch model/optimizer state.  If the tiny device-event
-    # probe reports unavailable (every rank must agree), NO extra
-    # workload is executed: an ungated capture in that state was observed
-    # to hang the DTK runtime (CPU spin, device idle).
+    # advance scratch model/optimizer state.
+    #
+    # Distributed liveness contract: each rank performs EXACTLY ONE tiny
+    # local probe; the probes are reduced to ONE canonical all-rank
+    # decision (all_reduce(MIN) == AND of the local flags).  That
+    # decision is FINAL: if true, EVERY rank enters the profiler
+    # workload; if false, EVERY rank skips it.  Capture is invoked with
+    # availability_verified=True and must NOT probe again — a second
+    # per-rank probe could transiently disagree and let one rank skip
+    # the DDP workload while another enters it (collective hang).  An
+    # ungated capture in the unavailable state was observed to hang the
+    # DTK runtime (CPU spin, device idle).
     all_ranks_available = False
     scratch_snapshot_box: list = []
     if args.profiler:
@@ -367,7 +376,6 @@ def main(argv: list[str] | None = None) -> int:
             f"available={available}",
             flush=True,
         )
-        all_ranks_available = available
         if world > 1:
             import torch.distributed as dist
 
@@ -375,12 +383,16 @@ def main(argv: list[str] | None = None) -> int:
                 flag = torch.tensor([1 if available else 0], device=device)
                 dist.all_reduce(flag, op=dist.ReduceOp.MIN)
                 all_ranks_available = bool(flag.item() == 1)
-                if all_ranks_available != available:
-                    print(
-                        f"[bench rank{rank}] profiler all-rank consensus "
-                        f"overrides local probe: available={all_ranks_available}",
-                        flush=True,
-                    )
+            else:
+                all_ranks_available = probe_consensus_decision([available])
+            if all_ranks_available != available:
+                print(
+                    f"[bench rank{rank}] profiler all-rank consensus "
+                    f"overrides local probe: available={all_ranks_available}",
+                    flush=True,
+                )
+        else:
+            all_ranks_available = probe_consensus_decision([available])
         if all_ranks_available:
             print(
                 f"[bench rank{rank}] profiler scratch stage: capturing "
@@ -390,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             def wrap_scratch(workload) -> None:
+                # The all-rank decision above is FINAL; capture must not
+                # probe again (availability_verified=True).
                 scratch_snapshot_box.append(
                     capture_profiler_window(
                         workload,
@@ -397,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
                         rank=rank,
                         export_trace=(rank == 0),
                         profiler_updates=profiler_updates,
+                        availability_verified=True,
                     )
                 )
 

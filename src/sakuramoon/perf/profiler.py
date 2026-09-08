@@ -10,16 +10,21 @@ never used as correctness facts.
 
 Device-trace availability is decided by a tiny matmul probe that must
 yield at least one real CUDA device event with positive device time.
-Importing ``torch.profiler`` alone never counts as "available".  When
-the probe reports unavailable, NO extra workload is executed (a prior
-ungated full-workload capture was observed to hang the DTK runtime).
+Importing ``torch.profiler`` alone never counts as "available".  In
+distributed runs the probe executes exactly ONCE per rank and the
+results are reduced to a single all-rank decision; capture then trusts
+that decision (``availability_verified=True``) and does NOT re-probe,
+so no rank can independently skip the DDP workload after the consensus.
+When the (single) decision reports unavailable, NO extra workload is
+executed (a prior ungated full-workload capture was observed to hang
+the DTK runtime).
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -80,6 +85,21 @@ def is_cuda_device_event(event: Any) -> bool:
     text = str(device_type).strip()
     tail = text.rsplit(".", 1)[-1]
     return tail.upper() == "CUDA"
+
+
+def probe_consensus_decision(local_flags: Sequence[bool]) -> bool:
+    """Reduce per-rank probe flags to ONE all-rank capture decision.
+
+    Pure AND semantics — exactly what the distributed runner computes with
+    ``dist.all_reduce(MIN)``: the profiler workload is entered by EVERY
+    rank only when EVERY rank's local probe reported available.  This is
+    the decision helper for the runner's control flow; it performs no
+    probing and no distributed machinery.
+    """
+
+    if len(local_flags) == 0:
+        raise ValueError("probe_consensus_decision requires at least one rank flag")
+    return all(local_flags)
 
 
 def profiler_device_trace_available() -> bool:
@@ -236,12 +256,28 @@ def capture_profiler_window(
     top_n: int = 20,
     export_trace: bool = False,
     profiler_updates: int = DEFAULT_PROFILER_UPDATES,
+    availability_verified: bool = False,
 ) -> ProfilerSnapshot:
     """Run a SEPARATE scratch workload under torch.profiler and summarize it.
 
     The caller passes the scratch profiler stage (exactly
     ``profiler_updates`` logical updates, post-baseline).  The canonical
     measured baseline never runs under a profiler context.
+
+    Availability contract:
+
+    - ``availability_verified=False`` (standalone / single-rank callers):
+      this function performs its OWN one-shot probe and, when the probe
+      reports unavailable, executes NO workload and returns the
+      UNAVAILABLE record.
+    - ``availability_verified=True`` (distributed callers): the caller has
+      ALREADY completed the required all-rank availability consensus
+      (one local probe per rank reduced to a single all-rank decision).
+      This function does NOT probe again and deterministically enters the
+      profiler workload, so no rank can skip the DDP workload
+      independently after the consensus (a per-rank second probe could
+      transiently disagree and hang the collective).  Only the
+      torch.profiler importability check is kept; no GPU probing.
     """
 
     if _torch_profiler is None:
@@ -250,7 +286,7 @@ def capture_profiler_window(
         raise ValueError("top_n must be a positive int")
     validate_profiler_updates(profiler_updates)
 
-    if not profiler_device_trace_available():
+    if not availability_verified and not profiler_device_trace_available():
         # The stack's activity tracer produced no real device event in the
         # probe.  A prior ungated full-workload capture in this state was
         # observed to hang the DTK runtime (CPU spin, device idle), so the
@@ -364,6 +400,7 @@ __all__ = [
     "capture_profiler_window",
     "display_category",
     "is_cuda_device_event",
+    "probe_consensus_decision",
     "profiler_device_trace_available",
     "profiler_supported",
     "render_snapshot_markdown",
