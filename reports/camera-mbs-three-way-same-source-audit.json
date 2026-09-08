@@ -1,0 +1,219 @@
+{
+  "checkpoints": {
+    "CONTROL": {
+      "evidence": {
+        "complete_marker": "complete",
+        "growth_alpha": 1.0,
+        "manifest_sha256": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+        "model_tree_sha256": "5347def81c6c8627b66861159890aaf23eb8fca61a87ed3c544c1a3b07d3c241",
+        "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror/ckpt_118200_raw-118200-update-cadence",
+        "successful_updates": 118200
+      },
+      "problems": [],
+      "status": "PASS"
+    },
+    "PRE": {
+      "evidence": {
+        "complete_marker": "complete",
+        "growth_alpha": 1.0,
+        "manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+        "model_tree_sha256": "32b76aff83a92b26fa1313cf100afeb8ec920b2b11920bf9319c14e2293da370",
+        "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+        "successful_updates": 118100
+      },
+      "problems": [],
+      "status": "PASS"
+    },
+    "TREATMENT": {
+      "evidence": {
+        "complete_marker": "complete",
+        "full_tree_sha256": "d2673914eba014ca389178f9bff191df4db31431b5de373ecabbfdfed4206c74",
+        "growth_alpha": 1.0,
+        "manifest_sha256": "11deada823da8217a08cd15f4c0365c391f01c60af8335d89c07a9ea61d69824",
+        "model_tree_sha256": "22a802f22987a6797db2886a8fd9db717ee2ce92cc0dbc699f00adc5a780fb98",
+        "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror_v2/ckpt_118200_raw-118200-update-cadence",
+        "successful_updates": 118200
+      },
+      "problems": [],
+      "status": "PASS"
+    }
+  },
+  "code": {
+    "base_reviewed_sha": "1b8fce49031b854b835d9f47ea65a3f77b83a2f9",
+    "branch": "camera-v2-mbs-three-way-same-source-audit-review",
+    "frozen_vbs_final_snapshot_untouched": true,
+    "production_diff_src_config_scripts": "",
+    "tooling_sha_h1": "9d428faf01ed5843002eb5246f2d688b13de7418"
+  },
+  "control_treatment": {
+    "note": "raw ledgers remain in /tmp/camera-mbs-three-way-audit/ledger (never committed); no D/G/I contrast is reported",
+    "scored_pairs": {
+      "CONTROL": 512,
+      "PRE": 512,
+      "TREATMENT": 512
+    },
+    "spec_ref": "section 7 STOP: do not interpret treatment/control",
+    "status": "SCORED_NOT_INTERPRETED"
+  },
+  "created_utc": "2026-09-08T16:23:36Z",
+  "forensics": {
+    "full_rerun": {
+      "control": {
+        "bitexact_vs_original": 458,
+        "n_pairs": 512
+      },
+      "pre": {
+        "bitexact_vs_frozen": 72,
+        "bitexact_vs_original": 456,
+        "maxabs_rerun_delta": 0.0002734512090650388,
+        "maxabs_rerun_delta_pair": 298,
+        "n_pairs": 512,
+        "tail_flipped": 45,
+        "tail_stable": 12
+      }
+    },
+    "summary": "come7 determinism probe. 8-tail-pair scratch re-run: 6/8 bit-exact vs the original run, 2/8 (pairs 371, 43) bit-exact vs the FROZEN values although the original run differed ~1e-4 -> intra-host non-deterministic DCU reduction path for a small input subset. Full 512-pair re-verification: 456/512 PRE pairs bit-exact vs the original run, 72/512 bit-exact vs frozen, 12/57 of the >1e-6 tail stable, 45/57 flipped; CONTROL 458/512 bit-exact vs its original run. Pipeline is otherwise bit-faithful (median per-pair delta ~2e-15).",
+    "tail8_table": [
+      {
+        "d_top_orig": 0.0002734512090650388,
+        "d_top_rerun": 0.0002734512090650388,
+        "pair": 298,
+        "rerun": "bit-exact vs original"
+      },
+      {
+        "d_top_orig": 0.0002653962516784668,
+        "d_top_rerun": 0.0002653962516784668,
+        "pair": 203,
+        "rerun": "bit-exact vs original"
+      },
+      {
+        "d_top_orig": -0.0001237210578918457,
+        "d_top_rerun": -0.0001237210578918457,
+        "pair": 459,
+        "rerun": "bit-exact vs original"
+      },
+      {
+        "d_top_orig": 0.00010825777053833009,
+        "d_top_rerun": 1.517467478297426e-16,
+        "pair": 371,
+        "rerun": "bit-exact vs FROZEN (original run was the outlier)"
+      },
+      {
+        "d_top_orig": 9.873676300048828e-05,
+        "d_top_rerun": 9.873676300048828e-05,
+        "pair": 109,
+        "rerun": "bit-exact vs original"
+      },
+      {
+        "d_top_orig": -9.845256805419922e-05,
+        "d_top_rerun": -9.845256805419922e-05,
+        "pair": 400,
+        "rerun": "bit-exact vs original"
+      },
+      {
+        "d_top_orig": 9.29825210571289e-05,
+        "d_top_rerun": 1.708117024634647e-15,
+        "pair": 43,
+        "rerun": "bit-exact vs FROZEN (original run was the outlier)"
+      },
+      {
+        "d_top_orig": -8.75406265258789e-05,
+        "d_top_rerun": -8.75406265258789e-05,
+        "pair": 278,
+        "rerun": "bit-exact vs original"
+      }
+    ]
+  },
+  "label": "MBS THREE-WAY SAME-SOURCE CAUSAL AUDIT (gate-FAIL record)",
+  "pair_cohort": {
+    "cohort_field_identity": "512/512 pairs field-identical to committed frozen CSV (pair-cohort-gate PASS)",
+    "cohort_sizes": {
+      "all": 512,
+      "content_balanced": 256,
+      "latent_2to4": 275,
+      "latent_ge2": 312,
+      "latent_ge4": 37,
+      "latent_lt2": 200
+    },
+    "pair_count": 512,
+    "pair_manifest_sha256": "cbde1a735fec05e2c9025555c0797ae94a6911f2c3ad8934cb2b2c75580f76c9"
+  },
+  "replay": {
+    "bound": 3.369840669620314e-06,
+    "checks": [
+      {
+        "bound": 3.369840669620314e-06,
+        "name": "maxabs_per_pair",
+        "pass": false,
+        "value": 0.0002734512090650388
+      },
+      {
+        "bound": 3.369840669620314e-06,
+        "name": "rms_per_pair",
+        "pass": false,
+        "value": 2.0119547426682294e-05
+      },
+      {
+        "bound": 3.369840669620314e-06,
+        "name": "point_delta_M_TOP",
+        "pass": true,
+        "value": 5.092224455438554e-07
+      },
+      {
+        "bound": 3.369840669620314e-06,
+        "name": "point_delta_M_BOTTOM",
+        "pass": true,
+        "value": 5.442852852866054e-07
+      }
+    ],
+    "delta_distribution": {
+      "M_BOT": {
+        "count_gt_1e-4": 4,
+        "count_gt_1e-5": 46,
+        "count_gt_1e-6": 60,
+        "max": 0.0002301856875458006,
+        "median": 2.641550173043683e-15,
+        "p95": 3.127753739005229e-05,
+        "p99": 9.298324584534369e-05
+      },
+      "M_TOP": {
+        "count_gt_1e-4": 4,
+        "count_gt_1e-5": 39,
+        "count_gt_1e-6": 57,
+        "max": 0.0002734512090650388,
+        "median": 1.9810542095655137e-15,
+        "p95": 2.3767352104040048e-05,
+        "p99": 9.845197200282962e-05
+      }
+    },
+    "derivation": "5.0 x max(frozen POST SAME-floor CI95 upper bounds) computed from committed audit.json numerics_floor",
+    "fraction_pairs_below_1e-6": 0.888671875,
+    "frozen_reference": "committed VBS pairs CSV M_TOP_POST / M_BOT_POST (U118100)",
+    "maxabs": 0.0002734512090650388,
+    "mean_delta": 5.267538654998307e-07,
+    "new_pre_checkpoint": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+    "point_estimates": {
+      "delta_M_BOTTOM": 5.442852852866054e-07,
+      "delta_M_TOP": 5.092224455438554e-07,
+      "frozen": {
+        "M_BOTTOM": 0.003546690451912582,
+        "M_TOP": 0.002115014685841743
+      },
+      "new": {
+        "M_BOTTOM": 0.0035472347371978685,
+        "M_TOP": 0.0021155239082872868
+      }
+    },
+    "rms": 2.0119547426682294e-05,
+    "within_frozen_numerics_floor": false
+  },
+  "spec": "same-source 3-way: PRE U118100 vs CONTROL U118200 vs TREATMENT U118200 on the frozen 512 VBS pairs",
+  "spec_ref": "prompt section 7 (PRE-SCORE REPLAY GATE): replay exceeded the frozen numerics floor -> STOP, do not interpret treatment/control",
+  "status": "STOP_AT_REPLAY_GATE",
+  "validation": {
+    "focused_tests": "35/35 pass (come7 DTK venv, pytest 9.1.1)",
+    "git_diff_check": "clean",
+    "py_compile": "OK",
+    "ruff": "contracts/score/analyze/test ruff-clean (repo config, ruff 0.16); reconstruct_stage1.py inherits the 11 frozen cc_stage1.py findings verbatim (documented in README)"
+  }
+}

@@ -1,0 +1,241 @@
+{
+  "arms": [
+    "TT",
+    "TB",
+    "BT",
+    "BB",
+    "T_SAME",
+    "B_SAME",
+    "T_ID",
+    "B_ID"
+  ],
+  "checkpoint_identity_post_scoring": {
+    "checked_utc": "2026-09-08T15:52:56Z",
+    "checkpoint_identity_post_scoring": {
+      "CONTROL": {
+        "evidence": {
+          "complete_marker": "complete",
+          "growth_alpha": 1.0,
+          "manifest_sha256": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+          "model_tree_sha256": "5347def81c6c8627b66861159890aaf23eb8fca61a87ed3c544c1a3b07d3c241",
+          "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror/ckpt_118200_raw-118200-update-cadence",
+          "successful_updates": 118200
+        },
+        "problems": [],
+        "status": "PASS"
+      },
+      "PRE": {
+        "evidence": {
+          "complete_marker": "complete",
+          "growth_alpha": 1.0,
+          "manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+          "model_tree_sha256": "32b76aff83a92b26fa1313cf100afeb8ec920b2b11920bf9319c14e2293da370",
+          "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+          "successful_updates": 118100
+        },
+        "problems": [],
+        "status": "PASS"
+      },
+      "TREATMENT": {
+        "evidence": {
+          "complete_marker": "complete",
+          "full_tree_sha256": "d2673914eba014ca389178f9bff191df4db31431b5de373ecabbfdfed4206c74",
+          "growth_alpha": 1.0,
+          "manifest_sha256": "11deada823da8217a08cd15f4c0365c391f01c60af8335d89c07a9ea61d69824",
+          "model_tree_sha256": "22a802f22987a6797db2886a8fd9db717ee2ce92cc0dbc699f00adc5a780fb98",
+          "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror_v2/ckpt_118200_raw-118200-update-cadence",
+          "successful_updates": 118200
+        },
+        "problems": [],
+        "status": "PASS"
+      }
+    },
+    "git_immutability": {
+      "base_sha": "1b8fce49031b854b835d9f47ea65a3f77b83a2f9",
+      "frozen_vbs_and_final_snapshot_untouched": true,
+      "head_sha": "9d428faf01ed5843002eb5246f2d688b13de7418",
+      "src_config_scripts_untouched": true,
+      "tracked_diff_src_config_scripts": ""
+    }
+  },
+  "checkpoints": [
+    "PRE",
+    "CONTROL",
+    "TREATMENT"
+  ],
+  "created_utc": "2026-09-08T16:23:36Z",
+  "delta_distribution": {
+    "M_BOT": {
+      "count_gt_1e-4": 4,
+      "count_gt_1e-5": 46,
+      "count_gt_1e-6": 60,
+      "max": 0.0002301856875458006,
+      "median": 2.641550173043683e-15,
+      "p95": 3.127753739005229e-05,
+      "p99": 9.298324584534369e-05
+    },
+    "M_TOP": {
+      "count_gt_1e-4": 4,
+      "count_gt_1e-5": 39,
+      "count_gt_1e-6": 57,
+      "max": 0.0002734512090650388,
+      "median": 1.9810542095655137e-15,
+      "p95": 2.3767352104040048e-05,
+      "p99": 9.845197200282962e-05
+    }
+  },
+  "device_count": 2,
+  "device_names": [
+    "BW",
+    "BW"
+  ],
+  "dtk": "DTK 26.04",
+  "hostname": "crdnotebook-2097137043750113282-come7-21657",
+  "label": "MBS THREE-WAY SAME-SOURCE AUDIT - RUN METRICS (gate-FAIL record)",
+  "pair_cohort_gate": {
+    "frozen_pairs_csv": "/sakuramoon-runtime/sakuramoon-camera-mbs-three-way-audit/reports/camera-vertical-bottom-supervision-pairs.csv",
+    "label": "MBS THREE-WAY PAIR COHORT IDENTITY GATE",
+    "n_pairs": 512,
+    "note": "the original pair-manifest.json embeds created_utc and is not byte-reproducible (sha 7f3a81b2... not matchable); cohort identity verified field-by-field against the committed frozen CSV via check_pair_cohort_identity",
+    "pair_manifest": "/tmp/camera-vertical-bottom/pair-manifest.json",
+    "pair_manifest_sha256": "cbde1a735fec05e2c9025555c0797ae94a6911f2c3ad8934cb2b2c75580f76c9",
+    "status": "PASS"
+  },
+  "pair_count": 512,
+  "per_worker": [
+    {
+      "anchor_coord_invariant_pairs": 256,
+      "anchor_source": "re-verification gate doc (counter regenerated; original doc overwritten by resume)",
+      "ck": "PRE",
+      "device": "cuda:0",
+      "finished_utc": "2026-09-08T15:19:04Z",
+      "identity_gate": "PASS",
+      "n_pairs": 256,
+      "worker": 0
+    },
+    {
+      "anchor_coord_invariant_pairs": 256,
+      "anchor_source": "re-verification gate doc (counter regenerated; original doc overwritten by resume)",
+      "ck": "PRE",
+      "device": "cuda:1",
+      "finished_utc": "2026-09-08T15:19:04Z",
+      "identity_gate": "PASS",
+      "n_pairs": 256,
+      "worker": 1
+    },
+    {
+      "anchor_coord_invariant_pairs": 256,
+      "anchor_source": "re-verification gate doc (counter regenerated; original doc overwritten by resume)",
+      "ck": "CONTROL",
+      "device": "cuda:0",
+      "finished_utc": "2026-09-08T15:19:38Z",
+      "identity_gate": "PASS",
+      "n_pairs": 256,
+      "worker": 0
+    },
+    {
+      "anchor_coord_invariant_pairs": 256,
+      "anchor_source": "re-verification gate doc (counter regenerated; original doc overwritten by resume)",
+      "ck": "CONTROL",
+      "device": "cuda:1",
+      "finished_utc": "2026-09-08T15:19:38Z",
+      "identity_gate": "PASS",
+      "n_pairs": 256,
+      "worker": 1
+    },
+    {
+      "anchor_coord_invariant_pairs": 256,
+      "anchor_source": "original-run gate doc (intact)",
+      "ck": "TREATMENT",
+      "device": "cuda:0",
+      "finished_utc": "2026-09-08T15:28:54Z",
+      "identity_gate": "PASS",
+      "n_pairs": 256,
+      "worker": 0
+    },
+    {
+      "anchor_coord_invariant_pairs": 256,
+      "anchor_source": "original-run gate doc (intact)",
+      "ck": "TREATMENT",
+      "device": "cuda:1",
+      "finished_utc": "2026-09-08T15:29:13Z",
+      "identity_gate": "PASS",
+      "n_pairs": 256,
+      "worker": 1
+    }
+  ],
+  "replay_gate": {
+    "bound": 3.369840669620314e-06,
+    "checks": [
+      {
+        "bound": 3.369840669620314e-06,
+        "name": "maxabs_per_pair",
+        "pass": false,
+        "value": 0.0002734512090650388
+      },
+      {
+        "bound": 3.369840669620314e-06,
+        "name": "rms_per_pair",
+        "pass": false,
+        "value": 2.0119547426682294e-05
+      },
+      {
+        "bound": 3.369840669620314e-06,
+        "name": "point_delta_M_TOP",
+        "pass": true,
+        "value": 5.092224455438554e-07
+      },
+      {
+        "bound": 3.369840669620314e-06,
+        "name": "point_delta_M_BOTTOM",
+        "pass": true,
+        "value": 5.442852852866054e-07
+      }
+    ],
+    "created_utc": "2026-09-08T15:53:27Z",
+    "derivation": "5.0 x max(frozen POST SAME-floor CI95 upper bounds) computed from committed audit.json numerics_floor",
+    "floor_ci95_upper_bot": 6.739681339240628e-07,
+    "floor_ci95_upper_top": 6.060925443307496e-07,
+    "floor_mean_bot": 1.4765100786462426e-07,
+    "floor_mean_top": 1.3151293387636542e-07,
+    "frozen_points": {
+      "M_BOTTOM": 0.003546690451912582,
+      "M_TOP": 0.002115014685841743
+    },
+    "frozen_reference": "committed VBS pairs CSV M_TOP_POST / M_BOT_POST (U118100)",
+    "label": "MBS THREE-WAY PRE REPLAY GATE",
+    "maxabs": 0.0002734512090650388,
+    "mean_delta": 5.267538654998307e-07,
+    "multiplier": 5.0,
+    "n_pairs": 512,
+    "new_points": {
+      "M_BOTTOM": 0.0035472347371978685,
+      "M_TOP": 0.0021155239082872868
+    },
+    "new_pre_checkpoint": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+    "rms": 2.0119547426682294e-05,
+    "status": "FAIL"
+  },
+  "rerun_verification": {
+    "control": {
+      "bitexact_vs_original": 458,
+      "n_pairs": 512
+    },
+    "note": "all 512 pairs re-scored (PRE + CONTROL) in a scratch out-root to (a) regenerate anchor-invariant counters after the resume launch overwrote the original PRE/CONTROL gate docs and (b) quantify per-pair determinism of the full cohort",
+    "pre": {
+      "bitexact_vs_frozen": 72,
+      "bitexact_vs_original": 456,
+      "maxabs_rerun_delta": 0.0002734512090650388,
+      "maxabs_rerun_delta_pair": 298,
+      "n_pairs": 512,
+      "tail_flipped": 45,
+      "tail_stable": 12
+    },
+    "root": "/tmp/mbs3-rerun-full"
+  },
+  "scoring_wall": "2026-09-08T14:32:58Z -> 15:29:13Z (PRE/CONTROL/TREATMENT; one supervisor relaunch after a local ssh session drop between CONTROL and TREATMENT; resume-safe ledgers used, no pair re-scored)",
+  "stage1_wall_s": 4831,
+  "t_strata": 4,
+  "torch": "2.9.0",
+  "total_forwards": 49152
+}
