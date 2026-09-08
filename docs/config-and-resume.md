@@ -85,7 +85,10 @@ checkpoint 与配置之间的绑定分两类：
      - 调低 `max_updates` 永不回滚模型/优化器/计数——它只表示“本次调用不超过
        该点继续训练”；
      - `max_updates ≤ 恢复 update`：零 update 干净完成（成功的 no-op，不是失败、
-       不是回滚；无数据消费、无 forward/backward/optimizer.step）。
+       不是回滚）：checkpoint 恢复/结构绑定后立即退出——不连接数据服务、
+       不加载冻结编码器、不运行训练前检查（含 Qwen fast-path 探针）、
+       无 forward/backward/optimizer.step；显式 `preflight-only` 调用不享受
+       该短路，仍运行完整训练就绪预检。
 
      例（checkpoint @130k，历史 terminal 168k）：
      `max_updates=200k` → 训练到 200k；`150k` → 训练到 150k；`135k` → 训练到

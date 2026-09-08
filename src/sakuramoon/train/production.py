@@ -82,6 +82,7 @@ from sakuramoon.train.preflight import (
     require_static_single_gpu_preflight,
     restore_single_gpu_checkpoint,
     run_single_gpu_preflight,
+    write_zero_update_preflight_report,
 )
 from sakuramoon.train.runtime import (
     SingleGpuBatchRuntime,
@@ -116,7 +117,9 @@ class ProductionReadinessError(RuntimeError):
         super().__init__("production runtime has unresolved governed bindings")
 
 
-def require_production_irepa_readiness(config: RuntimeConfig, resume: Path | None) -> None:
+def require_production_irepa_readiness(
+    config: RuntimeConfig, resume: Path | None
+) -> None:
     """Phase 5 gate: an iREPA-enabled production run requires a migrated checkpoint.
 
     ``[irepa] enabled = true`` parses, its schema v4 architecture artifact
@@ -498,7 +501,10 @@ def _build_optimizer(
                 "construction; [optimizer.cmuon_forensic] is for the retired "
                 "original candidate and must stay disabled"
             )
-        if optimizer.cmuon_ns_telemetry is not None and optimizer.cmuon_ns_telemetry.enabled:
+        if (
+            optimizer.cmuon_ns_telemetry is not None
+            and optimizer.cmuon_ns_telemetry.enabled
+        ):
             raise ValueError(
                 "the guarded canonical candidate has its own per-step safety "
                 "checks; [optimizer.cmuon_ns_telemetry] must stay disabled"
@@ -877,9 +883,7 @@ def _resume_state_for_config(
     if resumed.growth.active_slot_ids != target_slots:
         # Growth cutover: the source ramp is complete (checked at binding),
         # so the new slots start ramping from the restored update.
-        new_slots = growth_new_slot_ids(
-            target_slots, resumed.growth.active_slot_ids
-        )
+        new_slots = growth_new_slot_ids(target_slots, resumed.growth.active_slot_ids)
         current_update = state.trainer.successful_updates
         _log(
             f"生长切换: {len(resumed.growth.active_slot_ids)} -> "
@@ -1193,7 +1197,9 @@ def _run_accepted_lifecycle(
     )
     rank = 0 if accelerator is None else accelerator.process_index
     is_main_process = accelerator is None or accelerator.is_main_process
-    world_size = 1 if accelerator is None else accelerator.num_processes
+    # ``accelerator.num_processes`` is untyped upstream; the cast (a pure
+    # type-level assertion, no runtime effect) pins the value to ``int``.
+    world_size = 1 if accelerator is None else cast("int", accelerator.num_processes)
     progress = DistributedProgress.from_default_store(
         namespace=f"training/{config.run.run_id}",
         rank=rank,
@@ -1255,17 +1261,6 @@ def _run_accepted_lifecycle(
             f"(tuning={tunable_state.tuning}, loaded={tunable_state.loaded_results})"
         )
 
-    _log("加载 Qwen 文本编码器")
-    qwen = load_local_qwen(
-        repository_root,
-        device,
-        attention_backend=config.kernels.qwen_attention_backend,
-    )
-    _log("加载 Mage VAE")
-    vae = load_local_mage_vae(repository_root, device)
-    if config.kernels.vae_torch_compile:
-        vae = compile_vae_methods(vae)
-        _log("Mage VAE encode/decode 已启用 torch.compile (opt-in)")
     target_slots = _resolved_target_slots(config)
     if resume is None:
         new_growth_slots = target_slots if config.growth.enabled else ()
@@ -1273,12 +1268,8 @@ def _run_accepted_lifecycle(
         _, source_state = read_raw_checkpoint_state(resume)
         source_slots = source_state.growth.active_slot_ids
         if source_slots == target_slots:
-            in_flight = (
-                source_state.growth.ramp_start_successful_update is not None
-            )
-            new_growth_slots = (
-                source_state.growth.new_slot_ids if in_flight else ()
-            )
+            in_flight = source_state.growth.ramp_start_successful_update is not None
+            new_growth_slots = source_state.growth.new_slot_ids if in_flight else ()
         else:
             if not config.growth.enabled:
                 raise ConfigurationError(
@@ -1351,13 +1342,76 @@ def _run_accepted_lifecycle(
             fresh=False,
         )
 
+    require_checkpoint_resume_binding(
+        config,
+        restored.state,
+        runtime_growth_alpha=restored.state.growth.alpha,
+    )
+    initial_update = restored.state.trainer.successful_updates
+
+    # Completed resume: the live config terminal is at or below the
+    # restored update, so this invocation is a pure training no-op.  The
+    # exact RAW restore and the resume binding above are the entire
+    # integrity requirement; the frozen encoder loads, the data-service
+    # connection, the training preflight (including the Qwen fast-path
+    # probe), torch.compile, accelerator.prepare, calibration, telemetry,
+    # and the training loop must all be left untouched.  An explicit
+    # preflight-only invocation deliberately does NOT take this shortcut:
+    # it must run the ordinary full readiness preflight.
+    if (
+        resume is not None
+        and not preflight_only
+        and _terminal_completed(config, initial_update)
+    ):
+        zero_update_report = artifact_root / (
+            f"preflight-{initial_update}-zero-update.json"
+        )
+        if is_main_process:
+            write_zero_update_preflight_report(
+                zero_update_report,
+                world_size=world_size,
+                checkpoint_id=restored.manifest.identity.checkpoint_id,
+                checkpoint_update=initial_update,
+            )
+            _log(
+                f"配置终端 {config.train.max_updates} 未超过恢复 update "
+                f"{initial_update}; 零 update 完成"
+                "（不连接数据服务 / 不运行训练资源探针）"
+            )
+        # Every rank made the identical decision from the identical
+        # restored state; the barrier pairs the main-rank report write
+        # before any rank proceeds to use the report path.
+        progress.synchronize("resume/zero-update-completed")
+        return ProductionTrainingResult(
+            resolved_config_path,
+            zero_update_report.resolve(strict=True),
+            restored.path,
+            initial_update,
+            initial_update,
+            False,
+        )
+
+    _log("加载 Qwen 文本编码器")
+    qwen = load_local_qwen(
+        repository_root,
+        device,
+        attention_backend=config.kernels.qwen_attention_backend,
+    )
+    _log("加载 Mage VAE")
+    vae = load_local_mage_vae(repository_root, device)
+    if config.kernels.vae_torch_compile:
+        vae = compile_vae_methods(vae)
+        _log("Mage VAE encode/decode 已启用 torch.compile (opt-in)")
+
     # Guard shadow calibration (Guarded Canonical candidate development):
     # SAKURAMOON_GUARD_CALIBRATION_STEPS>0 swaps the optimizer step for a
     # gradient/momentum shadow observation (no parameter update, no NS, no
     # AdamW step) and neutralizes W&B / checkpoint / sampling side effects.
     # Fail-closed: calibration is only legal on the hybrid CMuon optimizer.
     calibration: GuardCalibration | None = None
-    calibration_steps = int(os.environ.get("SAKURAMOON_GUARD_CALIBRATION_STEPS", "0") or 0)
+    calibration_steps = int(
+        os.environ.get("SAKURAMOON_GUARD_CALIBRATION_STEPS", "0") or 0
+    )
     if calibration_steps > 0:
         if not isinstance(optimizer, _hybrid_cmuon_class()):
             raise ValueError(
@@ -1407,12 +1461,8 @@ def _run_accepted_lifecycle(
         structural = install_structural_calibration(
             optimizer,
             observations=structural_steps,
-            ns_repeat=int(
-                os.environ.get("SAKURAMOON_STRUCTURAL_NS_REPEAT", "5") or 5
-            ),
-            pi_iters=int(
-                os.environ.get("SAKURAMOON_STRUCTURAL_PI_ITERS", "20") or 20
-            ),
+            ns_repeat=int(os.environ.get("SAKURAMOON_STRUCTURAL_NS_REPEAT", "5") or 5),
+            pi_iters=int(os.environ.get("SAKURAMOON_STRUCTURAL_PI_ITERS", "20") or 20),
             sigma_method=os.environ.get("SAKURAMOON_STRUCTURAL_SIGMA_METHOD", "pi")
             or "pi",
             output_path=artifact_root / f"structural-calibration-rank{rank}.jsonl",
@@ -1422,10 +1472,7 @@ def _run_accepted_lifecycle(
             update_offset=restored.state.trainer.successful_updates,
             refs=refs,
             full_sample_obs=int(
-                os.environ.get(
-                    "SAKURAMOON_STRUCTURAL_FULL_SAMPLE_OBS", "5"
-                )
-                or 5
+                os.environ.get("SAKURAMOON_STRUCTURAL_FULL_SAMPLE_OBS", "5") or 5
             ),
         )
         if is_main_process:
@@ -1447,11 +1494,6 @@ def _run_accepted_lifecycle(
                 f"{optimizer.forensic.update_offset} dump_dir="
                 f"{optimizer.forensic.fcfg.dump_dir}"
             )
-    require_checkpoint_resume_binding(
-        config,
-        restored.state,
-        runtime_growth_alpha=restored.state.growth.alpha,
-    )
     if is_main_process and resume is not None:
         _record_data_policy_resume_transition(loaded, repository_root, resume)
         _record_optimizer_transition(
@@ -1550,9 +1592,9 @@ def _run_accepted_lifecycle(
             resume=resume,
         )
         if in_calibration:
-            publisher: (
-                ProductionSingleGpuCheckpointPublisher
-            ) = _GuardCalibrationCheckpointPublisher()
+            publisher: ProductionSingleGpuCheckpointPublisher = (
+                _GuardCalibrationCheckpointPublisher()
+            )
         else:
             base_publisher = ProductionSingleGpuCheckpointPublisher(
                 checkpoint_root=checkpoint_root,
@@ -1594,10 +1636,11 @@ def _run_accepted_lifecycle(
         _log("运行训练前检查")
         accepted = run_single_gpu_preflight(plan, preflight_report)
         _log("训练前检查通过")
-        initial_update = restored.state.trainer.successful_updates
-        # The live config terminal (R14): a resume at or beyond it completes
-        # with zero updates instead of failing.
-        terminal_completed = _terminal_completed(config, initial_update)
+        # A completed resume (live terminal at/below the restored update)
+        # already returned with zero updates before any training-resource
+        # path; only an explicit preflight-only invocation can reach the
+        # full preflight with the terminal reached, and it returns the
+        # preflight result.
         if preflight_only:
             result = ProductionTrainingResult(
                 resolved_config_path,
@@ -1606,20 +1649,6 @@ def _run_accepted_lifecycle(
                 initial_update,
                 initial_update,
                 True,
-            )
-        elif terminal_completed:
-            if is_main_process:
-                _log(
-                    f"配置终端 {config.train.max_updates} 未超过恢复 update "
-                    f"{initial_update}; 零 update 完成"
-                )
-            result = ProductionTrainingResult(
-                resolved_config_path,
-                preflight_report.resolve(strict=True),
-                restored.path,
-                initial_update,
-                initial_update,
-                False,
             )
         else:
             verified_checkpoints: list[Path] = []

@@ -71,6 +71,8 @@ cd /root/private_data/sakuramoon
 - checkpoint 里记录的历史 terminal 不是权限：它不会允许也不会阻止继续训练。
 - 调低 `max_updates` **不会回滚**模型/优化器/计数——只表示本次调用不超过该点。
 - `max_updates ≤ checkpoint update` 时训练零新 update 干净退出（成功的 no-op）。
+  完成的 resume 在 checkpoint 恢复/结构绑定后即退出：不连接训练 DataService、
+  不加载冻结编码器、不运行训练前探针；显式 `preflight-only` 仍跑完整就绪检查。
 - 分辨率/world size 变化在结构兼容时允许；checkpoint 模型/优化器的结构完整性
   校验保持 fail-closed。
 

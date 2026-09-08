@@ -704,6 +704,41 @@ def run_single_gpu_preflight(
     return AcceptedPreflight(report, plan.bindings)
 
 
+def write_zero_update_preflight_report(
+    destination: Path,
+    *,
+    world_size: int,
+    checkpoint_id: str,
+    checkpoint_update: int,
+) -> Path:
+    """Write the explicit completed-resume (zero-update) report.
+
+    This is NOT a training preflight: the live config terminal was at or
+    below the restored update, so the training-resource paths (frozen
+    encoder loads, data-service connection, training preflight, Qwen
+    fast-path probe) were intentionally never executed.  Only the checks
+    that were actually established are reported, and the dataset identity
+    records that no dataset was required for this invocation.
+    """
+
+    report = PreflightReport(
+        schema_version=1,
+        hardware=f"{world_size}GPU",
+        passed=True,
+        dataset_id="not-required-zero-update",
+        checkpoint_id=checkpoint_id,
+        checkpoint_update=checkpoint_update,
+        checks=(
+            PreflightCheckResult("resolved_config", True),
+            PreflightCheckResult("checkpoint_restore", True),
+            PreflightCheckResult("resume_binding", True),
+            PreflightCheckResult("terminal_completed", True),
+        ),
+    )
+    _write_report(report, destination)
+    return destination.resolve(strict=True)
+
+
 __all__ = [
     "DATA_POLICY_TRANSITION_KIND",
     "AcceptedPreflight",
@@ -717,4 +752,5 @@ __all__ = [
     "require_static_single_gpu_preflight",
     "restore_single_gpu_checkpoint",
     "run_single_gpu_preflight",
+    "write_zero_update_preflight_report",
 ]
