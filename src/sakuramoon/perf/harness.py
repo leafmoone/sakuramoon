@@ -42,6 +42,7 @@ from sakuramoon.data.serialize import (
 from sakuramoon.encoders.mage_vae import load_local_mage_vae
 from sakuramoon.encoders.qwen import load_local_qwen
 from sakuramoon.model.growth import new_slot_ids as growth_new_slot_ids
+from sakuramoon.perf.batch_shape import benchmark_batch_shape_config
 from sakuramoon.perf.sample import PERFORMANCE_SCHEMA_VERSION, PerformanceSample
 from sakuramoon.perf.synthetic import SyntheticBatchSource
 from sakuramoon.telemetry.timers import PhaseTimer
@@ -158,11 +159,19 @@ def assemble_benchmark(
     warmup_updates: int = 5,
     measure_updates: int = 10,
     config_override: Callable[[RuntimeConfig], RuntimeConfig] | None = None,
+    local_batch: int | None = None,
+    accumulation: int | None = None,
+    expected_global_batch: int | None = None,
 ) -> BenchmarkAssembly:
     """Build the current production stack on scratch state (no I/O beyond models).
 
     ``config_override`` (tests only) transforms the loaded config in memory
     AFTER the single-rank benchmark transform, e.g. to a small-model recipe.
+
+    ``local_batch`` / ``accumulation`` (P1-R1A) apply an IN-MEMORY
+    benchmark-only batch-shape override AFTER ``config_override``: the
+    effective global batch is re-derived and the derivation fails closed
+    against ``expected_global_batch``.  No config file is written.
     """
 
     if type(seed) is not int or seed < 0:
@@ -182,6 +191,15 @@ def assemble_benchmark(
     )
     if config_override is not None:
         config = config_override(config)
+    if local_batch is not None or accumulation is not None:
+        if local_batch is None or accumulation is None:
+            raise ValueError("local_batch and accumulation must be given together")
+        config = benchmark_batch_shape_config(
+            config,
+            local_batch,
+            accumulation,
+            expected_global_batch=expected_global_batch,
+        )
     rank, world_size = _topology(config)
 
     accelerator: Any = None

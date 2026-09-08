@@ -207,8 +207,52 @@ Summary conventions (exact, schema 2):
 
 - `tests/unit/perf/` — fingerprint, sample/summary semantics (aligned
   distributed global step, cross-rank volume sums, true peak memory,
-  schema 2 round-trip), profiler probe/validator semantics (CPU).
+  schema 2 round-trip), profiler probe/validator semantics, batch-shape
+  override / sweep math (CPU).
 - `tests/gpu/perf/test_benchmark_harness.py` — small-model, real-encoder
-  two-stage harness smoke test, peak-vs-current memory proof, and
-  profiler-scratch-stage isolation (skips when no DCU / no local
-  assets).
+  two-stage harness smoke test, peak-vs-current memory proof,
+  profiler-scratch-stage isolation, and an alternate batch shape (4x1
+  vs 2x2) proving the same logical sample population through the
+  production loop (skips when no DCU / no local assets).
+
+## P1-R1A batch-shape sweep (microbatch / accumulation)
+
+The 2-GPU runner accepts an IN-MEMORY benchmark-only batch shape:
+
+```
+--local-batch N --accumulation M --expected-global-batch 800
+```
+
+`benchmark_batch_shape_config()` derives the shape with
+`model_copy` (world size, model, resolution, optimizer and LR rule
+untouched); `global_batch` is re-derived as
+`local_batch * accumulation * world_size` and the run FAILS CLOSED when
+it differs from `--expected-global-batch`. No TOML is written and no
+canonical config file is modified.
+
+Identity guarantee: the synthetic population per logical update is
+shape-invariant — update `u` always covers the contiguous identity range
+`[u * 400, (u + 1) * 400)` per rank for every factor pair with the same
+product (see `logical_update_identities()` and the unit tests).
+Throughput is compared at the SAME effective global batch (800);
+bitwise gradient equivalence across GEMM batch shapes is NOT claimed.
+
+`scripts/benchmark_batch_shape_sweep.py` runs the canonical matrix
+(A0 20x20, S 16x25, C1 25x16, C2 40x10 gated from C1's measured peaks at
+<= 48 GiB allocated / <= 56 GiB reserved, A1 20x20 repeat) with EVERY
+candidate in its own fresh process group (accelerate launch, bounded
+timeout, per-shape scratch root).  The A0/A1 bracket (p50 drift <= 2%)
+is the stability gate; the baseline reference is the MEDIAN of A0/A1,
+never the faster of the two.  Outputs: `sweep-summary.json` +
+`sweep-summary.md` with per-candidate status (PASS / OOM /
+SKIPPED_SAFETY_GATE / TIMEOUT / ERROR — failures are never hidden),
+whole-step p50/p95, global samples/s, phase means, true per-rank memory
+peaks, rank skew, speed class (NEUTRAL < 2% <= USEFUL < 5% <= STRONG)
+and memory class (SAFE <= 54 GiB allocated / <= 60 GiB reserved,
+TIGHT beyond, UNSAFE on OOM / instability).  The sweep is a benchmark
+recommendation only: it changes no production configuration.
+
+Canonical P0 baseline it is compared against (separate session, DO NOT
+replace with sweep runs): 1-GPU p50 15.777 s / 25.46 samples/s /
+peak allocated 32.25 GiB; 2-GPU p50 15.636 s / 51.26 samples/s /
+peak allocated 36.12 GiB per rank.

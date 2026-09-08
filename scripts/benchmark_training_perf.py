@@ -16,6 +16,12 @@ the measured baseline and captures exactly ``--profiler-updates`` logical
 updates (default 1; 0 is rejected); it never appends to the measured
 baseline and may advance scratch model/optimizer state only.
 
+Batch-shape override (P1-R1A): ``--local-batch`` / ``--accumulation``
+apply an IN-MEMORY benchmark-only shape to the loaded config (the
+effective global batch is re-derived and, with
+``--expected-global-batch``, the derivation fails closed on mismatch).
+No TOML is written and no canonical config file is modified.
+
 Launch modes
 ------------
 1 GPU (rank-local compute baseline):
@@ -74,6 +80,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "profiler scratch stage (default 1; 0 is rejected)",
     )
     parser.add_argument("--label", default="")
+    parser.add_argument(
+        "--local-batch",
+        type=int,
+        default=None,
+        help=(
+            "benchmark-only in-memory microbatch override (P1-R1A); must be "
+            "given with --accumulation.  No config file is written."
+        ),
+    )
+    parser.add_argument(
+        "--accumulation",
+        type=int,
+        default=None,
+        help="benchmark-only in-memory accumulation override (see --local-batch)",
+    )
+    parser.add_argument(
+        "--expected-global-batch",
+        type=int,
+        default=None,
+        help=(
+            "when set with the shape override, the run FAILS CLOSED unless "
+            "local_batch * accumulation * world_size equals this value"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -292,6 +322,9 @@ def main(argv: list[str] | None = None) -> int:
         single_rank=(args.gpus == 1),
         warmup_updates=args.warmup_updates,
         measure_updates=args.measure_updates,
+        local_batch=args.local_batch,
+        accumulation=args.accumulation,
+        expected_global_batch=args.expected_global_batch,
     )
     rank = assembly.rank
     world = assembly.world_size
@@ -308,6 +341,12 @@ def main(argv: list[str] | None = None) -> int:
     diagnostic_root = output_root / f"diagnostics-rank{rank}"
     diagnostic_root.mkdir(parents=True, exist_ok=True)
 
+    print(
+        f"[bench rank{rank}] batch shape: local_batch="
+        f"{config.train.local_batch} accumulation={config.train.accumulation} "
+        f"global_batch={config.train.global_batch} world_size={world}",
+        flush=True,
+    )
     print(
         f"[bench rank{rank}] warmup {args.warmup_updates} updates "
         f"(model load/compile/lazy state excluded)",

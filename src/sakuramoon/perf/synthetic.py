@@ -198,4 +198,48 @@ class SyntheticBatchSource:
             position += 1
 
 
-__all__ = ["SyntheticBatchSource"]
+def logical_update_identities(
+    local_batch: int,
+    accumulation: int,
+    update: int,
+    total_updates: int,
+) -> tuple[int, ...]:
+    """The synthetic sample identities one logical update consumes.
+
+    Mirrors the harness supply contract EXACTLY: the harness pregenerates
+    ``(total_updates + 1) * accumulation`` microbatches of
+    ``local_batch`` samples (the extra full update is retry margin), the
+    stage iterator cycles that supply in order, and each sample identity
+    is ``global_batch_index * local_batch + position`` (see
+    :meth:`SyntheticBatchSource.generate`).  The loop consumes exactly
+    ``accumulation`` microbatches per logical update, so update ``u``
+    (0-based from the start of the stream) always covers the contiguous
+    identity range ``[u * local_batch * accumulation,
+    (u + 1) * local_batch * accumulation)`` — INDEPENDENT of the factor
+    pair whenever the product is fixed.  That shape invariance is what
+    the P1-R1A sweep relies on when comparing microbatch shapes: every
+    candidate sees the same logical sample population per rank/update.
+    """
+
+    if type(local_batch) is not int or local_batch <= 0:
+        raise ValueError("local_batch must be a positive int")
+    if type(accumulation) is not int or accumulation <= 0:
+        raise ValueError("accumulation must be a positive int")
+    if type(update) is not int or update < 0:
+        raise ValueError("update must be a nonnegative int")
+    if type(total_updates) is not int or total_updates <= 0:
+        raise ValueError("total_updates must be a positive int")
+    batch_count = (total_updates + 1) * accumulation
+    identities: list[int] = []
+    for microbatch in range(accumulation):
+        global_batch = (update * accumulation + microbatch) % batch_count
+        identities.extend(
+            range(
+                global_batch * local_batch,
+                global_batch * local_batch + local_batch,
+            )
+        )
+    return tuple(identities)
+
+
+__all__ = ["SyntheticBatchSource", "logical_update_identities"]

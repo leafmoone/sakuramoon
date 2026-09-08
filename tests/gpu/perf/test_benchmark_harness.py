@@ -285,3 +285,95 @@ def test_no_checkpoints_are_written(assembly, repository_root: Path) -> None:
 
     entries = sorted(entry.name for entry in repository_root.iterdir())
     assert entries == ["model"]  # only the asset symlink; nothing was written
+
+
+@pytest.fixture(scope="module")
+def alternate_shape_assembly(
+    repository_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+):
+    """Small config (2x2) + IN-MEMORY override to 4x1 (same 4 samples/update)."""
+
+    from sakuramoon.perf.harness import assemble_benchmark
+
+    return assemble_benchmark(
+        config_path=REPOSITORY_ROOT / "config" / "train_s0.toml",
+        config_root=REPOSITORY_ROOT / "config",
+        repository_root=repository_root,
+        environment={
+            "MODELSCOPE_API_TOKEN": "placeholder-perf-smoke",
+            "WANDB_API_KEY": "placeholder-perf-smoke",
+        },
+        seed=44,
+        single_rank=True,
+        warmup_updates=WARMUP_UPDATES,
+        measure_updates=MEASURE_UPDATES,
+        config_override=_small_config,
+        local_batch=4,
+        accumulation=1,
+        expected_global_batch=SMALL_LOCAL_BATCH * SMALL_ACCUMULATION,
+    )
+
+
+def test_alternate_batch_shape_same_logical_population(
+    assembly, alternate_shape_assembly
+) -> None:
+    """P1-R1A identity: 4x1 consumes the SAME sample identities per
+    logical update as 2x2 (same seed, same population per rank/update)."""
+
+    assert alternate_shape_assembly.config.train.local_batch == 4
+    assert alternate_shape_assembly.config.train.accumulation == 1
+    assert alternate_shape_assembly.config.train.global_batch == (
+        SMALL_LOCAL_BATCH * SMALL_ACCUMULATION
+    )
+    assert alternate_shape_assembly.samples_per_update == (
+        SMALL_LOCAL_BATCH * SMALL_ACCUMULATION
+    )
+    assert alternate_shape_assembly.samples_per_update == assembly.samples_per_update
+
+    base_batches = assembly.batches
+    alt_batches = alternate_shape_assembly.batches
+    total_updates = WARMUP_UPDATES + MEASURE_UPDATES
+    for update in range(total_updates):
+        base_ids: set[int] = set()
+        for microbatch in range(SMALL_ACCUMULATION):
+            batch = base_batches[
+                (update * SMALL_ACCUMULATION + microbatch) % len(base_batches)
+            ]
+            base_ids.update(int(value) for value in batch.sample_ids.tolist())
+        # accumulation=1: exactly one microbatch per logical update.
+        alt_batch = alt_batches[update % len(alt_batches)]
+        alt_ids = {int(value) for value in alt_batch.sample_ids.tolist()}
+        assert len(base_ids) == SMALL_LOCAL_BATCH * SMALL_ACCUMULATION
+        assert alt_ids == base_ids
+
+
+def test_alternate_batch_shape_runs_through_harness(alternate_shape_assembly) -> None:
+    """One alternate shape end to end through the production loop."""
+
+    import tempfile
+
+    from sakuramoon.perf.harness import run_benchmark_stage
+
+    with tempfile.TemporaryDirectory(prefix="perf-alt-shape-") as workdir:
+        diag = Path(workdir)
+        warm_state = run_benchmark_stage(
+            alternate_shape_assembly,
+            state=SingleGpuUpdateState.initial(),
+            target_successful_updates=WARMUP_UPDATES,
+            diagnostic_root=diag,
+        )
+        measured: list = []
+        final_state = run_benchmark_stage(
+            alternate_shape_assembly,
+            state=warm_state,
+            target_successful_updates=WARMUP_UPDATES + MEASURE_UPDATES,
+            diagnostic_root=diag,
+            collect=measured,
+            reset_peak_memory_per_update=True,
+        )
+    assert final_state.successful_updates == WARMUP_UPDATES + MEASURE_UPDATES
+    assert len(measured) == MEASURE_UPDATES
+    for sample in measured:
+        assert sample.samples == SMALL_LOCAL_BATCH * SMALL_ACCUMULATION
+        assert sample.image_tokens == sample.samples * 16 * 16
