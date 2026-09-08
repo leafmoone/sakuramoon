@@ -6,11 +6,32 @@ records.  Percentiles use linear interpolation between closest ranks
 Standard deviation is the sample standard deviation (n-1); with a single
 sample it is reported as 0.0.
 
-Throughput and DiT matmul rate conventions (documented, exact):
+Distributed global-step semantics (schema 2, exact):
 
-* the global step time is the MAX across ranks of the per-rank mean step
-  wall — distributed ranks are lock-step at the allreduce boundary, so
-  the slowest rank bounds the update;
+* Every rank must contribute the SAME set of logical-update identities
+  (missing, duplicate or mismatched update ids fail closed).
+* For each aligned update ``u`` the global wall is the SLOWEST rank:
+  ``global_wall[u] = max(rank0.wall[u], rank1.wall[u], ...)``.
+* ``global_step_seconds`` is the canonical statistic block over the
+  aligned ``global_wall`` values — the real distributed logical-update
+  critical path, NOT a pooled all-rank wall distribution and NOT
+  max-of-means.
+* Throughput uses actual summed cross-rank volumes over summed aligned
+  global walls: ``rate = sum(global_volume[u]) / sum(global_wall[u])``.
+  Ranks are NOT assumed to carry equal per-update token counts.
+* ``per_rank_step_seconds`` stays rank-local.
+* Phase timing blocks are pooled rank-local component statistics; a
+  phase's ``share_of_step`` uses the MEAN aligned global wall as the
+  denominator.  Phase means are not claimed to decompose one exact
+  global critical path when overlap exists.
+
+Memory semantics (exact): per-rank ``peak_allocated_bytes`` /
+``peak_reserved_bytes`` are the max over the measured window of the true
+per-update ``torch.cuda.max_memory_*`` counters (each update's peak
+window is reset immediately before that update); ``final_*`` are the
+current post-update counts of the last measured update.  Current values
+are never reported as peaks.
+
 * ``dit_forward_matmul_tflops_per_second`` is the DiT FORWARD matmul FLOP
   counter divided by the measured ``dit_forward`` phase seconds.  It is
   NOT MFU and NOT a whole-step training FLOPS model.
@@ -21,11 +42,11 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sakuramoon.perf.sample import PerformanceSample
 
-SUMMARY_SCHEMA_VERSION = 1
+SUMMARY_SCHEMA_VERSION = 2
 
 _STAT_KEYS: tuple[str, ...] = (
     "mean",
@@ -98,6 +119,44 @@ def rank_step_skew_pct(rank_mean_wall: Mapping[int, float]) -> float:
     return (slowest - fastest) / slowest * 100.0
 
 
+def _align_updates(
+    rank_samples: Mapping[int, Sequence[PerformanceSample]],
+) -> tuple[list[int], dict[int, dict[int, PerformanceSample]]]:
+    """Align every rank by logical-update identity.
+
+    Returns ``(sorted_update_ids, {rank: {update: sample}})``.  Fails
+    closed on an empty rank, a duplicate update id within a rank, or a
+    mismatched update-id set between ranks.
+    """
+
+    per_rank_map: dict[int, dict[int, PerformanceSample]] = {}
+    reference: set[int] | None = None
+    for rank in sorted(rank_samples):
+        mapping: dict[int, PerformanceSample] = {}
+        for sample in rank_samples[rank]:
+            if sample.update in mapping:
+                raise ValueError(
+                    f"rank {rank} reports duplicate update {sample.update}"
+                )
+            mapping[sample.update] = sample
+        if not mapping:
+            raise ValueError(
+                "every rank must contribute the same nonzero set of measured updates"
+            )
+        identity = set(mapping)
+        if reference is None:
+            reference = identity
+        elif identity != reference:
+            missing = sorted(reference - identity)
+            extra = sorted(identity - reference)
+            raise ValueError(
+                "rank update identities differ from the reference rank "
+                f"(missing: {missing}, extra: {extra})"
+            )
+        per_rank_map[int(rank)] = mapping
+    return sorted(cast(set[int], reference)), per_rank_map
+
+
 def _phase_pool(samples: Sequence[PerformanceSample]) -> dict[str, list[float]]:
     pool: dict[str, list[float]] = {}
     for sample in samples:
@@ -154,10 +213,9 @@ def summarize(
 ) -> PerformanceSummary:
     """Aggregate per-rank measured samples into one summary.
 
-    All ranks must contribute the same number of measured iterations.
-    Phases are pooled across ranks for the distribution statistics; a
-    phase's ``share_of_step`` is defined only when the phase was measured
-    in EVERY sample (otherwise null).
+    All ranks must contribute the exact same logical-update identity
+    set; per-update global walls take the slowest rank, and throughput
+    volumes are summed across ranks per update.
     """
 
     if type(world_size) is not int or world_size <= 0:
@@ -166,43 +224,55 @@ def summarize(
         raise ValueError("warmup_iterations must be a nonnegative int")
     if not rank_samples:
         raise ValueError("summarize requires at least one rank")
-    first_rank = next(iter(rank_samples))
-    lengths = {rank: len(samples) for rank, samples in rank_samples.items()}
-    if len(set(lengths.values())) != 1 or lengths[first_rank] == 0:
-        raise ValueError("every rank must contribute the same nonzero iteration count")
-    measured = lengths[first_rank]
 
-    all_samples = [
-        sample for rank in sorted(rank_samples) for sample in rank_samples[rank]
+    updates, per_rank_map = _align_updates(rank_samples)
+    measured = len(updates)
+    ranks = sorted(per_rank_map)
+
+    # Per-update aligned global walls: the slowest rank bounds the update.
+    global_walls = [
+        max(per_rank_map[rank][update].wall_seconds for rank in ranks)
+        for update in updates
     ]
+    global_step = step_stats(global_walls)
+    global_wall_sum = sum(global_walls)
+    # Mean aligned global wall: the documented share_of_step denominator.
+    global_step_mean = sum(global_walls) / len(global_walls)
 
+    # Rank-local distributions, in aligned update order.
     per_rank: dict[int, dict[str, float]] = {}
     rank_means: dict[int, float] = {}
-    for rank in sorted(rank_samples):
-        walls = [sample.wall_seconds for sample in rank_samples[rank]]
-        per_rank[int(rank)] = step_stats(walls)
-        rank_means[int(rank)] = sum(walls) / len(walls)
+    for rank in ranks:
+        walls = [per_rank_map[rank][update].wall_seconds for update in updates]
+        per_rank[rank] = step_stats(walls)
+        rank_means[rank] = sum(walls) / len(walls)
 
-    global_step = step_stats([sample.wall_seconds for sample in all_samples])
-    global_step_time = max(rank_means.values())
-    # Every rank carries the same local batch/accumulation, so the global
-    # per-update volume is rank 0's local volume times the world size.
-    samples_per_update = all_samples[0].samples * world_size
-    image_tokens_per_update = all_samples[0].image_tokens * world_size
-    text_tokens_per_update = all_samples[0].text_tokens * world_size
-    global_samples_per_second = samples_per_update / global_step_time
-    image_tokens_per_second = image_tokens_per_update / global_step_time
-    text_tokens_per_second = text_tokens_per_update / global_step_time
+    # Actual summed cross-rank volumes over the measured window.
+    total_samples = 0
+    total_image_tokens = 0
+    total_text_tokens = 0
+    for update in updates:
+        for rank in ranks:
+            sample = per_rank_map[rank][update]
+            total_samples += sample.samples
+            total_image_tokens += sample.image_tokens
+            total_text_tokens += sample.text_tokens
+    if global_wall_sum <= 0.0:
+        raise ValueError("summed aligned global walls must be positive")
+    global_samples_per_second = total_samples / global_wall_sum
+    image_tokens_per_second = total_image_tokens / global_wall_sum
+    text_tokens_per_second = total_text_tokens / global_wall_sum
 
+    all_samples = [per_rank_map[rank][update] for rank in ranks for update in updates]
     phase_seconds: dict[str, dict[str, float | None]] = {}
     pool = _phase_pool(all_samples)
-    total_samples = len(all_samples)
+    total_samples_count = len(all_samples)
     for name in sorted(pool):
         values = pool[name]
-        if len(values) != total_samples:
+        if len(values) != total_samples_count:
             share: float | None = None
         else:
-            share = (sum(values) / len(values)) / global_step_time
+            share = (sum(values) / len(values)) / global_step_mean
         phase_seconds[name] = {
             "mean": sum(values) / len(values),
             "p50": percentile(values, 50.0),
@@ -211,33 +281,33 @@ def summarize(
         }
 
     memory: dict[str, Any] = {"per_rank": {}}
-    max_allocated = 0
-    max_reserved = 0
-    for rank in sorted(rank_samples):
-        rows = rank_samples[rank]
-        allocated = max(sample.memory_allocated_bytes for sample in rows)
-        reserved = max(sample.memory_reserved_bytes for sample in rows)
-        memory["per_rank"][int(rank)] = {
-            "max_allocated_bytes": allocated,
-            "max_reserved_bytes": reserved,
+    max_peak_allocated = 0
+    max_peak_reserved = 0
+    for rank in ranks:
+        rows = [per_rank_map[rank][update] for update in updates]
+        peak_allocated = max(sample.peak_memory_allocated_bytes for sample in rows)
+        peak_reserved = max(sample.peak_memory_reserved_bytes for sample in rows)
+        memory["per_rank"][rank] = {
+            "peak_allocated_bytes": peak_allocated,
+            "peak_reserved_bytes": peak_reserved,
             "final_allocated_bytes": rows[-1].memory_allocated_bytes,
             "final_reserved_bytes": rows[-1].memory_reserved_bytes,
         }
-        max_allocated = max(max_allocated, allocated)
-        max_reserved = max(max_reserved, reserved)
+        max_peak_allocated = max(max_peak_allocated, peak_allocated)
+        max_peak_reserved = max(max_peak_reserved, peak_reserved)
     memory["max_across_ranks"] = {
-        "max_allocated_bytes": max_allocated,
-        "max_reserved_bytes": max_reserved,
+        "peak_allocated_bytes": max_peak_allocated,
+        "peak_reserved_bytes": max_peak_reserved,
     }
 
     dit_per_rank: dict[int, Any] = {}
     dit_tflops: list[float] = []
-    for rank in sorted(rank_samples):
-        rows = rank_samples[rank]
+    for rank in ranks:
+        rows = [per_rank_map[rank][update] for update in updates]
         flops = sum(sample.dit_forward_matmul_flops for sample in rows)
         seconds = sum(sample.phases.get("dit_forward", 0.0) for sample in rows)
         rate = (flops / seconds / 1e12) if seconds > 0.0 else 0.0
-        dit_per_rank[int(rank)] = {
+        dit_per_rank[rank] = {
             "measured_forward_matmul_flops": flops,
             "dit_forward_seconds": seconds,
             "dit_forward_matmul_tflops_per_second": rate,

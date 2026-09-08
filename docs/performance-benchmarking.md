@@ -104,13 +104,22 @@ accelerate launch --multi_gpu --num_processes 2 --num_machines 1 \
 
 ### RUN C — profiler snapshot (opt-in kernel view)
 
-Add `--profiler` to either command (2-GPU preferred). The profiler window
-is the measured updates only (post-warmup). A cheap device-event probe runs
-before capture: if it reports no device events, the measured window executes
-WITHOUT a profiler context (capturing the full workload in that state has
-been observed to hang the DTK runtime — CPU spin, device idle) and the
-summary records `device_trace_available = false`; no kernel rows are
-invented.
+Add `--profiler` to either command (2-GPU preferred). The canonical
+timing baseline (warmup 5 / measure 10) ALWAYS runs without a
+torch.profiler context. The profiler is a SEPARATE scratch stage that
+starts AFTER the normal measured baseline finishes and captures exactly
+`--profiler-updates` logical updates (default **1**; 0 is rejected). It
+does not append to the measured baseline and may advance scratch
+model/optimizer state (no persistence anyway).
+
+A cheap device-event probe runs before any capture and must yield at
+least one real CUDA device event with positive device time; importing
+torch.profiler alone never counts as available. If the probe reports
+unavailable, NO extra workload is executed (a prior ungated
+full-workload capture in that state was observed to hang the DTK
+runtime — CPU spin, device idle) and the record is
+`device_trace_available = false` with empty operator rows and
+`trace_path = null`; no kernel rows are invented.
 
 ## Outputs
 
@@ -125,28 +134,48 @@ invented.
   diagnostics-rank<r>/             # loop diagnostics (empty unless a fault)
 ```
 
-Summary conventions (exact):
+Summary conventions (exact, schema 2):
 
-- `global_step_seconds` = statistics over all rank-measured update walls;
-  the derived global step time used for throughput is the **max across
-  ranks of the per-rank mean** (distributed ranks are lock-step at the
-  allreduce boundary).
-- `global_samples_per_second` = `(local_samples_per_update * world_size)
-  / global_step_time`.
+- **GLOBAL STEP** — `global_step_seconds` = the canonical mean / p50 /
+  p90 / p95 / min / max / stddev over the **aligned per-update global
+  walls**: all ranks are aligned by logical-update id (missing, duplicate
+  or mismatched update identities fail closed), and
+  `global_wall[u] = max over ranks of rank.wall[u]` (the slowest rank
+  bounds the distributed logical update). This is NOT a pooled
+  all-rank wall distribution and NOT max-of-means.
+- **PER-RANK STEP** — `per_rank_step_seconds` = rank-local distributions
+  (rank-local component cost, in aligned update order).
+- **THROUGHPUT** — `global_samples_per_second`,
+  `image_tokens_per_second`, `text_tokens_per_second` = actual summed
+  cross-rank volumes over the measured window divided by the summed
+  aligned global walls:
+  `sum_u(global_volume[u]) / sum_u(global_wall[u])`. Ranks are NOT
+  assumed to carry equal per-update sample/image/text counts.
 - `rank_step_skew_pct` = `(slowest_rank_mean - fastest_rank_mean) /
-  slowest_rank_mean * 100`.
-- `phase_seconds[name].share_of_step` is defined only when the phase was
-  measured in **every** sample; otherwise it is `null` (absent phases are
-  never reported as fake 0.0 s).
+  slowest_rank_mean * 100` over rank-local means.
+- `phase_seconds[name]` = pooled rank-local phase statistics;
+  `share_of_step` is defined only when the phase was measured in
+  **every** sample (otherwise `null`; absent phases are never reported
+  as fake 0.0 s) and its denominator is the **mean aligned global
+  logical-update wall**. Phase means are pooled rank-local component
+  costs — they are NOT claimed to decompose one exact global critical
+  path when overlap exists.
 - `dit_forward_matmul_tflops_per_second` = the exact DiT **forward
   matmul** FLOP counter (`ActualDitFlopCounter`) divided by the measured
   `dit_forward` phase seconds. It is NOT MFU and NOT a whole-step
   training FLOPS model. No other "TFLOPS"/"MFU" figure may be derived
   from this observatory.
-- `memory` = per-rank peak allocated/reserved (reset at the start of the
-  measured window) plus final values; peak = the maximum across the
-  window (the window ends right after the last measured update, so the
-  peak covers forward+backward+optimizer state of the steady state).
+- **MEMORY** — per rank: `peak_allocated_bytes` / `peak_reserved_bytes`
+  = the max over measured updates of the TRUE per-update
+  `torch.cuda.max_memory_allocated/reserved` counters. Each measured
+  update's peak window is reset in the loop's `update_started` hook
+  (immediately before that update) and read at the existing
+  update-finalization boundary (no extra synchronization), so each
+  sample's peak is the peak of exactly that logical update and warmup
+  memory never enters measured peaks. `final_allocated_bytes` /
+  `final_reserved_bytes` are the CURRENT post-update counters of the
+  last measured update and are never called peaks.
+  `max_across_ranks` reports the cross-rank maxima of the true peaks.
 
 ## BASE vs CANDIDATE comparison protocol
 
@@ -172,6 +201,10 @@ Summary conventions (exact):
 
 ## Tests
 
-- `tests/unit/perf/` — fingerprint, sample/summary semantics (CPU).
+- `tests/unit/perf/` — fingerprint, sample/summary semantics (aligned
+  distributed global step, cross-rank volume sums, true peak memory,
+  schema 2 round-trip), profiler probe/validator semantics (CPU).
 - `tests/gpu/perf/test_benchmark_harness.py` — small-model, real-encoder
-  two-stage harness smoke test (skips when no DCU / no local assets).
+  two-stage harness smoke test, peak-vs-current memory proof, and
+  profiler-scratch-stage isolation (skips when no DCU / no local
+  assets).

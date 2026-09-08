@@ -4,6 +4,18 @@ A sample is one successful logical update (including all configured
 accumulation microbatches) on one rank.  Only phases that were actually
 measured appear in ``phases``; a phase that was not measured is ABSENT,
 never recorded as a fake 0.0 second value.
+
+Memory semantics (schema 2, exact):
+
+* ``memory_allocated_bytes`` / ``memory_reserved_bytes`` are the CURRENT
+  (final, post-update) allocator counts read at the update-finalization
+  boundary; they are NOT peaks.
+* ``peak_memory_allocated_bytes`` / ``peak_memory_reserved_bytes`` are the
+  TRUE window peaks: ``torch.cuda.max_memory_allocated/reserved`` read
+  after the update, with ``reset_peak_memory_stats`` called immediately
+  before that same update began.  The peak window of each sample is
+  exactly one logical update, so warmup allocations never enter measured
+  peaks, and ``peak >= final`` always holds (enforced at construction).
 """
 
 from __future__ import annotations
@@ -15,7 +27,7 @@ from typing import Any, cast
 
 from sakuramoon.telemetry.metrics import TIMING_PHASES
 
-PERFORMANCE_SCHEMA_VERSION = 1
+PERFORMANCE_SCHEMA_VERSION = 2
 PHASE_NAMES: frozenset[str] = frozenset(TIMING_PHASES)
 
 
@@ -62,6 +74,8 @@ class PerformanceSample:
     phases: dict[str, float]
     memory_allocated_bytes: int
     memory_reserved_bytes: int
+    peak_memory_allocated_bytes: int
+    peak_memory_reserved_bytes: int
     schema_version: int = PERFORMANCE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -92,6 +106,26 @@ class PerformanceSample:
         _require_nonnegative_int(
             self.memory_reserved_bytes, "memory_reserved_bytes", positive=False
         )
+        _require_nonnegative_int(
+            self.peak_memory_allocated_bytes,
+            "peak_memory_allocated_bytes",
+            positive=False,
+        )
+        _require_nonnegative_int(
+            self.peak_memory_reserved_bytes,
+            "peak_memory_reserved_bytes",
+            positive=False,
+        )
+        # A window peak can never be smaller than the current (final)
+        # allocation of that same window; reject inconsistent records.
+        if self.peak_memory_allocated_bytes < self.memory_allocated_bytes:
+            raise ValueError(
+                "peak_memory_allocated_bytes must be >= memory_allocated_bytes"
+            )
+        if self.peak_memory_reserved_bytes < self.memory_reserved_bytes:
+            raise ValueError(
+                "peak_memory_reserved_bytes must be >= memory_reserved_bytes"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +139,8 @@ class PerformanceSample:
             "phases": {key: self.phases[key] for key in sorted(self.phases)},
             "memory_allocated_bytes": self.memory_allocated_bytes,
             "memory_reserved_bytes": self.memory_reserved_bytes,
+            "peak_memory_allocated_bytes": self.peak_memory_allocated_bytes,
+            "peak_memory_reserved_bytes": self.peak_memory_reserved_bytes,
         }
 
     @classmethod
@@ -120,6 +156,8 @@ class PerformanceSample:
             "phases",
             "memory_allocated_bytes",
             "memory_reserved_bytes",
+            "peak_memory_allocated_bytes",
+            "peak_memory_reserved_bytes",
         }
         if set(payload) != expected:
             raise ValueError(
@@ -141,6 +179,12 @@ class PerformanceSample:
             phases={str(name): _float_field(raw_phases, name) for name in raw_phases},
             memory_allocated_bytes=_int_field(payload, "memory_allocated_bytes"),
             memory_reserved_bytes=_int_field(payload, "memory_reserved_bytes"),
+            peak_memory_allocated_bytes=_int_field(
+                payload, "peak_memory_allocated_bytes"
+            ),
+            peak_memory_reserved_bytes=_int_field(
+                payload, "peak_memory_reserved_bytes"
+            ),
             schema_version=_int_field(payload, "schema_version"),
         )
 

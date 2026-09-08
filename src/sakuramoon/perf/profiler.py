@@ -1,10 +1,18 @@
 """Optional torch.profiler snapshot helpers (P0, display-only heuristics).
 
-The profiler is STRICTLY opt-in.  When supported by the DTK/PyTorch
-stack it captures a small representative window after warmup and produces
-a normalized top-N operator summary.  Operator categories are heuristic
-string matches for DISPLAY ONLY — the raw operator names are always kept
-and the heuristics are never used as correctness facts.
+The profiler is STRICTLY opt-in and runs as a SEPARATE scratch stage
+AFTER the canonical measured baseline (never inside it).  When supported
+by the stack it captures exactly ``profiler_updates`` logical updates
+(default 1, canonical P0) and produces a normalized top-N operator
+summary.  Operator categories are heuristic string matches for DISPLAY
+ONLY — the raw operator names are always kept and the heuristics are
+never used as correctness facts.
+
+Device-trace availability is decided by a tiny matmul probe that must
+yield at least one real CUDA device event with positive device time.
+Importing ``torch.profiler`` alone never counts as "available".  When
+the probe reports unavailable, NO extra workload is executed (a prior
+ungated full-workload capture was observed to hang the DTK runtime).
 """
 
 from __future__ import annotations
@@ -21,6 +29,18 @@ try:
 except ImportError:  # torch.profiler is optional at import time
     _torch_profiler = None  # type: ignore[assignment]
 
+DEFAULT_PROFILER_UPDATES = 1
+
+
+def validate_profiler_updates(value: object) -> int:
+    """``profiler_updates`` must be a positive int (0 and negatives rejected)."""
+
+    if type(value) is not int:
+        raise ValueError("profiler_updates must be an int")
+    if value <= 0:
+        raise ValueError("profiler_updates must be a positive int (got 0)")
+    return value
+
 
 def profiler_supported() -> bool:
     """Whether torch.profiler is importable on this stack."""
@@ -28,9 +48,44 @@ def profiler_supported() -> bool:
     return _torch_profiler is not None
 
 
-def profiler_device_trace_available() -> bool:
-    """Cheap probe: does a tiny CUDA profile actually yield device events?
+def _torch_device_type_enum() -> Any:
+    try:
+        import torch
 
+        device_type = getattr(torch.autograd, "DeviceType", None)
+        if device_type is None:
+            return None
+        cuda = getattr(device_type, "CUDA", None)
+        return cuda if cuda is not None else device_type
+    except Exception:  # noqa: BLE001 - detection must degrade, never raise
+        return None
+
+
+def is_cuda_device_event(event: Any) -> bool:
+    """Robust device-type classification for profiler events.
+
+    Prefers direct enum comparison against ``torch.autograd.DeviceType.CUDA``
+    when the build exposes it; falls back to parsing string representations
+    (``CUDA``, ``DeviceType.CUDA``, ``cuda``).  CPU events (enum or
+    string) are NEVER classified as CUDA, and an absent ``device_type``
+    attribute is not CUDA.
+    """
+
+    device_type = getattr(event, "device_type", None)
+    if device_type is None:
+        return False
+    cuda = _torch_device_type_enum()
+    if cuda is not None and device_type == cuda:
+        return True
+    text = str(device_type).strip()
+    tail = text.rsplit(".", 1)[-1]
+    return tail.upper() == "CUDA"
+
+
+def profiler_device_trace_available() -> bool:
+    """Cheap probe: does a tiny CUDA profile yield a real device event?
+
+    Requires at least one CUDA device event with POSITIVE device time.
     Returns False (UNAVAILABLE) on any exception instead of guessing.
     """
 
@@ -49,14 +104,11 @@ def profiler_device_trace_available() -> bool:
             _ = left @ right
             torch.cuda.synchronize()
         events: list[Any] = cast(list[Any], prof.events())
-        if not events:
-            return False
-        device_events = [
-            event
-            for event in events
-            if str(getattr(event, "device_type", "")).lower() == "cuda"
-        ]
-        return len(device_events) > 0
+        cuda_events = [event for event in events if is_cuda_device_event(event)]
+        return any(
+            _event_time(event, "self_device_time_total", "self_device_time") > 0.0
+            for event in cuda_events
+        )
     except Exception:  # noqa: BLE001 - the probe must degrade to UNAVAILABLE on any failure
         return False
 
@@ -137,11 +189,13 @@ class ProfilerSnapshot:
     top_by_total_device_time: tuple[ProfilerOperatorRow, ...]
     trace_path: str | None
     device_trace_available: bool
+    profiler_updates: int = DEFAULT_PROFILER_UPDATES
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": 1,
             "device_trace_available": self.device_trace_available,
+            "profiler_updates": self.profiler_updates,
             "trace_path": self.trace_path,
             "top_by_self_device_time": [
                 row.to_dict() for row in self.top_by_self_device_time
@@ -160,6 +214,20 @@ def _event_time(event: Any, *attributes: str) -> float:
     return 0.0
 
 
+def unavailable_snapshot(
+    profiler_updates: int = DEFAULT_PROFILER_UPDATES,
+) -> ProfilerSnapshot:
+    """The honest UNAVAILABLE record (no workload was executed)."""
+
+    return ProfilerSnapshot(
+        top_by_self_device_time=(),
+        top_by_total_device_time=(),
+        trace_path=None,
+        device_trace_available=False,
+        profiler_updates=profiler_updates,
+    )
+
+
 def capture_profiler_window(
     workload: Callable[[], None],
     *,
@@ -167,35 +235,28 @@ def capture_profiler_window(
     rank: int,
     top_n: int = 20,
     export_trace: bool = False,
+    profiler_updates: int = DEFAULT_PROFILER_UPDATES,
 ) -> ProfilerSnapshot:
-    """Run ``workload`` under torch.profiler and summarize device operators.
+    """Run a SEPARATE scratch workload under torch.profiler and summarize it.
 
-    The window is whatever the caller passes (the benchmark harness passes
-    the measured-update stage only, after warmup).
+    The caller passes the scratch profiler stage (exactly
+    ``profiler_updates`` logical updates, post-baseline).  The canonical
+    measured baseline never runs under a profiler context.
     """
 
     if _torch_profiler is None:
         raise RuntimeError("torch.profiler is not supported on this stack")
     if type(top_n) is not int or top_n <= 0:
         raise ValueError("top_n must be a positive int")
-
-    import torch
+    validate_profiler_updates(profiler_updates)
 
     if not profiler_device_trace_available():
-        # The stack's activity tracer produced no device events in the probe.
-        # Capturing the full workload in that state has been observed to
-        # hang the DTK runtime (CPU spin, device idle), so the P0 contract
-        # degrades to UNAVAILABLE and runs the workload WITHOUT a profiler
-        # context instead of risking the machine.
-        workload()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        return ProfilerSnapshot(
-            top_by_self_device_time=(),
-            top_by_total_device_time=(),
-            trace_path=None,
-            device_trace_available=False,
-        )
+        # The stack's activity tracer produced no real device event in the
+        # probe.  A prior ungated full-workload capture in this state was
+        # observed to hang the DTK runtime (CPU spin, device idle), so the
+        # P0 contract emits the UNAVAILABLE record and executes NO extra
+        # workload at all.
+        return unavailable_snapshot(profiler_updates)
 
     with _torch_profiler.profile(
         activities=[
@@ -204,6 +265,8 @@ def capture_profiler_window(
         ]
     ) as prof:
         workload()
+        import torch
+
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
@@ -247,6 +310,7 @@ def capture_profiler_window(
         top_by_total_device_time=by_total,
         trace_path=trace_path,
         device_trace_available=device_trace_available,
+        profiler_updates=profiler_updates,
     )
 
 
@@ -267,11 +331,16 @@ def render_snapshot_markdown(snapshot: ProfilerSnapshot, limit: int = 20) -> str
         return (
             "# Profiler summary\n\n"
             "PROFILER_DEVICE_TRACE = UNAVAILABLE on this stack; no kernel-level "
-            "rows were invented.\n"
+            "rows were invented and no extra workload was executed for the "
+            f"profiler stage ({snapshot.profiler_updates} update(s) requested).\n"
         )
     lines = [
         "# Profiler summary",
         "",
+        (
+            "Mode: SEPARATE scratch stage after the measured baseline "
+            f"({snapshot.profiler_updates} logical update(s), default 1)."
+        ),
         f"Device trace available: {'yes' if snapshot.device_trace_available else 'no'}",
         f"Trace file: {snapshot.trace_path or '(not exported)'}",
         "",
@@ -289,12 +358,16 @@ def render_snapshot_markdown(snapshot: ProfilerSnapshot, limit: int = 20) -> str
 
 
 __all__ = [
+    "DEFAULT_PROFILER_UPDATES",
     "ProfilerOperatorRow",
     "ProfilerSnapshot",
     "capture_profiler_window",
     "display_category",
+    "is_cuda_device_event",
     "profiler_device_trace_available",
     "profiler_supported",
     "render_snapshot_markdown",
+    "unavailable_snapshot",
+    "validate_profiler_updates",
     "write_snapshot_json",
 ]

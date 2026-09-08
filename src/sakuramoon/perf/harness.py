@@ -42,7 +42,7 @@ from sakuramoon.data.serialize import (
 from sakuramoon.encoders.mage_vae import load_local_mage_vae
 from sakuramoon.encoders.qwen import load_local_qwen
 from sakuramoon.model.growth import new_slot_ids as growth_new_slot_ids
-from sakuramoon.perf.sample import PerformanceSample
+from sakuramoon.perf.sample import PERFORMANCE_SCHEMA_VERSION, PerformanceSample
 from sakuramoon.perf.synthetic import SyntheticBatchSource
 from sakuramoon.telemetry.timers import PhaseTimer
 from sakuramoon.train import production
@@ -346,13 +346,23 @@ def run_benchmark_stage(
     diagnostic_root: Path,
     collect: list[PerformanceSample] | None = None,
     wrap_workload: Callable[[Callable[[], None]], Any] | None = None,
+    reset_peak_memory_per_update: bool = False,
 ) -> SingleGpuUpdateState:
     """Run one benchmark stage (warmup or measured) of the production loop.
 
     ``collect`` receives one :class:`PerformanceSample` per successful
     update (pass a list for measured stages).  ``wrap_workload`` receives
     the zero-argument loop workload and is expected to invoke it, wrapped
-    (the profiler capture uses this hook).  Returns the final update state.
+    (the separate profiler scratch stage uses this hook).  Returns the
+    final update state.
+
+    ``reset_peak_memory_per_update`` (measured stages only) resets the
+    CUDA peak-memory counters in the loop's ``update_started`` hook —
+    immediately before each measured update begins — so every sample's
+    ``peak_memory_*`` fields are the true peak of exactly that update
+    (warmup memory can never enter measured peaks).  No extra
+    synchronization is introduced: the peaks are read at the existing
+    update-finalization boundary, where the device is already synced.
     """
 
     if (
@@ -372,6 +382,10 @@ def run_benchmark_stage(
         if not isinstance(timer, PhaseTimer):
             raise TypeError("benchmark stage expects an active PhaseTimer")
         active_timer = timer
+        if reset_peak_memory_per_update:
+            # Immediately before this update begins: the peak window of
+            # the sample this update produces starts here.
+            torch.cuda.reset_peak_memory_stats(device)
         runtime.set_growth_alpha(BENCHMARK_GROWTH_ALPHA)
 
     def measure_batch(batch: Any) -> torch.Tensor:
@@ -406,8 +420,18 @@ def run_benchmark_stage(
                 text_tokens=sum(item.text_tokens for item in measurements),
                 dit_forward_matmul_flops=sum(item.dit_flops for item in measurements),
                 phases=dict(phases),
+                # finish_update synced the device before this observer ran,
+                # so the counters here are the exact post-update
+                # (current/final) values, and the max_memory_* counters
+                # (reset before this update began via
+                # ``reset_peak_memory_per_update``) are the TRUE peak of
+                # exactly this logical update.
                 memory_allocated_bytes=int(torch.cuda.memory_allocated(device)),
                 memory_reserved_bytes=int(torch.cuda.memory_reserved(device)),
+                peak_memory_allocated_bytes=int(
+                    torch.cuda.max_memory_allocated(device)
+                ),
+                peak_memory_reserved_bytes=int(torch.cuda.max_memory_reserved(device)),
             )
         )
 
@@ -450,7 +474,7 @@ def run_benchmark_stage(
 def write_rank_samples(samples: Sequence[PerformanceSample], destination: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 1,
+        "schema_version": PERFORMANCE_SCHEMA_VERSION,
         "rank_samples": [item.to_dict() for item in samples],
     }
     destination.write_text(
@@ -462,7 +486,7 @@ def write_rank_samples(samples: Sequence[PerformanceSample], destination: Path) 
 
 def load_rank_samples(source: Path) -> list[PerformanceSample]:
     payload = json.loads(source.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 1 or not isinstance(
+    if payload.get("schema_version") != PERFORMANCE_SCHEMA_VERSION or not isinstance(
         payload.get("rank_samples"), list
     ):
         raise ValueError(f"rank sample file is malformed: {source}")

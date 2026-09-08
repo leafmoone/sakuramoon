@@ -196,6 +196,7 @@ def test_full_harness_two_stage_run(assembly) -> None:
             target_successful_updates=WARMUP_UPDATES + MEASURE_UPDATES,
             diagnostic_root=diag,
             collect=measured,
+            reset_peak_memory_per_update=True,
         )
 
     assert final_state.successful_updates == WARMUP_UPDATES + MEASURE_UPDATES
@@ -214,6 +215,9 @@ def test_full_harness_two_stage_run(assembly) -> None:
             assert sample.phases[phase] > 0.0
         assert sample.memory_allocated_bytes > 0
         assert sample.memory_reserved_bytes >= sample.memory_allocated_bytes
+        # True per-update peak counters: peak >= final always holds.
+        assert sample.peak_memory_allocated_bytes >= sample.memory_allocated_bytes
+        assert sample.peak_memory_reserved_bytes >= sample.memory_reserved_bytes
 
     summary = summarize(
         {assembly.rank: measured},
@@ -223,7 +227,57 @@ def test_full_harness_two_stage_run(assembly) -> None:
     assert summary.measured_iterations == MEASURE_UPDATES
     assert summary.global_samples_per_second > 0.0
     assert summary.phase_seconds["dit_forward"]["share_of_step"] is not None
+    memory = summary.memory["per_rank"][assembly.rank]
+    assert memory["peak_allocated_bytes"] >= memory["final_allocated_bytes"]
+    assert memory["peak_reserved_bytes"] >= memory["final_reserved_bytes"]
     assert assembly.runtime.growth_alpha == BENCHMARK_GROWTH_ALPHA
+
+    # Separate profiler scratch stage (post-baseline): it must execute an
+    # update (wrap called, state advances) WITHOUT appending to the
+    # measured baseline.  The production LR scheduler requires consecutive
+    # update ids, so the scratch stage continues the SAME sequence
+    # (update 4) instead of restarting.
+    wrap_calls = {"count": 0}
+
+    def wrap_scratch(workload) -> None:
+        wrap_calls["count"] += 1
+        workload()
+
+    with tempfile.TemporaryDirectory(prefix="perf-diag-scratch-") as scratch_dir:
+        scratch_state = run_benchmark_stage(
+            assembly,
+            state=final_state,
+            target_successful_updates=final_state.successful_updates + 1,
+            diagnostic_root=Path(scratch_dir),
+            wrap_workload=wrap_scratch,
+        )
+    assert scratch_state.successful_updates == final_state.successful_updates + 1
+    assert wrap_calls["count"] == 1
+    assert len(measured) == MEASURE_UPDATES  # measured baseline untouched
+
+
+def test_peak_memory_counters_differ_from_current_memory(assembly) -> None:
+    """Lock the peak/current distinction with a real transient allocation.
+
+    Reset the peak counters, transiently allocate well above the final
+    resident allocation, free it, and prove that
+    ``max_memory_allocated`` stays above ``memory_allocated`` while the
+    current counter drops back down.
+    """
+
+    device = torch.device("cuda", 0)
+    torch.cuda.reset_peak_memory_stats(device)
+    # ~2 GiB of bf16: far above this small-model harness's resident
+    # allocation, small relative to a 64 GiB device.
+    transient = torch.empty(1_000_000_000, dtype=torch.bfloat16, device="cuda")
+    del transient
+    torch.cuda.empty_cache()
+    peak = int(torch.cuda.max_memory_allocated(device))
+    current = int(torch.cuda.memory_allocated(device))
+    assert peak > current, (
+        "peak_memory_allocated must exceed the current allocation after a "
+        f"transient (peak={peak}, current={current})"
+    )
 
 
 def test_no_checkpoints_are_written(assembly, repository_root: Path) -> None:
