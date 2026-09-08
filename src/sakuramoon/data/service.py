@@ -137,7 +137,13 @@ class _QueueStore:
             raise DataServiceError("validation selection leaves no training shards")
 
     def new(self, cycle: int) -> _QueueState:
-        paths = list(self.paths)
+        # Canonical input order: self.paths is a frozenset whose iteration
+        # order is per-process (string hash randomization). The shuffle must
+        # start from sorted(paths) — the only input arrangement that is
+        # bit-identical across processes, restarts, and experiment arms —
+        # otherwise two fresh cycle-0 runs consume different sample
+        # sequences despite identical manifest and seed.
+        paths = sorted(self.paths)
         # Deterministic per-cycle order: the cross-cycle lookahead in
         # _schedule_lookahead pre-downloads the NEXT cycle's leading shards
         # while the current cycle still drains. Those pre-downloads only
@@ -857,6 +863,14 @@ class DataServiceServer:
                     raise DataServiceError("another data service owns the socket")
                 finally:
                     probe.close()
+            # Readiness contract: the socket file must not exist until the
+            # warmup barrier passes. Consumers (training_stack.sh) treat
+            # socket existence as "protocol servable"; creating it before
+            # wait_until_ready() lets the trainer connect into an empty
+            # backlog while the accept loop still waits for ready shards,
+            # and the client's health timeout expires (0U FAIL #2).
+            if not self.service.wait_until_ready() or stop_event.is_set():
+                return
             self.socket_path.parent.mkdir(parents=True, exist_ok=True)
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             listener.bind(str(self.socket_path))
@@ -864,8 +878,6 @@ class DataServiceServer:
             os.chmod(self.socket_path, 0o600)
             listener.listen(self.service.limits.ack_channel_capacity)
             listener.settimeout(0.2)
-            if not self.service.wait_until_ready() or stop_event.is_set():
-                return
             if ready_callback is not None:
                 ready_callback()
             while not stop_event.is_set():
