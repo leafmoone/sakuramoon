@@ -1,0 +1,165 @@
+{
+  "schema": "mbs_worker_clone_fix_review_v1",
+  "branch": "camera-v2-mbs-worker-clone-fix-review",
+  "base_sha": "bbf744d204dd3cdd985cd13b3ab5298fe1b95b5b",
+  "runtime_host": "come7",
+  "mode": "review-only",
+  "no_training": true,
+  "errata": [
+    {
+      "id": "ERRATUM-1",
+      "claim": "old 100U exposure root cause (dataset x policy mismatch, no severe vertical rows in first 100U exposure)",
+      "verdict": "FALSE",
+      "evidence": {
+        "source": "reports/camera-mbs-canary-100u-run (rank-0 telemetry cohort, 40000 logical rows)",
+        "vertical_applied": 5620,
+        "severity_lt2": 3399,
+        "severity_2to4": 1892,
+        "severity_ge4": 329,
+        "severe_vertical_shift_ge_2": 2221,
+        "invariant": "severity_lt2 + severity_2to4 + severity_ge4 == vertical_applied (CameraMirrorCounts validator)",
+        "invariant_holds": true,
+        "expected_eligible_if_pipeline_healthy": 2221,
+        "observed_eligible": 0
+      },
+      "corrected_root_cause": "ProductionPipelineFactory.pipeline_for_lease() passes mirror_policy to the parent WebDatasetPipeline, but WebDatasetPipeline._with_local_shards() (the persistent-worker clone boundary) omitted mirror_policy; every spawned worker ran with the __init__ default mirror_policy=None, so the worker-side eligibility gate never fired and eligible/selected/applied were all 0 regardless of the actual severe population."
+    },
+    {
+      "id": "ERRATUM-2",
+      "claim": "monitoring session death (~U118122, 03:24 local, liangshen maxTokens=1024 reasoning-only) could explain failure to enforce the early-activity gate",
+      "verdict": "REJECTED",
+      "gate_target_update": 118103,
+      "session_death_update_approx": 118122,
+      "correct_phrasing": "EARLY_ACTIVITY_GATE_ENFORCEMENT = FAILED",
+      "explanation": "The gate target was U118103 (cumulative mirror_applied > 0 before 118103). The live session observed mirror_eligible == 0 through and past U118103 and did not stop the run; it died ~19 updates after the gate point. The death does not explain, mitigate, or relocate the failure."
+    },
+    {
+      "id": "ERRATUM-3",
+      "claim": "effective_batch=400 was global",
+      "verdict": "TERMINOLOGY CORRECTION",
+      "correct_phrasing": "effective_batch=400 is the rank-0 telemetry cohort (metrics.jsonl aggregate), not a global batch of 80000; ratios such as 2221/40000 = 5.5525% are descriptive statistics over the rank-0 cohort, not global rates",
+      "impact_on_verdicts": "none (all gates are cohort-internal conservation laws)"
+    }
+  ],
+  "root_cause": {
+    "file": "src/sakuramoon/data/pipeline.py",
+    "function": "WebDatasetPipeline._with_local_shards",
+    "defect": "clone constructor call copied spatial_policy/camera_policy/transparent_policy but omitted mirror_policy; clone fell back to __init__ default mirror_policy=None; worker-side gate `if self.mirror_policy is not None and self.mirror_policy.enabled` never fired",
+    "construction_sites_in_src": 2,
+    "site_with_defect": "pipeline.py _with_local_shards (spawned per worker per shard)",
+    "site_correct": "production.py pipeline_for_lease (parent pipeline)"
+  },
+  "fix": {
+    "file": "src/sakuramoon/data/pipeline.py",
+    "diff": "            camera_policy=self.camera_policy,\n+           mirror_policy=self.mirror_policy,\n            transparent_policy=self.transparent_policy,",
+    "insertions": 1,
+    "deletions": 0,
+    "other_production_changes": 0,
+    "forbidden_changes_performed": []
+  },
+  "tests": {
+    "file": "tests/unit/data/test_camera_mirror_worker_clone.py",
+    "count": 7,
+    "passed": 7,
+    "failed": 0,
+    "skip": 0,
+    "xfail": 0,
+    "list": [
+      "test_clone_preserves_policy_identity",
+      "test_clone_preserves_none_policies",
+      "test_v1_eligibility_boundary_values",
+      "test_cloned_pipeline_applies_severe_vertical_rows",
+      "test_canary_policy_invariant_on_cloned_pipeline",
+      "test_persistent_worker_exposes_mirror_through_clone",
+      "test_v2_canary_config_differs_only_in_identity"
+    ],
+    "base_fail_proof": {
+      "base_sha": "bbf744d204dd3cdd985cd13b3ab5298fe1b95b5b",
+      "test": "test_persistent_worker_exposes_mirror_through_clone",
+      "outcome_on_base": "FAILED",
+      "outcome_on_fix": "PASSED",
+      "base_failure_specimen": "severe vertical row (camera_orientation='vertical', camera_latent_center_shift=7.0, camera_applied=True) lost its mirror payload in the persistent worker: assert None is not None",
+      "base_occurrences_of_mirror_policy_propagation": 0
+    }
+  },
+  "smoke_section_11": {
+    "status": "PASS",
+    "host": "come7",
+    "config": "config/train_g1_camera_v2_p25_mirror_v2_canary.toml",
+    "path": "ProductionPipelineFactory.from_config -> factory.batches -> ConfiguredDataLoader/iter_service_batches -> _PersistentShardDataset (spawn, persistent) -> _with_local_shards -> _iter_paths -> collate_samples",
+    "data_only": true,
+    "shards": {"count": 3, "total_bytes": 6445414400, "sha_verified_against_manifest": true},
+    "tool": "scripts/mbs_worker_exposure_smoke.py",
+    "results": {
+      "batches_consumed": 8,
+      "logical": 160,
+      "camera_selected": 88,
+      "camera_applied": 80,
+      "vertical_applied": 60,
+      "severity_lt2": 39,
+      "severity_2to4": 19,
+      "severity_ge4": 2,
+      "severe_vertical": 21,
+      "eligible": 21,
+      "selected": 21,
+      "applied": 21,
+      "degraded": 0,
+      "extra_views": 21,
+      "physical_views": 181,
+      "gates": {
+        "severe_vertical_gt_0": true,
+        "eligible_eq_severe_vertical": true,
+        "selected_eq_eligible": true,
+        "applied_eq_selected": true,
+        "degraded_zero": true,
+        "extra_views_eq_applied": true,
+        "physical_eq_logical_plus_applied": true,
+        "physical_gt_logical": true
+      },
+      "stop_reason": "severe_vertical >= 20 reached (spec: >=400 logical OR severe_vertical>=20, whichever first)",
+      "transparent_rejections": {"ai_image_corrupted": 9, "reject_missing_alpha": 5, "no_upscale": 1, "retention": 1, "total": 16}
+    }
+  },
+  "hcu_forward_section_12": {
+    "status": "SKIPPED",
+    "reason": "optional per spec; the complete real data path (production factory -> spawn workers -> clone -> collate) is already proven by the section-11 smoke on real shards with the v2 config; a forward-only HCU pass would require re-assembling the trainer's private module stack outside the trainer, risking a subtly-divergent harness; if required, it should run through a governed trainer entry point in a later explicitly authorized round"
+  },
+  "suites": {
+    "new_test_file": "7 passed (0 skip / 0 xfail)",
+    "unit_data_scope": "366 passed (test_deepghs_quality_pipeline.py + test_run_deepghs_quality_pipeline.py excluded: pre-existing collection error, onnxruntime absent from DTK venv, unrelated)",
+    "full_unit": "962 passed, 4 failed — the 4 failures are exactly the pre-existing cmuon forensic environment failures (tests/unit/optim/test_cmuon_fp32_forensic.py x4: bcd_hard_fail, e_writer_failure, f_serialization_failure, m2_mirror_failure); identical set to baseline, no new failures; same two deepghs onnxruntime collection-error exclusions"
+  },
+  "static_checks": {
+    "ruff_changed_scope": "All checks passed",
+    "py_compile": "OK",
+    "git_diff_check": "clean",
+    "staged_scope_secrets_or_binaries": false
+  },
+  "immutable_terminals": {
+    "u118200_control": {
+      "path": "output_model/g1_camera_v2_p25_mirror/ckpt_118200_raw-118200-update-cadence",
+      "manifest_sha256": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+      "interpretation": "CONTROL_100U_CAMERA_ONLY",
+      "touched": false
+    },
+    "u118100_treatment_source": {
+      "path": "output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+      "manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+      "touched": false
+    }
+  },
+  "v2_config": {
+    "file": "config/train_g1_camera_v2_p25_mirror_v2_canary.toml",
+    "extends": "train_g1_camera_v2_p25_mirror_canary.toml",
+    "resolved_identity_diff_keys": [
+      "run.run_id",
+      "paths.run_dir",
+      "paths.checkpoint_dir",
+      "paths.artifact_dir",
+      "logging.local_jsonl_path",
+      "wandb.retry_jsonl_path",
+      "evaluation.output_dir"
+    ],
+    "review_only": true
+  }
+}
