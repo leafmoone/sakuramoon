@@ -21,20 +21,6 @@ _ARCHITECTURE_SCHEMA_VERSION_V4 = 4
 _ROOT_KEYS = {"schema_version", "class", "dit", "text", "condition_tokens"}
 _ROOT_KEYS_V4 = _ROOT_KEYS | {"training_auxiliaries"}
 _DIT_META_KEYS = {"active_slot_ids", "attention_backend"}
-_IREPA_META_KEYS = {
-    "class",
-    "schema_version",
-    "in_channels",
-    "out_channels",
-    "kernel_size",
-    "stride",
-    "padding",
-    "dilation",
-    "groups",
-    "bias",
-    "weight_dtype",
-    "bias_dtype",
-}
 _STATE_COMPATIBLE_ATTENTION_BACKENDS = {
     "dense_sdpa",
     "fa4_varlen",
@@ -157,35 +143,23 @@ def _decode_irepa_auxiliary(value: object) -> int:
     """Strictly decode the locked iREPA v1 auxiliary document.
 
     Returns the projector input width; the module itself is constructed on
-    the requested device by ``build_trainable_composite``.
+    the requested device by ``build_trainable_composite``.  The metadata is
+    validated by the single canonical contract in
+    ``irepa_auxiliary_fqns`` (exact key set, values and types), not by a
+    second field-by-field copy.
     """
 
     auxiliaries = _mapping(value, "training auxiliaries")
     if set(auxiliaries) != {"irepa"}:
         raise ValueError("model architecture has an unknown training auxiliary")
-    meta = _mapping(auxiliaries["irepa"], "irepa auxiliary metadata")
-    if set(meta) != _IREPA_META_KEYS:
-        raise ValueError("irepa auxiliary metadata has unknown or missing fields")
-    if (
-        meta["class"] != "IRepaAlignment"
-        or meta["schema_version"] != 1
-        or meta["out_channels"] != 768
-        or meta["kernel_size"] != 3
-        or meta["stride"] != 1
-        or meta["padding"] != 1
-        or meta["dilation"] != 1
-        or meta["groups"] != 1
-        or meta["bias"] is not True
-        or meta["weight_dtype"] != "bfloat16"
-        or meta["bias_dtype"] != "float32"
-    ):
+    try:
+        irepa_auxiliary_fqns(auxiliaries["irepa"])
+    except ValueError:
         raise ValueError(
             "irepa auxiliary metadata is not the locked v1 projector contract"
-        )
-    in_channels = meta["in_channels"]
-    if type(in_channels) is not int or in_channels <= 0:
-        raise ValueError("irepa auxiliary input width is invalid")
-    return in_channels
+        ) from None
+    meta = _mapping(auxiliaries["irepa"], "irepa auxiliary metadata")
+    return cast(int, meta["in_channels"])
 
 
 def build_trainable_composite(
@@ -271,21 +245,54 @@ def build_trainable_composite(
     return module
 
 
-def _drop_declared_irepa_auxiliary(
-    document: dict[str, object],
-) -> dict[str, object] | None:
-    """Strip a locked single-iREPA ``training_auxiliaries`` key for contract
-    comparison; ``None`` when the document carries any other auxiliary set
-    (the strict comparison must then decide)."""
+def is_canonical_v4_irepa_document(document: object) -> bool:
+    """Whether ``document`` is a canonical schema-v4 TrainableComposite
+    architecture declaring exactly the locked single iREPA auxiliary.
 
+    This is the single provenance predicate for direct v4 -> OFF auxiliary
+    drops: the source must be a v4 document with the exact canonical root
+    key set, exactly one auxiliary named "irepa", and auxiliary metadata
+    that passes the exact canonical locked-v1 validation in
+    ``irepa_auxiliary_fqns``.  Both the contract comparison and the
+    checkpoint loader call this predicate instead of re-deriving the v4
+    shape, so there is one definition of the drop provenance.
+    """
+
+    if not isinstance(document, dict):
+        return False
+    if (
+        document.get("schema_version") != _ARCHITECTURE_SCHEMA_VERSION_V4
+        or document.get("class") != "TrainableComposite"
+        or set(document) != _ROOT_KEYS_V4
+    ):
+        return False
     auxiliary = document.get("training_auxiliaries")
-    if auxiliary is None:
-        return document
     if not isinstance(auxiliary, dict) or set(auxiliary) != {"irepa"}:
-        return None
+        return False
     try:
         irepa_auxiliary_fqns(auxiliary["irepa"])
     except ValueError:
+        return False
+    return True
+
+
+def _drop_declared_irepa_auxiliary(
+    document: dict[str, object],
+) -> dict[str, object] | None:
+    """Strip the locked single-iREPA ``training_auxiliaries`` key for
+    contract comparison.
+
+    A document without an auxiliary passes through unchanged and the
+    strict comparison decides.  A document that declares an auxiliary is
+    droppable only when it is a canonical schema-v4 TrainableComposite
+    carrying exactly the locked iREPA auxiliary with canonical locked-v1
+    metadata (``is_canonical_v4_irepa_document``); anything else returns
+    ``None`` so the strict comparison rejects it.
+    """
+
+    if document.get("training_auxiliaries") is None:
+        return document
+    if not is_canonical_v4_irepa_document(document):
         return None
     return {
         key: value for key, value in document.items() if key != "training_auxiliaries"
@@ -364,5 +371,6 @@ __all__ = [
     "architectures_share_parameter_contract",
     "build_trainable_composite",
     "export_trainable_composite",
+    "is_canonical_v4_irepa_document",
     "validate_optimizer_coverage",
 ]

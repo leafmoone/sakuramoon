@@ -30,19 +30,23 @@ IREPA_ALIGNMENT_FQN_PREFIX = "irepa_alignment."
 def irepa_auxiliary_fqns(metadata: object) -> frozenset[str]:
     """The exact parameter FQNs declared by one locked iREPA auxiliary.
 
-    The v1 projector contract is locked (out=768, kernel=3, stride=1,
-    padding=1, dilation=1, groups=1, bias=true), so a valid metadata
-    document declares exactly the projector weight and bias.  Any other
-    document is rejected: the checkpoint loader may only ever drop this
-    exact FQN set, never a broader one.
+    The metadata document must match the canonical v1 projector contract
+    produced by :func:`irepa_alignment_metadata` for its own
+    ``in_channels`` exactly: the same key set, the same values with the
+    same types, no missing keys and no extra keys.  Any deviation (wrong
+    out width, kernel, stride, padding, dilation, groups, dtypes, class
+    or schema) is rejected, so the checkpoint loader may only ever drop
+    this exact two-FQN set, never a broader one.
     """
 
     if type(metadata) is not dict:
         raise ValueError("irepa auxiliary metadata must be an object")
-    if (
-        metadata.get("class") != IREPA_ARTIFACT_CLASS
-        or metadata.get("schema_version") != IREPA_ARTIFACT_SCHEMA_VERSION
-        or metadata.get("bias") is not True
+    in_channels = metadata.get("in_channels")
+    if type(in_channels) is not int or in_channels <= 0:
+        raise ValueError("irepa auxiliary metadata has no positive integer in_channels")
+    canonical = irepa_alignment_metadata(in_channels)
+    if metadata != canonical or any(
+        type(metadata[key]) is not type(canonical[key]) for key in canonical
     ):
         raise ValueError("irepa auxiliary metadata is not the locked v1 document")
     return frozenset(

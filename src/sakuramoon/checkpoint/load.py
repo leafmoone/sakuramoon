@@ -19,6 +19,7 @@ from sakuramoon.checkpoint.artifact import (
     architectures_share_parameter_contract,
     build_trainable_composite,
     export_trainable_composite,
+    is_canonical_v4_irepa_document,
     validate_optimizer_coverage,
 )
 from sakuramoon.checkpoint.rng import restore_rank_rng, validate_rank_rng
@@ -315,8 +316,16 @@ def _declared_dropped_auxiliary_fqns(
     module: nn.Module, architecture: object
 ) -> frozenset[str]:
     """The exact iREPA auxiliary FQNs a no-iREPA module may drop from a v4
-    artifact (direct ON->OFF resume).  A module carrying the iREPA
-    auxiliary, or an artifact without one, drops nothing."""
+    artifact (direct ON->OFF resume).
+
+    A module carrying the iREPA auxiliary, or an artifact without an
+    auxiliary, drops nothing.  A drop is only ever declared by a canonical
+    schema-v4 TrainableComposite architecture whose sole auxiliary is the
+    locked single iREPA projector with canonical locked-v1 metadata
+    (``is_canonical_v4_irepa_document``); any other shape — wrong schema,
+    unknown or extra auxiliary, extra root fields, malformed metadata —
+    fails closed.
+    """
 
     if getattr(module, "irepa_alignment", None) is not None:
         return frozenset()
@@ -327,11 +336,18 @@ def _declared_dropped_auxiliary_fqns(
     if not isinstance(auxiliary, dict) or set(auxiliary) != {"irepa"}:
         raise CheckpointError("artifact declares non-iREPA training auxiliaries")
     try:
-        return irepa_auxiliary_fqns(auxiliary["irepa"])
+        dropped = irepa_auxiliary_fqns(auxiliary["irepa"])
     except ValueError:
         raise CheckpointError(
             "artifact iREPA auxiliary metadata is not the locked v1 document"
         ) from None
+    if not is_canonical_v4_irepa_document(document):
+        raise CheckpointError(
+            "artifact architecture is not a canonical schema-v4 "
+            "TrainableComposite iREPA document; the declared drop "
+            "cannot be proven"
+        )
+    return dropped
 
 
 # Element sizes of the safetensors dtypes that may appear in the locked

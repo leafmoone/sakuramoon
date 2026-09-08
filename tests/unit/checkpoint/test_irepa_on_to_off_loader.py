@@ -13,8 +13,8 @@ import sakuramoon.checkpoint.load as loader
 from sakuramoon.checkpoint.artifact import (
     architectures_share_parameter_contract,
 )
-from sakuramoon.checkpoint.migrate_irepa_checkpoint import (  # pyright: ignore[reportPrivateUsage]
-    _migrate_architecture_v4,
+from sakuramoon.checkpoint.migrate_irepa_checkpoint import (
+    _migrate_architecture_v4,  # pyright: ignore[reportPrivateUsage]
 )
 from sakuramoon.checkpoint.schema import CheckpointError
 from sakuramoon.model.irepa import irepa_auxiliary_fqns
@@ -107,6 +107,155 @@ def test_declared_dropped_rejects_malformed_irepa_metadata() -> None:
         loader._declared_dropped_auxiliary_fqns(  # pyright: ignore[reportPrivateUsage]
             _module(None), architecture
         )
+
+
+def _canonical_irepa_metadata() -> dict[str, object]:
+    v4 = _v4_architecture()
+    auxiliary = cast(dict[str, object], v4["training_auxiliaries"])
+    return cast(dict[str, object], auxiliary["irepa"])
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("out_channels", 769),
+        ("kernel_size", 5),
+        ("weight_dtype", "float32"),
+        ("bias_dtype", "bfloat16"),
+        ("stride", 2),
+        ("padding", 0),
+        ("dilation", 2),
+        ("groups", 2),
+        ("bias", False),
+        ("class", "OtherProjector"),
+        ("schema_version", 2),
+    ],
+)
+def test_auxiliary_fqns_rejects_perturbed_locked_values(
+    key: str, value: object
+) -> None:
+    # Every locked metadata value, perturbed one at a time, must be
+    # rejected against the canonical document.
+    broken = _canonical_irepa_metadata()
+    broken[key] = value
+    with pytest.raises(ValueError, match="locked v1"):
+        irepa_auxiliary_fqns(broken)
+
+
+def test_auxiliary_fqns_rejects_rogue_field() -> None:
+    broken = _canonical_irepa_metadata()
+    broken["rogue_field"] = True
+    with pytest.raises(ValueError, match="locked v1"):
+        irepa_auxiliary_fqns(broken)
+
+
+def test_auxiliary_fqns_rejects_missing_field() -> None:
+    broken = _canonical_irepa_metadata()
+    del broken["bias"]
+    with pytest.raises(ValueError, match="locked v1"):
+        irepa_auxiliary_fqns(broken)
+
+
+def test_auxiliary_fqns_rejects_wrong_value_type() -> None:
+    # 1 == True in Python equality; the canonical validation is
+    # type-strict, so an int in the bool slot is not the locked document.
+    broken = _canonical_irepa_metadata()
+    broken["bias"] = 1
+    with pytest.raises(ValueError, match="locked v1"):
+        irepa_auxiliary_fqns(broken)
+
+
+def test_auxiliary_fqns_rejects_non_positive_in_channels() -> None:
+    broken = _canonical_irepa_metadata()
+    broken["in_channels"] = 0
+    with pytest.raises(ValueError, match="positive integer in_channels"):
+        irepa_auxiliary_fqns(broken)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("out_channels", 769),
+        ("kernel_size", 5),
+        ("weight_dtype", "float32"),
+    ],
+)
+def test_declared_dropped_rejects_perturbed_locked_metadata(
+    key: str, value: object
+) -> None:
+    v4 = _v4_architecture()
+    auxiliary = cast(dict[str, object], v4["training_auxiliaries"])
+    irepa_meta = cast(dict[str, object], auxiliary["irepa"])
+    irepa_meta[key] = value
+    with pytest.raises(CheckpointError, match="locked v1"):
+        loader._declared_dropped_auxiliary_fqns(  # pyright: ignore[reportPrivateUsage]
+            _module(None), v4
+        )
+
+
+def test_declared_dropped_rejects_non_v4_schema_with_canonical_metadata() -> None:
+    # Canonical auxiliary metadata does not excuse a non-v4 (or wrong)
+    # architecture schema: the drop provenance is the whole v4 document.
+    v4 = _v4_architecture()
+    v4["schema_version"] = 9
+    with pytest.raises(CheckpointError, match="canonical schema-v4"):
+        loader._declared_dropped_auxiliary_fqns(  # pyright: ignore[reportPrivateUsage]
+            _module(None), v4
+        )
+
+
+def test_declared_dropped_rejects_extra_root_field() -> None:
+    v4 = _v4_architecture()
+    v4["rogue_root"] = {}
+    with pytest.raises(CheckpointError, match="canonical schema-v4"):
+        loader._declared_dropped_auxiliary_fqns(  # pyright: ignore[reportPrivateUsage]
+            _module(None), v4
+        )
+
+
+def test_declared_dropped_rejects_extra_auxiliary() -> None:
+    v4 = _v4_architecture()
+    auxiliary = cast(dict[str, object], v4["training_auxiliaries"])
+    auxiliary["other"] = {"class": "Other"}
+    with pytest.raises(CheckpointError, match="non-iREPA training auxiliaries"):
+        loader._declared_dropped_auxiliary_fqns(  # pyright: ignore[reportPrivateUsage]
+            _module(None), v4
+        )
+
+
+def test_contract_rejects_malformed_irepa_metadata_with_opt_in() -> None:
+    v4 = _v4_architecture()
+    auxiliary = cast(dict[str, object], v4["training_auxiliaries"])
+    irepa_meta = cast(dict[str, object], auxiliary["irepa"])
+    irepa_meta["out_channels"] = 769
+    assert (
+        architectures_share_parameter_contract(
+            _v3_architecture(), v4, allow_irepa_auxiliary_drop=True
+        )
+        is False
+    )
+
+
+def test_contract_rejects_non_v4_provenance_with_opt_in() -> None:
+    v4 = _v4_architecture()
+    v4["schema_version"] = 9
+    assert (
+        architectures_share_parameter_contract(
+            _v3_architecture(), v4, allow_irepa_auxiliary_drop=True
+        )
+        is False
+    )
+
+
+def test_contract_rejects_extra_root_field_with_opt_in() -> None:
+    v4 = _v4_architecture()
+    v4["rogue_root"] = {}
+    assert (
+        architectures_share_parameter_contract(
+            _v3_architecture(), v4, allow_irepa_auxiliary_drop=True
+        )
+        is False
+    )
 
 
 def test_contract_is_strict_for_raw_v3_vs_v4_documents() -> None:
