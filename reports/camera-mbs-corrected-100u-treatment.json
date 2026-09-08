@@ -1,0 +1,167 @@
+{
+  "schema": "mbs_corrected_100u_treatment_evidence_v1",
+  "status": "FAILED_TREATMENT_ATTEMPT",
+  "frozen": true,
+  "note": "0-update FAIL evidence. Do not overwrite with a later successful run.",
+  "date": "2026-09-08",
+  "host": "come7",
+  "verdict": {
+    "successful_updates": 0,
+    "source_damage": "NONE",
+    "control_damage": "NONE",
+    "treatment_checkpoint": "NONE",
+    "root_cause": "variable mirror physical rows -> Python tuple-length specialization -> Dynamo recompiles -> recompile_limit 8 -> FailOnRecompileLimitHit",
+    "root_cause_confidence": "HIGH",
+    "option1": "ACCEPTED_WITH_MODIFICATION",
+    "global_unconditional_64": false,
+    "config_governed_default8_v2_64": true,
+    "option2_padding": "HOLD",
+    "option3_structural_refactor": "HOLD"
+  },
+  "identity": {
+    "reviewed_code_sha": "73d419c6cede6d6bf76ee86b706e4dd881bc9a6d",
+    "evidence_branch": "camera-v2-mbs-corrected-100u-treatment-evidence",
+    "worktree": "/sakuramoon-runtime/sakuramoon-camera-mbs-corrected-100u",
+    "config": "config/train_g1_camera_v2_p25_mirror_v2_canary.toml",
+    "run_id": "g1_camera_v2_p25_mirror_v2",
+    "source_checkpoint": "output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+    "source_update": 118100,
+    "control_checkpoint": "output_model/g1_camera_v2_p25_mirror/ckpt_118200_raw-118200-update-cadence",
+    "control_update": 118200,
+    "treatment_output_root": "output_model/g1_camera_v2_p25_mirror_v2",
+    "target_update": 118200,
+    "world_size": 2,
+    "optimizer": "hybrid_cmuon_canonical_ns4_fp32_rescue",
+    "stage_global_batch": 800,
+    "local_batch": 20,
+    "accumulation": 20,
+    "telemetry_effective_batch_rank0_cohort": 400,
+    "stop_cap": 118200,
+    "planned_updates": 168000,
+    "stage_budget": { "start": 58000, "terminal": 168000 },
+    "main_process_port": 29500,
+    "log_root": "/sakuramoon-runtime/logs/mbs-corrected-treatment-118100-118200",
+    "run_root": "/run/sakuramoon-mbs-corrected-treatment",
+    "publish_state_root": "/sakuramoon-runtime/.sm-train-state-publisher-mbs-corrected-118100-118200",
+    "repo_path": "experiments/camera-v2-mbs-corrected-treatment-118100-118200",
+    "production_s0_touched": false,
+    "interval_seconds": 86400,
+    "pids": { "data": 8883, "publisher": 9150, "train_launcher": 9300 }
+  },
+  "supervisor": {
+    "path": "/sakuramoon-runtime/mbs-corrected-treatment-supervisor.py",
+    "sha256": "1c83455955792913fe80a6762486a30b7aac81d1b72a0c0d25a03dde8abd8a72",
+    "pid": 8682,
+    "independent_of_dsh": true,
+    "result_path": "/sakuramoon-runtime/mbs-corrected-treatment-supervisor-result.json",
+    "result_sha256": "fe8cd9bd0dd5cf4302c60a4d3f4bd3c61a115617d81a95c18e0e1535031ee80d",
+    "final_status": "FAIL",
+    "failure_reason": "fatal pattern in train.log: 'Traceback'",
+    "last_successful_update": 118100,
+    "early_exposure_gate": "not_reached",
+    "validated": {
+      "independent_survival": true,
+      "fatal_log_gate_detected_traceback": true,
+      "fail_closed_no_auto_restart": true,
+      "startup_gate_observed_train_process": true
+    },
+    "bug": {
+      "summary": "stack_stop() omitted VENV_ROOT from the environment passed to training_stack.sh stop",
+      "effect": "load_config_contract resolved MANAGEMENT_PYTHON to ${PROJECT_ROOT}/.venv/bin/python (missing) -> stop FAST-FAILED -> data-service (8883) and publisher (9150) orphaned, stopped manually",
+      "exact_error": "FAST-FAIL: Python is not executable: /sakuramoon-runtime/sakuramoon-camera-mbs-corrected-100u/.venv/bin/python",
+      "required_fix": [
+        "include VENV_ROOT in the stored/passed stop environment",
+        "add pre-launch side-effect-free self-test (--self-test-stop-env) confirming all stop-required variables present and python executable"
+      ]
+    }
+  },
+  "root_cause": {
+    "confidence": "HIGH",
+    "mechanism": [
+      "worker-clone fix made mirror actually fire",
+      "each batch appends a variable number (0..20) of mirror extra views",
+      "PackedDiT varlen attention receives AcceptedCuSeqlens.sequence_lengths as a Python tuple; batch_size = len(sequence_lengths)",
+      "Dynamo guards on the Python container length even with dynamic=True",
+      "physical row count varies batch-to-batch -> recompile per distinct length",
+      "8 distinct lengths hit config.recompile_limit (default 8)",
+      "code sets fail_on_recompile_limit_hit=True -> HARD failure"
+    ],
+    "dynamo_diagnostic": {
+      "log": "train.log lines 402-406",
+      "hit": "torch._dynamo hit config.recompile_limit (8)",
+      "function": "forward (src/sakuramoon/model/block.py:216)",
+      "last_reason": "len(boundaries.sequence_lengths) == 22  # self.attention(...) block.py:250"
+    },
+    "exception_chain": [
+      "torch._dynamo.exc.FailOnRecompileLimitHit (fail_on_recompile_limit_hit=True -> HARD failure)",
+      "sakuramoon.train.production.ProductionTrainingError: accepted production training failed"
+    ],
+    "why_control_never_hit": "v1 mirror broken (eligible/selected/applied == 0) -> constant physical rows -> no recompiles",
+    "why_smoke_missed": "real-data exposure smoke ~160 logical (1-2 updates), too short to see 8 distinct sequence_lengths lengths"
+  },
+  "bounded_distinct_length_argument": {
+    "local_logical_per_rank": 20,
+    "mirror_applied_per_batch": "0..20",
+    "physical_sequences": "20..40",
+    "distinct_lengths_max": 21,
+    "proposed_recompile_limit": 64,
+    "headroom": "~3x for pure physical batch count dimension",
+    "caveat": "sequence_lengths is the whole Python tuple, not only its length; Dynamo may specialize on more. A forward-only saturation smoke over 32-64 real persistent-worker batches with TORCH_LOGS=recompiles must confirm: recompile-limit failure NO, accumulated-limit failure NO, eager fallback NO.",
+    "accumulated_recompile_limit_default": 256,
+    "accumulated_recompile_limit_change": "NOT in this fix (separate decision if 256 is hit)"
+  },
+  "state_integrity": {
+    "source_manifest_before": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+    "source_manifest_after": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+    "control_manifest_before": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+    "control_manifest_after": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+    "source_tree_pre_sha": "f022ff07d29a6865a96bfa0fb1515fd9cb51878bc5fcde68ebd4b952fb8debbf",
+    "control_tree_pre_sha": "f01ad3ff7f0f30460650408ed4d0a79fd39d20738e2ee6a7197a8bdee4b977f4",
+    "treatment_root": "empty, no checkpoint",
+    "treatment_metrics_bytes": 0,
+    "treatment_metrics_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "queue_state_reset_for_matched_data": true,
+    "queue_backup_sha": "a33e2557417d791f5729d6b5eacfd96efed4974998844eaf5689986f50c66cbf",
+    "data_cache_gib": 112,
+    "data_cache_reusable": true
+  },
+  "evidence_hashes": {
+    "reviewed_code_sha": "73d419c6cede6d6bf76ee86b706e4dd881bc9a6d",
+    "supervisor_script": "1c83455955792913fe80a6762486a30b7aac81d1b72a0c0d25a03dde8abd8a72",
+    "supervisor_result": "fe8cd9bd0dd5cf4302c60a4d3f4bd3c61a115617d81a95c18e0e1535031ee80d",
+    "supervisor_log": "c944076438bbd39115e656368c8556c884b08b986d5cf3cf9f7a2553a551c7fe",
+    "train_log": "a0a9d825b60f17e2525524309888c52e649f8d1d086b9d01e2d0e2b5a9d5069c",
+    "treatment_metrics_jsonl_0bytes": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "source_manifest": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+    "control_manifest": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+    "treatment_manifest": null
+  },
+  "metrics_summary_ref": "reports/camera-mbs-corrected-100u-metrics-summary.json",
+  "accepted_fix_direction": {
+    "implemented_in_this_commit": false,
+    "option": 1,
+    "modification": "config-governed, not global unconditional",
+    "kernel_config_key": "kernels.torch_compile_recompile_limit",
+    "default": 8,
+    "v2_canary": 64,
+    "pass_through": "compile_packed_dit_blocks(..., recompile_limit=config.kernels.torch_compile_recompile_limit)",
+    "internal_fail_closed": [
+      "dynamo_config.recompile_limit = recompile_limit",
+      "dynamo_config.fail_on_recompile_limit_hit = True"
+    ],
+    "rationale": "MBS canary explicitly opts in to 64 instead of relaxing the production compiler safety ceiling for all runs"
+  },
+  "next_ordered": [
+    "1. (B) freeze + push this 0-update FAIL evidence (this commit)",
+    "2. external review of this evidence (exact SHA)",
+    "3. (A) NEW fix branch: config-governed recompile_limit (default 8 / v2 canary 64)",
+    "4. long forward-only compile saturation smoke: real persistent-worker batches, Qwen/VAE/compiled DiT forward-only, 32-64 distinct mirror-count batches, TORCH_LOGS=recompiles; require recompile-limit failure NO, accumulated-limit failure NO, eager fallback NO",
+    "5. supervisor stop-env fix: include VENV_ROOT + pre-launch --self-test-stop-env (side-effect-free)",
+    "6. external code review of the fix",
+    "7. only then rerun U118100 -> U118200"
+  ],
+  "code_immutability": {
+    "diff_path": "git diff 73d419c6cede6d6bf76ee86b706e4dd881bc9a6d..HEAD -- src config scripts tests",
+    "result": "EMPTY"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schema": "mbs_corrected_100u_metrics_summary_v1",
+  "run_id": "g1_camera_v2_p25_mirror_v2",
+  "metrics_path": "/sakuramoon-runtime/artifacts/g1_camera_v2_p25_mirror_v2/metrics.jsonl",
+  "metrics_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "metrics_bytes": 0,
+  "record_count": 0,
+  "expected_update_range": [118101, 118200],
+  "contiguous": "N/A (no records)",
+  "duplicates": 0,
+  "missing": "all (100 expected, 0 present)",
+  "schema_version_expected": 12,
+  "nonfinite_total": 0,
+  "loss": null,
+  "gradient_norm": null,
+  "throughput": null,
+  "update_wall": null,
+  "memory": null,
+  "learning_rate": null,
+  "effective_batch": null,
+  "mirror_exposure": {
+    "note": "no successful update; no rank-0 telemetry cohort recorded. The mirror was ACTIVE in code (fix applied) but the run terminated in torch.compile startup before any optimizer step, so no exposure counters exist.",
+    "logical_samples": null,
+    "severe_vertical": null,
+    "eligible": null,
+    "selected": null,
+    "applied": null,
+    "degraded": null,
+    "extra_views": null,
+    "physical_views": null
+  },
+  "reason": "run failed at torch.compile first-forward autotune (recompile_limit hard failure) before the first successful update; see reports/camera-mbs-corrected-100u-treatment.md"
+}
