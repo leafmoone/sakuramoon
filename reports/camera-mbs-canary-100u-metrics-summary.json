@@ -1,0 +1,108 @@
+{
+ "schema": "mbs_canary_100u_metrics_summary_v1",
+ "window": {
+  "start_successful_update": 118100,
+  "first_successful": 118101,
+  "final_successful": 118200,
+  "count": 100,
+  "contiguous": true,
+  "duplicates": 0,
+  "missing": 0
+ },
+ "telemetry": {
+  "schema_version": 12,
+  "records": 100,
+  "nonfinite_total": 0,
+  "conservation_all_records": "PASS",
+  "selected_eq_eligible_all": true,
+  "degraded_all_zero": true
+ },
+ "loss": {
+  "total_first": 0.5715566277503967,
+  "total_mean": 0.567765,
+  "total_final": 0.5542643070220947,
+  "total_min": 0.5344357490539551,
+  "total_max": 0.6248759031295776,
+  "high_noise_final": 0.5542642879486084,
+  "low_noise_final": 0.0
+ },
+ "grad_norm": {
+  "pre_clip_max": 0.12189057469367981,
+  "post_clip_max": 0.12189057469367981,
+  "pre_clip_mean": 0.046476,
+  "post_clip_mean": 0.046476,
+  "clip_fraction_max": 0.0
+ },
+ "throughput": {
+  "samples_per_second_median_p10_p90": [
+   51.5248,
+   49.4534,
+   53.4732
+  ],
+  "update_wall_seconds_median_p10_p90": [
+   15.53,
+   14.97,
+   16.19
+  ],
+  "update_wall_seconds_mean": 21.6873
+ },
+ "learning_rate": {
+  "values": [
+   0.00015624999650754035
+  ],
+  "constant": true,
+  "formula": "base_lr 5e-05 x linear_global_batch(800/256)"
+ },
+ "effective_batch": {
+  "values": [
+   400
+  ],
+  "constant": true
+ },
+ "growth_alpha": {
+  "values": [
+   1.0
+  ],
+  "constant": true
+ },
+ "hcu_memory_gib": {
+  "peak_allocated": 12.691,
+  "peak_reserved": 62.49,
+  "devices": "2x Hygon DCU (device name BW)"
+ },
+ "mirror_exposure": {
+  "logical_samples": 40000,
+  "camera_selected": 10194,
+  "camera_applied": 8140,
+  "vertical_applied": 5620,
+  "eligible": 0,
+  "selected": 0,
+  "applied": 0,
+  "degraded": 0,
+  "extra_physical_views": 0,
+  "physical_views": 40000,
+  "physical_logical_ratio": 1.0,
+  "applied_logical_ratio": 0.0,
+  "severity_lt2": 3399,
+  "severity_2to4": 1892,
+  "severity_ge4": 329,
+  "original_start": 0,
+  "original_center": 0,
+  "original_end": 0,
+  "mirror_start": 0,
+  "mirror_center": 0,
+  "mirror_end": 0
+ },
+ "camera": {
+  "orientation_totals": {
+   "horizontal": 2520,
+   "vertical": 5620
+  }
+ },
+ "hashes": {
+  "metrics_jsonl": "5fb691f39f754e265102a405b9d63dac6f23865e3d4fc579204ab6f6fe21c126",
+  "train_log": "8fb5150a59e0d48d0bc836a2ac9c396b9ae77464bbc76b2277962aa7993e79a1",
+  "source_ckpt_manifest": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+  "final_ckpt_manifest": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7"
+ }
+}

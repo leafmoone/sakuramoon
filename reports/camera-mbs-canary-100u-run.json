@@ -1,0 +1,183 @@
+{
+ "schema": "mbs_canary_100u_run_v1",
+ "title": "SakuraMoon Camera — MBS 100U canary run evidence",
+ "authorization": {
+  "window": "U118100 -> U118200 (exactly 100 successful updates, hard stop at 118200)",
+  "reviewed_launch_sha": "9a8810dfe535b54f1c0a393952c483cd29b6875e",
+  "reviewer_verdicts": {
+   "MBS core": "PASS",
+   "logical 0.5/0.5 weighting": "PASS",
+   "same timestep / same noise": "PASS",
+   "CUDA condition routing": "PASS",
+   "durable mirror telemetry v12": "PASS",
+   "eager HCU smoke": "PASS",
+   "compile-on dynamic A->B->A": "PASS",
+   "governed runtime stop cap": "PASS"
+  },
+  "not_authorized": [
+   "U118201+",
+   "longer P25",
+   "P50",
+   "production merge/deploy",
+   "horizontal mirror",
+   "MBS policy change",
+   "optimizer/LR/batch change",
+   "stop cap change",
+   "stage finalization"
+  ]
+ },
+ "host": {
+  "training_host": "come3 (crdnotebook-2096778566526828546-come3-31863), 2x Hygon DCU (device name BW), DTK torch 2.9.0",
+  "post_run_note": "After run completion and this evidence commit, the full runtime state was migrated to come7 (ssh gateway :10161) on 2026-09-08; come3 is pending release. All hashes below were re-verified on come7 post-migration.",
+  "launch_timeline_local": [
+   "02:55 attempt1 start: production preflight FAIL (require_local_inception_weights: 2 inception pth files missing from fresh host cache); zero state change; stack stopped",
+   "03:02 repair: both inception weights copied from come4, sha256 verified (pt_inception-2015-12-05-6726825d.pth 95628359B; inception_v3_google-0cc3c7bd.pth 108949747B)",
+   "03:03 attempt2 start OK (data=74505 publisher=74597 train=74743, 2/2 ranks, resume U118100)",
+   "03:03:06 publisher first cycle: no complete checkpoint tree (expected); interval 86400s",
+   "03:24 monitoring session dd17abfe died (liangshen preset maxTokens=1024 reasoning-only turn) at ~update 118122 — monitoring gap from here on",
+   "03:42:39 training exited cleanly after update 118200 (stop cap reached; no 118201); NCCL teardown clean",
+   "09-08 ~10:00 post-run audit: full gate verification (this report); stack stopped (data service idle-stopped); runtime migrated to come7"
+  ]
+ },
+ "code": {
+  "reviewed_launch_sha": "9a8810dfe535b54f1c0a393952c483cd29b6875e",
+  "evidence_branch": "camera-v2-mbs-canary-100u-evidence",
+  "code_config_diff_from_reviewed_sha": "EMPTY (git diff 9a8810d..HEAD -- src config scripts tests)",
+  "worktree": "/sakuramoon-runtime/sakuramoon-camera-mbs-canary-100u (clean)"
+ },
+ "source_checkpoint": {
+  "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+  "COMPLETE": "complete",
+  "update": 118100,
+  "manifest_sha256_before": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+  "manifest_sha256_after": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+  "immutable": true,
+  "stage_budget": {
+   "start": 58000,
+   "terminal": 168000
+  },
+  "cadence": 100
+ },
+ "launch": {
+  "config": "config/train_g1_camera_v2_p25_mirror_canary.toml",
+  "world_size": 2,
+  "devices": "0,1 (Hygon DCU \"BW\" x2)",
+  "device_names": "BW, BW",
+  "optimizer": "hybrid_cmuon_canonical_ns4_fp32_rescue",
+  "lr": 0.00015624999650754035,
+  "logical_global_batch": 400,
+  "stage_global_batch_config": 800,
+  "stop_cap": 118200,
+  "start_update": 118100,
+  "target_update": 118200,
+  "camera": {
+   "mode": "hdm_shifted_square_v2",
+   "p": 0.25,
+   "zoom": "1.10-1.50"
+  },
+  "mirror": {
+   "mode": "vertical_mirror_pair_v1",
+   "min_latent_shift": 2.0,
+   "pair_probability": 1.0,
+   "pair_weight": 1.0
+  }
+ },
+ "publisher_isolation": {
+  "interval_seconds": 86400,
+  "repo_path": "experiments/camera-v2-mbs-canary-118100-118200",
+  "remote_upload_occurred": false,
+  "upload_complete_lines_in_log": 0,
+  "last_published_file_exists": false,
+  "production_s0_touched": false,
+  "first_cycle_message": "no complete checkpoint tree under /sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror"
+ },
+ "training_terminal": {
+  "first_successful": 118101,
+  "final_successful": 118200,
+  "count": 100,
+  "contiguous": true,
+  "u118201_observed": false,
+  "train_processes_after_completion": 0,
+  "stack_stopped": true
+ },
+ "final_checkpoint": {
+  "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror/ckpt_118200_raw-118200-update-cadence",
+  "COMPLETE": "complete",
+  "manifest_sha256": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+  "trainer_successful": 118200,
+  "stage_budget_start": 58000,
+  "stage_budget_terminal": 168000,
+  "cadence_last": 118200,
+  "reason": "update-cadence",
+  "stage_finalize": false
+ },
+ "stability": {
+  "nonfinite_total": 0,
+  "ddp_rank_failure": false,
+  "optimizer_hard_failure": false,
+  "cmuon_rescue_guard_failure": false,
+  "loss_first": 0.5715566277503967,
+  "loss_mean": 0.567765,
+  "loss_final": 0.5542643070220947,
+  "grad_norm_max": 0.12189057469367981,
+  "peak_allocated_gib": 12.691,
+  "peak_reserved_gib": 62.49,
+  "samples_per_second_median": 51.5248
+ },
+ "mirror_exposure": {
+  "logical_samples": 40000,
+  "camera_selected": 10194,
+  "camera_applied": 8140,
+  "vertical_applied": 5620,
+  "eligible": 0,
+  "selected": 0,
+  "applied": 0,
+  "degraded": 0,
+  "extra_physical_views": 0,
+  "physical_views": 40000,
+  "physical_logical_ratio": 1.0,
+  "applied_logical_ratio": 0.0,
+  "severity_lt2": 3399,
+  "severity_2to4": 1892,
+  "severity_ge4": 329,
+  "original_start": 0,
+  "original_center": 0,
+  "original_end": 0,
+  "mirror_start": 0,
+  "mirror_center": 0,
+  "mirror_end": 0
+ },
+ "gates": {
+  "S14_first_update_gate": "PASS (update 118101, schema 12, nonfinite 0, conservation exact, selected==eligible, logical==effective_batch=400)",
+  "S15_early_mirror_activity_gate": "FAIL (cumulative camera_mirror_applied=0 at and after U118103; prescribed STOP was not executed because the monitoring session died at ~U118122 before this gate could trigger; run completed the authorized 100U unmonitored for its final ~18 minutes)",
+  "S16_continuous_gates": "PASS (contiguous updates, schema 12 throughout, nonfinite 0, conservation exact per record, selected==eligible, degraded 0, LR/effective_batch/growth_alpha constant)",
+  "S17_terminal": "PASS (U118200 normal completion; cadence ckpt COMPLETE; reason update-cadence; stage budget untouched)",
+  "S18_no_u118201": "PASS (no log line, no checkpoint, no trainer state >118200)",
+  "S19_publisher_isolation": "PASS (zero uploads; no last-published file; s0 untouched)",
+  "S20_source_immutability": "PASS (manifest sha256 unchanged: 821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892)",
+  "S27_git_immutability": "PASS (git diff 9a8810d..HEAD -- src config scripts tests EMPTY)"
+ },
+ "verdict": {
+  "training_stability": "PASS",
+  "intervention_exposure": "FAIL",
+  "overall": "PARTIAL — TRAINING STABILITY PASS + INTERVENTION EXPOSURE FAIL",
+  "exposure_root_cause": "Dataset x policy interaction: in the 256px danbooru bucket, vertical-applied camera rows are near-square sources, whose long-axis shifts under zoom 1.10-1.50 all fall below min_latent_shift=2.0 (severity histogram over 8140 applied camera rows: lt2=3399, 2to4=1892, ge4=329; all >=2.0 rows are horizontal and excluded by orientation). Result: eligible=selected=applied=0 for all 40000 logical samples; the canary therefore ran as a camera-only control with the mirror path numerically idle (loss=0.5*L_orig only, physical_views==logical_samples throughout).",
+  "vertical_asymmetry_fixed": "NOT YET DETERMINED (per spec section 24: this round establishes training stability, intervention exposure [absent here], and terminal checkpoint only; no claim of directional-gap fix)"
+ },
+ "scientific_limit": "This 100U run does NOT prove the top/bottom directional gap is fixed. Next external-review round decides whether to run the frozen same-source causal audit on U118200.",
+ "no_fid_run": true,
+ "hashes": {
+  "reviewed_code_sha": "9a8810dfe535b54f1c0a393952c483cd29b6875e",
+  "source_manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+  "final_manifest_sha256": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+  "metrics_jsonl_sha256": "5fb691f39f754e265102a405b9d63dac6f23865e3d4fc579204ab6f6fe21c126",
+  "train_log_sha256": "8fb5150a59e0d48d0bc836a2ac9c396b9ae77464bbc76b2277962aa7993e79a1"
+ },
+ "authorization_state": {
+  "additional_training_started": false,
+  "u118201_started": false,
+  "p50_started": false,
+  "production_changed": false,
+  "next": "HARD STOP — send exact evidence SHA to external reviewer — then decide same-source U118200 causal audit"
+ }
+}
