@@ -24,6 +24,34 @@ _DTYPE_NAMES = {
     torch.float32: "float32",
 }
 
+IREPA_ALIGNMENT_FQN_PREFIX = "irepa_alignment."
+
+
+def irepa_auxiliary_fqns(metadata: object) -> frozenset[str]:
+    """The exact parameter FQNs declared by one locked iREPA auxiliary.
+
+    The v1 projector contract is locked (out=768, kernel=3, stride=1,
+    padding=1, dilation=1, groups=1, bias=true), so a valid metadata
+    document declares exactly the projector weight and bias.  Any other
+    document is rejected: the checkpoint loader may only ever drop this
+    exact FQN set, never a broader one.
+    """
+
+    if type(metadata) is not dict:
+        raise ValueError("irepa auxiliary metadata must be an object")
+    if (
+        metadata.get("class") != IREPA_ARTIFACT_CLASS
+        or metadata.get("schema_version") != IREPA_ARTIFACT_SCHEMA_VERSION
+        or metadata.get("bias") is not True
+    ):
+        raise ValueError("irepa auxiliary metadata is not the locked v1 document")
+    return frozenset(
+        {
+            f"{IREPA_ALIGNMENT_FQN_PREFIX}projector.weight",
+            f"{IREPA_ALIGNMENT_FQN_PREFIX}projector.bias",
+        }
+    )
+
 
 def irepa_alignment_metadata(in_channels: int) -> dict[str, object]:
     """The canonical v4 architecture document for one iREPA auxiliary.
@@ -156,9 +184,7 @@ class IRepaAlignment(nn.Module):
         # (H, W): spatial[b, c, y, x] == image_hidden[b, y * grid_width + x,
         # c].  A bare image_hidden.reshape(batch, D, H, W) reinterprets the
         # flat storage and mixes tokens with feature channels.
-        spatial = image_hidden.transpose(1, 2).reshape(
-            batch, width, height, grid_width
-        )
+        spatial = image_hidden.transpose(1, 2).reshape(batch, width, height, grid_width)
         features = self.projector(spatial)
         # flatten(2) keeps the spatial axis row-major (token t = h*W + w);
         # the transpose produces the documented [B, T, C] layout.
@@ -189,10 +215,12 @@ class IRepaAlignment(nn.Module):
 
 
 __all__ = [
+    "IREPA_ALIGNMENT_FQN_PREFIX",
     "IREPA_ARTIFACT_CLASS",
     "IREPA_ARTIFACT_SCHEMA_VERSION",
     "IREPA_PROJECTOR_KERNEL_SIZE",
     "IREPA_TEACHER_FEATURE_WIDTH",
     "IRepaAlignment",
     "irepa_alignment_metadata",
+    "irepa_auxiliary_fqns",
 ]

@@ -143,9 +143,8 @@ def record_data_policy_transition(
     if payload is None:
         payload = {"kind": DATA_POLICY_TRANSITION_KIND, "records": []}
     records = payload.get("records")
-    if (
-        payload.get("kind") != DATA_POLICY_TRANSITION_KIND
-        or not isinstance(records, list)
+    if payload.get("kind") != DATA_POLICY_TRANSITION_KIND or not isinstance(
+        records, list
     ):
         raise ValueError(
             f"existing data policy transition artifact has an unknown shape: "
@@ -159,9 +158,7 @@ def record_data_policy_transition(
             return artifact_path
     records.append(dict(record))
     document = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    temporary = artifact_path.with_name(
-        f".{artifact_path.name}.{os.getpid()}.tmp"
-    )
+    temporary = artifact_path.with_name(f".{artifact_path.name}.{os.getpid()}.tmp")
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with temporary.open("w", encoding="utf-8") as handle:
@@ -343,9 +340,14 @@ class ProductionSingleGpuCheckpointPublisher:
             read_irepa_state,
         )
 
+        # A direct ON->OFF resume (module without the iREPA auxiliary) drops
+        # the auxiliary together with its anchor document: the sidecar is
+        # republished verbatim only when the current run still carries the
+        # projector, so the next checkpoint after an OFF resume is clean.
         self._irepa_state: dict[str, object] | None = (
             read_irepa_state(restored_checkpoint.path)
             if (restored_checkpoint.path / IREPA_STATE_FILE).exists()
+            and getattr(self._module, "irepa_alignment", None) is not None
             else None
         )
         self._accepted_checkpoint_ids = accepted_checkpoint_ids
@@ -377,9 +379,7 @@ class ProductionSingleGpuCheckpointPublisher:
             trainer=state,
             growth=replace(
                 restored.growth,
-                alpha=canonical_growth_alpha(
-                    restored.growth, state.successful_updates
-                ),
+                alpha=canonical_growth_alpha(restored.growth, state.successful_updates),
             ),
             stage_budget=restored.stage_budget,
             checkpoint_cadence=cadence,
@@ -547,9 +547,7 @@ def build_single_gpu_preflight_checks(
             require_local_inception_weights()
         irepa = loaded.config.irepa
         if irepa is not None and pe_spatial_teacher_required(irepa):
-            require_local_pe_spatial_teacher(
-                repository_root, irepa.teacher_local_path
-            )
+            require_local_pe_spatial_teacher(repository_root, irepa.teacher_local_path)
 
     def data_service() -> None:
         if data_client.health():
@@ -588,7 +586,9 @@ def build_single_gpu_preflight_checks(
         )
 
         if not isinstance(qwen, FrozenQwenEncoder):
-            raise PreflightError("the production qwen binding is not a FrozenQwenEncoder")
+            raise PreflightError(
+                "the production qwen binding is not a FrozenQwenEncoder"
+            )
         facts = require_qwen_fast_path(qwen)
         probe_rows = loaded.config.train.local_batch
         seconds = probe_qwen_fast_path(qwen, probe_rows)

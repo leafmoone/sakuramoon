@@ -10,7 +10,7 @@ from torch import nn
 from sakuramoon.conditioning.condition_tokens import ConditionTokenEncoder
 from sakuramoon.conditioning.text_mixer import TextConditioner
 from sakuramoon.model.dit import DenseDiT, PackedDiT
-from sakuramoon.model.irepa import IRepaAlignment
+from sakuramoon.model.irepa import IRepaAlignment, irepa_auxiliary_fqns
 from sakuramoon.train.step import TrainableComposite
 
 _DTYPES = {"bfloat16": torch.bfloat16, "float32": torch.float32}
@@ -90,15 +90,13 @@ def export_trainable_composite(module: nn.Module) -> dict[str, object]:
     if composite.dit.hidden_size != composite.condition_tokens.output_size:
         raise ValueError("DiT and condition-token encoder widths differ")
     if has_irepa and irepa.projector.in_channels != composite.dit.hidden_size:
-        raise ValueError(
-            "DiT hidden width and iREPA projector input width differ"
-        )
+        raise ValueError("DiT hidden width and iREPA projector input width differ")
     parameters = tuple(composite.named_parameters(remove_duplicate=False))
-    if not parameters or any(not parameter.requires_grad for _, parameter in parameters):
-        raise ValueError("checkpoint composite parameters must all be trainable")
-    if any(
-        name.split(".", 1)[0] not in allowed_roots for name, _ in parameters
+    if not parameters or any(
+        not parameter.requires_grad for _, parameter in parameters
     ):
+        raise ValueError("checkpoint composite parameters must all be trainable")
+    if any(name.split(".", 1)[0] not in allowed_roots for name, _ in parameters):
         raise ValueError("checkpoint parameter is outside the trainable composite")
     metadata = composite.dit.model_metadata()
     if metadata.get("prediction_type") != "x":
@@ -132,7 +130,9 @@ def validate_optimizer_coverage(
     # name must bind to the identical parameter object.
     canonical_sorted = tuple(sorted(canonical_parameters, key=lambda item: item[0]))
     module_parameters = tuple(
-        sorted(module.named_parameters(remove_duplicate=False), key=lambda item: item[0])
+        sorted(
+            module.named_parameters(remove_duplicate=False), key=lambda item: item[0]
+        )
     )
     if tuple(name for name, _ in module_parameters) != tuple(
         name for name, _ in canonical_sorted
@@ -165,9 +165,7 @@ def _decode_irepa_auxiliary(value: object) -> int:
         raise ValueError("model architecture has an unknown training auxiliary")
     meta = _mapping(auxiliaries["irepa"], "irepa auxiliary metadata")
     if set(meta) != _IREPA_META_KEYS:
-        raise ValueError(
-            "irepa auxiliary metadata has unknown or missing fields"
-        )
+        raise ValueError("irepa auxiliary metadata has unknown or missing fields")
     if (
         meta["class"] != "IRepaAlignment"
         or meta["schema_version"] != 1
@@ -199,19 +197,14 @@ def build_trainable_composite(
     version = document.get("schema_version")
     irepa_in_channels: int | None = None
     if version == _ARCHITECTURE_SCHEMA_VERSION:
-        if (
-            set(document) != _ROOT_KEYS
-            or document.get("class") != "TrainableComposite"
-        ):
+        if set(document) != _ROOT_KEYS or document.get("class") != "TrainableComposite":
             raise ValueError("model architecture has unknown or missing fields")
     elif version == _ARCHITECTURE_SCHEMA_VERSION_V4:
         if (
             set(document) != _ROOT_KEYS_V4
             or document.get("class") != "TrainableComposite"
         ):
-            raise ValueError(
-                "v4 model architecture has unknown or missing fields"
-            )
+            raise ValueError("v4 model architecture has unknown or missing fields")
         irepa_in_channels = _decode_irepa_auxiliary(document["training_auxiliaries"])
     else:
         raise ValueError("model architecture schema version is unsupported")
@@ -268,7 +261,9 @@ def build_trainable_composite(
                 irepa_alignment=irepa_alignment,
             )
     except (TypeError, ValueError):
-        raise ValueError("model architecture cannot construct the locked composite") from None
+        raise ValueError(
+            "model architecture cannot construct the locked composite"
+        ) from None
     if list(module.dit.active_slot_ids) != recorded_slots:
         raise ValueError("model architecture active slots differ from depth")
     if export_trainable_composite(module) != document:
@@ -276,12 +271,47 @@ def build_trainable_composite(
     return module
 
 
-def architectures_share_parameter_contract(left: object, right: object) -> bool:
+def _drop_declared_irepa_auxiliary(
+    document: dict[str, object],
+) -> dict[str, object] | None:
+    """Strip a locked single-iREPA ``training_auxiliaries`` key for contract
+    comparison; ``None`` when the document carries any other auxiliary set
+    (the strict comparison must then decide)."""
+
+    auxiliary = document.get("training_auxiliaries")
+    if auxiliary is None:
+        return document
+    if not isinstance(auxiliary, dict) or set(auxiliary) != {"irepa"}:
+        return None
+    try:
+        irepa_auxiliary_fqns(auxiliary["irepa"])
+    except ValueError:
+        return None
+    return {
+        key: value for key, value in document.items() if key != "training_auxiliaries"
+    }
+
+
+def architectures_share_parameter_contract(
+    left: object,
+    right: object,
+    *,
+    allow_irepa_auxiliary_drop: bool = False,
+) -> bool:
     """Compare artifacts while treating parameter-free attention backends alike.
 
     ``new_slot_ids`` is runtime growth state, not parameter structure: it is
     stripped from both sides so pre-existing v3 documents (without the key)
     still share the parameter contract with current modules.
+
+    Strict by default: a no-iREPA (v3) document and an iREPA (v4) document
+    do NOT share a parameter contract.  ``allow_irepa_auxiliary_drop=True``
+    is the explicit opt-in used by the raw-checkpoint loader for direct
+    ON->OFF resume: only then is a locked single-iREPA auxiliary on the
+    right side stripped (and its v4 schema marker aligned) before the
+    trunk comparison.  The loader additionally enforces, via the explicit
+    FQN-delta check, that the artifact carries exactly that auxiliary and
+    nothing else, so the opt-in can never widen the accepted set silently.
     """
 
     try:
@@ -298,22 +328,32 @@ def architectures_share_parameter_contract(left: object, right: object) -> bool:
         or right_backend not in _STATE_COMPATIBLE_ATTENTION_BACKENDS
     ):
         return False
+    # A no-iREPA module may resume an iREPA (v4) artifact when exactly the
+    # declared iREPA auxiliary is being dropped (direct ON->OFF resume):
+    # the auxiliary key is runtime capability, not trunk parameter
+    # structure.  Only the locked single-iREPA document qualifies; any
+    # other auxiliary set keeps the strict comparison.  (The reverse
+    # direction, an iREPA module against a v3 artifact, stays strict and
+    # is answered by the strict FQN-set check in the loader.)
+    if allow_irepa_auxiliary_drop and left_document.get("training_auxiliaries") is None:
+        right_document = _drop_declared_irepa_auxiliary(right_document)
+        if right_document is None:
+            return False
+        # The v4 marker is part of the locked auxiliary contract (v4 is
+        # exactly v3 plus the single iREPA auxiliary): the trunk comparison
+        # must not see the version bump.
+        right_document = {
+            **right_document,
+            "schema_version": left_document.get("schema_version"),
+        }
     normalized_left = {
         **left_document,
-        "dit": {
-            key: value
-            for key, value in left_dit.items()
-            if key != "new_slot_ids"
-        }
+        "dit": {key: value for key, value in left_dit.items() if key != "new_slot_ids"}
         | {"attention_backend": "state_compatible_gqa"},
     }
     normalized_right = {
         **right_document,
-        "dit": {
-            key: value
-            for key, value in right_dit.items()
-            if key != "new_slot_ids"
-        }
+        "dit": {key: value for key, value in right_dit.items() if key != "new_slot_ids"}
         | {"attention_backend": "state_compatible_gqa"},
     }
     return normalized_left == normalized_right

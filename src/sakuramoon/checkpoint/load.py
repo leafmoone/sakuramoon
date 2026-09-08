@@ -34,6 +34,7 @@ from sakuramoon.checkpoint.schema import (
     raw_state_from_dicts,
 )
 from sakuramoon.model.growth import new_slot_fqn_prefixes, new_slot_ids
+from sakuramoon.model.irepa import irepa_auxiliary_fqns
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
 from sakuramoon.optim.cmuon import HybridCMuon
 from sakuramoon.optim.groups import ParameterAudit, ParameterSpec
@@ -130,7 +131,9 @@ def read_checkpoint_manifest(path: Path) -> CheckpointManifest:
             raise CheckpointError("checkpoint tree contains a symbolic link")
         if item.is_dir():
             if relative not in allowed_directories:
-                raise CheckpointError("checkpoint payload file set does not match manifest")
+                raise CheckpointError(
+                    "checkpoint payload file set does not match manifest"
+                )
             continue
         if not item.is_file() or relative not in allowed_files:
             raise CheckpointError("checkpoint payload file set does not match manifest")
@@ -146,7 +149,9 @@ def read_checkpoint_manifest(path: Path) -> CheckpointManifest:
             if payload.stat().st_size != record.size:
                 raise CheckpointError(f"checkpoint payload size differs: {record.path}")
         except OSError:
-            raise CheckpointError(f"checkpoint payload is unreadable: {record.path}") from None
+            raise CheckpointError(
+                f"checkpoint payload is unreadable: {record.path}"
+            ) from None
     return manifest
 
 
@@ -163,17 +168,15 @@ def read_raw_checkpoint_state(
         _read_json(train_state / "growth_state.json", "growth state"),
     )
     if manifest.identity.update != state.trainer.successful_updates:
-        raise CheckpointError("checkpoint update differs from trainer successful updates")
+        raise CheckpointError(
+            "checkpoint update differs from trainer successful updates"
+        )
     return manifest, state
 
 
-def _validate_raw_sidecars(
-    checkpoint: Path, manifest: CheckpointManifest
-) -> None:
+def _validate_raw_sidecars(checkpoint: Path, manifest: CheckpointManifest) -> None:
     sidecars = {
-        record.path
-        for record in manifest.files
-        if not record.path.startswith("model/")
+        record.path for record in manifest.files if not record.path.startswith("model/")
     }
     if "train_state/data_state.json" in sidecars:
         raise CheckpointError("legacy raw data sidecar is unsupported")
@@ -224,7 +227,9 @@ def _model_index(path: Path) -> tuple[dict[str, str], int]:
     total_size = metadata["total_size"]
     if type(total_size) is not int or total_size < 0:
         raise CheckpointError("model total size is invalid")
-    if not weight_map or not all(isinstance(filename, str) for filename in weight_map.values()):
+    if not weight_map or not all(
+        isinstance(filename, str) for filename in weight_map.values()
+    ):
         raise CheckpointError("model weight map is invalid")
     return cast(dict[str, str], weight_map), total_size
 
@@ -306,30 +311,96 @@ def _validate_model_config(
     return document["architecture"]
 
 
+def _declared_dropped_auxiliary_fqns(
+    module: nn.Module, architecture: object
+) -> frozenset[str]:
+    """The exact iREPA auxiliary FQNs a no-iREPA module may drop from a v4
+    artifact (direct ON->OFF resume).  A module carrying the iREPA
+    auxiliary, or an artifact without one, drops nothing."""
+
+    if getattr(module, "irepa_alignment", None) is not None:
+        return frozenset()
+    document = _mapping(architecture, "model architecture")
+    auxiliary = document.get("training_auxiliaries")
+    if auxiliary is None:
+        return frozenset()
+    if not isinstance(auxiliary, dict) or set(auxiliary) != {"irepa"}:
+        raise CheckpointError("artifact declares non-iREPA training auxiliaries")
+    try:
+        return irepa_auxiliary_fqns(auxiliary["irepa"])
+    except ValueError:
+        raise CheckpointError(
+            "artifact iREPA auxiliary metadata is not the locked v1 document"
+        ) from None
+
+
+# Element sizes of the safetensors dtypes that may appear in the locked
+# iREPA auxiliary (projector weight = BF16, bias = F32).
+_SAFE_DTYPE_ELEMENT_SIZES = {
+    "BF16": 2,
+    "F16": 2,
+    "F32": 4,
+    "F64": 8,
+    "I64": 8,
+    "I32": 4,
+    "I16": 2,
+    "I8": 1,
+    "U8": 1,
+    "BOOL": 1,
+}
+
+
 def _validate_model_tensors(
     model_dir: Path,
     module: nn.Module,
     expected: CheckpointIdentity,
     kind: CheckpointKind,
-) -> tuple[dict[str, str], dict[str, torch.Tensor]]:
+) -> tuple[dict[str, str], dict[str, torch.Tensor], frozenset[str]]:
     architecture = _validate_model_config(model_dir / "config.json", expected, kind)
+    dropped_fqns = _declared_dropped_auxiliary_fqns(module, architecture)
     try:
+        # Direct ON->OFF resume: the no-iREPA module may drop exactly the
+        # declared iREPA auxiliary from a v4 artifact.  The opt-in is safe
+        # because the explicit FQN-delta check below accepts a checkpoint
+        # only when its surplus over the module is precisely that set.
         if not architectures_share_parameter_contract(
-            export_trainable_composite(module), architecture
+            export_trainable_composite(module),
+            architecture,
+            allow_irepa_auxiliary_drop=True,
         ):
             raise CheckpointError("model architecture differs from artifact")
     except (TypeError, ValueError):
-        raise CheckpointError("target is not the artifact trainable composite") from None
+        raise CheckpointError(
+            "target is not the artifact trainable composite"
+        ) from None
     weight_map, declared_size = _model_index(model_dir / "model.safetensors.index.json")
     current = module.state_dict(keep_vars=True)
+    # Explicit delta before anything else: the checkpoint may carry exactly
+    # the declared iREPA auxiliary FQNs beyond the module, nothing more.
+    model_delta = set(weight_map) - set(current)
+    if model_delta != set(dropped_fqns):
+        sample = sorted(model_delta - dropped_fqns)[:8]
+        detail = (
+            "unexpected: " + ", ".join(sample)
+            if sample
+            else "declared auxiliary FQN missing from checkpoint: "
+            + ", ".join(sorted(dropped_fqns - model_delta))
+        )
+        raise CheckpointError(
+            "checkpoint model FQN delta differs from the declared iREPA "
+            f"auxiliary set ({detail})"
+        )
     _verify_fqn_sets(
-        set(weight_map), set(current), _module_new_slot_prefixes(module)
+        set(weight_map) - dropped_fqns,
+        set(current),
+        _module_new_slot_prefixes(module),
     )
     shard_names = set(weight_map.values())
     if any("/" in name or not name.endswith(".safetensors") for name in shard_names):
         raise CheckpointError("model shard name is invalid")
     observed_names: set[str] = set()
     observed_size = 0
+    dropped_size = 0
     for shard_name in sorted(shard_names):
         shard_path = model_dir / shard_name
         try:
@@ -341,7 +412,21 @@ def _validate_model_tensors(
                 shard_keys = handle.keys()
                 for name in shard_keys:
                     if name in observed_names or weight_map.get(name) != shard_name:
-                        raise CheckpointError("model shard keys do not match weight map")
+                        raise CheckpointError(
+                            "model shard keys do not match weight map"
+                        )
+                    if name in dropped_fqns:
+                        # Declared iREPA auxiliary: its content is dropped
+                        # with the parameter; only the declared byte size is
+                        # accounted against the index total.
+                        view = handle.get_slice(name)
+                        element_size = _SAFE_DTYPE_ELEMENT_SIZES.get(view.get_dtype())
+                        if element_size is None:
+                            raise CheckpointError(
+                                f"dropped auxiliary tensor dtype is unsupported: {name}"
+                            )
+                        dropped_size += math.prod(view.get_shape()) * element_size
+                        continue
                     target = current.get(name)
                     if target is None:
                         raise CheckpointError("model shard contains an unknown FQN")
@@ -357,20 +442,23 @@ def _validate_model_tensors(
             raise
         except Exception:  # noqa: BLE001 - normalize backend deserialization errors
             raise CheckpointError(f"model shard is unreadable: {shard_name}") from None
-    if observed_names != set(current) or observed_size != declared_size:
+    if observed_names != set(current) or observed_size != declared_size - dropped_size:
         raise CheckpointError("model index size or tensor set is inconsistent")
-    return weight_map, current
+    return weight_map, current, dropped_fqns
 
 
 def _apply_model(
     model_dir: Path,
     weight_map: dict[str, str],
     current: dict[str, torch.Tensor],
+    dropped_fqns: frozenset[str] = frozenset(),
 ) -> None:
     with torch.no_grad():
         for shard_name in sorted(set(weight_map.values())):
             tensors = load_file(model_dir / shard_name, device="cpu")
             for name, tensor in tensors.items():
+                if name in dropped_fqns:
+                    continue
                 current[name].copy_(tensor, non_blocking=False)
 
 
@@ -389,7 +477,10 @@ def _validate_optimizer_schema(
 
     del expected
     document = _mapping(value, "optimizer schema")
-    if type(document.get("schema_version")) is not int or document["schema_version"] != 1:
+    if (
+        type(document.get("schema_version")) is not int
+        or document["schema_version"] != 1
+    ):
         raise CheckpointError("optimizer parameter schema version is invalid")
     groups = document["groups"]
     if not isinstance(groups, list):
@@ -399,8 +490,10 @@ def _validate_optimizer_schema(
         group = _mapping(raw_group, "optimizer group")
         _exact_keys(group, {"group_name", "param_names"}, "optimizer group")
         names = group["param_names"]
-        if not isinstance(group["group_name"], str) or not isinstance(names, list) or not all(
-            isinstance(name, str) for name in cast(list[object], names)
+        if (
+            not isinstance(group["group_name"], str)
+            or not isinstance(names, list)
+            or not all(isinstance(name, str) for name in cast(list[object], names))
         ):
             raise CheckpointError("optimizer group is invalid")
         saved.append((group["group_name"], tuple(cast(list[str], names))))
@@ -490,6 +583,7 @@ def _validate_optimizer_moment(
 def _remap_state_to_current_ids(
     state_document: dict[str, object],
     current_groups: list[dict[str, object]],
+    dropped_fqns: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     """Re-key a saved optimizer state into the current id space by FQN name.
 
@@ -498,6 +592,8 @@ def _remap_state_to_current_ids(
     cutover inserts new parameters mid-group.  The remap is identity when
     the FQN sets match; for a cutover it pairs every saved entry with the
     current parameter of the same canonical name and drops nothing else.
+    ``dropped_fqns`` (direct iREPA ON->OFF resume) additionally discards
+    exactly the declared auxiliary parameters' state entries.
     """
 
     current_id_by_name: dict[str, int] = {}
@@ -530,9 +626,12 @@ def _remap_state_to_current_ids(
             raise CheckpointError("saved optimizer state references an unknown id")
         current_id = current_id_by_name.get(name)
         if current_id is None:
+            if name in dropped_fqns:
+                # Declared iREPA auxiliary: its optimizer state is dropped
+                # together with the parameter (nothing else may be).
+                continue
             raise CheckpointError(
-                f"saved optimizer state FQN {name} is absent from the current "
-                "optimizer"
+                f"saved optimizer state FQN {name} is absent from the current optimizer"
             )
         remapped_state[current_id] = entry
     return {"state": remapped_state, "param_groups": current_groups}
@@ -542,15 +641,21 @@ def _verify_group_diff(
     saved: list[tuple[str, tuple[str, ...]]],
     current: list[tuple[str, tuple[str, ...]]],
     new_fqns: frozenset[str],
+    dropped_fqns: frozenset[str] = frozenset(),
 ) -> None:
-    """Exact group/param-name comparison with growth-slot tolerance.
+    """Exact group/param-name comparison with growth-slot and declared-iREPA
+    auxiliary tolerance.
 
     The saved groups must be the current groups minus exactly the
-    growth-slot FQNs (nothing more, nothing less, same order).
+    growth-slot FQNs and/or plus exactly the declared iREPA auxiliary FQNs
+    (nothing more, nothing less, same relative order).  Every declared
+    auxiliary FQN must appear in the saved groups (a declared drop that the
+    checkpoint does not actually carry is a different delta and fails).
     """
 
     if len(saved) != len(current):
         raise CheckpointError("optimizer state group count does not match")
+    seen_dropped: set[str] = set()
     for (saved_name, saved_names), (current_name, current_names) in zip(
         saved, current, strict=True
     ):
@@ -558,19 +663,31 @@ def _verify_group_diff(
             raise CheckpointError(f"optimizer group name differs: {saved_name}")
         saved_set = set(saved_names)
         current_set = set(current_names)
-        if saved_set - current_set:
-            raise CheckpointError(
-                f"optimizer group {saved_name} contains FQNs the current "
-                "optimizer does not have"
-            )
+        extra = saved_set - current_set
+        if extra:
+            if not extra <= dropped_fqns:
+                raise CheckpointError(
+                    f"optimizer group {saved_name} contains FQNs the current "
+                    f"optimizer does not have: {sorted(extra)[:8]}"
+                )
+            seen_dropped |= extra
         diff = current_set - saved_set
         if not diff <= new_fqns:
             raise CheckpointError(
-                f"optimizer group {saved_name} is missing non-growth FQNs"
+                f"optimizer group {saved_name} is missing non-growth FQNs: "
+                f"{sorted(diff)[:8]}"
             )
-        expected_saved = tuple(name for name in current_names if name not in diff)
-        if tuple(saved_names) != expected_saved:
+        stripped_saved = tuple(name for name in saved_names if name not in dropped_fqns)
+        stripped_current = tuple(name for name in current_names if name not in new_fqns)
+        if stripped_saved != stripped_current:
             raise CheckpointError(f"optimizer group {saved_name} order differs")
+    if seen_dropped != set(dropped_fqns):
+        raise CheckpointError(
+            "saved optimizer groups do not carry exactly the declared iREPA "
+            "auxiliary FQNs (missing: "
+            + ", ".join(sorted(dropped_fqns - seen_dropped))
+            + ")"
+        )
 
 
 def _validate_optimizer_state(
@@ -594,9 +711,7 @@ def _validate_optimizer_state(
 
     audit_by_name = {spec.name: spec for spec in optimizer.audit.specs}
     expected_by_id: dict[int, ParameterSpec] = {}
-    for saved_raw, current_raw in zip(
-        saved_group_items, current_groups, strict=True
-    ):
+    for saved_raw, current_raw in zip(saved_group_items, current_groups, strict=True):
         if not isinstance(saved_raw, dict) or not isinstance(current_raw, dict):
             raise CheckpointError("optimizer parameter group is invalid")
         saved_group = cast(dict[str, object], saved_raw)
@@ -701,7 +816,19 @@ def _hybrid_momentum_dtype(name: object) -> torch.dtype | None:
 def _hybrid_ns_map(value: object) -> dict[str, int] | None:
     """Normalize a saved per-role NS map (canonical dict or legacy scalar)."""
     if isinstance(value, int):
-        return {role: value for role in ("attention_q", "attention_k", "attention_v", "attention_content_gate", "attention_out", "ffn_in", "ffn_down", "adaln_shared")}
+        return {
+            role: value
+            for role in (
+                "attention_q",
+                "attention_k",
+                "attention_v",
+                "attention_content_gate",
+                "attention_out",
+                "ffn_in",
+                "ffn_down",
+                "adaln_shared",
+            )
+        }
     if isinstance(value, dict):
         return {str(key): int(item) for key, item in value.items()}
     return None
@@ -712,6 +839,7 @@ def _validate_hybrid_optimizer_schema(
     optimizer: HybridCMuon,
     *,
     new_fqns: frozenset[str] = frozenset(),
+    dropped_fqns: frozenset[str] = frozenset(),
 ) -> None:
     """Schema v2: inner AdamW groups + the CMuon algorithm contract."""
     from sakuramoon.optim.guarded_canonical import (
@@ -721,7 +849,10 @@ def _validate_hybrid_optimizer_schema(
     )
 
     document = _mapping(value, "optimizer schema")
-    if type(document.get("schema_version")) is not int or document["schema_version"] != 2:
+    if (
+        type(document.get("schema_version")) is not int
+        or document["schema_version"] != 2
+    ):
         raise CheckpointError("hybrid optimizer schema version is invalid")
     keys = {"schema_version", "groups", "hybrid_cmuon"}
     if "guarded_canonical" in document:
@@ -784,8 +915,10 @@ def _validate_hybrid_optimizer_schema(
         group = _mapping(raw_group, "optimizer group")
         _exact_keys(group, {"group_name", "param_names"}, "optimizer group")
         names = group["param_names"]
-        if not isinstance(group["group_name"], str) or not isinstance(names, list) or not all(
-            isinstance(name, str) for name in cast(list[object], names)
+        if (
+            not isinstance(group["group_name"], str)
+            or not isinstance(names, list)
+            or not all(isinstance(name, str) for name in cast(list[object], names))
         ):
             raise CheckpointError("optimizer group is invalid")
         saved.append((group["group_name"], tuple(cast(list[str], names))))
@@ -796,7 +929,7 @@ def _validate_hybrid_optimizer_schema(
         if not isinstance(group_name, str) or not isinstance(names, list):
             raise CheckpointError("current optimizer lacks canonical parameter names")
         current.append((group_name, tuple(cast(list[str], names))))
-    _verify_group_diff(saved, current, new_fqns)
+    _verify_group_diff(saved, current, new_fqns, dropped_fqns)
     block = _mapping(document["hybrid_cmuon"], "hybrid_cmuon schema block")
     _exact_keys(
         block,
@@ -856,12 +989,9 @@ def _load_hybrid_optimizer_state(path: Path) -> dict[str, object]:
         or document["hybrid_cmuon_schema_version"] != 1
     ):
         raise CheckpointError("hybrid optimizer state schema version is invalid")
-    if (
-        "guard" in document
-        and (
-            type(document.get("guarded_canonical_schema_version")) is not int
-            or document["guarded_canonical_schema_version"] != 1
-        )
+    if "guard" in document and (
+        type(document.get("guarded_canonical_schema_version")) is not int
+        or document["guarded_canonical_schema_version"] != 1
     ):
         raise CheckpointError("guarded canonical schema version is invalid")
     return document
@@ -871,14 +1001,19 @@ def _verify_routing_manifest(
     saved: object,
     current: dict[str, object],
     new_fqns: frozenset[str],
+    dropped_fqns: frozenset[str] = frozenset(),
 ) -> None:
-    """State-exact routing manifest, with growth-slot entries allowed absent.
+    """State-exact routing manifest, with growth-slot entries allowed absent
+    and declared iREPA auxiliary entries allowed dropped.
 
-    Every saved entry must match the current manifest exactly; current
-    entries that the saved manifest lacks must all be growth-slot FQNs.
+    Every shared entry must match exactly; current entries that the saved
+    manifest lacks must all be growth-slot FQNs; saved entries with no
+    current counterpart must together be exactly the declared iREPA
+    auxiliary FQNs (nothing more, nothing less).
     """
 
     saved_document = _mapping(saved, "hybrid routing manifest")
+    saved_extra: set[str] = set()
     for key in ("cmuon", "adamw"):
         raw_saved_entries = saved_document.get(key)
         if not isinstance(raw_saved_entries, list):
@@ -898,15 +1033,28 @@ def _verify_routing_manifest(
             for entry in current_entries
         }
         for name, entry in saved_by_name.items():
-            if name not in current_by_name or current_by_name[name] != entry:
-                raise CheckpointError(
-                    f"hybrid routing manifest entry differs: {name}"
-                )
+            if name not in current_by_name:
+                if name not in dropped_fqns:
+                    raise CheckpointError(
+                        "hybrid routing manifest entry has no current "
+                        f"counterpart: {name}"
+                    )
+                saved_extra.add(name)
+                continue
+            if current_by_name[name] != entry:
+                raise CheckpointError(f"hybrid routing manifest entry differs: {name}")
         for name in current_by_name:
             if name not in saved_by_name and name not in new_fqns:
                 raise CheckpointError(
                     f"hybrid routing manifest is missing non-growth FQN: {name}"
                 )
+    if saved_extra != set(dropped_fqns):
+        raise CheckpointError(
+            "hybrid routing manifest drops differ from the declared iREPA "
+            "auxiliary FQNs (missing: "
+            + ", ".join(sorted(dropped_fqns - saved_extra))
+            + ")"
+        )
 
 
 def _validate_hybrid_cmuon_state(
@@ -960,24 +1108,28 @@ def _validate_hybrid_cmuon_state(
     for spec in optimizer.routing.cmuon_specs:
         tensor = momenta.get(spec.name)
         if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cpu":
-            raise CheckpointError(f"hybrid CMuon momentum missing/invalid for {spec.name}")
+            raise CheckpointError(
+                f"hybrid CMuon momentum missing/invalid for {spec.name}"
+            )
         if tuple(tensor.shape) != tuple(spec.parameter.shape):
-            raise CheckpointError(f"hybrid CMuon momentum shape mismatch for {spec.name}")
+            raise CheckpointError(
+                f"hybrid CMuon momentum shape mismatch for {spec.name}"
+            )
         if tensor.dtype != expected_dtype:
-            raise CheckpointError(f"hybrid CMuon momentum dtype mismatch for {spec.name}")
+            raise CheckpointError(
+                f"hybrid CMuon momentum dtype mismatch for {spec.name}"
+            )
         if not bool(torch.isfinite(tensor.to(torch.float32)).all().item()):
-            raise CheckpointError(f"hybrid CMuon momentum has nonfinite values: {spec.name}")
+            raise CheckpointError(
+                f"hybrid CMuon momentum has nonfinite values: {spec.name}"
+            )
         seen.add(spec.name)
     unexpected_momenta = set(momenta) - seen
     if unexpected_momenta:
-        raise CheckpointError(
-            "hybrid CMuon momenta contain FQNs outside the routing"
-        )
+        raise CheckpointError("hybrid CMuon momenta contain FQNs outside the routing")
     missing_momenta = seen - set(momenta)
     if missing_momenta and not missing_momenta <= new_fqns:
-        raise CheckpointError(
-            "hybrid CMuon momenta are missing for non-growth FQNs"
-        )
+        raise CheckpointError("hybrid CMuon momenta are missing for non-growth FQNs")
 
 
 def _validate_transition_optimizer_schema(
@@ -991,7 +1143,10 @@ def _validate_transition_optimizer_schema(
     and fork the CMuon allowlist from it.  Growth-slot FQNs may be absent
     from the saved groups (fresh fork state)."""
     document = _mapping(value, "optimizer schema")
-    if type(document.get("schema_version")) is not int or document["schema_version"] != 1:
+    if (
+        type(document.get("schema_version")) is not int
+        or document["schema_version"] != 1
+    ):
         raise CheckpointError("optimizer parameter schema version is invalid")
     groups = document["groups"]
     if not isinstance(groups, list):
@@ -1001,8 +1156,10 @@ def _validate_transition_optimizer_schema(
         group = _mapping(raw_group, "optimizer group")
         _exact_keys(group, {"group_name", "param_names"}, "optimizer group")
         names = group["param_names"]
-        if not isinstance(group["group_name"], str) or not isinstance(names, list) or not all(
-            isinstance(name, str) for name in cast(list[object], names)
+        if (
+            not isinstance(group["group_name"], str)
+            or not isinstance(names, list)
+            or not all(isinstance(name, str) for name in cast(list[object], names))
         ):
             raise CheckpointError("optimizer group is invalid")
         saved.append((group["group_name"], tuple(cast(list[str], names))))
@@ -1029,7 +1186,9 @@ def _validate_transition_optimizer_state(
     saved_group_items = cast(list[object], saved_groups)
     saved_state_items = cast(dict[object, object], saved_state)
     if len(saved_group_items) != 2:
-        raise CheckpointError("transition optimizer state requires the two canonical groups")
+        raise CheckpointError(
+            "transition optimizer state requires the two canonical groups"
+        )
     audit_by_name = {spec.name: spec for spec in audit.specs}
     # Expected torch state ids: the baseline (build_adamw8bit) param_groups are
     # [matrix_decay, sensitive_no_decay] in name-sorted order, so the flattened
@@ -1048,7 +1207,9 @@ def _validate_transition_optimizer_state(
         raw_ids = saved_group.get("params")
         raw_names = saved_group.get("param_names")
         if not isinstance(raw_ids, list) or not isinstance(raw_names, list):
-            raise CheckpointError("transition optimizer canonical parameter IDs are invalid")
+            raise CheckpointError(
+                "transition optimizer canonical parameter IDs are invalid"
+            )
         id_items = cast(list[object], raw_ids)
         name_items = cast(list[object], raw_names)
         if (
@@ -1056,14 +1217,20 @@ def _validate_transition_optimizer_state(
             or not all(isinstance(name, str) for name in name_items)
             or len(id_items) != len(name_items)
         ):
-            raise CheckpointError("transition optimizer canonical parameter IDs are invalid")
+            raise CheckpointError(
+                "transition optimizer canonical parameter IDs are invalid"
+            )
         for parameter_id, name in zip(
             cast(list[int], id_items), cast(list[str], name_items), strict=True
         ):
             if expected_id_by_name.get(name) != parameter_id:
-                raise CheckpointError("transition optimizer parameter identity is invalid")
+                raise CheckpointError(
+                    "transition optimizer parameter identity is invalid"
+                )
             if parameter_id in expected_by_id:
-                raise CheckpointError("transition optimizer parameter identity is duplicated")
+                raise CheckpointError(
+                    "transition optimizer parameter identity is duplicated"
+                )
             expected_by_id[parameter_id] = audit_by_name[name]
     if set(expected_id_by_name) != {spec.name for spec in expected_by_id.values()}:
         raise CheckpointError("transition optimizer state omits canonical parameters")
@@ -1088,7 +1255,9 @@ def _validate_transition_optimizer_state(
             or not float(step.item()).is_integer()
             or not 1 <= int(step.item()) <= successful_updates
         ):
-            raise CheckpointError("transition optimizer step is outside successful update history")
+            raise CheckpointError(
+                "transition optimizer step is outside successful update history"
+            )
         spec = expected_by_id[parameter_id]
         parameter = spec.parameter
         quantized = parameter.numel() >= 4096 and parameter.numel() % 256 == 0
@@ -1153,11 +1322,17 @@ def _validate_standalone_model_manifest(model_dir: Path) -> None:
             if path.stat().st_size != record.size:
                 raise CheckpointError(f"model directory size differs: {record.path}")
         except OSError:
-            raise CheckpointError(f"model directory file is unreadable: {record.path}") from None
+            raise CheckpointError(
+                f"model directory file is unreadable: {record.path}"
+            ) from None
 
 
-def _config_identity_kind(model_dir: Path) -> tuple[CheckpointIdentity, CheckpointKind, object]:
-    document = _mapping(_read_json(model_dir / "config.json", "model config"), "model config")
+def _config_identity_kind(
+    model_dir: Path,
+) -> tuple[CheckpointIdentity, CheckpointKind, object]:
+    document = _mapping(
+        _read_json(model_dir / "config.json", "model config"), "model config"
+    )
     try:
         identity = identity_from_dict(document.get("identity"))
         kind = CheckpointKind(document.get("kind"))
@@ -1176,8 +1351,10 @@ def _load_model_kind(
     manifest = read_checkpoint_manifest(checkpoint)
     _validate_identity(manifest, expected, kind)
     model_dir = checkpoint / "model"
-    weight_map, current = _validate_model_tensors(model_dir, module, expected, kind)
-    _apply_model(model_dir, weight_map, current)
+    weight_map, current, dropped_fqns = _validate_model_tensors(
+        model_dir, module, expected, kind
+    )
+    _apply_model(model_dir, weight_map, current, dropped_fqns)
 
 
 def load_model_only(
@@ -1201,10 +1378,10 @@ def load_model_directory(
         module = build_trainable_composite(architecture, device=device)
     except (TypeError, ValueError):
         raise CheckpointError("model architecture is invalid") from None
-    weight_map, current = _validate_model_tensors(
+    weight_map, current, dropped_fqns = _validate_model_tensors(
         model_dir, module, identity, kind
     )
-    _apply_model(model_dir, weight_map, current)
+    _apply_model(model_dir, weight_map, current, dropped_fqns)
     return module, identity, kind
 
 
@@ -1225,10 +1402,10 @@ def load_inference_artifact(
         module = build_trainable_composite(architecture, device=device)
     except (TypeError, ValueError):
         raise CheckpointError("model architecture is invalid") from None
-    weight_map, current = _validate_model_tensors(
+    weight_map, current, dropped_fqns = _validate_model_tensors(
         model_dir, module, expected, manifest.kind
     )
-    _apply_model(model_dir, weight_map, current)
+    _apply_model(model_dir, weight_map, current, dropped_fqns)
     return module
 
 
@@ -1259,8 +1436,10 @@ def load_raw_checkpoint(
             tuple((spec.name, spec.parameter) for spec in optimizer.audit.specs),
         )
     except (TypeError, ValueError):
-        raise CheckpointError("checkpoint module and optimizer boundary differ") from None
-    weight_map, current_model = _validate_model_tensors(
+        raise CheckpointError(
+            "checkpoint module and optimizer boundary differ"
+        ) from None
+    weight_map, current_model, dropped_fqns = _validate_model_tensors(
         checkpoint / "model", module, expected, CheckpointKind.RAW
     )
     train_state = checkpoint / "train_state"
@@ -1274,9 +1453,10 @@ def load_raw_checkpoint(
         _read_json(train_state / "growth_state.json", "growth state"),
     )
     cutover_new_fqns: frozenset[str] = frozenset()
-    if state.growth.active_slot_ids != tuple(
-        active_slot_ids_from_module(module)
-    ) and new_prefixes:
+    if (
+        state.growth.active_slot_ids != tuple(active_slot_ids_from_module(module))
+        and new_prefixes
+    ):
         cutover_new_fqns = frozenset(
             name
             for name in current_model
@@ -1284,7 +1464,9 @@ def load_raw_checkpoint(
         )
     schema_version = _mapping(schema, "optimizer schema").get("schema_version")
     if expected.update != state.trainer.successful_updates:
-        raise CheckpointError("checkpoint update differs from trainer successful updates")
+        raise CheckpointError(
+            "checkpoint update differs from trainer successful updates"
+        )
     module_slots = active_slot_ids_from_module(module)
     saved_slots = state.growth.active_slot_ids
     if saved_slots == module_slots:
@@ -1321,7 +1503,7 @@ def load_raw_checkpoint(
     sr_rng = _load_sr_rng(train_state / "rng" / "optimizer_sr.safetensors", optimizer)
     successful_updates = state.trainer.successful_updates
 
-    _apply_model(checkpoint / "model", weight_map, current_model)
+    _apply_model(checkpoint / "model", weight_map, current_model, dropped_fqns)
     if isinstance(optimizer, HybridCMuon):
         if type(schema_version) is int and schema_version == 2:
             _load_hybrid_state_exact(
@@ -1331,14 +1513,25 @@ def load_raw_checkpoint(
                 sr_rng,
                 successful_updates,
                 new_fqns=cutover_new_fqns,
+                dropped_fqns=dropped_fqns,
             )
         elif type(schema_version) is int and schema_version == 1:
+            if dropped_fqns:
+                raise CheckpointError(
+                    "iREPA auxiliary drop requires a hybrid (schema v2) "
+                    "checkpoint optimizer state"
+                )
             _load_adamw_transition_state(
                 train_state, schema, optimizer, sr_rng, successful_updates
             )
         else:
             raise CheckpointError("hybrid optimizer requires schema v1 or v2")
     else:
+        if dropped_fqns:
+            raise CheckpointError(
+                "iREPA auxiliary drop requires the hybrid CMuon optimizer "
+                "(the auxiliary parameters live in the hybrid AdamW part)"
+            )
         if type(schema_version) is not int or schema_version != 1:
             raise CheckpointError(
                 "schema v2 checkpoint requires the hybrid CMuon optimizer"
@@ -1359,9 +1552,7 @@ def load_raw_checkpoint(
                 optimizer_state,
                 [cast(dict[str, object], group) for group in current_groups],
             )
-        _validate_optimizer_state(
-            optimizer_state, optimizer, successful_updates
-        )
+        _validate_optimizer_state(optimizer_state, optimizer, successful_updates)
         saved_groups = cast(list[object], optimizer_state["param_groups"])
         if len(saved_groups) != len(current_groups):
             raise CheckpointError("optimizer state group count does not match")
@@ -1370,9 +1561,7 @@ def load_raw_checkpoint(
             {
                 **cast(dict[str, object], saved_group),
                 "lr": cast(dict[str, object], current_group)["lr"],
-                "weight_decay": cast(dict[str, object], current_group)[
-                    "weight_decay"
-                ],
+                "weight_decay": cast(dict[str, object], current_group)["weight_decay"],
             }
             for saved_group, current_group in zip(
                 saved_groups, current_groups, strict=True
@@ -1396,12 +1585,22 @@ def _load_hybrid_state_exact(
     successful_updates: int,
     *,
     new_fqns: frozenset[str] = frozenset(),
+    dropped_fqns: frozenset[str] = frozenset(),
 ) -> None:
-    """Hybrid -> hybrid resume: outer state dict, state-exact on both parts."""
+    """Hybrid -> hybrid resume: outer state dict, state-exact on both parts.
+
+    ``new_fqns`` tolerates growth-slot additions on the module side;
+    ``dropped_fqns`` tolerates exactly the declared iREPA auxiliary on the
+    checkpoint side (direct ON->OFF resume: the auxiliary parameters'
+    moments are discarded, every shared parameter keeps its exact state).
+    """
     from sakuramoon.optim.guarded_canonical import HybridCMuonGuardedCanonical
 
     _validate_hybrid_optimizer_schema(
-        schema, optimizer, new_fqns=new_fqns
+        schema,
+        optimizer,
+        new_fqns=new_fqns,
+        dropped_fqns=dropped_fqns,
     )
     outer = _load_hybrid_optimizer_state(train_state / "optimizer.pt")
     if "guard" in outer and not isinstance(optimizer, HybridCMuonGuardedCanonical):
@@ -1409,24 +1608,25 @@ def _load_hybrid_state_exact(
             "guarded optimizer state cannot be loaded into the unguarded "
             "hybrid optimizer (silent downgrade refused)"
         )
-    _validate_hybrid_cmuon_state(
-        outer["cmuon"], optimizer, new_fqns=new_fqns
-    )
+    _validate_hybrid_cmuon_state(outer["cmuon"], optimizer, new_fqns=new_fqns)
     _verify_routing_manifest(
-        outer["routing"], optimizer.routing.routing_manifest(), new_fqns
+        outer["routing"],
+        optimizer.routing.routing_manifest(),
+        new_fqns,
+        dropped_fqns,
     )
     inner = cast(dict[str, object], outer["optimizer"])
     if not isinstance(inner, dict):
         raise CheckpointError("hybrid inner optimizer state is invalid")
     inner_groups = cast(
         list[object],
-        cast(dict[str, object], optimizer.adamw.optimizer.state_dict())[
-            "param_groups"
-        ],
+        cast(dict[str, object], optimizer.adamw.optimizer.state_dict())["param_groups"],
     )
-    if new_fqns:
+    if new_fqns or dropped_fqns:
         inner = _remap_state_to_current_ids(
-            inner, [cast(dict[str, object], g) for g in inner_groups]
+            inner,
+            [cast(dict[str, object], g) for g in inner_groups],
+            dropped_fqns,
         )
     _validate_optimizer_state(inner, optimizer.adamw, successful_updates)
     # Learning rate and weight decay are runtime-controlled: replace the
