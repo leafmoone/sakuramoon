@@ -1,0 +1,209 @@
+{
+  "label": "MBS THREE-WAY NUMERICS ADJUDICATION \u2014 FINAL",
+  "question": "Does HCU/DCU forward numerical nondeterminism change the intervention-associated estimator classification under a same-source frozen evaluation cohort?",
+  "replicate_inventory": {
+    "label": "MBS THREE-WAY NUMERICS \u2014 RAW REPLICATE HASH FREEZE",
+    "PRE": {
+      "A": {
+        "root": "/tmp/camera-mbs-three-way-audit",
+        "files": {
+          "w0": "/tmp/camera-mbs-three-way-audit/ledger/ledger-w0-pre.jsonl",
+          "w1": "/tmp/camera-mbs-three-way-audit/ledger/ledger-w1-pre.jsonl"
+        },
+        "sha256": {
+          "w0": "4f780e3578df506b77b14620ec0abec5e285e50391266eb71d0d82daa8ab51a1",
+          "w1": "59918d1aa3b821f4a350af72b6c636746a0f7a7230ebf266664ab67c066c4316"
+        },
+        "rows": {
+          "w0": 256,
+          "w1": 256
+        }
+      },
+      "B": {
+        "root": "/tmp/mbs3-rerun-full",
+        "files": {
+          "w0": "/tmp/mbs3-rerun-full/ledger/ledger-w0-pre.jsonl",
+          "w1": "/tmp/mbs3-rerun-full/ledger/ledger-w1-pre.jsonl"
+        },
+        "sha256": {
+          "w0": "5a70b4c29c5a3d414589855a22bbae80286ffdc9fa7bfc8a2a4dbea4a0dd051d",
+          "w1": "e548a27c838cf6b0cc75057152c65b9c2e61e3dd3f23b84f2216b81951ec963a"
+        },
+        "rows": {
+          "w0": 256,
+          "w1": 256
+        }
+      }
+    },
+    "CONTROL": {
+      "A": {
+        "root": "/tmp/camera-mbs-three-way-audit",
+        "files": {
+          "w0": "/tmp/camera-mbs-three-way-audit/ledger/ledger-w0-control.jsonl",
+          "w1": "/tmp/camera-mbs-three-way-audit/ledger/ledger-w1-control.jsonl"
+        },
+        "sha256": {
+          "w0": "3cf918a0774d48861cf69e9a3d9047b6ecef7719831f5b07f2fc6e322bd20613",
+          "w1": "0616622d67217f7cbcb1d88ef068e6419fc5a077ea254f95d94c7883b53831e7"
+        },
+        "rows": {
+          "w0": 256,
+          "w1": 256
+        }
+      },
+      "B": {
+        "root": "/tmp/mbs3-rerun-full",
+        "files": {
+          "w0": "/tmp/mbs3-rerun-full/ledger/ledger-w0-control.jsonl",
+          "w1": "/tmp/mbs3-rerun-full/ledger/ledger-w1-control.jsonl"
+        },
+        "sha256": {
+          "w0": "779860ceccfa4e9ec938b49f5389ca3a2b9b00f876966409b025be33236c18f0",
+          "w1": "1fdd17d733e5fdc290aae1e0649eff290020b8888bc671f571a91b89ba030a2b"
+        },
+        "rows": {
+          "w0": 256,
+          "w1": 256
+        }
+      }
+    },
+    "TREATMENT": {
+      "A": {
+        "root": "/tmp/camera-mbs-three-way-audit",
+        "files": {
+          "w0": "/tmp/camera-mbs-three-way-audit/ledger/ledger-w0-treatment.jsonl",
+          "w1": "/tmp/camera-mbs-three-way-audit/ledger/ledger-w1-treatment.jsonl"
+        },
+        "sha256": {
+          "w0": "8c6866b293a94061e97b8d1a3e38e35e8fc7ccb46cdd4cc333f1784a1e1db751",
+          "w1": "fcfaec5964e2067eae01c93b592eed4464c8fbf800fec87dbb85f9eaf5761960"
+        },
+        "rows": {
+          "w0": 256,
+          "w1": 256
+        }
+      },
+      "B": {
+        "root": "/tmp/camera-mbs-three-way-numerics/treatment-b",
+        "files": {
+          "w0": "/tmp/camera-mbs-three-way-numerics/treatment-b/ledger/ledger-w0-treatment.jsonl",
+          "w1": "/tmp/camera-mbs-three-way-numerics/treatment-b/ledger/ledger-w1-treatment.jsonl"
+        },
+        "sha256": {
+          "w0": "8b76ad6521cd7c35e6646ec82c71acfb1aef9f359024d9a130be22c10a140c59",
+          "w1": "701de41d0ddaf49c4e8c83ece96f3ea79b00b9b02ff1cfc17a1c9309a833e218"
+        },
+        "rows": {
+          "w0": 256,
+          "w1": 256
+        }
+      }
+    },
+    "created_utc": "2026-09-08T17:45:56Z"
+  },
+  "tuple_classifications_targeted": {
+    "P0 C0 T0": "CLEAR_HARM",
+    "P0 C0 T1": "CLEAR_HARM",
+    "P0 C1 T0": "CLEAR_HARM",
+    "P0 C1 T1": "CLEAR_HARM",
+    "P1 C0 T0": "CLEAR_HARM",
+    "P1 C0 T1": "CLEAR_HARM",
+    "P1 C1 T0": "CLEAR_HARM",
+    "P1 C1 T1": "CLEAR_HARM"
+  },
+  "adjudication": {
+    "stable": true,
+    "stable_label": "NUMERICALLY_STABLE",
+    "common_classification": "CLEAR_HARM",
+    "envelope_classification": "CLEAR_HARM",
+    "verdict": "PASS"
+  },
+  "canonical_control_recommendation": {
+    "action": "NOT_REQUIRED_NOW",
+    "note": "canonical camera-only 100U NOT REQUIRED now; MBS strategy requires review"
+  },
+  "root_cause_statement": "localized HCU/DCU forward numerical nondeterminism; root operator/kernel family not isolated",
+  "created_utc": "2026-09-08T17:57:55Z",
+  "checkpoint_identity": {
+    "status": "PASS",
+    "note": "checkpoint identity re-hashed before and after TREATMENT_B scoring; all PASS, hashes unchanged",
+    "pre_scoring": {
+      "PRE": {
+        "status": "PASS",
+        "problems": [],
+        "evidence": {
+          "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+          "complete_marker": "complete",
+          "manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+          "model_tree_sha256": "32b76aff83a92b26fa1313cf100afeb8ec920b2b11920bf9319c14e2293da370",
+          "successful_updates": 118100,
+          "growth_alpha": 1.0
+        }
+      },
+      "CONTROL": {
+        "status": "PASS",
+        "problems": [],
+        "evidence": {
+          "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror/ckpt_118200_raw-118200-update-cadence",
+          "complete_marker": "complete",
+          "manifest_sha256": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+          "model_tree_sha256": "5347def81c6c8627b66861159890aaf23eb8fca61a87ed3c544c1a3b07d3c241",
+          "successful_updates": 118200,
+          "growth_alpha": 1.0
+        }
+      },
+      "TREATMENT": {
+        "status": "PASS",
+        "problems": [],
+        "evidence": {
+          "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror_v2/ckpt_118200_raw-118200-update-cadence",
+          "complete_marker": "complete",
+          "manifest_sha256": "11deada823da8217a08cd15f4c0365c391f01c60af8335d89c07a9ea61d69824",
+          "model_tree_sha256": "22a802f22987a6797db2886a8fd9db717ee2ce92cc0dbc699f00adc5a780fb98",
+          "full_tree_sha256": "d2673914eba014ca389178f9bff191df4db31431b5de373ecabbfdfed4206c74",
+          "successful_updates": 118200,
+          "growth_alpha": 1.0
+        }
+      }
+    },
+    "post_scoring": {
+      "PRE": {
+        "status": "PASS",
+        "problems": [],
+        "evidence": {
+          "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25/ckpt_118100_raw-118100-update-cadence",
+          "complete_marker": "complete",
+          "manifest_sha256": "821a8c12546a094865972fef0c23152e9754e01f82eed8353f7248b92076b892",
+          "model_tree_sha256": "32b76aff83a92b26fa1313cf100afeb8ec920b2b11920bf9319c14e2293da370",
+          "successful_updates": 118100,
+          "growth_alpha": 1.0
+        }
+      },
+      "CONTROL": {
+        "status": "PASS",
+        "problems": [],
+        "evidence": {
+          "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror/ckpt_118200_raw-118200-update-cadence",
+          "complete_marker": "complete",
+          "manifest_sha256": "f014827fb441aca8780a5bb710eeb2631a40aac112ed3aa6b07b6e3b65d657f7",
+          "model_tree_sha256": "5347def81c6c8627b66861159890aaf23eb8fca61a87ed3c544c1a3b07d3c241",
+          "successful_updates": 118200,
+          "growth_alpha": 1.0
+        }
+      },
+      "TREATMENT": {
+        "status": "PASS",
+        "problems": [],
+        "evidence": {
+          "path": "/sakuramoon-runtime/output_model/g1_camera_v2_p25_mirror_v2/ckpt_118200_raw-118200-update-cadence",
+          "complete_marker": "complete",
+          "manifest_sha256": "11deada823da8217a08cd15f4c0365c391f01c60af8335d89c07a9ea61d69824",
+          "model_tree_sha256": "22a802f22987a6797db2886a8fd9db717ee2ce92cc0dbc699f00adc5a780fb98",
+          "full_tree_sha256": "d2673914eba014ca389178f9bff191df4db31431b5de373ecabbfdfed4206c74",
+          "successful_updates": 118200,
+          "growth_alpha": 1.0
+        }
+      }
+    }
+  }
+}
