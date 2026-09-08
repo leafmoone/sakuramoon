@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,19 @@ from sakuramoon.train.step import SingleGpuUpdateState, StepOptimizer
 BENCHMARK_GROWTH_ALPHA = 1.0
 _NO_CHECKPOINT_INTERVAL = 10**9
 _RANK_SEED_STRIDE = 1_000_003
+
+
+def _record_startup_mark(startup_marks: dict[str, float] | None, name: str) -> None:
+    """Record a perf_counter startup mark when a recorder dict was provided.
+
+    The harness never fabricates a mark for a stage that did not run
+    (e.g. DDP prepare in single-rank mode, or compile when disabled): the
+    caller passes the dict, and each phase boundary records itself only
+    when that phase actually executed.
+    """
+
+    if startup_marks is not None:
+        startup_marks[name] = time.perf_counter()
 
 
 def git_head_sha(repository_root: Path) -> str:
@@ -162,6 +176,7 @@ def assemble_benchmark(
     local_batch: int | None = None,
     accumulation: int | None = None,
     expected_global_batch: int | None = None,
+    startup_marks: dict[str, float] | None = None,
 ) -> BenchmarkAssembly:
     """Build the current production stack on scratch state (no I/O beyond models).
 
@@ -172,8 +187,15 @@ def assemble_benchmark(
     benchmark-only batch-shape override AFTER ``config_override``: the
     effective global batch is re-derived and the derivation fails closed
     against ``expected_global_batch``.  No config file is written.
+
+    ``startup_marks`` (P1-R1B) is an OPTIONAL mutable dict that receives
+    ``time.perf_counter()`` marks at each assembly phase boundary (the
+    outside-the-measured-window startup timeline).  Pass ``None`` (the
+    default) for zero behavior change; pass a fresh dict to record the
+    startup phases.  A phase that did not execute records no mark.
     """
 
+    _record_startup_mark(startup_marks, "assembly_start")
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a nonnegative int")
     if type(warmup_updates) is not int or warmup_updates <= 0:
@@ -201,6 +223,7 @@ def assemble_benchmark(
             expected_global_batch=expected_global_batch,
         )
     rank, world_size = _topology(config)
+    _record_startup_mark(startup_marks, "config_loaded")
 
     accelerator: Any = None
     if world_size > 1:
@@ -235,6 +258,7 @@ def assemble_benchmark(
     else:
         device = torch.device("cuda", 0)
     local_index = int(device.index or 0)
+    _record_startup_mark(startup_marks, "accelerator_ready")
 
     target_slots = config.model.dit.active_slot_ids
     if target_slots is None:
@@ -243,17 +267,20 @@ def assemble_benchmark(
     module = build_trainable_composite_from_config(
         config, device=device, new_slot_ids=new_growth_slots
     )
+    _record_startup_mark(startup_marks, "model_built")
     # The benchmark reuses the production optimizer/scheduler assembly
     # paths directly (module-private by design).
     optimizer = production._build_optimizer(  # pyright: ignore[reportPrivateUsage]
         config, module, rank=rank, world_size=world_size
     )
+    _record_startup_mark(startup_marks, "optimizer_built")
     qwen = load_local_qwen(
         repository_root,
         device,
         attention_backend=config.kernels.qwen_attention_backend,
     )
     vae = load_local_mage_vae(repository_root, device)
+    _record_startup_mark(startup_marks, "encoders_loaded")
 
     rank_seed = seed + rank * _RANK_SEED_STRIDE
     torch.manual_seed(rank_seed)  # pyright: ignore[reportUnknownMemberType]
@@ -276,6 +303,7 @@ def assemble_benchmark(
         backward = cast(Callable[[torch.Tensor], None], accelerator.backward)  # pyright: ignore[reportUnknownMemberType]
         distributed_sync = require_distributed_forward_module(module, forward_module)
         no_sync = distributed_sync.no_sync
+        _record_startup_mark(startup_marks, "ddp_prepared")
 
     if config.kernels.torch_compile_enabled:
         compile_packed_dit_blocks(
@@ -284,6 +312,7 @@ def assemble_benchmark(
             mode=config.kernels.torch_compile_mode,
             dynamic=config.kernels.torch_compile_dynamic,
         )
+        _record_startup_mark(startup_marks, "compile_installed")
 
     runtime = SingleGpuBatchRuntime(
         qwen=cast(Any, qwen.encoder),
@@ -303,6 +332,7 @@ def assemble_benchmark(
         torch_compile_mode=config.kernels.torch_compile_mode,
         torch_compile_dynamic=config.kernels.torch_compile_dynamic,
     )
+    _record_startup_mark(startup_marks, "runtime_built")
 
     scheduler = production._SuccessfulUpdateLrScheduler(  # pyright: ignore[reportPrivateUsage]
         config,
@@ -330,7 +360,9 @@ def assemble_benchmark(
     # Margin of one full update so loop retries never exhaust the supply.
     batch_count = (total_updates + 1) * config.train.accumulation
     batches = source.pregenerate(batch_count, pin=True)
+    _record_startup_mark(startup_marks, "batches_pregenerated")
     samples_per_update = config.train.local_batch * config.train.accumulation
+    _record_startup_mark(startup_marks, "assembly_end")
     return BenchmarkAssembly(
         config=config,
         module=module,
@@ -365,6 +397,7 @@ def run_benchmark_stage(
     collect: list[PerformanceSample] | None = None,
     wrap_workload: Callable[[Callable[[], None]], Any] | None = None,
     reset_peak_memory_per_update: bool = False,
+    update_completed_hook: Callable[[int, float], None] | None = None,
 ) -> SingleGpuUpdateState:
     """Run one benchmark stage (warmup or measured) of the production loop.
 
@@ -381,6 +414,12 @@ def run_benchmark_stage(
     (warmup memory can never enter measured peaks).  No extra
     synchronization is introduced: the peaks are read at the existing
     update-finalization boundary, where the device is already synced.
+
+    ``update_completed_hook`` (P1-R1B) is an OPTIONAL callable invoked as
+    ``hook(update_number, time.perf_counter())`` after every successful
+    update, at the existing observation boundary (the device is already
+    synced).  The startup timeline uses it to time the FIRST successful
+    update without adding any synchronization of its own.
     """
 
     if (
@@ -422,6 +461,12 @@ def run_benchmark_stage(
         # event pair of this update is complete; collect_ready() therefore
         # adds no synchronization of its own.
         phases = timer.collect_ready()
+        if update_completed_hook is not None:
+            # finish_update already synced the device for this observation,
+            # so the perf_counter value is an honest completion timestamp.
+            update_completed_hook(
+                observation.update.state.successful_updates, time.perf_counter()
+            )
         if collect is None:
             pending.clear()
             return

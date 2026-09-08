@@ -52,6 +52,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -262,6 +263,10 @@ def main(argv: list[str] | None = None) -> int:
 
     import torch
 
+    from sakuramoon.perf.compile import (
+        CompileStartupSample,
+        capture_dynamo_counters,
+    )
     from sakuramoon.perf.fingerprint import (
         capture_runtime_fingerprint,
     )
@@ -280,6 +285,9 @@ def main(argv: list[str] | None = None) -> int:
         unavailable_snapshot,
         validate_profiler_updates,
         write_snapshot_json,
+    )
+    from sakuramoon.perf.sample import (
+        PerformanceSample,
     )
     from sakuramoon.perf.summary import rank_step_skew_pct, summarize
     from sakuramoon.train.step import SingleGpuUpdateState
@@ -311,6 +319,12 @@ def main(argv: list[str] | None = None) -> int:
     output_root: Path = args.output_root
     output_root.mkdir(parents=True, exist_ok=True)
 
+    # P1-R1B startup timeline (OUTSIDE the measured window).  process_start
+    # is the epoch; the harness records the assembly phase marks into the
+    # same dict, and the stage boundaries below record the rest.  No
+    # synchronization is added anywhere on this path.
+    startup_marks: dict[str, float] = {"process_start": time.perf_counter()}
+
     assembly = assemble_benchmark(
         config_path=Path(args.config),
         config_root=Path(args.config_root)
@@ -325,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         local_batch=args.local_batch,
         accumulation=args.accumulation,
         expected_global_batch=args.expected_global_batch,
+        startup_marks=startup_marks,
     )
     rank = assembly.rank
     world = assembly.world_size
@@ -352,12 +367,31 @@ def main(argv: list[str] | None = None) -> int:
         f"(model load/compile/lazy state excluded)",
         flush=True,
     )
+    warmup_collect: list[PerformanceSample] = []
+    first_update_box: list[float] = []
+
+    def _first_update_hook(_update: int, now: float) -> None:
+        # Records the exact completion of the FIRST successful update (the
+        # hook fires on every update; only the first timestamp is kept).
+        if not first_update_box:
+            startup_marks["first_update_complete"] = now
+            first_update_box.append(now)
+
+    startup_marks["warmup_stage_start"] = time.perf_counter()
     warm_state = run_benchmark_stage(
         assembly,
         state=SingleGpuUpdateState.initial(),
         target_successful_updates=args.warmup_updates,
         diagnostic_root=diagnostic_root,
+        collect=warmup_collect,
+        update_completed_hook=_first_update_hook,
     )
+    startup_marks["warmup_stage_end"] = time.perf_counter()
+    counters_warmup_end = capture_dynamo_counters()
+    if not first_update_box:
+        raise RuntimeError(
+            "warmup stage completed without an update-completion hook firing"
+        )
 
     # The measured stage NEVER runs under a profiler context.  Per-update
     # peak-memory reset makes each sample's peak the TRUE peak of exactly
@@ -367,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
         f"[bench rank{rank}] measuring {args.measure_updates} logical updates",
         flush=True,
     )
+    startup_marks["measured_stage_start"] = time.perf_counter()
     final_state = run_benchmark_stage(
         assembly,
         state=warm_state,
@@ -375,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
         collect=measured,
         reset_peak_memory_per_update=True,
     )
+    counters_measured_end = capture_dynamo_counters()
     assert final_state.successful_updates == (
         args.warmup_updates + args.measure_updates
     )
@@ -390,6 +426,31 @@ def main(argv: list[str] | None = None) -> int:
 
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
+
+    # P1-R1B: every rank writes its OWN startup timeline (outside the
+    # measured window) plus the in-process compiler counters at both window
+    # boundaries.  The measured-window recompile count is the DELTA of the
+    # recompile-style counter between the two snapshots.
+    startup_payload = CompileStartupSample.from_marks(
+        startup_marks,
+        warmup_update_walls=[s.wall_seconds for s in warmup_collect],
+    ).to_dict()
+    startup_payload["cache_env"] = {
+        key: os.environ[key]
+        for key in (
+            "TORCHINDUCTOR_CACHE_DIR",
+            "TORCHINDUCTOR_FX_GRAPH_CACHE",
+            "TORCHINDUCTOR_AUTOGRAD_CACHE",
+            "TRITON_CACHE_DIR",
+        )
+        if key in os.environ
+    }
+    startup_payload["dynamo_counters_warmup_end"] = counters_warmup_end
+    startup_payload["dynamo_counters_measured_end"] = counters_measured_end
+    (output_root / f"startup-rank{rank}.json").write_text(
+        json.dumps(startup_payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
     # SEPARATE post-baseline profiler scratch stage (opt-in).  It runs
     # AFTER the measured baseline, captures exactly profiler_updates
@@ -485,6 +546,7 @@ def main(argv: list[str] | None = None) -> int:
             for r, samples in rank_samples.items()
         }
         summary_payload["rank_step_skew_pct"] = rank_step_skew_pct(rank_means)
+        summary_payload["startup"] = startup_payload  # rank-0 view
         summary_path = output_root / f"{label}.json"
         summary_path.write_text(
             json.dumps(summary_payload, ensure_ascii=True, indent=2, sort_keys=True)
