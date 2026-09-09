@@ -130,6 +130,9 @@ def _decision_kwargs(**overrides: object) -> dict[str, object]:
         "reference_peak_allocated_gib": 36.5,
         "m0_peak_reserved_gib": 40.0,
         "reference_peak_reserved_gib": 40.5,
+        "m1_p95_s": 15.45,
+        "m1_peak_allocated_gib": 36.2,
+        "m1_peak_reserved_gib": 40.2,
     }
     base.update(overrides)
     return base
@@ -141,8 +144,10 @@ def test_decide_accepts_strong_candidate_with_clean_memory() -> None:
     assert decision.accepted is True
     assert decision.improvement_class == STRONG
     assert decision.reasons == ()
-    # median of (2.0%, 1.667%) -> the upper half for two samples
-    assert decision.median_improvement_pct == pytest.approx(2.0)
+    # standard two-sample median: (2.0% + 1.6667%) / 2
+    assert decision.median_improvement_pct == pytest.approx(
+        (2.0 + 0.25 / 15.0 * 100.0) / 2.0
+    )
 
 
 def test_decide_rejects_sub_threshold_improvement() -> None:
@@ -186,6 +191,103 @@ def test_decide_rejects_nonfinite_inputs() -> None:
         decide_memory_planning(**_decision_kwargs(m0_p50_s=math.nan))  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         decide_memory_planning(**_decision_kwargs(m1_p50_s=math.nan))  # type: ignore[arg-type]
+
+
+def test_decide_median_two_sample_is_arithmetic_mean() -> None:
+    # (A) improvements of 0.8% and 1.2% -> median exactly 1.0%
+    decision = decide_memory_planning(
+        m0_p50_s=9.92,  # (10.0 - 9.92) / 10.0 = 0.8%
+        m1_p50_s=9.88,  # (10.0 - 9.88) / 10.0 = 1.2%
+        reference_p50_s=10.0,
+        m0_p95_s=10.5,
+        reference_p95_s=10.5,
+        m0_peak_allocated_gib=36.0,
+        reference_peak_allocated_gib=36.5,
+        m0_peak_reserved_gib=40.0,
+        reference_peak_reserved_gib=40.5,
+        m1_p95_s=10.5,
+        m1_peak_allocated_gib=36.0,
+        m1_peak_reserved_gib=40.0,
+    )
+    assert decision.median_improvement_pct == pytest.approx(1.0)
+    # the reported median is the standard two-sample mean; the class stays
+    # M0-driven (0.8% < 1%) per the existing acceptance rules
+    assert decision.improvement_class == REJECT
+
+
+def test_decide_reports_negative_median_unclamped() -> None:
+    # (B) a single negative improvement stays negative in the reported median
+    decision = decide_memory_planning(
+        m0_p50_s=10.02,  # (10.0 - 10.02) / 10.0 = -0.2%
+        m1_p50_s=None,
+        reference_p50_s=10.0,
+        m0_p95_s=10.5,
+        reference_p95_s=10.5,
+        m0_peak_allocated_gib=36.0,
+        reference_peak_allocated_gib=36.5,
+        m0_peak_reserved_gib=40.0,
+        reference_peak_reserved_gib=40.5,
+    )
+    assert decision.median_improvement_pct == pytest.approx(-0.2)
+    assert decision.improvement_class == REJECT
+    assert decision.accepted is False
+
+
+def test_decide_rejects_m1_p95_regression() -> None:
+    # (D) M0 healthy, M1 p95 2.58% above reference -> reject
+    decision = decide_memory_planning(
+        **_decision_kwargs(m1_p95_s=15.9)  # type: ignore[arg-type]
+    )
+    assert decision.accepted is False
+    assert any("M1 p95 regression" in r for r in decision.reasons)
+
+
+def test_decide_rejects_m1_peak_allocated_regression() -> None:
+    # (E) M0 healthy, M1 peak allocated 5.48% above reference -> reject
+    decision = decide_memory_planning(
+        **_decision_kwargs(m1_peak_allocated_gib=38.5)  # type: ignore[arg-type]
+    )
+    assert decision.accepted is False
+    assert any("M1 peak_allocated regression" in r for r in decision.reasons)
+
+
+def test_decide_rejects_m1_peak_reserved_regression() -> None:
+    # (F) M0 healthy, M1 peak reserved 5.19% above reference -> reject
+    decision = decide_memory_planning(
+        **_decision_kwargs(m1_peak_reserved_gib=42.6)  # type: ignore[arg-type]
+    )
+    assert decision.accepted is False
+    assert any("M1 peak_reserved regression" in r for r in decision.reasons)
+
+
+def test_decide_fails_closed_on_incomplete_m1_evidence() -> None:
+    # (G) M1 p50 present but stability evidence absent -> fail closed
+    decision = decide_memory_planning(
+        **_decision_kwargs(  # type: ignore[arg-type]
+            m1_p95_s=None,
+            m1_peak_allocated_gib=None,
+            m1_peak_reserved_gib=None,
+        )
+    )
+    assert decision.accepted is False
+    assert any("M1 stability evidence" in r for r in decision.reasons)
+
+
+def test_decide_sub_threshold_without_m1_is_plain_reject() -> None:
+    # (H) M0 below threshold and M1 legitimately not run -> normal REJECT,
+    # no M1-related reasons
+    decision = decide_memory_planning(
+        **_decision_kwargs(  # type: ignore[arg-type]
+            m0_p50_s=14.99,
+            m1_p50_s=None,
+            m1_p95_s=None,
+            m1_peak_allocated_gib=None,
+            m1_peak_reserved_gib=None,
+        )
+    )
+    assert decision.accepted is False
+    assert decision.improvement_class == REJECT
+    assert not any("M1" in r for r in decision.reasons)
 
 
 def _census_record() -> dict[str, object]:

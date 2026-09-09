@@ -17,6 +17,7 @@ function is deterministic and unit-testable without a device.
 from __future__ import annotations
 
 import math
+import statistics
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -197,51 +198,79 @@ def decide_memory_planning(
     reference_peak_allocated_gib: float,
     m0_peak_reserved_gib: float,
     reference_peak_reserved_gib: float,
+    m1_p95_s: float | None = None,
+    m1_peak_allocated_gib: float | None = None,
+    m1_peak_reserved_gib: float | None = None,
 ) -> MemoryPlanningDecision:
-    """Apply the GO section 12 acceptance rules to one measured candidate.
+    """Apply the GO section 12 acceptance rules to measured candidates.
 
     ``m1_p50_s`` is None when the M1 repeat has not been run (required as soon
-    as M0 improvement reaches the candidate threshold).
+    as M0 improvement reaches the candidate threshold). When M1 WAS run
+    (``m1_p50_s is not None``), the M1 stability evidence (``m1_p95_s``,
+    ``m1_peak_allocated_gib``, ``m1_peak_reserved_gib``) must also be
+    supplied; acceptance then requires BOTH repeats to satisfy the p95 and
+    memory regression limits against the same baseline references. Missing or
+    non-finite M1 evidence fails closed.
     """
 
     reasons: list[str] = []
     m0_improvement = improvement_pct(reference_p50_s, m0_p50_s)
     class_ = classify_improvement(m0_improvement)
-    candidates = (m0_p50_s,) + ((m1_p50_s,) if m1_p50_s is not None else ())
     if class_ != REJECT and m1_p50_s is None:
         reasons.append("M1 repeat missing although M0 reached the candidate threshold")
-    median_improvement = max(
-        0.0,
-        sorted(improvement_pct(reference_p50_s, value) for value in candidates)[
-            len(candidates) // 2
-        ],
-    )
+    improvements = [m0_improvement]
+    if m1_p50_s is not None:
+        improvements.append(improvement_pct(reference_p50_s, m1_p50_s))
+    # Standard statistical median: for two samples this is the arithmetic
+    # mean. Negative measured improvements are reported as-is (no clamping).
+    median_improvement = float(statistics.median(improvements))
     if median_improvement < CANDIDATE_IMPROVEMENT_PCT:
         reasons.append(
             f"median improvement {median_improvement:.3f}% < "
             f"{CANDIDATE_IMPROVEMENT_PCT:.1f}%"
         )
-    if not _finite(m0_p95_s) or not _finite(reference_p95_s):
-        reasons.append("p95 values must be finite")
-    elif reference_p95_s > 0.0:
-        p95_delta_pct = (m0_p95_s - reference_p95_s) / reference_p95_s * 100.0
-        if p95_delta_pct > P95_REGRESSION_LIMIT_PCT:
+    repeats: list[tuple[str, float, float, float]] = [
+        ("M0", m0_p95_s, m0_peak_allocated_gib, m0_peak_reserved_gib)
+    ]
+    if m1_p50_s is not None:
+        if (
+            m1_p95_s is None
+            or m1_peak_allocated_gib is None
+            or m1_peak_reserved_gib is None
+        ):
             reasons.append(
-                f"p95 regression {p95_delta_pct:.3f}% > {P95_REGRESSION_LIMIT_PCT:.1f}%"
+                "M1 p50 present but M1 stability evidence "
+                "(m1_p95_s/m1_peak_allocated_gib/m1_peak_reserved_gib) missing"
             )
-    for name, value, baseline in (
-        ("peak_allocated", m0_peak_allocated_gib, reference_peak_allocated_gib),
-        ("peak_reserved", m0_peak_reserved_gib, reference_peak_reserved_gib),
-    ):
-        if not _finite(value) or not _finite(baseline) or baseline <= 0.0:
-            reasons.append(f"{name} values must be finite and baseline positive")
-            continue
-        delta_pct = (value - baseline) / baseline * 100.0
-        if delta_pct > MEMORY_REGRESSION_LIMIT_PCT:
-            reasons.append(
-                f"{name} regression {delta_pct:.3f}% > "
-                f"{MEMORY_REGRESSION_LIMIT_PCT:.1f}%"
+        else:
+            repeats.append(
+                ("M1", m1_p95_s, m1_peak_allocated_gib, m1_peak_reserved_gib)
             )
+    for label, p95_s, peak_alloc, peak_resv in repeats:
+        if not _finite(p95_s) or not _finite(reference_p95_s):
+            reasons.append(f"{label} p95 values must be finite")
+        elif reference_p95_s > 0.0:
+            p95_delta_pct = (p95_s - reference_p95_s) / reference_p95_s * 100.0
+            if p95_delta_pct > P95_REGRESSION_LIMIT_PCT:
+                reasons.append(
+                    f"{label} p95 regression {p95_delta_pct:.3f}% > "
+                    f"{P95_REGRESSION_LIMIT_PCT:.1f}%"
+                )
+        for name, value, baseline in (
+            ("peak_allocated", peak_alloc, reference_peak_allocated_gib),
+            ("peak_reserved", peak_resv, reference_peak_reserved_gib),
+        ):
+            if not _finite(value) or not _finite(baseline) or baseline <= 0.0:
+                reasons.append(
+                    f"{label} {name} values must be finite and baseline positive"
+                )
+                continue
+            delta_pct = (value - baseline) / baseline * 100.0
+            if delta_pct > MEMORY_REGRESSION_LIMIT_PCT:
+                reasons.append(
+                    f"{label} {name} regression {delta_pct:.3f}% > "
+                    f"{MEMORY_REGRESSION_LIMIT_PCT:.1f}%"
+                )
     accepted = class_ != REJECT and m1_p50_s is not None and not reasons
     return MemoryPlanningDecision(
         accepted=accepted,
