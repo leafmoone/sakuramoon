@@ -311,6 +311,15 @@ def architectures_share_parameter_contract(
     stripped from both sides so pre-existing v3 documents (without the key)
     still share the parameter contract with current modules.
 
+    ``stable_slot_count`` is likewise derived, not structural: since the
+    slot-topology refactor it is the exclusive slot-id bound
+    (``max(active_slot_ids) + 1``), while pre-existing v3 documents record
+    the historical configured pin (24 for the G1 lineage).  The bound is
+    validation metadata only -- no tensor is sized from it -- so it is
+    stripped from both sides exactly like ``new_slot_ids``.  The real slot
+    structure stays strict through ``active_slot_ids``, and the loader's
+    FQN/shape/dtype delta checks still guard every weight.
+
     Strict by default: a no-iREPA (v3) document and an iREPA (v4) document
     do NOT share a parameter contract.  ``allow_irepa_auxiliary_drop=True``
     is the explicit opt-in used by the raw-checkpoint loader for direct
@@ -355,12 +364,20 @@ def architectures_share_parameter_contract(
         }
     normalized_left = {
         **left_document,
-        "dit": {key: value for key, value in left_dit.items() if key != "new_slot_ids"}
+        "dit": {
+            key: value
+            for key, value in left_dit.items()
+            if key not in ("new_slot_ids", "stable_slot_count")
+        }
         | {"attention_backend": "state_compatible_gqa"},
     }
     normalized_right = {
         **right_document,
-        "dit": {key: value for key, value in right_dit.items() if key != "new_slot_ids"}
+        "dit": {
+            key: value
+            for key, value in right_dit.items()
+            if key not in ("new_slot_ids", "stable_slot_count")
+        }
         | {"attention_backend": "state_compatible_gqa"},
     }
     return normalized_left == normalized_right
