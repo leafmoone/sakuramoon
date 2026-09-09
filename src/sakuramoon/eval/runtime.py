@@ -97,8 +97,39 @@ def _eager_composite_calls(composite: torch.nn.Module) -> Iterator[None]:
 
 
 def _conditional_plan(case: PromptCase) -> CaptionPlan:
+    """Resolve the governed caption plan for one prompt case.
+
+    A structured ``caption_plan`` is reused verbatim (the existing
+    serializer owns its text). Legacy string ``conditions`` are no longer
+    silently ignored: they must either agree with the structured condition
+    or fail loudly, because a bare string cannot carry the condition
+    source/role the conditioner requires.
+    """
+
     if case.caption_plan is not None:
-        return case.caption_plan
+        plan = case.caption_plan
+        if case.conditions:
+            if plan.condition is None:
+                raise EvaluationError(
+                    f"prompt {case.prompt_id}: string conditions are present "
+                    "but the structured caption plan carries no condition"
+                )
+            structured = tuple(tag.text for tag in plan.condition.tags)
+            if (
+                len(structured) != len(case.conditions)
+                or set(structured) != set(case.conditions)
+            ):
+                raise EvaluationError(
+                    f"prompt {case.prompt_id}: string conditions disagree "
+                    "with the structured caption plan condition"
+                )
+        return plan
+    if case.conditions:
+        raise EvaluationError(
+            f"prompt {case.prompt_id}: string conditions without a structured "
+            "caption plan are no longer accepted; provide a caption_plan with "
+            "an explicit condition source and role"
+        )
     return CaptionPlan(
         tags=(),
         condition=None,
@@ -161,7 +192,21 @@ def _conditioning_inputs(
     )
     serialized: list[SerializedCaption] = []
     for case in cases:
-        caption = serialize_caption(plan_for(case), encoder, framing)
+        plan = plan_for(case)
+        had_content = bool(
+            plan.tags or plan.condition is not None or plan.nl_text is not None
+        )
+        caption = serialize_caption(plan, encoder, framing)
+        if (
+            had_content
+            and not caption.plan.tags
+            and caption.plan.condition is None
+            and caption.plan.nl_text is None
+        ):
+            raise EvaluationError(
+                f"prompt {case.prompt_id}: serialization dropped all prompt "
+                "content; refusing to evaluate an empty condition silently"
+            )
         serialized.append(caption)
     unconditional = serialize_caption(_unconditional_plan(), encoder, framing)
     serialized.extend(unconditional for _ in cases)

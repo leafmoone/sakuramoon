@@ -14,7 +14,7 @@ from sakuramoon.eval.metrics import (
     inception_score,
     kernel_inception_distance,
 )
-from sakuramoon.eval.runtime import _conditioning_inputs, _stage_cases
+from sakuramoon.eval.runtime import EvaluationError, _conditioning_inputs, _stage_cases
 from sakuramoon.eval.spec import PromptCase, PromptManifest
 
 
@@ -186,7 +186,7 @@ def test_cmmd_matches_the_official_biased_rbf_estimator() -> None:
         clip_maximum_mean_discrepancy(generated * 2.0, real)
 
 
-def test_evaluation_uses_normal_caption_boundary_truncation() -> None:
+def test_evaluation_rejects_a_prompt_whose_content_is_fully_dropped() -> None:
     case = PromptCase(
         prompt_id="long-prompt",
         prompt=" ".join(["word"] * 600),
@@ -196,11 +196,8 @@ def test_evaluation_uses_normal_caption_boundary_truncation() -> None:
         width=256,
     )
 
-    inputs = _conditioning_inputs((case,), _Tokenizer(), torch.device("cpu"))
-
-    input_ids, attention_mask = inputs[:2]
-    assert input_ids.shape == (2, 98)
-    assert torch.equal(attention_mask.sum(dim=1), torch.tensor([39, 39]))
+    with pytest.raises(EvaluationError, match="long-prompt.*dropped all prompt content"):
+        _conditioning_inputs((case,), _Tokenizer(), torch.device("cpu"))
 
 
 def test_evaluation_stages_every_prompt_as_one_to_one(tmp_path) -> None:
