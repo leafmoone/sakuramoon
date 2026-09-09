@@ -23,7 +23,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 import torch
-from PIL import Image
+from PIL import Image, ImageOps, JpegImagePlugin
 
 from sakuramoon.config.schema import DataBucketsConfig
 from sakuramoon.data import pipeline as pipeline_module
@@ -361,11 +361,30 @@ class TestP100Geometry:
             assert result.audit.camera_fallback_reason == "none"
 
     def test_not_selected_matches_baseline_bitwise(self) -> None:
-        image_bytes = _gradient_png(1024, 512)
-        baseline = _process(_pipeline(camera_policy=None), image_bytes)
-        assert baseline is not None
-        seen = False
-        for sample_id in range(1, 64):
+        """Unselected samples are bit-identical to the camera-off baseline
+        for the SAME sample_id, SAME seed, and SAME input image.
+
+        The source is textured with a non-zero ordinary crop offset margin
+        (resized canvas larger than the bucket on one axis), so the ordinary
+        crop offset is genuinely seed-dependent; the baseline is rebuilt per
+        sample inside the loop instead of a single fixed sample_id=1
+        reference, and image, crop, and caption are compared per sample.
+        """
+        # 1000x700 (aspect ~1.43) maps to the 3:2 bucket with height
+        # headroom, so the crop offset is drawn from the sample's crop RNG.
+        image_bytes = _gradient_png(1000, 700)
+        checked = 0
+        for sample_id in range(1, 129):
+            baseline = _process(
+                _pipeline(camera_policy=None), image_bytes, sample_id=sample_id
+            )
+            assert baseline is not None
+            # The source must leave a non-zero ordinary crop offset margin:
+            box_width = baseline.audit.crop_box[2] - baseline.audit.crop_box[0]
+            box_height = baseline.audit.crop_box[3] - baseline.audit.crop_box[1]
+            assert baseline.audit.resized_width != box_width or (
+                baseline.audit.resized_height != box_height
+            ), "source must leave ordinary crop headroom"
             result = _process(
                 _pipeline(camera_policy=_policy(True, 0.25)),
                 image_bytes,
@@ -374,13 +393,37 @@ class TestP100Geometry:
             assert result is not None
             if result.audit.camera_selected:
                 continue
-            assert torch.equal(baseline.image, result.image)
             assert result.audit.crop_policy == "aspect_bucket"
             assert result.audit.camera_fallback_reason == "not_selected"
             assert result.audit.camera_applied is False
-            seen = True
-            break
-        assert seen, "expected at least one unselected draw in 64 samples"
+            # Same sample_id, same seed, same image: bit-identical view.
+            assert torch.equal(baseline.image, result.image)
+            # Identical ordinary crop geometry.
+            assert baseline.audit.crop_box == result.audit.crop_box
+            assert (
+                baseline.audit.resized_width,
+                baseline.audit.resized_height,
+            ) == (result.audit.resized_width, result.audit.resized_height)
+            assert baseline.audit.crop_retention == result.audit.crop_retention
+            # Identical caption serialization.
+            assert (
+                baseline.caption.main_token_indices
+                == result.caption.main_token_indices
+            )
+            assert (
+                baseline.caption.condition_token_indices
+                == result.caption.condition_token_indices
+            )
+            assert (
+                baseline.caption.use_null_condition
+                == result.caption.use_null_condition
+            )
+            assert baseline.caption.condition_source == result.caption.condition_source
+            assert baseline.caption.condition_role == result.caption.condition_role
+            checked += 1
+            if checked >= 5:
+                break
+        assert checked >= 5, "expected at least 5 unselected draws in 128 samples"
 
 
 class TestOrdinaryAdmissionDecoupling:
@@ -493,34 +536,177 @@ class TestImageCorrectness:
         assert tuple(result.image.shape) == (3, R, R)
         assert torch.isfinite(result.image.float()).all()
 
+    def _force_undersized_draft(self, monkeypatch: pytest.MonkeyPatch):
+        """Patch the REAL JPEG draft implementation (JpegImageFile.draft).
+
+        Patching ``Image.Image.draft`` cannot intercept JPEG decoding:
+        ``JpegImageFile`` shadows it with its own ``draft``. The wrapper
+        keeps the original method and merely replaces the requested size
+        with one that forces the smallest real PIL draft reduction, so the
+        returned image is a genuinely draft-downsampled decode.
+
+        Returns (draft_hits, source_sizes, open_counter) recording:
+        every intercepted draft request, every post-EXIF dimension read by
+        the pipeline (the pre-load header read and the post-load read),
+        and Image.open invocations (the re-decode branch opens the
+        original compressed bytes a second time).
+        """
+
+        draft_hits: list[tuple[str, tuple[int, int]]] = []
+        source_sizes: list[tuple[int, int]] = []
+        original_draft = JpegImagePlugin.JpegImageFile.draft
+
+        def forcing_draft(self, mode, size):  # type: ignore[no-untyped-def]
+            draft_hits.append((mode, tuple(size)))
+            return original_draft(self, mode, (256, 256))
+
+        monkeypatch.setattr(
+            JpegImagePlugin.JpegImageFile, "draft", forcing_draft
+        )
+
+        original_open = pipeline_module.Image.open
+        open_counter = {"count": 0}
+
+        def counting_open(*args, **kwargs):  # type: ignore[no-untyped-def]
+            open_counter["count"] += 1
+            return original_open(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline_module.Image, "open", counting_open)
+
+        original_dimensions = (
+            pipeline_module._source_dimensions  # type: ignore[reportPrivateUsage]
+        )
+
+        def recording_dimensions(decoded):  # type: ignore[no-untyped-def]
+            dimensions = original_dimensions(decoded)
+            source_sizes.append(dimensions)
+            return dimensions
+
+        monkeypatch.setattr(
+            pipeline_module, "_source_dimensions",  # type: ignore[reportPrivateUsage]
+            recording_dimensions,
+        )
+        return draft_hits, source_sizes, open_counter
+
     def test_draft_coverage_redecodes_when_undersized(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Force every JPEG draft through the smallest reduction PIL allows
-        # (decode comes back below the planned canvas on the long axis), so
-        # the pipeline must re-decode the original compressed bytes in full;
-        # the output must then equal the full-decode scale-then-crop
-        # reference.
-        original_draft = Image.Image.draft  # type: ignore[attr-defined]
+        """Horizontal orientation: a draft that comes back below the planned
+        canvas must trigger the full re-decode of the original compressed
+        bytes, and the output must equal the full-decode scale-then-crop
+        reference. Branch execution is proven by the draft hit count, the
+        recorded post-load size, and the open-count delta against a camera-off
+        run on the same image - not by image equality alone."""
 
-        def forcing_draft(self, mode, size):  # type: ignore[no-untyped-def]
-            return original_draft(self, mode, (100, 100))
-
-        monkeypatch.setattr(Image.Image, "draft", forcing_draft)
-        width, height = 5000, 4000
-        image = _jpeg_source(width, height)
+        draft_hits, source_sizes, open_counter = self._force_undersized_draft(
+            monkeypatch
+        )
+        width, height = 5000, 4000  # 20 MP: the natural draft threshold
         buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", quality=90)
+        _jpeg_source(width, height).save(buffer, format="JPEG", quality=90)
         image_bytes = buffer.getvalue()
+
+        # Camera-off baseline on the same image: the draft fires (20 MP)
+        # but nothing re-decodes; it measures the open-count baseline
+        # (probe + decode).
+        open_counter["count"] = 0
+        _process(_pipeline(camera_policy=None), image_bytes)
+        baseline_opens = open_counter["count"]
+
+        open_counter["count"] = 0
+        source_sizes.clear()
         result = _process(
             _pipeline(camera_policy=_policy(True, 1.0)), image_bytes
         )
+        camera_opens = open_counter["count"]
         assert result is not None
+        assert result.audit.camera_applied is True
+        canvas = (result.audit.resized_width, result.audit.resized_height)
+        # post-EXIF 5000x4000 -> canvas round(5000*512/4000)=640 x 512
+        assert canvas == (640, R)
+
+        # The real JPEG draft implementation was intercepted (the patch
+        # target is the one PIL actually calls for JPEG files).
+        assert len(draft_hits) >= 1
+        assert draft_hits[-1][0] == "RGB"
+        # The post-load read (last recorded dimension) is the draft decode,
+        # genuinely below the planned canvas on at least one axis.
+        post_load_size = source_sizes[-1]
+        assert (
+            post_load_size[0] < canvas[0] or post_load_size[1] < canvas[1]
+        ), f"draft decode {post_load_size} must be below canvas {canvas}"
+        # The full re-decode branch opened the original bytes exactly one
+        # extra time relative to the camera-off baseline on the same image.
+        assert camera_opens == baseline_opens + 1
+        # And the emitted view equals the full-decode reference exactly
+        # (a too-small draft would have been visibly upsampled instead).
         left, top, right, bottom = result.audit.crop_box
         reference = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         expected = reference.resize(
-            (result.audit.resized_width, result.audit.resized_height),
-            resample=Image.Resampling.LANCZOS,
+            canvas, resample=Image.Resampling.LANCZOS
+        ).crop((left, top, right, bottom))
+        expected_tensor = torch.from_numpy(np.asarray(expected)).permute(2, 0, 1)
+        assert torch.equal(result.image, expected_tensor)
+
+    def test_draft_coverage_redecodes_with_exif_axis_swap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """EXIF orientation 6 (stored portrait 4000x5000 -> post-EXIF
+        landscape 5000x4000): the draft operates on the STORED grid but the
+        coverage decision must run on post-EXIF dimensions; the axis swap
+        must not invalidate the size comparison. The re-decode fires on the
+        swapped (post-EXIF) width, and the output equals the
+        exif-transposed full-decode reference."""
+
+        draft_hits, source_sizes, open_counter = self._force_undersized_draft(
+            monkeypatch
+        )
+        # Stored 4000x5000 portrait with EXIF orientation 6 -> the
+        # post-EXIF source is 5000x4000 landscape, same canvas as the
+        # horizontal case: 640 x 512.
+        source = _jpeg_source(4000, 5000)
+        exif = Image.Exif()
+        exif[0x0112] = 6
+        buffer = io.BytesIO()
+        source.save(buffer, format="JPEG", quality=90, exif=exif.tobytes())
+        image_bytes = buffer.getvalue()
+
+        open_counter["count"] = 0
+        _process(_pipeline(camera_policy=None), image_bytes)
+        baseline_opens = open_counter["count"]
+
+        open_counter["count"] = 0
+        source_sizes.clear()
+        result = _process(
+            _pipeline(camera_policy=_policy(True, 1.0)), image_bytes
+        )
+        camera_opens = open_counter["count"]
+        assert result is not None
+        assert result.audit.camera_applied is True
+        assert (result.audit.source_width, result.audit.source_height) == (
+            5000,
+            4000,
+        )
+        canvas = (result.audit.resized_width, result.audit.resized_height)
+        assert canvas == (640, R)
+
+        assert len(draft_hits) >= 1
+        # The pre-load read (post-EXIF) and the post-load read (swapped
+        # draft decode) must both be recorded in post-EXIF terms: the
+        # post-load width is the stored HEIGHT scaled down, and it is
+        # below the canvas width - exactly what triggers the re-decode.
+        post_load_size = source_sizes[-1]
+        assert post_load_size[0] < canvas[0], (
+            f"post-EXIF draft width {post_load_size[0]} must be below "
+            f"canvas width {canvas[0]}"
+        )
+        assert camera_opens == baseline_opens + 1
+        left, top, right, bottom = result.audit.crop_box
+        reference = ImageOps.exif_transpose(
+            Image.open(io.BytesIO(image_bytes))
+        ).convert("RGB")
+        expected = reference.resize(
+            canvas, resample=Image.Resampling.LANCZOS
         ).crop((left, top, right, bottom))
         expected_tensor = torch.from_numpy(np.asarray(expected)).permute(2, 0, 1)
         assert torch.equal(result.image, expected_tensor)
