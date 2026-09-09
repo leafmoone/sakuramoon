@@ -350,9 +350,24 @@ def run_candidate(
     }
 
     if resume and summary_path.exists():
+        # A resume is a full re-derivation from the retained artifacts: the
+        # entry must carry the SAME payloads a fresh PASS run would have
+        # loaded (summary + startup-rank0 + cache snapshots), otherwise
+        # steady-state computation silently degrades to None.
         entry["status"] = STATUS_PASS
         entry["resumed"] = True
         entry["exit_code"] = 0
+        entry["summary"] = json.loads(summary_path.read_text(encoding="utf-8"))
+        startup_path = cand_root / "startup-rank0.json"
+        if startup_path.exists():
+            entry["startup_rank0"] = json.loads(
+                startup_path.read_text(encoding="utf-8")
+            )
+        now = _utc_now()
+        entry["cache_before"] = CompileCacheSnapshot.capture(
+            cache_root, captured_at=now
+        ).to_dict()
+        entry["cache_after"] = entry["cache_before"]
         print(f"[r1b] {candidate}: resumed (existing summary)", flush=True)
         return entry
 

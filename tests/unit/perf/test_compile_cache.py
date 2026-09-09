@@ -12,7 +12,9 @@ design.
 
 from __future__ import annotations
 
+import json
 import math
+import sys
 from pathlib import Path
 
 import pytest
@@ -523,6 +525,64 @@ def test_diagnostic_summary_to_dict() -> None:
     assert payload["recompiles_measured"] == 0
     assert payload["raw_log_preserved"] is True
     assert payload["top_recompile_reason"] == "guard size failed"
+
+
+def test_run_candidate_resume_loads_payloads(tmp_path: Path) -> None:
+    """A resume must re-derive the SAME payloads a fresh PASS run loaded."""
+
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        import benchmark_compile_cache as bcc
+    finally:
+        sys.path.pop(0)
+
+    ts_root = tmp_path / "ts"
+    cand_root = ts_root / "a0"
+    cand_root.mkdir(parents=True)
+    (ts_root / "cold-a0").mkdir(parents=True)
+    summary = {
+        "global_step_seconds": {"p50": 15.0, "p95": 15.5, "mean": 15.1},
+        "global_samples_per_second": 52.0,
+        "memory": {
+            "max_across_ranks": {
+                "peak_allocated_bytes": 1 << 30,
+                "peak_reserved_bytes": 2 << 30,
+            }
+        },
+    }
+    (cand_root / "baseline-2gpu.json").write_text(json.dumps(summary), encoding="utf-8")
+    (cand_root / "startup-rank0.json").write_text(
+        json.dumps({"time_to_first_successful_update_s": 650.0}),
+        encoding="utf-8",
+    )
+    entry = bcc.run_candidate(
+        "A0",
+        python=sys.executable,
+        repository_root=tmp_path,
+        config="train_g1.toml",
+        config_root="config",
+        ts_root=ts_root,
+        persistent_root=None,
+        seed=44,
+        warmup_updates=5,
+        measure_updates=10,
+        diagnostic_measure_updates=5,
+        timeout=60,
+        port=29611,
+        fx_graph_cache=True,
+        aot_autograd_cache=True,
+        resume=True,
+    )
+    assert entry["status"] == "PASS"
+    assert entry["resumed"] is True
+    assert entry["summary"] == summary
+    assert entry["startup_rank0"]["time_to_first_successful_update_s"] == 650.0
+    steady = bcc._steady_metrics(entry)
+    assert steady is not None
+    assert steady["p50_s"] == 15.0
+    up = bcc._startup_headline(entry)
+    assert up["time_to_first_successful_update_s"] == 650.0
 
 
 if __name__ == "__main__":
