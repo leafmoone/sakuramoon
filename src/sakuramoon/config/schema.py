@@ -305,6 +305,55 @@ class DataSpatialCropConfig(StrictModel):
         return self
 
 
+class DataCameraViewportConfig(StrictModel):
+    """Strict HDM-style shifted-square camera viewport policy (data-strategy only).
+
+    Absent (``None``) keeps the resolved configuration byte-identical to the
+    pre-camera tree and the data path bit-identical to the ordinary
+    aspect-bucket path.  ``probability`` is a plain configurable value over
+    the full [0, 1] range: ``enabled=false`` with p=0 turns the policy off,
+    p=1 evaluates every sample for eligibility.  Selected vs applied vs
+    fallback remain governed by the geometry gates, never by p alone.  In the
+    first version it is mutually exclusive with ``spatial_crop.enabled``.
+    This is a pure data-geometry strategy: no conditioning branch, no model /
+    loss / optimizer / LR / batch interaction.
+    """
+
+    enabled: bool
+    mode: Literal["hdm_shifted_square_v2"]
+    probability: UnitFloat
+    viewport: Literal["stage_square"]
+    min_equivalent_zoom: PositiveFloat
+    max_equivalent_zoom: PositiveFloat
+    offset_distribution: Literal["uniform_long_axis_inclusive"]
+    zoom_source: Literal["natural_source_aspect"]
+    fallback_to_aspect_bucket: Literal[True]
+
+    @model_validator(mode="after")
+    def validate_camera_viewport(self) -> DataCameraViewportConfig:
+        if self.min_equivalent_zoom <= 1.0:
+            raise ValueError(
+                "camera viewport min_equivalent_zoom must be above 1.0"
+            )
+        if self.min_equivalent_zoom >= self.max_equivalent_zoom:
+            raise ValueError(
+                "camera viewport min_equivalent_zoom must be below max_equivalent_zoom"
+            )
+        if self.max_equivalent_zoom > 1.5:
+            raise ValueError(
+                "camera viewport max_equivalent_zoom must not exceed 1.5"
+            )
+        if self.enabled and self.probability <= 0.0:
+            raise ValueError(
+                "camera viewport probability must be positive when enabled"
+            )
+        if not self.enabled and self.probability != 0.0:
+            raise ValueError(
+                "camera viewport probability must be zero when disabled"
+            )
+        return self
+
+
 class DataTransparentBackgroundConfig(StrictModel):
     """Transparent-background white-composite policy (data-strategy only)."""
 
@@ -352,6 +401,7 @@ class DataConfig(StrictModel):
     buckets: DataBucketsConfig
     spatial_crop: DataSpatialCropConfig
     transparent_background: DataTransparentBackgroundConfig
+    camera_viewport: DataCameraViewportConfig | None = None
 
     @model_validator(mode="after")
     def validate_spatial_crop_retention(self) -> DataConfig:
@@ -360,6 +410,18 @@ class DataConfig(StrictModel):
             raise ValueError(
                 "spatial crop max_equivalent_zoom violates the "
                 "min_crop_retention guard (1/max_zoom**2 must reach it exactly)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_camera_spatial_exclusion(self) -> DataConfig:
+        if (
+            self.camera_viewport is not None
+            and self.camera_viewport.enabled
+            and self.spatial_crop.enabled
+        ):
+            raise ValueError(
+                "camera_viewport.enabled and spatial_crop.enabled are mutually exclusive"
             )
         return self
 

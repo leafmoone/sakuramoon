@@ -16,6 +16,10 @@ from typing import Any, Protocol, TypeVar, cast
 import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
+from sakuramoon.data.camera_viewport import (
+    CameraViewportCounts,
+    aggregate_camera_viewport,
+)
 from sakuramoon.data.caption import (
     CAPTION_DROPOUT_KEYS,
     CaptionDropoutCounts,
@@ -85,6 +89,7 @@ class TrainingBatch:
     audits: tuple[ImageAudit, ...]
     rng_identities: tuple[RngIdentity, ...]
     spatial_crop: SpatialCropCounts
+    camera_viewport: CameraViewportCounts
     # Fixed-key transparent-white counters for the retained samples of this
     # batch.  Rejects are structurally zero here (rejected samples produce
     # no PipelineSample) and audit through the per-shard completion channel.
@@ -541,6 +546,9 @@ def collate_samples(samples: tuple[PipelineSample, ...]) -> TrainingBatch:
         audits=tuple(sample.audit for sample in samples),
         rng_identities=tuple(sample.rng for sample in samples),
         spatial_crop=aggregate_spatial_crop(
+            tuple(sample.audit for sample in samples)
+        ),
+        camera_viewport=aggregate_camera_viewport(
             tuple(sample.audit for sample in samples)
         ),
         transparent=aggregate_transparent_white(samples),

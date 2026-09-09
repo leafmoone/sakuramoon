@@ -1,0 +1,48 @@
+# HDM-style shifted-square camera viewport canary: 25% of samples train the
+# full-canvas 2D RoPE on a stage-edge R x R square cut from the zoomed full
+# long-axis canvas (short edge -> R, long axis fully preserved, equivalent
+# zoom 1.10-1.50 from the natural source aspect, uniform inclusive shift).
+#
+# Data strategy change only -- model architecture, optimizer, LR, batch,
+# objective and checkpoint schema are untouched. Extends the live G1 run
+# config (bs800 / lr flat / seed 44) and overrides exactly:
+#   - run identity and fully independent run/checkpoint/artifact paths
+#   - [data.camera_viewport]: p=0.25, equivalent zoom 1.10-1.50
+#
+# First-version mutual exclusion: [data.spatial_crop] is disabled by the
+# inherited live G1 config (p=0.0), so no override is needed here; enabling
+# both camera_viewport and spatial_crop is rejected by the config validator.
+#
+# NOT deployed: the canary starts only after an explicit user GO; it then
+# resumes from a COMPLETE production checkpoint via scripts/training_stack.sh
+# (see AGENTS.md for the launch contract).
+
+extends = ["train_g1.toml"]
+
+[run]
+run_id = "g1_camera_v2_p25"
+
+[paths]
+run_dir = "runs/g1_camera_v2_p25"
+checkpoint_dir = "output_model/g1_camera_v2_p25"
+artifact_dir = "artifacts/g1_camera_v2_p25"
+
+[logging]
+local_jsonl_path = "artifacts/g1_camera_v2_p25/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/g1_camera_v2_p25/wandb-retry.jsonl"
+
+[evaluation]
+output_dir = "output_model/evaluation/g1_camera_v2_p25"
+
+[data.camera_viewport]
+enabled = true
+mode = "hdm_shifted_square_v2"
+probability = 0.25
+viewport = "stage_square"
+min_equivalent_zoom = 1.10
+max_equivalent_zoom = 1.50
+offset_distribution = "uniform_long_axis_inclusive"
+zoom_source = "natural_source_aspect"
+fallback_to_aspect_bucket = true
