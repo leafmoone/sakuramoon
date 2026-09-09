@@ -726,7 +726,7 @@ class TrainingSamplingConfig(StrictModel):
     every_updates: PositiveInt = 1000
     image_count: PositiveInt = 12
     output_subdir: Annotated[str, StringConstraints(min_length=1)] = "sample"
-    fixed_cohort: Literal["neutral", "locked"] = "neutral"
+    fixed_cohort: Literal["none", "locked"] = "none"
     longitudinal_pin_update: PositiveInt | None = None
 
     @model_validator(mode="after")

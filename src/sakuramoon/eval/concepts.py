@@ -30,13 +30,22 @@ import json
 import math
 import re
 import statistics
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 import torch
 
-from sakuramoon.eval.spec import PromptCase
+from sakuramoon.data.caption import (
+    CaptionPlan,
+    ConditionRequest,
+    ConditionRole,
+    ConditionSource,
+    Tag,
+    empty_caption_dropout_hits,
+)
+from sakuramoon.eval.spec import PromptCase, caption_plan_prompt_text
 
 SUITE_SCHEMA_VERSION = 1
 _REF_COUNT = 3
@@ -66,6 +75,12 @@ _CONCEPT_FIELDS = frozenset(
 _REF_FIELDS = frozenset({"id", "fav", "aesthetics"})
 _GROUP_TYPES = ("artist", "character")
 _GROUP_TIERS = ("high", "mid", "tail")
+# The concept entry point explicitly expresses the condition routing by
+# concept type; the suite never guesses a role from the tag text.
+_CONCEPT_CONDITION_ROUTES: Mapping[str, tuple[ConditionSource, ConditionRole]] = {
+    "artist": ("artist_text", "style"),
+    "character": ("character_text", "identity"),
+}
 
 
 class ConceptSuiteError(ValueError):
@@ -268,19 +283,67 @@ def _case_seed(seed: int, concept_id: str, stream: str) -> int:
     return int(digest[:15], 16)
 
 
+def _concept_caption_plan(
+    concept_id: str, tag: str, meta_tag: str, concept_type: str
+) -> CaptionPlan:
+    """Structured condition plan for one concept tag.
+
+    The tag is an explicit tag input: it becomes a structured condition tag
+    at this construction boundary (surrounding whitespace stripped, empty
+    tags rejected), and the existing serializer renders its display text.
+    The canonical identity comes from the manifest's ``meta_tag``.
+    """
+
+    if type(tag) is not str or not tag.strip():
+        raise ConceptSuiteError(f"concept {concept_id} tag is empty")
+    if type(meta_tag) is not str or not meta_tag.strip():
+        raise ConceptSuiteError(f"concept {concept_id} meta_tag is empty")
+    route = _CONCEPT_CONDITION_ROUTES.get(concept_type)
+    if route is None:
+        raise ConceptSuiteError(
+            f"concept {concept_id} type {concept_type!r} has no condition route"
+        )
+    source, role = route
+    return CaptionPlan(
+        tags=(),
+        condition=ConditionRequest(
+            source=source,
+            role=role,
+            tags=(Tag(tag.strip(), meta_tag.strip()),),
+        ),
+        nl_text=None,
+        selected_nl=None,
+        all_condition_dropped=False,
+        dropout_hits=empty_caption_dropout_hits(),
+    )
+
+
+def _canonical_from_display(display: str) -> str:
+    """Inverse of the serializer's ``_display_text`` tag normalization."""
+
+    return display.replace(" ", "_")
+
+
 def canonical_prompt_cases(
     manifest: ConceptManifest, *, height: int, width: int
 ) -> tuple[PromptCase, ...]:
-    """One prompt case per concept, generated with the concept's own tag."""
+    """One prompt case per concept, conditioned on the concept's own tag."""
 
     return tuple(
         PromptCase(
             prompt_id=f"{concept.id}.canonical",
-            prompt=concept.tag,
+            prompt=caption_plan_prompt_text(
+                _concept_caption_plan(
+                    concept.id, concept.tag, concept.meta_tag, concept.type
+                )
+            ),
             conditions=(),
             seed=_case_seed(manifest.seed, concept.id, "canonical"),
             height=height,
             width=width,
+            caption_plan=_concept_caption_plan(
+                concept.id, concept.tag, concept.meta_tag, concept.type
+            ),
         )
         for concept in manifest.concepts
     )
@@ -289,7 +352,7 @@ def canonical_prompt_cases(
 def swap_prompt_cases(
     manifest: ConceptManifest, *, height: int, width: int
 ) -> tuple[PromptCase, ...]:
-    """One prompt case per concept, generated with the partner's tag.
+    """One prompt case per concept, conditioned on the partner's tag.
 
     Swap cases reuse the canonical noise stream of the same concept, so a
     swap image differs from its canonical image only in the conditioning
@@ -299,11 +362,24 @@ def swap_prompt_cases(
     return tuple(
         PromptCase(
             prompt_id=f"{concept.id}.swap",
-            prompt=concept.swap,
+            prompt=caption_plan_prompt_text(
+                _concept_caption_plan(
+                    concept.id,
+                    concept.swap,
+                    _canonical_from_display(concept.swap.strip()),
+                    concept.type,
+                )
+            ),
             conditions=(),
             seed=_case_seed(manifest.seed, concept.id, "canonical"),
             height=height,
             width=width,
+            caption_plan=_concept_caption_plan(
+                concept.id,
+                concept.swap,
+                _canonical_from_display(concept.swap.strip()),
+                concept.type,
+            ),
         )
         for concept in manifest.concepts
     )

@@ -6,6 +6,7 @@ from typing import cast
 import pytest
 import torch
 
+from sakuramoon.data.caption import Tag
 from sakuramoon.eval.concepts import (
     ConceptManifest,
     ConceptMetrics,
@@ -18,6 +19,7 @@ from sakuramoon.eval.concepts import (
     suite_report_document,
     swap_prompt_cases,
 )
+from sakuramoon.eval.spec import caption_plan_prompt_text
 
 
 def _concepts() -> list[dict[str, object]]:
@@ -179,9 +181,35 @@ def test_prompt_case_builders() -> None:
     swap = swap_prompt_cases(manifest, height=512, width=512)
     assert [case.prompt_id for case in canonical] == ["A001.canonical", "C061.canonical"]
     assert [case.prompt_id for case in swap] == ["A001.swap", "C061.swap"]
-    assert canonical[0].prompt == "dairi"
-    assert swap[0].prompt == "kantoku"
     assert all(case.conditions == () for case in canonical + swap)
+    # Explicit tag inputs become structured conditions at the construction
+    # boundary; the serializer owns the rendered text and the entry point's
+    # type expression routes the condition role (never guessed).
+    dairi = canonical[0].caption_plan
+    assert dairi is not None and dairi.tags == () and dairi.nl_text is None
+    assert dairi.condition is not None
+    assert (dairi.condition.source, dairi.condition.role) == (
+        "artist_text",
+        "style",
+    )
+    assert dairi.condition.tags == (Tag("dairi", "dairi"),)
+    assert canonical[0].prompt == caption_plan_prompt_text(dairi)
+    miku = canonical[1].caption_plan
+    assert miku is not None
+    assert miku.condition is not None
+    assert (miku.condition.source, miku.condition.role) == (
+        "character_text",
+        "identity",
+    )
+    assert miku.condition.tags == (Tag("hatsune miku", "hatsune_miku"),)
+    kantoku = swap[0].caption_plan
+    assert kantoku is not None and kantoku.condition is not None
+    assert kantoku.condition.tags == (Tag("kantoku", "kantoku"),)
+    # Display normalization: underscores render as spaces in the prompt text
+    # while the canonical identity stays on the tag.
+    assert "style reference: hatsune miku" not in canonical[1].prompt
+    assert "character identity: hatsune miku" in canonical[1].prompt
+    assert "hatsune_miku" not in canonical[1].prompt
     for case, swap_case in zip(canonical, swap):
         assert case.seed == swap_case.seed
         assert case.height == swap_case.height == 512

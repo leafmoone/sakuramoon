@@ -50,11 +50,6 @@ from sakuramoon.train.condition_diagnostics import (
 from sakuramoon.train.condition_diagnostics import (
     tensor_rms as _tensor_rms,
 )
-from sakuramoon.train.fixed_sample_prompts import (
-    FIXED_NEUTRAL_PROMPTS,
-    FIXED_NEUTRAL_SHARED_SEED,
-    fixed_neutral_provenance,
-)
 from sakuramoon.train.runtime import RuntimeMeasurement
 from sakuramoon.train.step import TrainableComposite, TrainableCompositeInputs
 
@@ -68,16 +63,21 @@ VariantName = Literal[
     "B-null",
     "A-with-BA",
     "B-with-BA",
-    "A-zoom-mild",
-    "A-zoom-strong",
-    "A-shift-zoom-mild",
-    "A-shift-zoom-strong",
+    "A-camera-h-center",
+    "A-camera-h-end",
+    "A-camera-v-center",
+    "A-camera-v-end",
 ]
-GeometryKind = Literal["canonical", "zoom", "shift_zoom"]
+GeometryKind = Literal[
+    "canonical",
+    "camera_h_center",
+    "camera_h_end",
+    "camera_v_center",
+    "camera_v_end",
+]
 CoordinateType = Literal[
     "canonical_full_canvas",
-    "zoom_full_canvas_crop",
-    "shift_zoom_full_canvas_crop",
+    "camera_full_canvas_crop",
 ]
 
 _VARIANT_DEFINITIONS: tuple[
@@ -98,17 +98,15 @@ _VARIANT_DEFINITIONS: tuple[
     ("B-null", "B", (), "canonical", 1.0),
     ("A-with-BA", "A", ("B", "A"), "canonical", 1.0),
     ("B-with-BA", "B", ("B", "A"), "canonical", 1.0),
-    ("A-zoom-mild", "A", ("A",), "zoom", 1.10),
-    ("A-zoom-strong", "A", ("A",), "zoom", 1.50),
-    ("A-shift-zoom-mild", "A", ("A",), "shift_zoom", 1.10),
-    ("A-shift-zoom-strong", "A", ("A",), "shift_zoom", 1.50),
+    ("A-camera-h-center", "A", ("A",), "camera_h_center", 1.0),
+    ("A-camera-h-end", "A", ("A",), "camera_h_end", 1.0),
+    ("A-camera-v-center", "A", ("A",), "camera_v_center", 1.0),
+    ("A-camera-v-end", "A", ("A",), "camera_v_end", 1.0),
 )
 _VARIANT_NAMES = tuple(definition[0] for definition in _VARIANT_DEFINITIONS)
 _VARIANT_COUNT = 12
 _CFG_BRANCH_COUNT = 24
-_GEOMETRY_PROTOCOL = "tiered-zoom-v1"
-_TOTAL_VARIANT_COUNT = 24
-_TOTAL_CFG_BRANCH_COUNT = 48
+_GEOMETRY_PROTOCOL = "camera-crop-v1"
 _LOCKED_FIXED_PAIR_COUNT = 4
 _LOCKED_FIXED_VARIANT_COUNT = _LOCKED_FIXED_PAIR_COUNT * _VARIANT_COUNT
 _LOCKED_TOTAL_VARIANT_COUNT = _VARIANT_COUNT + _LOCKED_FIXED_VARIANT_COUNT
@@ -216,37 +214,6 @@ def _unconditional_plan() -> CaptionPlan:
         all_condition_dropped=True,
         dropout_hits=_ALL_DROPPED,
     )
-
-
-def _fixed_neutral_prompt_pair(
-    *,
-    tokenizer: TokenEncoder,
-    framing: FramingContract,
-    resolution: int,
-) -> _PromptPair:
-    """Build the immutable Hiten/WLOP prompt pair for the fixed gallery."""
-    prompts: list[_PostDropoutPrompt] = []
-    for record in FIXED_NEUTRAL_PROMPTS:
-        plan = record.caption_plan()
-        caption = serialize_caption(plan, tokenizer, framing)
-        if caption.plan.condition is None:
-            raise TrainingSamplingError(
-                f"fixed neutral prompt {record.sample_id} lost its condition"
-            )
-        prompts.append(
-            _PostDropoutPrompt(
-                sample_id=record.sample_id,
-                caption=caption,
-                # The serializer may drop complete trailing body tags to honor
-                # the token budget; retain the governed serialized plan.
-                plan=caption.plan,
-                observed_height=resolution,
-                observed_width=resolution,
-            )
-        )
-    if len(prompts) != 2:
-        raise TrainingSamplingError("fixed neutral prompt cohort is incomplete")
-    return _PromptPair(prompts[0], prompts[1])
 
 
 def _parse_shape_key(value: str) -> tuple[int, int]:
@@ -385,6 +352,28 @@ def _select_prompt_pair(
     return selected
 
 
+def _camera_variant_geometry(
+    kind: GeometryKind,
+    resolution: int,
+) -> tuple[tuple[int, int], tuple[int, int, int, int]]:
+    """Single geometric definition for the four explicit camera diagnostics.
+
+    Returns ``(canvas (height, width), crop_box)`` in pixels. Every camera
+    variant produces the ``R x R`` output by cropping an ``R`` square out of
+    a ``2R``-long canvas, so ``equivalent_zoom = sqrt(2)`` and the area
+    retention is ``0.5`` for all four, derived from the same canvas/crop
+    pair that feeds ``full_canvas_crop_coordinates``.
+    """
+    half = resolution // 2
+    if kind in ("camera_h_center", "camera_h_end"):
+        canvas = (resolution, resolution * 2)
+        left = half if kind == "camera_h_center" else resolution
+        return canvas, (left, 0, left + resolution, resolution)
+    canvas = (resolution * 2, resolution)
+    top = half if kind == "camera_v_center" else resolution
+    return canvas, (0, top, resolution, top + resolution)
+
+
 def _variant_geometry(
     resolution: int,
     kind: GeometryKind,
@@ -393,10 +382,6 @@ def _variant_geometry(
     if type(resolution) is not int or resolution <= 0 or resolution % 16:
         raise TrainingSamplingError(
             "stage resolution must be a positive multiple of 16"
-        )
-    if resolution % 8:
-        raise TrainingSamplingError(
-            "stage resolution must support exact shift-zoom quarters"
         )
     if kind == "canonical":
         if requested_zoom != 1.0:
@@ -407,32 +392,29 @@ def _variant_geometry(
             (0, 0, resolution, resolution),
             "canonical_full_canvas",
         )
-    if (
-        type(requested_zoom) is not float
-        or not math.isfinite(requested_zoom)
-        or requested_zoom <= 1.0
+    if kind not in (
+        "camera_h_center",
+        "camera_h_end",
+        "camera_v_center",
+        "camera_v_end",
     ):
-        raise TrainingSamplingError(
-            "spatial geometry zoom must be finite and above one"
-        )
-    virtual = math.floor(resolution * requested_zoom + 0.5)
-    available = virtual - resolution
-    centered = available // 2
-    if kind == "zoom":
-        left = centered
-        top = centered
-        coordinate_type: CoordinateType = "zoom_full_canvas_crop"
-    elif kind == "shift_zoom":
-        left = centered + available // 4
-        top = centered + available // 4
-        coordinate_type = "shift_zoom_full_canvas_crop"
-    else:
         raise TrainingSamplingError("unknown training sample geometry")
+    if requested_zoom != 1.0:
+        raise TrainingSamplingError(
+            "camera geometry derives its equivalent zoom from the canvas"
+        )
+    canvas, crop_box = _camera_variant_geometry(kind, resolution)
+    canvas_area = float(canvas[0] * canvas[1])
+    left, top, right, bottom = crop_box
+    crop_area = float((right - left) * (bottom - top))
+    zoom = math.sqrt(canvas_area / crop_area)
+    if abs(zoom * math.sqrt(crop_area / canvas_area) - 1.0) > 1e-9:
+        raise TrainingSamplingError("camera geometry zoom/retention disagree")
     return (
-        virtual / resolution,
-        (virtual, virtual),
-        (left, top, left + resolution, top + resolution),
-        coordinate_type,
+        zoom,
+        canvas,
+        crop_box,
+        "camera_full_canvas_crop",
     )
 
 
@@ -716,13 +698,11 @@ class TrainingSampler:
         fixed_cohort = config.sampling.training.fixed_cohort
         if image_count not in (
             _VARIANT_COUNT,
-            _TOTAL_VARIANT_COUNT,
             _LOCKED_TOTAL_VARIANT_COUNT,
         ):
             raise ValueError(
                 "training sampling image_count must be "
-                f"{_VARIANT_COUNT} (single dynamic cohort), "
-                f"{_TOTAL_VARIANT_COUNT} (dynamic plus fixed-neutral cohort), or "
+                f"{_VARIANT_COUNT} (single dynamic cohort) or "
                 f"{_LOCKED_TOTAL_VARIANT_COUNT} "
                 "(dynamic plus locked condition pairs)"
             )
@@ -1329,33 +1309,18 @@ class TrainingSampler:
             padding_token_id,
         )
         image_count = self.config.sampling.training.image_count
-        neutral_cohort = image_count == _TOTAL_VARIANT_COUNT
         locked_cohort = image_count == _LOCKED_TOTAL_VARIANT_COUNT
-        two_cohorts = neutral_cohort or locked_cohort
         items = _build_variant_items(
             pair,
             tokenizer=self.qwen.tokenizer,
             framing=framing,
             resolution=self.config.train.resolution,
         )
-        fixed_pair: _PromptPair | None = None
         fixed_items: tuple[TrainingSampleItem, ...] = ()
         fixed_groups: list[
             tuple[_PromptPair, tuple[TrainingSampleItem, ...], int, str]
         ] = []
-        if neutral_cohort:
-            fixed_pair = _fixed_neutral_prompt_pair(
-                tokenizer=self.qwen.tokenizer,
-                framing=framing,
-                resolution=self.config.train.resolution,
-            )
-            fixed_items = _build_variant_items(
-                fixed_pair,
-                tokenizer=self.qwen.tokenizer,
-                framing=framing,
-                resolution=self.config.train.resolution,
-            )
-        elif locked_cohort:
+        if locked_cohort:
             for locked_pair in self.fixed_condition_pairs:
                 locked_prompts = self._fixed_prompt_pair(locked_pair, framing=framing)
                 locked_items = _build_variant_items(
@@ -1390,16 +1355,7 @@ class TrainingSampler:
                     framing=framing,
                 )
                 fixed_images: tuple[torch.Tensor, ...] = ()
-                fixed_diagnostics: dict[str, float] = {}
-                if neutral_cohort:
-                    assert fixed_pair is not None
-                    fixed_images, fixed_diagnostics = self._generate_batch(
-                        fixed_items,
-                        shared_seed=FIXED_NEUTRAL_SHARED_SEED,
-                        framing=framing,
-                        include_fixed_diagnostics=False,
-                    )
-                elif locked_cohort:
+                if locked_cohort:
                     locked_batch_images: list[torch.Tensor] = []
                     for (
                         _locked_prompts,
@@ -1420,15 +1376,7 @@ class TrainingSampler:
                     for item in items
                 )
                 fixed_group_paths: list[tuple[Path, ...]] = []
-                if neutral_cohort:
-                    fixed_group_paths.append(
-                        tuple(
-                            step_root
-                            / f"{_VARIANT_COUNT + item.ordinal + 1:02d}-fixed-neutral-{item.variant}.png"
-                            for item in fixed_items
-                        )
-                    )
-                elif locked_cohort:
+                if locked_cohort:
                     offset = 0
                     for (
                         _locked_prompts,
@@ -1463,8 +1411,6 @@ class TrainingSampler:
         expected_variant_count = (
             _LOCKED_TOTAL_VARIANT_COUNT
             if locked_cohort
-            else _TOTAL_VARIANT_COUNT
-            if two_cohorts
             else _VARIANT_COUNT
         )
         if len(paths) != expected_variant_count or not all(
@@ -1480,18 +1426,7 @@ class TrainingSampler:
             )
             for item in items
         )
-        if neutral_cohort:
-            assert fixed_pair is not None
-            wandb_captions = wandb_captions + tuple(
-                self._wandb_caption(
-                    item,
-                    pair=fixed_pair,
-                    shared_seed=FIXED_NEUTRAL_SHARED_SEED,
-                    cohort="fixed-neutral",
-                )
-                for item in fixed_items
-            )
-        elif locked_cohort:
+        if locked_cohort:
             for (
                 locked_prompts,
                 locked_items,
@@ -1519,21 +1454,7 @@ class TrainingSampler:
             )
             for item, path in zip(items, dynamic_paths, strict=True)
         ]
-        if neutral_cohort:
-            assert fixed_pair is not None
-            records.extend(
-                _variant_metadata(
-                    item,
-                    path,
-                    pair=fixed_pair,
-                    shared_seed=FIXED_NEUTRAL_SHARED_SEED,
-                    update=update,
-                    repository_root=self.repository_root,
-                    cohort="fixed-neutral",
-                )
-                for item, path in zip(fixed_items, fixed_paths, strict=True)
-            )
-        elif locked_cohort:
+        if locked_cohort:
             for (
                 locked_prompts,
                 locked_items,
@@ -1555,19 +1476,13 @@ class TrainingSampler:
                 )
         cohort_names = (
             ["dynamic"]
-            if not two_cohorts
-            else (
-                ["dynamic", "fixed-neutral"]
-                if neutral_cohort
-                else ["dynamic"]
-                + [f"fixed-{label}" for _prompts, _items, _seed, label in fixed_groups]
-            )
+            if not locked_cohort
+            else ["dynamic"]
+            + [f"fixed-{label}" for _prompts, _items, _seed, label in fixed_groups]
         )
         state_count = (
             _LOCKED_TOTAL_VARIANT_COUNT
             if locked_cohort
-            else _TOTAL_VARIANT_COUNT
-            if two_cohorts
             else _VARIANT_COUNT
         )
         metadata = {
@@ -1585,14 +1500,9 @@ class TrainingSampler:
             "cohort_cfg_branch_count": _CFG_BRANCH_COUNT,
             "cohorts": cohort_names,
             "condition_diagnostics": diagnostics,
-            **(
-                {"fixed_neutral_condition_diagnostics": fixed_diagnostics}
-                if neutral_cohort
-                else {}
-            ),
             "initial_noise": (
                 "one_base_noise_per_cohort_repeated_12"
-                if two_cohorts
+                if locked_cohort
                 else "single_base_noise_repeated_12"
             ),
             "cfg_coordinate_sharing": True,
@@ -1606,17 +1516,7 @@ class TrainingSampler:
             },
             "records": records,
         }
-        if neutral_cohort:
-            assert fixed_pair is not None
-            metadata["fixed_neutral"] = {
-                "shared_seed": FIXED_NEUTRAL_SHARED_SEED,
-                "provenance": fixed_neutral_provenance(),
-                "condition_sources": {
-                    "A": _prompt_metadata(fixed_pair.a),
-                    "B": _prompt_metadata(fixed_pair.b),
-                },
-            }
-        elif locked_cohort:
+        if locked_cohort:
             metadata["fixed_pairs"] = [
                 {
                     "label": label,

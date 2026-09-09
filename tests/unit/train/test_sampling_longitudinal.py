@@ -9,7 +9,6 @@ from sakuramoon.config.schema import TrainingSamplingConfig
 from sakuramoon.train.sampling import (
     _LOCKED_FIXED_PAIR_COUNT,
     _LOCKED_TOTAL_VARIANT_COUNT,
-    _TOTAL_VARIANT_COUNT,
     _VARIANT_COUNT,
     _pinned_selector_update,
 )
@@ -42,16 +41,16 @@ class TestLockedCohortConstants:
             _VARIANT_COUNT + _LOCKED_FIXED_PAIR_COUNT * _VARIANT_COUNT
         )
 
-    def test_locked_total_is_larger_than_neutral_total(self) -> None:
-        assert _LOCKED_TOTAL_VARIANT_COUNT > _TOTAL_VARIANT_COUNT
+    def test_locked_total_is_larger_than_dynamic_cohort(self) -> None:
+        assert _LOCKED_TOTAL_VARIANT_COUNT > _VARIANT_COUNT
 
 
 class TestSchemaCohortConsistency:
     """Config-level invariants for the new fixed_cohort / pin knobs."""
 
-    def test_defaults_are_neutral_and_unpinned(self) -> None:
+    def test_defaults_are_none_cohort_and_unpinned(self) -> None:
         config = TrainingSamplingConfig()
-        assert config.fixed_cohort == "neutral"
+        assert config.fixed_cohort == "none"
         assert config.longitudinal_pin_update is None
         assert config.image_count == 12
 
@@ -69,9 +68,15 @@ class TestSchemaCohortConsistency:
         with pytest.raises(ValidationError):
             TrainingSamplingConfig(image_count=24, fixed_cohort="locked")
 
-    def test_neutral_cohort_allows_single_cohort_count(self) -> None:
-        config = TrainingSamplingConfig(image_count=12, fixed_cohort="neutral")
-        assert config.fixed_cohort == "neutral"
+    def test_none_cohort_allows_single_cohort_count(self) -> None:
+        config = TrainingSamplingConfig(image_count=12, fixed_cohort="none")
+        assert config.fixed_cohort == "none"
+
+    def test_fixed_cohort_rejects_removed_neutral_value(self) -> None:
+        with pytest.raises(ValidationError):
+            TrainingSamplingConfig.model_validate(
+                {"fixed_cohort": "neutral", "image_count": 12}
+            )
 
     def test_pin_must_be_positive_or_none(self) -> None:
         with pytest.raises(ValidationError):
