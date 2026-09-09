@@ -22,6 +22,7 @@ from sakuramoon.data.buckets import BucketShape
 from sakuramoon.data.camera_viewport import (
     CameraViewportPlan,
     CameraViewportPolicy,
+    camera_is_active,
     camera_stage_edge,
     plan_camera_viewport,
 )
@@ -435,11 +436,16 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.cycle_index = cycle_index
         self.spatial_policy = spatial_policy
         self.camera_policy = camera_policy
-        if camera_policy is not None:
-            # Fail-fast config boundary: a camera viewport requires the
-            # unique square stage bucket (R). A missing or ambiguous
+        if camera_is_active(camera_policy):
+            # Fail-fast config boundary: an ACTIVE camera viewport requires
+            # the unique square stage bucket (R). A missing or ambiguous
             # square target raises at construction (factory boundary),
             # never later as a swallowed per-sample decode error.
+            # An effectively-off camera (absent, disabled, or probability
+            # 0) never calls camera_stage_edge and adds no camera-specific
+            # construction requirement; the ordinary path stays fully
+            # usable. The lease clone re-runs __init__ with the same
+            # policy, so direct, factory, and clone construction agree.
             self._camera_stage_edge = camera_stage_edge(buckets)
         else:
             self._camera_stage_edge = 0
@@ -538,11 +544,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 # inactive camera never plans and never draws the camera RNG
                 # domains.
                 camera_policy = self.camera_policy
-                if (
-                    camera_policy is not None
-                    and camera_policy.enabled
-                    and camera_policy.probability > 0.0
-                ):
+                if camera_is_active(camera_policy):
                     camera_plan = plan_camera_viewport(
                         camera_policy,
                         stage_edge=self._camera_stage_edge,

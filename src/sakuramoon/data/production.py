@@ -15,7 +15,11 @@ from typing import Never, SupportsIndex, cast
 from sakuramoon.config.load import ConfigurationError
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.buckets import generate_base_buckets, scale_buckets
-from sakuramoon.data.camera_viewport import CameraViewportPolicy, camera_stage_edge
+from sakuramoon.data.camera_viewport import (
+    CameraViewportPolicy,
+    camera_is_active,
+    camera_stage_edge,
+)
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
@@ -819,9 +823,12 @@ class ProductionPipelineFactory:
             if self.config.data.camera_viewport is not None
             else None
         )
-        if self.config.data.camera_viewport is not None:
-            # Fail-fast config boundary: the camera viewport square target
-            # must be the train.resolution square stage bucket.
+        if camera_is_active(camera_policy):
+            # Fail-fast config boundary (active camera only): the camera
+            # viewport square target must be the train.resolution square
+            # stage bucket. An effectively-off camera never calls
+            # camera_stage_edge and adds no camera-specific config
+            # requirement.
             stage_edge = camera_stage_edge(buckets)
             if stage_edge != self.config.train.resolution:
                 raise ConfigurationError(

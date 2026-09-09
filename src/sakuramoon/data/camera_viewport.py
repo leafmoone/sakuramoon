@@ -38,7 +38,7 @@ import math
 import random
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeGuard
 
 from sakuramoon.data.buckets import BucketShape
 
@@ -115,6 +115,24 @@ class CameraViewportPolicy:
     @classmethod
     def from_config(cls, config: DataCameraViewportConfig) -> CameraViewportPolicy:
         return cls(enabled=config.enabled, probability=config.probability)
+
+
+def camera_is_active(policy: CameraViewportPolicy | None) -> TypeGuard[CameraViewportPolicy]:
+    """Single activation gate for every camera construction and planning site.
+
+    The camera path is active iff a resolved policy exists and is enabled
+    with ``probability > 0.0``. Construction boundaries (pipeline
+    ``__init__``, lease clone, production factory) call
+    ``camera_stage_edge`` only under this gate, so an effectively-off
+    camera never imposes the square-bucket requirement; the planning site
+    uses the same gate, so direct construction, factory issuance, and
+    clones can never disagree about activation.
+
+    The ``TypeGuard`` lets the gate double as type narrowing: in every
+    guarded branch the caller sees a non-Optional resolved policy.
+    """
+
+    return policy is not None and policy.enabled and policy.probability > 0.0
 
 
 @dataclass(frozen=True, slots=True)
