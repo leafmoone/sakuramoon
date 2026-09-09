@@ -1,21 +1,22 @@
-# HDM-style shifted-square camera viewport canary (p=1.0): every sample is
-# evaluated for camera eligibility; applied samples train the full-canvas 2D
-# RoPE on a stage-edge R x R square cut from the zoomed full long-axis
-# canvas (short edge -> R, long axis fully preserved, equivalent zoom
-# 1.10-1.50 from the natural source aspect, uniform inclusive shift).
-# Ineligible samples (p does not force application) fall back to the
-# ordinary aspect-bucket crop, so p=1.0 is a full-eligibility canary, not a
-# full-application override.
+# Camera v2 shifted-square canary (P100): full-probability camera policy.
+# Selected samples train one stage-edge R x R square view per source sample
+# (crop-after-scale: short edge scaled to R, long edge quantized by
+# rounding half up, uniform inclusive integer offset on the long axis);
+# selected sources whose post-EXIF short edge is below R are rejected
+# (no-upscale rule) and never returned to an ordinary bucket.
 #
 # Data strategy change only -- model architecture, optimizer, LR, batch,
 # objective and checkpoint schema are untouched. Extends the live G1 run
-# config (bs800 / lr flat / seed 44) and overrides exactly:
+# config (bs800 / lr flat / seed 44, train.resolution = 256) and overrides
+# exactly:
 #   - run identity and fully independent run/checkpoint/artifact paths
-#   - [data.camera_viewport]: p=1.0, equivalent zoom 1.10-1.50
+#   - [data.camera_viewport]: p=1.0
 #
-# First-version mutual exclusion: [data.spatial_crop] is disabled by the
-# inherited live G1 config (p=0.0), so no override is needed here; enabling
-# both camera_viewport and spatial_crop is rejected by the config validator.
+# Activation is config-only: the camera path runs iff enabled and
+# probability > 0, so this file (enabled=true, p=1.0) is fully active.
+# [data.spatial_crop] is disabled by the inherited live G1 config, so no
+# override is needed; an active camera and spatial_crop are mutually
+# exclusive by config validator.
 #
 # NOT deployed: the canary starts only after an explicit user GO; it then
 # resumes from a COMPLETE production checkpoint via scripts/training_stack.sh
@@ -45,8 +46,5 @@ enabled = true
 mode = "hdm_shifted_square_v2"
 probability = 1.0
 viewport = "stage_square"
-min_equivalent_zoom = 1.10
-max_equivalent_zoom = 1.50
 offset_distribution = "uniform_long_axis_inclusive"
 zoom_source = "natural_source_aspect"
-fallback_to_aspect_bucket = true
