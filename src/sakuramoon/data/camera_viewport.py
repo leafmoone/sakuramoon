@@ -38,7 +38,7 @@ import math
 import random
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeGuard
+from typing import TYPE_CHECKING, Literal, TypeGuard
 
 from sakuramoon.data.buckets import BucketShape
 
@@ -258,6 +258,30 @@ class CameraViewportPlan:
             raise CameraViewportError("camera plan numerics disagree with the canvas geometry")
 
 
+def _unapplied_plan(
+    fallback_reason: Literal["not_selected", "no_upscale"],
+) -> CameraViewportPlan:
+    """All-zero unapplied plan for one fallback outcome.
+
+    Constructing the zero plan at each fallback site (after the selection
+    RNG draw) keeps the planner's RNG call positions identical for the
+    not-selected, no-upscale, and applied paths.
+    """
+    return CameraViewportPlan(
+        applied=False,
+        fallback_reason=fallback_reason,
+        orientation="none",
+        viewport=0,
+        full_width=0,
+        full_height=0,
+        left=0,
+        top=0,
+        crop_box=(0, 0, 0, 0),
+        equivalent_zoom=0.0,
+        retention=0.0,
+    )
+
+
 def plan_camera_viewport(
     policy: CameraViewportPolicy,
     *,
@@ -300,25 +324,13 @@ def plan_camera_viewport(
             "plan_camera_viewport requires an active camera policy"
         )
 
-    unapplied = {
-        "applied": False,
-        "orientation": "none",
-        "viewport": 0,
-        "full_width": 0,
-        "full_height": 0,
-        "left": 0,
-        "top": 0,
-        "crop_box": (0, 0, 0, 0),
-        "equivalent_zoom": 0.0,
-        "retention": 0.0,
-    }
     selection_rng = random.Random(policy_seed)
     if selection_rng.random() >= policy.probability:
-        return CameraViewportPlan(fallback_reason="not_selected", **unapplied)
+        return _unapplied_plan("not_selected")
 
     short_edge = min(source_width, source_height)
     if short_edge < stage_edge:
-        return CameraViewportPlan(fallback_reason="no_upscale", **unapplied)
+        return _unapplied_plan("no_upscale")
 
     long_edge = max(source_width, source_height)
     long_quantized = _round_half_up(long_edge * stage_edge / short_edge)

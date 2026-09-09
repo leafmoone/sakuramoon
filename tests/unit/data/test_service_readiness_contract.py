@@ -20,8 +20,8 @@ import socket
 import stat
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import cast
 
 import pytest
 
@@ -44,7 +44,7 @@ def _gated_service(barrier: threading.Event, stop_event: threading.Event) -> Dat
     (returns False if stop is requested first, mirroring the real
     ``_ServiceStopping`` path).
     """
-    service = cast(DataSupplyService, object.__new__(DataSupplyService))
+    service = object.__new__(DataSupplyService)
     service.identity = DataServiceSessionIdentity(
         dataset_id=_DATASET_ID,
         worker_count=2,
@@ -74,7 +74,7 @@ def _gated_service(barrier: threading.Event, stop_event: threading.Event) -> Dat
     return service
 
 
-def _wait_until(predicate, timeout: float) -> bool:
+def _wait_until(predicate: Callable[[], bool], timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():

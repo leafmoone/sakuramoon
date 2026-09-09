@@ -12,7 +12,7 @@ import math
 import pytest
 
 from sakuramoon.config.schema import DataBucketsConfig
-from sakuramoon.data.buckets import generate_base_buckets, scale_buckets
+from sakuramoon.data.buckets import StageEdge, generate_base_buckets, scale_buckets
 from sakuramoon.data.camera_viewport import (
     CameraViewportPolicy,
     camera_stage_edge,
@@ -20,7 +20,7 @@ from sakuramoon.data.camera_viewport import (
 )
 
 POLICY = CameraViewportPolicy(enabled=True, probability=1.0)
-STAGE_EDGES = (256, 512, 768, 1024)
+STAGE_EDGES: tuple[StageEdge, ...] = (256, 512, 768, 1024)
 
 _BUCKET_CONFIG = DataBucketsConfig(
     base_area_px=262144,
@@ -32,13 +32,13 @@ _BUCKET_CONFIG = DataBucketsConfig(
 
 
 @pytest.mark.parametrize("stage_edge", STAGE_EDGES)
-def test_stage_edge_matches_train_resolution(stage_edge: int) -> None:
+def test_stage_edge_matches_train_resolution(stage_edge: StageEdge) -> None:
     buckets = scale_buckets(generate_base_buckets(_BUCKET_CONFIG), stage_edge)
     assert camera_stage_edge(buckets) == stage_edge
 
 
 @pytest.mark.parametrize("stage_edge", STAGE_EDGES)
-def test_canvas_scales_with_stage_edge(stage_edge: int) -> None:
+def test_canvas_scales_with_stage_edge(stage_edge: StageEdge) -> None:
     buckets = scale_buckets(generate_base_buckets(_BUCKET_CONFIG), stage_edge)
     R = camera_stage_edge(buckets)
     plan = plan_camera_viewport(

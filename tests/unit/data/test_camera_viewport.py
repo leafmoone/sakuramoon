@@ -10,6 +10,7 @@ resolution scaling, plan/config validation, and the batch aggregate.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import replace
 
 import pytest
@@ -46,6 +47,22 @@ def _applied_plan(width: int, height: int) -> CameraViewportPlan:
     plan = _plan(width, height)
     assert plan.applied, f"{width}x{height} must be accepted at R={R}"
     return plan
+
+
+# Explicit Callable context so the invalid-plan mutators are checked against
+# CameraViewportPlan instead of being inferred as unknown-parameter lambdas.
+_INVALID_PLAN_MUTATORS: tuple[
+    Callable[[CameraViewportPlan], CameraViewportPlan], ...
+] = (
+    lambda plan: replace(plan, applied=False),
+    lambda plan: replace(plan, fallback_reason="near_square_below_min"),
+    lambda plan: replace(plan, orientation="diagonal"),
+    lambda plan: replace(plan, left=512),  # crop escapes the canvas
+    lambda plan: replace(plan, crop_box=(64, 0, 300, R)),
+    lambda plan: replace(plan, equivalent_zoom=0.5),
+    lambda plan: replace(plan, retention=0.0),
+    lambda plan: replace(plan, equivalent_zoom=math.sqrt(2.0), retention=0.25),
+)
 
 
 class TestPolicyAndStageEdge:
@@ -308,42 +325,28 @@ class TestValidation:
                 offset_seed=seeds[1],
             )
 
-    def _applied_kwargs(self) -> dict[str, object]:
-        return {
-            "applied": True,
-            "fallback_reason": "none",
-            "orientation": "horizontal",
-            "viewport": R,
-            "full_width": 512,
-            "full_height": R,
-            "left": 64,
-            "top": 0,
-            "crop_box": (64, 0, 320, R),
-            "equivalent_zoom": math.sqrt(2.0),
-            "retention": 0.5,
-        }
+    def _valid_plan(self) -> CameraViewportPlan:
+        return CameraViewportPlan(
+            applied=True,
+            fallback_reason="none",
+            orientation="horizontal",
+            viewport=R,
+            full_width=512,
+            full_height=R,
+            left=64,
+            top=0,
+            crop_box=(64, 0, 320, R),
+            equivalent_zoom=math.sqrt(2.0),
+            retention=0.5,
+        )
 
-    @pytest.mark.parametrize(
-        "mutate",
-        [
-            lambda plan: replace(plan, applied=False),  # type: ignore[attr-defined]
-            lambda plan: replace(plan, fallback_reason="near_square_below_min"),  # type: ignore[attr-defined]
-            lambda plan: replace(plan, orientation="diagonal"),  # type: ignore[attr-defined]
-            lambda plan: replace(plan, left=512),  # crop escapes the canvas  # type: ignore[attr-defined]
-            lambda plan: replace(plan, crop_box=(64, 0, 300, R)),  # type: ignore[attr-defined]
-            lambda plan: replace(plan, equivalent_zoom=0.5),  # type: ignore[attr-defined]
-            lambda plan: replace(plan, retention=0.0),  # type: ignore[attr-defined]
-            lambda plan: replace(plan,
-                equivalent_zoom=math.sqrt(2.0), retention=0.25  # inconsistent  # type: ignore[attr-defined]
-            ),
-        ],
-    )
+    @pytest.mark.parametrize("mutate", _INVALID_PLAN_MUTATORS)
     def test_plan_validation_rejects_inconsistent_geometry(
-        self, mutate: object
+        self, mutate: Callable[[CameraViewportPlan], CameraViewportPlan]
     ) -> None:
-        plan = CameraViewportPlan(**self._applied_kwargs())
+        plan = self._valid_plan()
         with pytest.raises(CameraViewportError):
-            mutate(plan)  # type: ignore[operator]
+            mutate(plan)
 
     def test_unapplied_plan_must_be_zero(self) -> None:
         CameraViewportPlan(
