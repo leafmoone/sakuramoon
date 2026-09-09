@@ -189,11 +189,6 @@ class ImageAudit:
     camera_orientation: str = "none"
     camera_equivalent_zoom: float = 0.0
     camera_final_retention: float = 0.0
-    camera_normalized_offset: float = 0.0
-    camera_pixel_center_shift: float = 0.0
-    camera_latent_center_shift: float = 0.0
-    camera_shift_x: float = 0.0
-    camera_shift_y: float = 0.0
     camera_full_width: int = 0
     camera_full_height: int = 0
 
@@ -440,7 +435,14 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         self.cycle_index = cycle_index
         self.spatial_policy = spatial_policy
         self.camera_policy = camera_policy
-        self._camera_stage_edge = camera_stage_edge(buckets)
+        if camera_policy is not None:
+            # Fail-fast config boundary: a camera viewport requires the
+            # unique square stage bucket (R). A missing or ambiguous
+            # square target raises at construction (factory boundary),
+            # never later as a swallowed per-sample decode error.
+            self._camera_stage_edge = camera_stage_edge(buckets)
+        else:
+            self._camera_stage_edge = 0
         self.transparent_policy = transparent_policy
         self.transparent_telemetry = (
             transparent_telemetry if transparent_telemetry is not None else TransparentWhiteTelemetry()
@@ -507,6 +509,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
         if not isinstance(fields, CaptionFields):
             raise PipelineSampleError("caption field parser returned an invalid value")
         image_bytes = _image_bytes(sample)
+        camera_plan: CameraViewportPlan | None = None
         try:
             probe_width, probe_height = _probe_image_dimensions(image_bytes)
             if (
@@ -528,17 +531,57 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 return None
             with Image.open(io.BytesIO(image_bytes)) as decoded:
                 source_width, source_height = _source_dimensions(decoded)
+                # Camera planning runs before the pixel decode: selection
+                # and shifted-square geometry depend only on the post-EXIF
+                # source size, and when a camera view applies the JPEG draft
+                # request must already cover the planned full canvas. An
+                # inactive camera never plans and never draws the camera RNG
+                # domains.
+                camera_policy = self.camera_policy
+                if (
+                    camera_policy is not None
+                    and camera_policy.enabled
+                    and camera_policy.probability > 0.0
+                ):
+                    camera_plan = plan_camera_viewport(
+                        camera_policy,
+                        stage_edge=self._camera_stage_edge,
+                        source_size=(source_width, source_height),
+                        policy_seed=identity.camera_policy_seed,
+                        offset_seed=identity.camera_offset_seed,
+                    )
                 if _should_draft_decode(decoded, probe_width, probe_height):
-                    decoded.draft("RGB", _draft_request_size(self.buckets))
+                    draft_request = _draft_request_size(self.buckets)
+                    if camera_plan is not None and camera_plan.applied:
+                        draft_request = (
+                            max(draft_request[0], 2 * camera_plan.full_width),
+                            max(draft_request[1], 2 * camera_plan.full_height),
+                        )
+                    decoded.draft("RGB", draft_request)
                 decoded.load()
                 image_mode = decoded.mode
+                base_image = decoded
+                # Draft coverage: a draft decode may come back below the
+                # planned full canvas on an axis. Re-decode the original
+                # compressed bytes in full for that one sample instead of
+                # upscaling a too-small draft (the source already passed
+                # the no-upscale acceptance on its true short edge).
+                if camera_plan is not None and camera_plan.applied:
+                    decoded_width, decoded_height = _source_dimensions(decoded)
+                    if (
+                        decoded_width < camera_plan.full_width
+                        or decoded_height < camera_plan.full_height
+                    ):
+                        with Image.open(io.BytesIO(image_bytes)) as full_decode:
+                            full_decode.load()
+                        base_image = full_decode
                 # Transparent-background white-composite policy (sections 6-12):
                 # alpha-first, applied BEFORE resize/crop. The ordinary (untagged)
                 # path is bit-identical: NOT_TAGGED keeps the decoded image and the
                 # original caption fields untouched.
                 if self.transparent_policy is not None:
                     tw = apply_transparent_white(
-                        decoded, fields, self.transparent_policy
+                        base_image, fields, self.transparent_policy
                     )
                     self.transparent_telemetry.record(tw.outcome)
                     if tw.outcome.is_reject:
@@ -557,13 +600,26 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                         work_fields = tw.fields
                         transparent_outcome = tw.outcome
                     else:
-                        work_image = decoded
+                        work_image = base_image
                         work_fields = fields
                         transparent_outcome = tw.outcome
                 else:
-                    work_image = decoded
+                    work_image = base_image
                     work_fields = fields
                     transparent_outcome = TransparentWhiteOutcome.NOT_TAGGED
+            # No-upscale rule, checked after the common data filtering
+            # (decode guard and transparent policy): a camera-selected
+            # source below the stage square target is rejected explicitly.
+            # It is never upscaled and never returned to an ordinary bucket.
+            if (
+                camera_plan is not None
+                and camera_plan.fallback_reason == "no_upscale"
+            ):
+                _trace_sample(
+                    shard_record.path, metadata.id, "reject:camera_no_upscale"
+                )
+                self.rejection_observer("camera_no_upscale")
+                return None
             plan = build_caption_plan(
                 work_fields,
                 self.probabilities,
@@ -571,6 +627,63 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 seed=identity.caption_seed,
             )
             caption = serialize_caption(plan, self.tokenizer, self.framing)
+            if camera_plan is not None and camera_plan.applied:
+                # The camera-selected path emits exactly its R x R view.
+                # The ordinary prepare_image / assign_bucket admission is
+                # never consulted for it: no throwaway ordinary crop, no
+                # ordinary retention/aspect gates, and the metadata comes
+                # from the actual camera crop only.
+                normalized = normalize_image(work_image)
+                camera_image = normalized.resize(
+                    (camera_plan.full_width, camera_plan.full_height),
+                    resample=Image.Resampling.LANCZOS,
+                ).crop(camera_plan.crop_box)
+                audit = ImageAudit(
+                    source_width=source_width,
+                    source_height=source_height,
+                    resized_width=camera_plan.full_width,
+                    resized_height=camera_plan.full_height,
+                    crop_box=camera_plan.crop_box,
+                    crop_retention=camera_plan.retention,
+                    crop_policy="camera_viewport",
+                    base_crop_retention=camera_plan.retention,
+                    final_crop_retention=camera_plan.retention,
+                    requested_equivalent_zoom=camera_plan.equivalent_zoom,
+                    actual_equivalent_zoom=camera_plan.equivalent_zoom,
+                    camera_policy="hdm_shifted_square_v2",
+                    camera_selected=True,
+                    camera_applied=True,
+                    camera_fallback_reason="none",
+                    camera_orientation=camera_plan.orientation,
+                    camera_equivalent_zoom=camera_plan.equivalent_zoom,
+                    camera_final_retention=camera_plan.retention,
+                    camera_full_width=camera_plan.full_width,
+                    camera_full_height=camera_plan.full_height,
+                )
+                _trace_sample(
+                    shard_record.path,
+                    metadata.id,
+                    "ok"
+                    + f" mode={image_mode}"
+                    + f" src={source_width}x{source_height}"
+                    + f" canvas={camera_plan.full_width}x{camera_plan.full_height}"
+                    + f" crop={camera_plan.left},{camera_plan.top},"
+                    + f"{camera_plan.viewport}x{camera_plan.viewport}"
+                    + f" cap={len(caption.input_ids)}"
+                    + " camera=applied",
+                )
+                return PipelineSample(
+                    sample_id=metadata.id,
+                    source_shard=shard_record.path,
+                    image=_uint8_chw(camera_image),
+                    target_height=camera_plan.viewport,
+                    target_width=camera_plan.viewport,
+                    caption=caption,
+                    audit=audit,
+                    rng=identity,
+                    padding_token_id=self.framing.padding_token_id,
+                    transparent_outcome=transparent_outcome,
+                )
             processed = prepare_image(
                 work_image,
                 self.buckets,
@@ -596,24 +709,6 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                         (spatial_plan.canvas_width, spatial_plan.canvas_height),
                         resample=Image.Resampling.LANCZOS,
                     ).crop(spatial_plan.crop_box)
-            camera_plan: CameraViewportPlan | None = None
-            camera_image: Image.Image | None = None
-            if self.camera_policy is not None and self.camera_policy.enabled:
-                camera_plan = plan_camera_viewport(
-                    processed.assignment,
-                    self.camera_policy,
-                    buckets=self.buckets,
-                    stage_edge=self._camera_stage_edge,
-                    source_size=(source_width, source_height),
-                    policy_seed=identity.camera_policy_seed,
-                    offset_seed=identity.camera_offset_seed,
-                )
-                if camera_plan.applied:
-                    normalized = normalize_image(work_image)
-                    camera_image = normalized.resize(
-                        (camera_plan.full_width, camera_plan.full_height),
-                        resample=Image.Resampling.LANCZOS,
-                    ).crop(camera_plan.crop_box)
         except ImageRejected as error:
             _trace_sample(shard_record.path, metadata.id, f"reject:{error.reason}")
             self.rejection_observer(error.reason)
@@ -634,41 +729,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             self.rejection_observer("decode_error")
             return None
         assignment = processed.assignment
-        if camera_plan is not None and camera_image is not None:
-            sample_image: Image.Image = camera_image
-            audit = ImageAudit(
-                source_width=assignment.source_width,
-                source_height=assignment.source_height,
-                resized_width=camera_plan.full_width,
-                resized_height=camera_plan.full_height,
-                crop_box=camera_plan.crop_box,
-                crop_retention=camera_plan.retention,
-                crop_policy="camera_viewport",
-                spatial_selected=False,
-                spatial_applied=False,
-                spatial_fallback_reason="none",
-                base_crop_retention=assignment.crop_retention,
-                final_crop_retention=camera_plan.retention,
-                requested_equivalent_zoom=camera_plan.equivalent_zoom,
-                actual_equivalent_zoom=camera_plan.equivalent_zoom,
-                normalized_offset_x=0.0,
-                normalized_offset_y=0.0,
-                camera_policy="hdm_shifted_square_v2",
-                camera_selected=True,
-                camera_applied=True,
-                camera_fallback_reason="none",
-                camera_orientation=camera_plan.orientation,
-                camera_equivalent_zoom=camera_plan.equivalent_zoom,
-                camera_final_retention=camera_plan.retention,
-                camera_normalized_offset=camera_plan.normalized_offset,
-                camera_pixel_center_shift=camera_plan.signed_pixel_center_shift,
-                camera_latent_center_shift=camera_plan.latent_center_shift,
-                camera_shift_x=camera_plan.camera_shift_x,
-                camera_shift_y=camera_plan.camera_shift_y,
-                camera_full_width=camera_plan.full_width,
-                camera_full_height=camera_plan.full_height,
-            )
-        elif spatial_plan is not None and spatial_image is not None:
+        if spatial_plan is not None and spatial_image is not None:
             sample_image = spatial_image
             audit = ImageAudit(
                 source_width=assignment.source_width,
@@ -708,8 +769,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                 camera_selected = False
                 camera_fallback_reason = "none"
             else:
+                # Reaching the ordinary path with an active camera plan
+                # means this sample was not selected for a camera view.
                 camera_policy_name = "hdm_shifted_square_v2"
-                camera_selected = camera_plan.fallback_reason != "not_selected"
+                camera_selected = False
                 camera_fallback_reason = camera_plan.fallback_reason
             audit = ImageAudit(
                 source_width=assignment.source_width,

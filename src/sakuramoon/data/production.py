@@ -12,9 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Never, SupportsIndex, cast
 
+from sakuramoon.config.load import ConfigurationError
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.buckets import generate_base_buckets, scale_buckets
-from sakuramoon.data.camera_viewport import CameraViewportPolicy
+from sakuramoon.data.camera_viewport import CameraViewportPolicy, camera_stage_edge
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
@@ -818,6 +819,16 @@ class ProductionPipelineFactory:
             if self.config.data.camera_viewport is not None
             else None
         )
+        if self.config.data.camera_viewport is not None:
+            # Fail-fast config boundary: the camera viewport square target
+            # must be the train.resolution square stage bucket.
+            stage_edge = camera_stage_edge(buckets)
+            if stage_edge != self.config.train.resolution:
+                raise ConfigurationError(
+                    "camera viewport square target "
+                    f"{stage_edge} does not match train.resolution "
+                    f"{self.config.train.resolution}"
+                )
         pipeline = WebDatasetPipeline(
             shard_paths=(descriptor.local_path,),
             shard_records=(descriptor.record,),
