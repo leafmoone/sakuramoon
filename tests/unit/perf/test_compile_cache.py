@@ -32,6 +32,7 @@ from sakuramoon.perf.compile import (
     parse_compiler_log,
     pct_improvement,
     sanitize_cache_identity,
+    split_lines_at_measured_banner,
     split_recompiles_by_window,
     steady_state_regression_pass,
     top_recompile_reason,
@@ -371,28 +372,59 @@ def test_steady_state_regression_gate() -> None:
 # ---------------------------------------------------------------------------
 
 _SAMPLE_LOG = """\
-[torchdynamo] graph break in _forward at /x/model/fa2_varlen.py:88
-  reason: fa4_varlen_attention is a torchdynamo_disable boundary
-WARNING graph break: torch._dynamo.exc: dynamic shape scalar extraction
-INFO: recompiling function packed_block_forward reason: guard L['x'].size()[1] failed
-[bench rank0] warmup 5 updates
+V0909 02:58:42.751000 418943 site-packages/torch/_dynamo/symbolic_convert.py:611] [0/0] [__graph_breaks] Graph break in user code at /sakuramoon/model/attention.py:532
+V0909 02:58:42.751000 418943 site-packages/torch/_dynamo/symbolic_convert.py:611] [0/0] [__graph_breaks] Graph Break Reason: Skip calling `torch.compiler.disable()`d function
+V0909 02:58:42.751000 418943 site-packages/torch/_dynamo/symbolic_convert.py:611] [0/0] [__graph_breaks]  For more details about this graph break, please visit: https://meta-pytorch.github.io/compile-graph-break-site/gb/gb0098.html
+SingleProcess AUTOTUNE benchmarking takes 3.2658 seconds and 6.2050 seconds precompiling for 37 choices
+I0909 02:59:01.000000 418943 site-packages/torch/_dynamo/output_graph.py:3135] torch._dynamo: recompiling function packed_block_forward because guard L['x'].size()[1] failed
+[bench rank0] measuring 5 logical updates
 dynamic: specializing on tensor size 400
-recompiling function packed_block_forward (2nd time) reason: new specialization
 """
 
 
-def test_parse_compiler_log_finds_all_kinds() -> None:
+def test_parse_compiler_log_event_level_breaks() -> None:
     parsed = parse_compiler_log(_SAMPLE_LOG)
-    assert len(parsed["graph_breaks"]) == 2
-    assert len(parsed["recompiles"]) == 2
+    # ONE break event: the location line starts it, the reason line
+    # attaches, and the "For more details ..." URL line is noise.
+    assert len(parsed["graph_breaks"]) == 1
+    entry = parsed["graph_breaks"][0]
+    assert entry["kind"] == "location"
+    assert entry["file"] == "/sakuramoon/model/attention.py"
+    assert "torch.compiler.disable" in entry["reason"]
+    assert entry["line_no"] == 1
+
+
+def test_parse_compiler_log_excludes_autotune_precompiling() -> None:
+    parsed = parse_compiler_log(_SAMPLE_LOG)
+    # The Inductor autotune "precompiling for 37 choices" line contains the
+    # substring "recompil" (inside "precompiling") but is NOT a recompile.
+    assert len(parsed["recompiles"]) == 1
+    assert (
+        "recompiling function packed_block_forward" in parsed["recompiles"][0]["line"]
+    )
     assert any("specializing" in line for line in parsed["dynamic_notes"])
-    # Original text is always retained (GO §10).
-    assert parsed["graph_breaks"][0]["line"].startswith("[torchdynamo] graph break")
+
+
+def test_standalone_reason_line_is_own_event() -> None:
+    parsed = parse_compiler_log(
+        "WARNING graph break reason: unsupported tensor mutation\n"
+    )
+    assert len(parsed["graph_breaks"]) == 1
+    assert parsed["graph_breaks"][0]["kind"] == "reason"
+    assert "unsupported tensor mutation" in parsed["graph_breaks"][0]["reason"]
 
 
 def test_classify_graph_breaks_expected_vs_unexpected() -> None:
     assert (
+        classify_graph_break("Skip calling `torch.compiler.disable()`d function")
+        == EXPECTED_BREAK
+    )
+    assert (
         classify_graph_break("fa4_varlen_attention is a torchdynamo_disable boundary")
+        == EXPECTED_BREAK
+    )
+    assert (
+        classify_graph_break("torch._dynamo.disable boundary in external kernel")
         == EXPECTED_BREAK
     )
     assert (
@@ -410,14 +442,41 @@ def test_classify_graph_breaks_counts_split() -> None:
     parsed = parse_compiler_log(_SAMPLE_LOG)
     expected, unexpected = classify_graph_breaks(parsed)
     assert expected == 1
-    assert unexpected == 1
+    assert unexpected == 0
+
+
+def test_classify_graph_breaks_line_nos_filter() -> None:
+    parsed = parse_compiler_log(_SAMPLE_LOG)
+    # Only the measured window (after the banner): the single break event is
+    # in the warmup window, so the measured count is zero/zero.
+    split = split_lines_at_measured_banner(_SAMPLE_LOG.splitlines())
+    expected_meas, unexpected_meas = classify_graph_breaks(
+        parsed, line_nos=set(split["measured"])
+    )
+    assert expected_meas == 0
+    assert unexpected_meas == 0
 
 
 def test_top_recompile_reason_most_common() -> None:
     parsed = parse_compiler_log(_SAMPLE_LOG)
     reason = top_recompile_reason(parsed)
     assert reason is not None
-    assert "specialization" in reason or "guard" in reason
+    assert "guard" in reason
+
+
+def test_split_lines_at_measured_banner_found() -> None:
+    split = split_lines_at_measured_banner(_SAMPLE_LOG.splitlines())
+    assert split["found"] is True
+    assert split["before"] == [1, 2, 3, 4, 5]
+    assert split["measured"] == [6, 7]
+
+
+def test_split_lines_at_measured_banner_absent_is_undefined() -> None:
+    lines = ["a", "b", "c"]
+    split = split_lines_at_measured_banner(lines)
+    assert split["found"] is False
+    assert split["measured"] == []
+    assert split["before"] == [1, 2, 3]
 
 
 def test_parse_compiler_log_empty_input() -> None:
@@ -425,6 +484,8 @@ def test_parse_compiler_log_empty_input() -> None:
     assert parsed == {"graph_breaks": [], "recompiles": [], "dynamic_notes": []}
     assert top_recompile_reason(parsed) is None
     assert classify_graph_breaks(parsed) == (0, 0)
+    split = split_lines_at_measured_banner([])
+    assert split["found"] is False
 
 
 # ---------------------------------------------------------------------------

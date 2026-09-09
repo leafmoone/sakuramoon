@@ -399,6 +399,8 @@ _EXPECTED_BREAK_MARKERS: tuple[str, ...] = (
     "_torchdynamo_disable",
     "torchdynamo_disable",
     "torch._dynamo.disable",
+    "torch.compiler.disable",
+    "compiler.disable",
     "dynamo.disable",
     "explicit eager",
     "intentionally eager",
@@ -464,60 +466,81 @@ class CompileDiagnosticSummary:
 # Tolerant compiler-log diagnostic parser
 # ---------------------------------------------------------------------------
 
-_GRAPH_BREAK_RE = re.compile(r"graph\s+break", re.IGNORECASE)
+_GRAPH_BREAK_LOCATION_RE = re.compile(
+    r"graph\s+break\s*(\(.*?\)\s*)?in\s+", re.IGNORECASE
+)
+_GRAPH_BREAK_REASON_RE = re.compile(r"graph\s+break\s+reason\s*[:=]", re.IGNORECASE)
+_GRAPH_BREAK_NOISE_RE = re.compile(
+    r"for more details about this graph break", re.IGNORECASE
+)
+_BREAK_PATH_RE = re.compile(r"at\s+(\S+?):(\d+)")
 _RECOMPILE_RE = re.compile(r"recompil\w*|re-evaluat\w*|re-evaluated", re.IGNORECASE)
+# Inductor max-autotune lines say "... precompiling for N choices": the
+# substring "recompil" inside "precompiling" is NOT a dynamo recompile.
+_AUTOTUNE_NOISE_RE = re.compile(
+    r"precompiling for|autotune benchmarking", re.IGNORECASE
+)
 _DYNAMIC_RE = re.compile(r"dynamic|specializ\w*|guard\b", re.IGNORECASE)
-_REASON_SPLIT_RE = re.compile(r"reason\s*[:=]?\s*", re.IGNORECASE)
-
-
-def _extract_reason(line: str, keyword: str) -> str:
-    """Best-effort reason text from a matched log line (original retained)."""
-
-    match = (
-        _RECOMPILE_RE.search(line)
-        if keyword == "recompile"
-        else _GRAPH_BREAK_RE.search(line)
-    )
-    if match is None:
-        return line.strip()
-    tail = line[match.end() :].strip(" :|-–—\t")
-    reason_match = _REASON_SPLIT_RE.search(tail)
-    if reason_match:
-        tail = tail[reason_match.end() :].strip()
-    return tail or line.strip()
+MEASURED_BANNER_RE = re.compile(r"\[bench rank\d+\] measuring \d+ logical updates")
 
 
 def parse_compiler_log(text: str) -> dict[str, Any]:
     """Tolerantly parse a ``TORCH_LOGS`` compiler log for evidence.
 
-    Returns::
-
-        {
-          "graph_breaks":  [ {"line": <raw>, "reason": <text>}, ... ],
-          "recompiles":    [ {"line": <raw>, "reason": <text>}, ... ],
-          "dynamic_notes": [ <raw line>, ... ],
-        }
-
-    The exact 2.9/DTK line format varies; this parser is deliberately loose
-    and always retains the ORIGINAL line (GO P1-R1B §10).  It is
-    evidence/display only and never drives a code change.
+    Returns a dict with "graph_breaks", "recompiles" and
+    "dynamic_notes".  Graph-break EVENTS: a "Graph break ... in user
+    code at <file>:<line>" location line starts one event; an adjacent
+    (<= 2 line gap) "Graph Break Reason:" line attaches to it; a
+    standalone reason line is its own event.  The "For more details
+    about this graph break ..." URL line is noise and never counted.
+    Inductor autotune "precompiling for N choices" lines are NOT
+    recompiles.  The exact 2.9/DTK line format varies; this parser is
+    deliberately loose and always retains the ORIGINAL line (GO
+    P1-R1B §10).  Evidence/display only; it never drives a code change.
     """
 
-    graph_breaks: list[dict[str, str]] = []
-    recompiles: list[dict[str, str]] = []
+    graph_breaks: list[dict[str, Any]] = []
+    recompiles: list[dict[str, Any]] = []
     dynamic_notes: list[str] = []
-    for raw_line in text.splitlines():
+    for line_no, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.rstrip()
-        if not line.strip():
+        if not line.strip() or _GRAPH_BREAK_NOISE_RE.search(line):
             continue
-        if _GRAPH_BREAK_RE.search(line):
-            graph_breaks.append(
-                {"line": line, "reason": _extract_reason(line, "graph_break")}
-            )
-        if _RECOMPILE_RE.search(line):
-            recompiles.append(
-                {"line": line, "reason": _extract_reason(line, "recompile")}
-            )
+        if _GRAPH_BREAK_LOCATION_RE.search(line):
+            path = _BREAK_PATH_RE.search(line)
+            event: dict[str, Any] = {
+                "line": line,
+                "line_no": line_no,
+                "kind": "location",
+                "reason": "",
+                "file": path.group(1) if path else "",
+            }
+            graph_breaks.append(event)
+        elif _GRAPH_BREAK_REASON_RE.search(line):
+            tail = line[
+                _GRAPH_BREAK_REASON_RE.search(line).end() :  # type: ignore[union-attr]
+            ].strip(" :|-\u2013\u2014\t")
+            if (
+                graph_breaks
+                and graph_breaks[-1]["kind"] == "location"
+                and line_no - int(graph_breaks[-1]["line_no"]) <= 2
+            ):
+                graph_breaks[-1]["reason"] = tail
+            else:
+                graph_breaks.append(
+                    {
+                        "line": line,
+                        "line_no": line_no,
+                        "kind": "reason",
+                        "reason": tail,
+                        "file": "",
+                    }
+                )
+        if _RECOMPILE_RE.search(line) and not _AUTOTUNE_NOISE_RE.search(line):
+            tail = line[
+                _RECOMPILE_RE.search(line).end() :  # type: ignore[union-attr]
+            ].strip(" :|-\t")
+            recompiles.append({"line": line, "line_no": line_no, "reason": tail})
         if _DYNAMIC_RE.search(line):
             dynamic_notes.append(line)
     return {
@@ -527,13 +550,47 @@ def parse_compiler_log(text: str) -> dict[str, Any]:
     }
 
 
-def classify_graph_breaks(parsed: dict[str, Any]) -> tuple[int, int]:
-    """Split parsed graph breaks into (expected, unexpected) counts."""
+def split_lines_at_measured_banner(lines: Sequence[str]) -> dict[str, Any]:
+    """Split log lines at the benchmark measured-stage banner.
+
+    Returns ``{"found": bool, "before": [line_no, ...], "measured":
+    [line_no, ...]}`` with 1-based line numbers.  ``before`` is
+    everything up to (but not including) the banner; ``measured`` is
+    the banner line and everything after it.  When the banner is
+    absent, ``found`` is False and ``measured`` is EMPTY — the measured
+    window is undefined, never fabricated.
+    """
+
+    before: list[int] = []
+    measured: list[int] = []
+    found = False
+    for line_no, line in enumerate(lines, start=1):
+        if not found and MEASURED_BANNER_RE.search(line):
+            found = True
+        (measured if found else before).append(line_no)
+    if not found:
+        return {"found": False, "before": before, "measured": []}
+    return {"found": True, "before": before, "measured": measured}
+
+
+def classify_graph_breaks(
+    parsed: dict[str, Any], *, line_nos: set[int] | None = None
+) -> tuple[int, int]:
+    """Split parsed graph breaks into (expected, unexpected) counts.
+
+    ``line_nos`` optionally restricts the count to a set of 1-based
+    line numbers (e.g. the measured window).
+    """
 
     expected = 0
     unexpected = 0
     for entry in parsed.get("graph_breaks", []):
-        if classify_graph_break(entry.get("reason", "")) == EXPECTED_BREAK:
+        if line_nos is not None and int(entry.get("line_no", -1)) not in line_nos:
+            continue
+        if (
+            classify_graph_break(entry.get("reason", ""), file=entry.get("file", ""))
+            == EXPECTED_BREAK
+        ):
             expected += 1
         else:
             unexpected += 1
@@ -692,6 +749,7 @@ __all__ = [
     "parse_compiler_log",
     "pct_improvement",
     "sanitize_cache_identity",
+    "split_lines_at_measured_banner",
     "split_recompiles_by_window",
     "steady_state_regression_pass",
     "top_recompile_reason",

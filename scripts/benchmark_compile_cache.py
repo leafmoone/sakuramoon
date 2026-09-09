@@ -50,6 +50,7 @@ from sakuramoon.perf.compile import (
     parse_compiler_log,
     pct_improvement,
     sanitize_cache_identity,
+    split_lines_at_measured_banner,
     split_recompiles_by_window,
     steady_state_regression_pass,
     top_recompile_reason,
@@ -532,27 +533,61 @@ def _recompile_delta(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _diagnostic_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    """Compiler evidence for the 1-HCU diagnostic run (GO P1-R1B \u00a724).
+
+    Recompile evidence prefers the in-process dynamo COUNTER delta
+    (authoritative).  When this torch build exposes no recompile-style
+    counter in ``torch._dynamo.utils.counters`` (observed on 2.9/DTK), it
+    falls back to the retained TORCH_LOGS recompile lines split by the
+    benchmark measured-stage banner.  Graph breaks come from the retained
+    log; the measured-window split uses the same banner.  Counts are
+    reported exactly, never fabricated.
+    """
+
     log_text = ""
     try:
         log_text = Path(entry["log"]).read_text(encoding="utf-8", errors="replace")
     except OSError:
         pass
     parsed = parse_compiler_log(log_text)
+    split = split_lines_at_measured_banner(log_text.splitlines())
+    measured_nos: set[int] = set(split["measured"])
+
     expected, unexpected = classify_graph_breaks(parsed)
+    _, unexpected_meas = classify_graph_breaks(parsed, line_nos=measured_nos)
+    breaks_in_measured = sum(
+        1 for e in parsed["graph_breaks"] if int(e.get("line_no", -1)) in measured_nos
+    )
+
     recompile_counts = _recompile_delta(entry)
+    if recompile_counts["method"] == "in-process-counter-delta":
+        recomp_total: int = int(recompile_counts["total"])
+        recomp_warmup: int = int(recompile_counts["warmup"])
+        recomp_measured: int = int(recompile_counts["measured"])
+        method = "in-process-counter-delta"
+    else:
+        recomp_total = len(parsed["recompiles"])
+        recomp_measured = sum(
+            1 for e in parsed["recompiles"] if int(e.get("line_no", -1)) in measured_nos
+        )
+        recomp_warmup = recomp_total - recomp_measured
+        method = "log-banner-window" if split["found"] else "log-banner-not-found"
     return {
         "graph_breaks_total": len(parsed["graph_breaks"]),
         "graph_breaks_expected": expected,
         "graph_breaks_unexpected": unexpected,
+        "graph_breaks_measured_window": breaks_in_measured,
+        "graph_breaks_unexpected_measured_window": unexpected_meas,
         "graph_break_lines": [e["line"] for e in parsed["graph_breaks"]][:40],
-        "recompiles_total": recompile_counts["total"],
-        "recompiles_warmup": recompile_counts["warmup"],
-        "recompiles_measured": recompile_counts["measured"],
-        "recompile_counter_method": recompile_counts["method"],
+        "recompiles_total": recomp_total,
+        "recompiles_warmup": recomp_warmup,
+        "recompiles_measured": recomp_measured,
+        "recompile_counter_method": method,
         "recompile_counter_key": recompile_counts["counter_key"],
         "recompile_log_lines": [e["line"] for e in parsed["recompiles"]][:40],
         "top_recompile_reason": top_recompile_reason(parsed),
         "dynamic_shape_notes": parsed["dynamic_notes"][:20],
+        "measured_banner_found": split["found"],
         "raw_log_preserved": True,
     }
 
@@ -668,8 +703,10 @@ def _compute(
     # evidence is not "clean": it DEFERS the recommendation.
     d: dict[str, Any] = candidates.get("D") or {}
     diag: dict[str, Any] = d.get("diagnostic") or {}
+    # GO P1-R1B \u00a732 Case A: clean = NO recompiles and NO unexpected
+    # graph breaks in the steady (MEASURED) window.
     recompiles_measured: Any = diag.get("recompiles_measured")
-    unexpected_breaks: Any = diag.get("graph_breaks_unexpected")
+    unexpected_breaks: Any = diag.get("graph_breaks_unexpected_measured_window")
     compiler_clean = (
         recompiles_measured == 0 and unexpected_breaks == 0
         if isinstance(recompiles_measured, int) and isinstance(unexpected_breaks, int)
@@ -831,6 +868,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="disable the AOTAutograd cache candidate (FX only)",
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--ts-root",
+        type=Path,
+        default=None,
+        help="reuse an existing ts_root in place (requires --resume)",
+    )
     parser.add_argument("--python", default=sys.executable)
     return parser.parse_args(argv)
 
@@ -841,8 +884,18 @@ def main(argv: list[str] | None = None) -> int:
 
     git_sha = _git_head_sha(repository_root)
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    ts_root = args.scratch_root / git_sha / ts
-    ts_root.mkdir(parents=True, exist_ok=True)
+    if args.ts_root is not None:
+        if not args.resume:
+            print("[r1b] --ts-root requires --resume", file=sys.stderr)
+            return 2
+        ts_root = args.ts_root
+        if not ts_root.is_dir():
+            print(f"[r1b] --ts-root does not exist: {ts_root}", file=sys.stderr)
+            return 2
+        ts = ts_root.name
+    else:
+        ts_root = args.scratch_root / git_sha / ts
+        ts_root.mkdir(parents=True, exist_ok=True)
 
     probe = _probe_runtime(args.python)
     fx = not args.no_fx_graph_cache
@@ -862,7 +915,7 @@ def main(argv: list[str] | None = None) -> int:
     # P0 requires the persistent root to START EMPTY (GO §16).  A stale
     # non-empty root is moved aside (non-destructively), never deleted.
     stale = None
-    if persistent_root.exists() and any(persistent_root.iterdir()):
+    if not args.resume and persistent_root.exists() and any(persistent_root.iterdir()):
         stale = _move_dir_away(persistent_root, f"stale-{ts}")
     persistent_root.mkdir(parents=True, exist_ok=True)
 
@@ -994,6 +1047,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if d_entry["status"] == STATUS_PASS:
             d_entry["diagnostic"] = _diagnostic_summary(d_entry)
+        d_entry["steady"] = _steady_metrics(d_entry)
+        d_entry["startup_headline"] = _startup_headline(d_entry)
         candidates["D"] = d_entry
 
     computed = _compute(
