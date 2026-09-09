@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 MEMORY_PLANNING_ENV = "TORCHINDUCTOR_MEMORY_PLANNING"
 MEMORY_POOL_ENV = "TORCHINDUCTOR_MEMORY_POOL"
@@ -250,27 +251,28 @@ def decide_memory_planning(
     )
 
 
-def census_record_to_dict(record: Mapping[str, object]) -> dict[str, object]:
+def census_record_to_dict(record: object) -> dict[str, object]:
     """Validate and return a plain-dict copy of an allocation-census record."""
 
     if not isinstance(record, Mapping):
         raise TypeError("census record must be a mapping")
+    rec = cast("Mapping[str, object]", record)
     for key in _CENSUS_REQUIRED_KEYS:
-        if key not in record:
+        if key not in rec:
             raise ValueError(f"census record is missing required key {key!r}")
-    candidates = record["candidates"]
-    if not isinstance(candidates, (list, tuple)):
+    raw_candidates = rec["candidates"]
+    if not isinstance(raw_candidates, (list, tuple)):
         raise TypeError("census 'candidates' must be a list")
+    # Typed boundary: the census builder always emits Mapping entries here.
+    candidates = cast("list[Mapping[str, object]]", raw_candidates)
     for entry in candidates:
-        if not isinstance(entry, Mapping):
-            raise TypeError("census candidate entries must be mappings")
         for key in _CANDIDATE_REQUIRED_KEYS:
             if key not in entry:
                 raise ValueError(f"census candidate is missing required key {key!r}")
-    return dict(record)
+    return dict(rec)
 
 
-def _finite(value: float) -> bool:
+def _finite(value: object) -> bool:
     return isinstance(value, (int, float)) and math.isfinite(value)
 
 
