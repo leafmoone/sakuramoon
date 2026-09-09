@@ -1,463 +1,456 @@
-"""Planner guarantees for the hdm_shifted_square_v2 camera viewport.
+"""Planner-level tests for the shifted-square camera viewport.
 
-Geometry authority is the SakuraMoon frozen invariant set (bucket
-vocabulary, min_crop_retention admission, stage-scaled square discovery),
-never the HDM public sources.
+Covers the P100 geometry matrix at R=256 (square, near-square, 1.2:1, 2:1,
+3:1, 5:1 in both orientations, the short-edge boundary at R and the
+no-upscale rejection just below it), the descriptive zoom/retention
+numerics, selection determinism, inclusive offset endpoints, multi-stage
+resolution scaling, plan/config validation, and the batch aggregate.
 """
 
 from __future__ import annotations
 
 import math
-import pickle
-import random
-from types import SimpleNamespace
-from typing import cast
+from dataclasses import replace
 
 import pytest
 
-from sakuramoon.config.schema import DataBucketsConfig
-from sakuramoon.data.buckets import (
-    BucketRejection,
-    BucketShape,
-    assign_bucket,
-    generate_base_buckets,
-    scale_buckets,
-)
+from sakuramoon.data.buckets import BucketShape
 from sakuramoon.data.camera_viewport import (
     CAMERA_FALLBACK_REASONS,
-    CAMERA_SHIFT_TOKEN_BIN_LABELS,
-    CAMERA_ZOOM_BAND_LABELS,
+    CAMERA_ORIENTATION_KEYS,
     CameraViewportError,
+    CameraViewportPlan,
     CameraViewportPolicy,
     aggregate_camera_viewport,
-    camera_shift_token_bin,
     camera_stage_edge,
-    camera_zoom_band,
-    discover_square_bucket,
     plan_camera_viewport,
 )
+from sakuramoon.data.pipeline import ImageAudit
 
-STAGE_EDGE = 512
-
-
-def _buckets() -> tuple[BucketShape, ...]:
-    config = DataBucketsConfig(
-        base_area_px=262144,
-        quantum_px=32,
-        min_short_edge_px=256,
-        max_aspect_ratio=4.0,
-        transpose_closed=True,
-    )
-    return scale_buckets(generate_base_buckets(config), STAGE_EDGE)
+R = 256
+POLICY_P1 = CameraViewportPolicy(enabled=True, probability=1.0)
+SEEDS = {"policy_seed": 1, "offset_seed": 2}
 
 
-BUCKETS = _buckets()
-
-
-def _assignment(width: int, height: int, buckets: tuple[BucketShape, ...] | None = None):
-    result = assign_bucket(
-        width,
-        height,
-        BUCKETS if buckets is None else buckets,
-        min_crop_retention=0.8,
-    )
-    assert not isinstance(result, BucketRejection)
-    return result
-
-
-def _plan(
-    width: int,
-    height: int,
-    *,
-    buckets: tuple[BucketShape, ...] | None = None,
-    probability: float = 1.0,
-    policy_seed: int = 1,
-    offset_seed: int = 1,
-    min_zoom: float = 1.10,
-    max_zoom: float = 1.50,
-):
-    policy = CameraViewportPolicy(
-        enabled=True,
-        probability=probability,
-        min_equivalent_zoom=min_zoom,
-        max_equivalent_zoom=max_zoom,
-    )
+def _plan(source_width: int, source_height: int, **kwargs: object) -> CameraViewportPlan:
     return plan_camera_viewport(
-        _assignment(width, height, buckets),
-        policy,
-        buckets=BUCKETS if buckets is None else buckets,
-        stage_edge=STAGE_EDGE,
-        source_size=(width, height),
-        policy_seed=policy_seed,
-        offset_seed=offset_seed,
+        POLICY_P1,
+        stage_edge=R,
+        source_size=(source_width, source_height),
+        **SEEDS,  # type: ignore[arg-type]
+        **kwargs,  # type: ignore[arg-type]
     )
 
 
-def test_square_bucket_discovery() -> None:
-    square = discover_square_bucket(BUCKETS, stage_edge=STAGE_EDGE)
-    assert square == STAGE_EDGE
-    assert discover_square_bucket(BUCKETS, stage_edge=256) is None
-    assert (
-        discover_square_bucket(
-            # Duck-type stand-in: the discovery contract reads width/height only.
-            cast(
-                "tuple[BucketShape, ...]",
-                (type("B", (), {"width": 512, "height": 512})(),),
-            ),
-            stage_edge=STAGE_EDGE,
+def _applied_plan(width: int, height: int) -> CameraViewportPlan:
+    plan = _plan(width, height)
+    assert plan.applied, f"{width}x{height} must be accepted at R={R}"
+    return plan
+
+
+class TestPolicyAndStageEdge:
+    def test_policy_valid_range(self) -> None:
+        assert CameraViewportPolicy(True, 0.0).probability == 0.0
+        assert CameraViewportPolicy(False, 1.0).probability == 1.0
+
+    @pytest.mark.parametrize(
+        ("enabled", "probability"),
+        [
+            (1, 1.0),  # type: ignore[arg-type]
+            (True, 1.5),
+            (True, -0.1),
+            (True, float("nan")),
+            (True, float("inf")),
+        ],
+    )
+    def test_policy_rejects_invalid_values(
+        self, enabled: bool, probability: float
+    ) -> None:
+        with pytest.raises(CameraViewportError):
+            CameraViewportPolicy(enabled, probability)
+
+    def test_stage_edge_discovers_unique_square(self) -> None:
+        buckets = (BucketShape(512, 256), BucketShape(256, 256), BucketShape(256, 512))
+        assert camera_stage_edge(buckets) == 256
+
+    @pytest.mark.parametrize("squares", [0, 2])
+    def test_stage_edge_fails_fast_without_unique_square(self, squares: int) -> None:
+        buckets = tuple(BucketShape(320, 448) for _ in range(3))
+        if squares == 2:
+            buckets = buckets + (BucketShape(256, 256), BucketShape(512, 512))
+        with pytest.raises(CameraViewportError):
+            camera_stage_edge(buckets)
+
+
+class TestP100GeometryMatrix:
+    """All legal accepts at R=256 are 256x256 views; no legacy fallbacks."""
+
+    @pytest.mark.parametrize(
+        ("width", "height", "orientation", "canvas"),
+        [
+            (512, 512, "square", (256, 256)),
+            (2600, 2500, "horizontal", (266, 256)),  # near-square
+            (1200, 1000, "horizontal", (307, 256)),  # 1.2:1
+            (2000, 1000, "horizontal", (512, 256)),  # 2:1
+            (3000, 1000, "horizontal", (768, 256)),  # 3:1
+            (5000, 1000, "horizontal", (1280, 256)),  # 5:1
+            (2500, 2600, "vertical", (256, 266)),  # near-square
+            (1000, 1200, "vertical", (256, 307)),  # 1.2:1
+            (1000, 2000, "vertical", (256, 512)),  # 2:1
+            (1000, 3000, "vertical", (256, 768)),  # 3:1
+            (1000, 5000, "vertical", (256, 1280)),  # 5:1
+            (640, 256, "horizontal", (640, 256)),  # short edge == R boundary
+            (256, 640, "vertical", (256, 640)),  # short edge == R boundary
+        ],
+    )
+    def test_matrix(
+        self,
+        width: int,
+        height: int,
+        orientation: str,
+        canvas: tuple[int, int],
+    ) -> None:
+        plan = _applied_plan(width, height)
+        assert plan.orientation == orientation
+        assert (plan.full_width, plan.full_height) == canvas
+        assert plan.viewport == R
+        assert plan.crop_box == (plan.left, plan.top, plan.left + R, plan.top + R)
+        assert 0 <= plan.left <= plan.full_width - R
+        assert 0 <= plan.top <= plan.full_height - R
+        if orientation == "horizontal":
+            assert plan.top == 0
+        elif orientation == "vertical":
+            assert plan.left == 0
+        else:
+            assert plan.left == 0 and plan.top == 0
+        # Descriptive numerics: zoom = sqrt(canvas/R^2), retention = R^2/canvas.
+        canvas_area = plan.full_width * plan.full_height
+        assert plan.equivalent_zoom == pytest.approx(
+            math.sqrt(canvas_area / (R * R)), rel=1e-12
         )
-        == STAGE_EDGE
+        assert plan.retention == pytest.approx((R * R) / canvas_area, rel=1e-12)
+        assert plan.equivalent_zoom >= 1.0
+        assert 0.0 < plan.retention <= 1.0
+
+    def test_square_is_identity(self) -> None:
+        plan = _applied_plan(512, 512)
+        assert plan.orientation == "square"
+        assert (plan.full_width, plan.full_height) == (R, R)
+        assert (plan.left, plan.top) == (0, 0)
+        assert plan.equivalent_zoom == 1.0
+        assert plan.retention == 1.0
+
+    def test_near_square_zero_shift_range_is_legal(self) -> None:
+        # 2504/2500 quantizes its long edge exactly to R: no shift range,
+        # offset 0, and the view is still a legal applied camera view.
+        plan = _applied_plan(2504, 2500)
+        assert plan.orientation == "horizontal"
+        assert (plan.full_width, plan.full_height) == (R, R)
+        assert (plan.left, plan.top) == (0, 0)
+        assert plan.equivalent_zoom == 1.0
+
+    @pytest.mark.parametrize(
+        ("width", "height"),
+        [
+            (630, 255),  # short edge 255 < 256
+            (255, 630),
+            (255, 255),
+        ],
     )
+    def test_no_upscale_rejection(self, width: int, height: int) -> None:
+        plan = _plan(width, height)
+        assert plan.applied is False
+        assert plan.fallback_reason == "no_upscale"
+        assert plan.orientation == "none"
+        assert (plan.full_width, plan.full_height) == (0, 0)
 
 
-def test_camera_stage_edge() -> None:
-    assert camera_stage_edge(BUCKETS) == STAGE_EDGE
-    assert camera_stage_edge((BUCKETS[0], BUCKETS[1])) == 0
-
-
-def test_zoom_band_labels_and_bounds() -> None:
-    assert CAMERA_ZOOM_BAND_LABELS == (
-        "[1.10,1.20)",
-        "[1.20,1.35)",
-        "[1.35,1.501]",
-    )
-    assert camera_zoom_band(1.10) == 0
-    assert camera_zoom_band(1.1999) == 0
-    assert camera_zoom_band(1.20) == 1
-    assert camera_zoom_band(1.35) == 2
-    assert camera_zoom_band(1.50) == 2
-    assert camera_zoom_band(1.501) == 2
-    with pytest.raises(ValueError):
-        camera_zoom_band(1.0999)
-    with pytest.raises(ValueError):
-        camera_zoom_band(1.502)
-
-
-def test_shift_token_bin_labels_and_bounds() -> None:
-    assert len(CAMERA_SHIFT_TOKEN_BIN_LABELS) == 6
-    assert camera_shift_token_bin(0.0) == 0
-    assert camera_shift_token_bin(0.99) == 0
-    assert camera_shift_token_bin(1.0) == 1
-    assert camera_shift_token_bin(1.99) == 1
-    assert camera_shift_token_bin(2.0) == 2
-    assert camera_shift_token_bin(3.99) == 2
-    assert camera_shift_token_bin(4.0) == 3
-    assert camera_shift_token_bin(7.99) == 3
-    assert camera_shift_token_bin(8.0) == 4
-    assert camera_shift_token_bin(15.99) == 4
-    assert camera_shift_token_bin(16.0) == 5
-    assert camera_shift_token_bin(1e9) == 5
-    with pytest.raises(ValueError):
-        camera_shift_token_bin(-1e-9)
-
-
-def test_horizontal_geometry_exact() -> None:
-    plan = _plan(1024, 512)
-    assert plan.applied
-    assert plan.fallback_reason == "none"
-    assert plan.orientation == "horizontal"
-    assert (plan.full_width, plan.full_height) == (1024, 512)
-    assert plan.viewport == STAGE_EDGE
-    assert plan.equivalent_zoom == pytest.approx(math.sqrt(2.0), rel=1e-12)
-    assert plan.retention == pytest.approx(0.5, rel=1e-12)
-    left, top, right, bottom = plan.crop_box
-    assert top == 0 and bottom == STAGE_EDGE
-    assert 0 <= left <= 512 and right == left + STAGE_EDGE
-    # Coupled algebra: (base + [y_shift, x_shift]) / zoom must reproduce the
-    # crop-frame coordinates, so the shifts are pinned to the crop geometry.
-    assert plan.camera_shift_x == pytest.approx(
-        2.0 * left / STAGE_EDGE + 1.0 - plan.full_width / STAGE_EDGE
-    )
-    assert plan.camera_shift_y == 0.0
-    signed = left + STAGE_EDGE // 2 - plan.full_width / 2.0
-    assert plan.signed_pixel_center_shift == pytest.approx(signed)
-    assert plan.absolute_pixel_center_shift == pytest.approx(abs(signed))
-    assert plan.latent_center_shift == pytest.approx(abs(signed) / 16.0)
-    # Coupled consistency: camera_shift_x is exactly 2 * signed / viewport.
-    assert plan.camera_shift_x == pytest.approx(2.0 * signed / STAGE_EDGE)
-
-
-def test_vertical_geometry_exact() -> None:
-    plan = _plan(512, 1024)
-    assert plan.applied
-    assert plan.orientation == "vertical"
-    assert (plan.full_width, plan.full_height) == (512, 1024)
-    left, top, right, bottom = plan.crop_box
-    assert left == 0 and right == STAGE_EDGE
-    assert 0 <= top <= 512 and bottom == top + STAGE_EDGE
-    assert plan.camera_shift_y == pytest.approx(
-        2.0 * top / STAGE_EDGE + 1.0 - plan.full_height / STAGE_EDGE
-    )
-    assert plan.camera_shift_x == 0.0
-    signed = top + STAGE_EDGE // 2 - plan.full_height / 2.0
-    assert plan.signed_pixel_center_shift == pytest.approx(signed)
-    assert plan.absolute_pixel_center_shift == pytest.approx(abs(signed))
-    assert plan.latent_center_shift == pytest.approx(abs(signed) / 16.0)
-    assert plan.camera_shift_y == pytest.approx(2.0 * signed / STAGE_EDGE)
-
-
-def test_exact_min_zoom_boundary_inclusive() -> None:
-    # z_ideal = sqrt(1210/1000) = 1.10 exactly: the boundary must apply.
-    plan = _plan(1210, 1000)
-    assert plan.applied
-    assert plan.orientation == "horizontal"
-    assert plan.full_width == 620
-    assert plan.equivalent_zoom >= 1.10 - 1e-12
-
-
-def test_exact_max_zoom_boundary_inclusive() -> None:
-    # z_ideal = sqrt(2250/1000) = 1.50 exactly: the boundary must apply.
-    plan = _plan(2250, 1000)
-    assert plan.applied
-    assert plan.full_width == 1152
-    assert plan.equivalent_zoom == pytest.approx(1.5, rel=1e-12)
-
-
-def test_quantization_cannot_escape_the_zoom_band() -> None:
-    # For every admissible source whose ideal zoom lies inside [1.10, 1.50],
-    # the quantized canvas must also stay inside the band (half-up rounding
-    # at 0.5 px cannot push z out of the band): no quantized_no_effect.
-    rng = random.Random(20260905)
-    checked = 0
-    for short in range(STAGE_EDGE, 1600, 37):
-        for aspect in (1.0 + 0.01 * index for index in range(10, 55)):
-            if not (1.10**2 <= aspect <= 1.50**2):
-                continue
-            width = max(short, round(short * aspect))
-            height = short
-            result = assign_bucket(
-                width,
-                height,
-                BUCKETS,
-                min_crop_retention=0.8,
-            )
-            if isinstance(result, BucketRejection):
-                continue
+class TestSelection:
+    def test_p1_is_always_selected(self) -> None:
+        for seed in range(64):
             plan = plan_camera_viewport(
-                result,
-                CameraViewportPolicy(True, 1.0, 1.10, 1.50),
-                buckets=BUCKETS,
-                stage_edge=STAGE_EDGE,
-                source_size=(width, height),
-                policy_seed=rng.randrange(2**63),
-                offset_seed=rng.randrange(2**63),
+                POLICY_P1,
+                stage_edge=R,
+                source_size=(4000, 2000),
+                policy_seed=seed,
+                offset_seed=seed,
             )
-            assert plan.applied, (width, height, plan.fallback_reason)
-            assert plan.fallback_reason != "quantized_no_effect"
-            checked += 1
-    assert checked > 200
+            assert plan.applied, f"seed {seed} must be selected at p=1"
+
+    def test_selection_is_deterministic_per_seed(self) -> None:
+        policy = CameraViewportPolicy(True, 0.5)
+        first = [
+            plan_camera_viewport(
+                policy,
+                stage_edge=R,
+                source_size=(4000, 2000),
+                policy_seed=seed,
+                offset_seed=seed,
+            )
+            for seed in range(16)
+        ]
+        second = [
+            plan_camera_viewport(
+                policy,
+                stage_edge=R,
+                source_size=(4000, 2000),
+                policy_seed=seed,
+                offset_seed=seed,
+            )
+            for seed in range(16)
+        ]
+        assert first == second
+
+    def test_p_half_is_mixed(self) -> None:
+        policy = CameraViewportPolicy(True, 0.5)
+        reasons = {
+            plan_camera_viewport(
+                policy,
+                stage_edge=R,
+                source_size=(4000, 2000),
+                policy_seed=seed,
+                offset_seed=0,
+            ).fallback_reason
+            for seed in range(64)
+        }
+        assert reasons == {"none", "not_selected"}
+
+    def test_inactive_policy_refuses_to_plan(self) -> None:
+        for policy in (
+            CameraViewportPolicy(False, 1.0),
+            CameraViewportPolicy(True, 0.0),
+        ):
+            with pytest.raises(CameraViewportError):
+                plan_camera_viewport(
+                    policy,
+                    stage_edge=R,
+                    source_size=(4000, 2000),
+                    policy_seed=1,
+                    offset_seed=2,
+                )
 
 
-def test_fallback_short_edge_too_small() -> None:
-    plan = _plan(400, 800)
-    assert not plan.applied
-    assert plan.fallback_reason == "short_edge_too_small"
+class TestOffsetsAndResolution:
+    def test_offset_endpoints_are_inclusive(self) -> None:
+        # 5:1 at R=256 -> canvas 1280x256, range 1024 on the long axis.
+        plan = _applied_plan(5000, 1000)
+        assert plan.full_width == 1280
+        range_max = plan.full_width - R
+        offsets = {
+            plan_camera_viewport(
+                POLICY_P1,
+                stage_edge=R,
+                source_size=(5000, 1000),
+                policy_seed=0,
+                offset_seed=seed,
+            ).left
+            for seed in range(4096)
+        }
+        assert min(offsets) == 0
+        assert max(offsets) == range_max
+        assert offsets <= set(range(range_max + 1))
 
-
-def test_fallback_near_square_below_min() -> None:
-    plan = _plan(600, 600)
-    assert not plan.applied
-    assert plan.fallback_reason == "near_square_below_min"
-    # 1210x1000 (z_ideal exactly 1.10) must NOT be near-square: boundary.
-    assert _plan(1210, 1000).applied
-
-
-def test_fallback_aspect_above_max() -> None:
-    plan = _plan(1280, 512)
-    assert not plan.applied
-    assert plan.fallback_reason == "aspect_above_max"
-    # 2250x1000 (z_ideal exactly 1.50) must NOT be above max: boundary.
-    assert _plan(2250, 1000).applied
-
-
-def test_fallback_not_selected() -> None:
-    policy = CameraViewportPolicy(True, 0.25, 1.10, 1.50)
-    not_selected = 0
-    for seed in range(400):
+    @pytest.mark.parametrize(
+        ("stage_edge", "canvas"),
+        [
+            (256, (512, 256)),
+            (512, (1024, 512)),
+            (768, (1536, 768)),
+            (1024, (2048, 1024)),
+        ],
+    )
+    def test_stage_scaling_keeps_the_same_aspect(
+        self, stage_edge: int, canvas: tuple[int, int]
+    ) -> None:
         plan = plan_camera_viewport(
-            _assignment(1024, 512),
-            policy,
-            buckets=BUCKETS,
-            stage_edge=STAGE_EDGE,
-            source_size=(1024, 512),
-            policy_seed=seed,
-            offset_seed=seed,
+            POLICY_P1,
+            stage_edge=stage_edge,
+            source_size=(4000, 2000),
+            policy_seed=1,
+            offset_seed=2,
         )
-        if plan.fallback_reason == "not_selected":
-            not_selected += 1
-            assert not plan.applied
-            assert plan.equivalent_zoom == 0.0
-            assert plan.crop_box == (0, 0, 0, 0)
-            assert plan.orientation == "none"
-    assert not_selected > 20  # p=0.25 over 400 draws
+        assert plan.applied
+        assert (plan.full_width, plan.full_height) == canvas
+        assert plan.crop_box[2] - plan.crop_box[0] == stage_edge
+        assert plan.crop_box[3] - plan.crop_box[1] == stage_edge
+
+    def test_long_edge_quantization_rounds_half_up(self) -> None:
+        # 1600x1000 at R=256: long_q = round_half_up(409.6) = 410.
+        plan = _applied_plan(1600, 1000)
+        assert (plan.full_width, plan.full_height) == (410, R)
 
 
-def test_fallback_no_square_bucket() -> None:
-    buckets = tuple(b for b in BUCKETS if b.width != b.height)
-    plan = _plan(1024, 512, buckets=buckets)
-    assert not plan.applied
-    assert plan.fallback_reason == "no_square_bucket"
-
-
-def test_inclusive_endpoints_reachable() -> None:
-    seen_zero = False
-    seen_full = False
-    available = 512
-    for seed in range(200_000):
-        plan = _plan(1024, 512, offset_seed=seed)
-        if plan.fallback_reason == "not_selected":
-            continue
-        if plan.left == 0:
-            seen_zero = True
-        if plan.left == available:
-            seen_full = True
-        if seen_zero and seen_full:
-            break
-    assert seen_zero and seen_full
-
-
-def test_determinism_and_seed_isolation() -> None:
-    first = _plan(1024, 512, policy_seed=7, offset_seed=11)
-    second = _plan(1024, 512, policy_seed=7, offset_seed=11)
-    assert first == second
-    varied_offsets = {
-        _plan(1024, 512, offset_seed=seed).left for seed in range(64)
-    }
-    assert len(varied_offsets) > 1
-    policy_varied = {
-        _plan(
-            1024,
-            512,
-            probability=0.5,
-            policy_seed=seed,
-            offset_seed=1,
-        ).fallback_reason
-        for seed in range(64)
-    }
-    assert policy_varied == {"none", "not_selected"}
-
-
-def test_plan_and_policy_are_picklable() -> None:
-    plan = _plan(1024, 512)
-    assert pickle.loads(pickle.dumps(plan)) == plan
-    policy = CameraViewportPolicy(True, 0.25, 1.10, 1.50)
-    assert pickle.loads(pickle.dumps(policy)) == policy
-
-
-def test_fallback_plan_strict_zeros() -> None:
-    plan = _plan(600, 600)  # near_square_below_min
-    assert not plan.applied
-    assert plan.orientation == "none"
-    assert plan.viewport == 0
-    assert (plan.full_width, plan.full_height) == (0, 0)
-    assert plan.crop_box == (0, 0, 0, 0)
-    assert (plan.left, plan.top) == (0, 0)
-    assert plan.equivalent_zoom == 0.0
-    assert plan.retention == 0.0
-    assert plan.normalized_offset == 0.0
-    assert plan.signed_pixel_center_shift == 0.0
-    assert plan.absolute_pixel_center_shift == 0.0
-    assert plan.latent_center_shift == 0.0
-    assert plan.camera_shift_x == 0.0
-    assert plan.camera_shift_y == 0.0
-
-
-def test_counts_strict_zero_contract() -> None:
-    counts = aggregate_camera_viewport(
-        (
-            SimpleNamespace(
-                camera_selected=False,
-                camera_applied=False,
-                camera_fallback_reason="not_selected",
-                camera_orientation="none",
-                camera_equivalent_zoom=0.0,
-                camera_final_retention=0.0,
-                camera_pixel_center_shift=0.0,
-                camera_latent_center_shift=0.0,
-            ),
-        )
+class TestValidation:
+    @pytest.mark.parametrize(
+        ("stage_edge", "source_size", "seeds"),
+        [
+            (0, (2000, 1000), (1, 2)),
+            (-1, (2000, 1000), (1, 2)),
+            (256, (0, 1000), (1, 2)),
+            (256, (2000, -1000), (1, 2)),
+            (256, (2000.0, 1000), (1, 2)),  # type: ignore[arg-type]
+            (256, (2000, 1000), (-1, 2)),
+            (256, (2000, 1000), (1, -2)),
+        ],
     )
-    assert counts.applied == 0
-    assert sum(counts.fallback_reasons.values()) == 1
-    assert counts.camera_zoom_sum == 0.0
-    assert counts.camera_retention_min == 0.0
-
-
-def test_aggregate_conservation() -> None:
-    audits = [
-        SimpleNamespace(
-            camera_selected=True,
-            camera_applied=True,
-            camera_fallback_reason="none",
-            camera_orientation="horizontal",
-            camera_equivalent_zoom=1.414,
-            camera_final_retention=0.5,
-            camera_pixel_center_shift=128.0,
-            camera_latent_center_shift=8.0,
-        ),
-        SimpleNamespace(
-            camera_selected=True,
-            camera_applied=False,
-            camera_fallback_reason="aspect_above_max",
-            camera_orientation="none",
-            camera_equivalent_zoom=0.0,
-            camera_final_retention=0.0,
-            camera_pixel_center_shift=0.0,
-            camera_latent_center_shift=0.0,
-        ),
-        SimpleNamespace(
-            camera_selected=False,
-            camera_applied=False,
-            camera_fallback_reason="not_selected",
-            camera_orientation="none",
-            camera_equivalent_zoom=0.0,
-            camera_final_retention=0.0,
-            camera_pixel_center_shift=0.0,
-            camera_latent_center_shift=0.0,
-        ),
-    ]
-    counts = aggregate_camera_viewport(audits)
-    assert counts.selected == 2
-    assert counts.applied == 1
-    assert sum(counts.fallback_reasons.values()) == 3
-    assert counts.fallback_reasons["none"] == 1
-    assert counts.fallback_reasons["aspect_above_max"] == 1
-    assert counts.fallback_reasons["not_selected"] == 1
-    assert counts.orientation_counts == {"horizontal": 1, "vertical": 0}
-    assert counts.camera_zoom_sum == pytest.approx(1.414)
-    assert counts.camera_retention_mean == pytest.approx(0.5)
-    assert counts.camera_abs_pixel_shift_mean == pytest.approx(128.0)
-    assert counts.camera_abs_latent_shift_max == pytest.approx(8.0)
-    assert set(counts.fallback_reasons) == set(CAMERA_FALLBACK_REASONS)
-    assert set(counts.zoom_bands) == set(CAMERA_ZOOM_BAND_LABELS)
-    assert set(counts.shift_token_bins) == set(CAMERA_SHIFT_TOKEN_BIN_LABELS)
-
-
-def test_aggregate_rejects_unknown_reason() -> None:
-    with pytest.raises(CameraViewportError):
-        aggregate_camera_viewport(
-            (
-                SimpleNamespace(
-                    camera_selected=False,
-                    camera_applied=False,
-                    camera_fallback_reason="bogus",
-                    camera_orientation="none",
-                    camera_equivalent_zoom=0.0,
-                    camera_final_retention=0.0,
-                    camera_pixel_center_shift=0.0,
-                    camera_latent_center_shift=0.0,
-                ),
+    def test_planner_rejects_invalid_inputs(
+        self,
+        stage_edge: int,
+        source_size: tuple[int, int],
+        seeds: tuple[int, int],
+    ) -> None:
+        with pytest.raises(CameraViewportError):
+            plan_camera_viewport(
+                POLICY_P1,
+                stage_edge=stage_edge,
+                source_size=source_size,
+                policy_seed=seeds[0],
+                offset_seed=seeds[1],
             )
-        )
 
+    def _applied_kwargs(self) -> dict[str, object]:
+        return {
+            "applied": True,
+            "fallback_reason": "none",
+            "orientation": "horizontal",
+            "viewport": R,
+            "full_width": 512,
+            "full_height": R,
+            "left": 64,
+            "top": 0,
+            "crop_box": (64, 0, 320, R),
+            "equivalent_zoom": math.sqrt(2.0),
+            "retention": 0.5,
+        }
 
-def test_all_reasons_are_exposed() -> None:
-    assert CAMERA_FALLBACK_REASONS == (
-        "none",
-        "not_selected",
-        "short_edge_too_small",
-        "near_square_below_min",
-        "aspect_above_max",
-        "quantized_no_effect",
-        "no_square_bucket",
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda plan: replace(plan, applied=False),  # type: ignore[attr-defined]
+            lambda plan: replace(plan, fallback_reason="near_square_below_min"),  # type: ignore[attr-defined]
+            lambda plan: replace(plan, orientation="diagonal"),  # type: ignore[attr-defined]
+            lambda plan: replace(plan, left=512),  # crop escapes the canvas  # type: ignore[attr-defined]
+            lambda plan: replace(plan, crop_box=(64, 0, 300, R)),  # type: ignore[attr-defined]
+            lambda plan: replace(plan, equivalent_zoom=0.5),  # type: ignore[attr-defined]
+            lambda plan: replace(plan, retention=0.0),  # type: ignore[attr-defined]
+            lambda plan: replace(plan,
+                equivalent_zoom=math.sqrt(2.0), retention=0.25  # inconsistent  # type: ignore[attr-defined]
+            ),
+        ],
     )
+    def test_plan_validation_rejects_inconsistent_geometry(
+        self, mutate: object
+    ) -> None:
+        plan = CameraViewportPlan(**self._applied_kwargs())
+        with pytest.raises(CameraViewportError):
+            mutate(plan)  # type: ignore[operator]
+
+    def test_unapplied_plan_must_be_zero(self) -> None:
+        CameraViewportPlan(
+            applied=False,
+            fallback_reason="not_selected",
+            orientation="none",
+            viewport=0,
+            full_width=0,
+            full_height=0,
+            left=0,
+            top=0,
+            crop_box=(0, 0, 0, 0),
+            equivalent_zoom=0.0,
+            retention=0.0,
+        )
+        with pytest.raises(CameraViewportError):
+            CameraViewportPlan(
+                applied=False,
+                fallback_reason="no_upscale",
+                orientation="none",
+                viewport=R,  # nonzero geometry on an unapplied plan
+                full_width=0,
+                full_height=0,
+                left=0,
+                top=0,
+                crop_box=(0, 0, 0, 0),
+                equivalent_zoom=0.0,
+                retention=0.0,
+            )
+
+
+def _audit(**overrides: object) -> ImageAudit:
+    base: dict[str, object] = {
+        "source_width": 2000,
+        "source_height": 1000,
+        "resized_width": 512,
+        "resized_height": 256,
+        "crop_box": (64, 0, 320, 256),
+        "crop_retention": 0.5,
+    }
+    base.update(overrides)
+    return ImageAudit(**base)  # type: ignore[arg-type]
+
+
+class TestAggregate:
+    def test_fixed_key_counts(self) -> None:
+        audits = (
+            _audit(
+                camera_policy="hdm_shifted_square_v2",
+                camera_selected=True,
+                camera_applied=True,
+                camera_orientation="horizontal",
+            ),
+            _audit(
+                camera_policy="hdm_shifted_square_v2",
+                camera_selected=True,
+                camera_applied=True,
+                camera_orientation="vertical",
+            ),
+            _audit(
+                camera_policy="hdm_shifted_square_v2",
+                camera_selected=True,
+                camera_applied=True,
+                camera_orientation="square",
+            ),
+            _audit(
+                camera_policy="hdm_shifted_square_v2",
+                camera_selected=True,
+                camera_fallback_reason="not_selected",
+            ),
+            _audit(),  # camera absent from the policy entirely
+        )
+        counts = aggregate_camera_viewport(audits)
+        assert counts.selected == 4
+        assert counts.applied == 3
+        assert counts.orientation_counts == {
+            "horizontal": 1,
+            "vertical": 1,
+            "square": 1,
+        }
+        assert set(counts.orientation_counts) == set(CAMERA_ORIENTATION_KEYS)
+
+    def test_empty_batch_is_strict_zero(self) -> None:
+        counts = aggregate_camera_viewport(())
+        assert counts.selected == 0
+        assert counts.applied == 0
+        assert counts.orientation_counts == {key: 0 for key in CAMERA_ORIENTATION_KEYS}
+
+    def test_unknown_orientation_raises(self) -> None:
+        with pytest.raises(CameraViewportError):
+            aggregate_camera_viewport(
+                (
+                    _audit(
+                        camera_selected=True,
+                        camera_applied=True,
+                        camera_orientation="diagonal",
+                    ),
+                )
+            )
+
+    def test_counts_reject_inconsistent_records(self) -> None:
+        with pytest.raises(CameraViewportError):
+            from sakuramoon.data.camera_viewport import CameraViewportCounts
+
+            CameraViewportCounts(
+                selected=1,
+                applied=2,  # applied > selected
+                orientation_counts={key: 0 for key in CAMERA_ORIENTATION_KEYS},
+            )
+        assert CAMERA_FALLBACK_REASONS == ("none", "not_selected", "no_upscale")

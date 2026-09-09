@@ -92,10 +92,10 @@ def test_vertical_equivalence_vs_crop_coordinates() -> None:
         assert (got - expected).abs().max().item() <= TOLERANCE
 
 
-def test_exact_zoom_boundaries_equivalence() -> None:
+def test_canvas_extent_equivalence() -> None:
     token_h = token_w = 16
     base = _base(token_h, token_w)
-    # min zoom: full = (620, 512); max zoom: full = (1152, 512)
+    # Two arbitrary canvases: a narrow and a wide long axis.
     for full_w in (620, 1152):
         for left in (0, full_w - 512):
             zoom, x_shift, y_shift = camera_transform_params(
@@ -117,15 +117,20 @@ def test_exact_zoom_boundaries_equivalence() -> None:
                 device=DEVICE,
             )
             assert (got - expected).abs().max().item() <= TOLERANCE
-    # z bounds themselves
+    # The descriptive zoom is a property of the canvas aspect only:
+    # any finite value >= 1.0 is legal (square source = identity 1.0).
     zoom_min, _, _ = camera_transform_params(
         viewport=512, full_width=620, full_height=512, left=0, top=0
     )
     zoom_max, _, _ = camera_transform_params(
         viewport=512, full_width=1152, full_height=512, left=0, top=0
     )
-    assert zoom_min >= 1.10 - 1e-12
-    assert zoom_max == pytest.approx(1.5, rel=1e-12)
+    assert zoom_min > 1.0
+    assert zoom_max > zoom_min
+    identity_zoom, ix, iy = camera_transform_params(
+        viewport=512, full_width=512, full_height=512, left=0, top=0
+    )
+    assert (identity_zoom, ix, iy) == (1.0, 0.0, 0.0)
 
 
 def test_transform_params_closed_form() -> None:

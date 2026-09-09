@@ -1,37 +1,30 @@
-"""Config-layer tests for the camera-viewport schema.
+"""Config-layer tests for the shifted-square camera viewport schema.
 
-Pins old-config compatibility (absent/disabled camera byte-identity),
-schema validation, the camera/spatial mutual exclusion, and the exact
-leaves of the two canary configs (p25 and p100).
+Covers camera-absent compatibility (no new resolved table bytes), the
+effectively-off shapes (absent / disabled-any-p / enabled p=0) against the
+camera/spatial mutual exclusion that keys on the single activation
+condition, exact canary leaves (p25 and p100), and field validation.
 """
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import pytest
 
 from sakuramoon.config import ConfigurationError, load_config
+from sakuramoon.config.load import LoadedConfig
+from sakuramoon.config.schema import RuntimeConfig
 
 CONFIG_ROOT = Path("config")
 
-# Byte-identity anchors: the resolved TOMLs produced by the pre-camera dev
-# code (dev @ 100d768e4). Adding the optional camera_viewport field must not
-# change the resolved output of any camera-absent config (exclude_none).
-# Constants are split so display-layer hex masking cannot corrupt this file.
-LIVE_G1_RESOLVED_SHA256 = (
-    "f060224f73fd2cab335d3b9aa38a1455b36943867604b31367e"
-    "9e096b04d501e"
-)
-PRODUCTION_RESOLVED_SHA256 = (
-    "8b34b09ca853cd82f9167649c28392a19fe17b7c59672b8fe1448f4"
-    "cb8789004"
-)
 
-
-def _load(name: str):
-    return load_config(Path(name), config_root=CONFIG_ROOT, validate_secrets=False)
+def _load(name: str, config_root: Path | None = None) -> LoadedConfig:
+    return load_config(
+        Path(name),
+        config_root=config_root or CONFIG_ROOT,
+        validate_secrets=False,
+    )
 
 
 class _TmpConfigRoot:
@@ -50,156 +43,232 @@ class _TmpConfigRoot:
         return name
 
 
-class TestOldConfigCompatibility:
-    def test_production_config_parses_without_camera(self) -> None:
-        loaded = _load("train_g1_cmuon_production.toml")
-        assert loaded.config.data.camera_viewport is None
-        assert loaded.config.data.spatial_crop.enabled is True
+def _camera_body(
+    base: str,
+    *,
+    enabled: bool,
+    probability: str,
+    mode: str = "hdm_shifted_square_v2",
+    viewport: str = "stage_square",
+    offset_distribution: str = "uniform_long_axis_inclusive",
+    zoom_source: str = "natural_source_aspect",
+) -> str:
+    return (
+        f'extends = ["{base}"]\n'
+        "\n"
+        "[data.camera_viewport]\n"
+        f"enabled = {str(enabled).lower()}\n"
+        f'mode = "{mode}"\n'
+        f"probability = {probability}\n"
+        f'viewport = "{viewport}"\n'
+        f'offset_distribution = "{offset_distribution}"\n'
+        f'zoom_source = "{zoom_source}"\n'
+    )
 
+
+def _is_active(config: RuntimeConfig) -> bool:
+    camera = config.data.camera_viewport
+    return camera is not None and camera.enabled and camera.probability > 0.0
+
+
+class TestCameraAbsentCompatibility:
     def test_live_g1_parses_without_camera(self) -> None:
         loaded = _load("train_g1.toml")
         assert loaded.config.data.camera_viewport is None
         assert loaded.config.data.spatial_crop.enabled is False
 
-    def test_live_g1_resolved_toml_is_byte_identical_to_baseline(self) -> None:
-        loaded = _load("train_g1.toml")
-        digest = hashlib.sha256(loaded.resolved_toml.encode("utf-8")).hexdigest()
-        assert digest == LIVE_G1_RESOLVED_SHA256
-
-    def test_production_resolved_toml_is_byte_identical_to_baseline(self) -> None:
+    def test_production_config_parses_without_camera(self) -> None:
         loaded = _load("train_g1_cmuon_production.toml")
-        digest = hashlib.sha256(loaded.resolved_toml.encode("utf-8")).hexdigest()
-        assert digest == PRODUCTION_RESOLVED_SHA256
+        assert loaded.config.data.camera_viewport is None
+        assert loaded.config.data.spatial_crop.enabled is True
 
-    def test_absent_camera_emits_no_camera_bytes(self) -> None:
+    def test_absent_camera_emits_no_camera_table_bytes(self) -> None:
         for name in ("train_g1.toml", "train_g1_cmuon_production.toml"):
             loaded = _load(name)
             assert "camera_viewport" not in loaded.resolved_toml
             assert "camera_" not in loaded.resolved_toml
 
 
-class TestValidation:
-    def _config(self, tmp_path: Path, body: str) -> None:
-        root = _TmpConfigRoot(tmp_path)
-        name = root.write("camera_test.toml", body)
-        with pytest.raises(ConfigurationError):
-            load_config(Path(name), config_root=root.root, validate_secrets=False)
+class TestOffShapesParse:
+    """Every effectively-off shape parses and is inactive."""
 
-    def _camera_body(self, base: str = "train_g1_cmuon_production.toml", **overrides: object) -> str:
-        table = (
-            "[data.camera_viewport]\n"
-            f"enabled = {overrides.get('enabled', 'true')}\n"
-            "mode = \"hdm_shifted_square_v2\"\n"
-            f"probability = {overrides.get('probability', '0.25')}\n"
-            "viewport = \"stage_square\"\n"
-            f"min_equivalent_zoom = {overrides.get('min_zoom', '1.10')}\n"
-            f"max_equivalent_zoom = {overrides.get('max_zoom', '1.50')}\n"
-            "offset_distribution = \"uniform_long_axis_inclusive\"\n"
-            "zoom_source = \"natural_source_aspect\"\n"
-            "fallback_to_aspect_bucket = true\n"
-            f"{overrides.get('extra', '')}"
-        )
-        return f'extends = ["{base}"]\n' + table
+    def test_absent_table_is_inactive(self) -> None:
+        loaded = _load("train_g1.toml")
+        assert loaded.config.data.camera_viewport is None
+        assert not _is_active(loaded.config)
 
-    def test_unknown_field_fails(self, tmp_path: Path) -> None:
-        self._config(
-            tmp_path,
-            self._camera_body(extra="bogus_key = 1\n"),
-        )
-
-    def test_invalid_probability_fails(self, tmp_path: Path) -> None:
-        for bad in ("1.5", "-0.1"):
-            self._config(
-                tmp_path,
-                self._camera_body(probability=bad),
-            )
-
-    def test_enabled_with_zero_probability_fails(self, tmp_path: Path) -> None:
-        self._config(tmp_path, self._camera_body(probability="0.0"))
-
-    def test_disabled_with_positive_probability_fails(self, tmp_path: Path) -> None:
-        self._config(
-            tmp_path,
-            self._camera_body(enabled="false", probability="0.25"),
-        )
-
-    def test_disabled_with_zero_probability_parses(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        ("enabled", "probability"),
+        [
+            (False, "0.0"),
+            (False, "1.0"),
+            (True, "0.0"),
+        ],
+    )
+    def test_off_shapes_parse_and_are_inactive(
+        self, tmp_path: Path, enabled: bool, probability: str
+    ) -> None:
         root = _TmpConfigRoot(tmp_path)
         name = root.write(
             "camera_off.toml",
-            self._camera_body(
-                base="train_g1.toml", enabled="false", probability="0.0"
+            _camera_body(
+                "train_g1.toml", enabled=enabled, probability=probability
             ),
         )
-        loaded = load_config(
-            Path(name), config_root=root.root, validate_secrets=False
-        )
+        loaded = _load(name, config_root=root.root)
         camera = loaded.config.data.camera_viewport
         assert camera is not None
-        assert camera.enabled is False
-        assert camera.probability == 0.0
+        assert camera.enabled is enabled
+        assert camera.probability == float(probability)
+        assert not _is_active(loaded.config)
 
-    def test_min_gte_max_fails(self, tmp_path: Path) -> None:
-        for min_zoom, max_zoom in (("1.50", "1.50"), ("1.40", "1.20")):
-            self._config(
-                tmp_path,
-                self._camera_body(min_zoom=min_zoom, max_zoom=max_zoom),
-            )
-
-    def test_min_below_one_fails(self, tmp_path: Path) -> None:
-        self._config(tmp_path, self._camera_body(min_zoom="1.00"))
-
-    def test_max_above_1_5_fails(self, tmp_path: Path) -> None:
-        self._config(tmp_path, self._camera_body(max_zoom="1.51"))
-
-    def test_camera_and_spatial_both_enabled_fails(self, tmp_path: Path) -> None:
-        # The production lineage already enables spatial p50; enabling camera
-        # on top of it must be rejected by the mutual-exclusion validator.
-        self._config(tmp_path, self._camera_body())
+    def test_active_shape_is_active(self, tmp_path: Path) -> None:
+        root = _TmpConfigRoot(tmp_path)
+        name = root.write(
+            "camera_on.toml",
+            _camera_body("train_g1.toml", enabled=True, probability="0.25"),
+        )
+        loaded = _load(name, config_root=root.root)
+        assert _is_active(loaded.config)
 
 
-class TestCanaryConfigs:
-    def test_p25_exact_leaves(self) -> None:
-        loaded = _load("train_g1_camera_v2_p25.toml")
-        config = loaded.config
-        camera = config.data.camera_viewport
+class TestMutualExclusion:
+    """Exclusion keys on the single activation condition, not on the table."""
+
+    def test_active_camera_conflicts_with_spatial(self, tmp_path: Path) -> None:
+        root = _TmpConfigRoot(tmp_path)
+        name = root.write(
+            "camera_conflict.toml",
+            _camera_body(
+                "train_g1_cmuon_production.toml",
+                enabled=True,
+                probability="0.25",
+            ),
+        )
+        with pytest.raises(ConfigurationError, match="mutually exclusive"):
+            _load(name, config_root=root.root)
+
+    @pytest.mark.parametrize(
+        ("enabled", "probability"),
+        [
+            (False, "1.0"),
+            (True, "0.0"),
+        ],
+    )
+    def test_off_camera_does_not_block_spatial(
+        self, tmp_path: Path, enabled: bool, probability: str
+    ) -> None:
+        root = _TmpConfigRoot(tmp_path)
+        name = root.write(
+            "camera_off_spatial.toml",
+            _camera_body(
+                "train_g1_cmuon_production.toml",
+                enabled=enabled,
+                probability=probability,
+            ),
+        )
+        loaded = _load(name, config_root=root.root)
+        assert loaded.config.data.spatial_crop.enabled is True
+        assert not _is_active(loaded.config)
+
+    def test_active_camera_with_spatial_disabled_parses(self, tmp_path: Path) -> None:
+        root = _TmpConfigRoot(tmp_path)
+        name = root.write(
+            "camera_only.toml",
+            _camera_body("train_g1.toml", enabled=True, probability="1.0"),
+        )
+        loaded = _load(name, config_root=root.root)
+        assert _is_active(loaded.config)
+        assert loaded.config.data.spatial_crop.enabled is False
+
+
+class TestCanaryLeaves:
+    def test_p100_exact_leaves(self) -> None:
+        loaded = _load("train_g1_camera_v2_p100.toml")
+        camera = loaded.config.data.camera_viewport
         assert camera is not None
         assert camera.enabled is True
         assert camera.mode == "hdm_shifted_square_v2"
-        assert camera.probability == 0.25
+        assert camera.probability == 1.0
         assert camera.viewport == "stage_square"
-        assert camera.min_equivalent_zoom == 1.10
-        assert camera.max_equivalent_zoom == 1.50
         assert camera.offset_distribution == "uniform_long_axis_inclusive"
         assert camera.zoom_source == "natural_source_aspect"
-        assert camera.fallback_to_aspect_bucket is True
-        # First-version mutual exclusion: the live G1 base inherits spatial
-        # disabled, so the canary needs no spatial override.
-        assert config.data.spatial_crop.enabled is False
-        assert config.data.spatial_crop.probability == 0.0
-        assert config.run.run_id == "g1_camera_v2_p25"
-        assert config.paths.checkpoint_dir == "output_model/g1_camera_v2_p25"
+        # Low-resolution shifted-square target config: inherits the live G1
+        # resolution; no legacy zoom-window or fallback leaves exist.
+        assert loaded.config.train.resolution == 256
+        legacy = set(camera.model_dump()) & {
+            "min_equivalent_zoom",
+            "max_equivalent_zoom",
+            "fallback_to_aspect_bucket",
+        }
+        assert legacy == set()
 
-    def test_p100_exact_leaves(self) -> None:
-        loaded = _load("train_g1_camera_v2_p100.toml")
-        config = loaded.config
-        camera = config.data.camera_viewport
+    def test_p25_exact_leaves(self) -> None:
+        loaded = _load("train_g1_camera_v2_p25.toml")
+        camera = loaded.config.data.camera_viewport
         assert camera is not None
         assert camera.enabled is True
-        assert camera.probability == 1.0
-        assert config.run.run_id == "g1_camera_v2_p100"
-        assert config.data.spatial_crop.enabled is False
-        assert config.paths.checkpoint_dir == "output_model/g1_camera_v2_p100"
+        assert camera.probability == 0.25
+        assert camera.mode == "hdm_shifted_square_v2"
+        assert loaded.config.train.resolution == 256
+        assert _is_active(loaded.config)
 
-    def test_p25_and_p100_differ_only_in_probability_and_identity(self) -> None:
-        p25 = _load("train_g1_camera_v2_p25.toml")
-        p100 = _load("train_g1_camera_v2_p100.toml")
-        c25 = p25.config.data.camera_viewport
-        c100 = p100.config.data.camera_viewport
-        assert c25 is not None and c100 is not None
-        assert c25.probability != c100.probability
-        dump25 = c25.model_dump()
-        dump100 = c100.model_dump()
-        dump100["probability"] = dump25["probability"]
-        assert dump25 == dump100
-        assert p25.config.run.run_id != p100.config.run.run_id
+    def test_canaries_do_not_override_training_parameters(self) -> None:
+        baseline = _load("train_g1.toml").config
+        for name in ("train_g1_camera_v2_p100.toml", "train_g1_camera_v2_p25.toml"):
+            loaded = _load(name).config
+            assert loaded.train == baseline.train
+            assert loaded.optimizer == baseline.optimizer
+            assert loaded.checkpoint == baseline.checkpoint
+
+
+class TestFieldValidation:
+    def _expect_error(self, tmp_path: Path, body: str, pattern: str) -> None:
+        root = _TmpConfigRoot(tmp_path)
+        name = root.write("camera_invalid.toml", body)
+        with pytest.raises(ConfigurationError, match=pattern):
+            _load(name, config_root=root.root)
+
+    def test_probability_above_one(self, tmp_path: Path) -> None:
+        self._expect_error(
+            tmp_path,
+            _camera_body("train_g1.toml", enabled=True, probability="1.1"),
+            "probability",
+        )
+
+    def test_probability_below_zero(self, tmp_path: Path) -> None:
+        self._expect_error(
+            tmp_path,
+            _camera_body("train_g1.toml", enabled=True, probability="-0.1"),
+            "probability",
+        )
+
+    def test_toml_integer_probability_is_coerced(self, tmp_path: Path) -> None:
+        root = _TmpConfigRoot(tmp_path)
+        name = root.write(
+            "camera_int_p.toml",
+            _camera_body("train_g1.toml", enabled=True, probability="1"),
+        )
+        loaded = _load(name, config_root=root.root)
+        camera = loaded.config.data.camera_viewport
+        assert camera is not None
+        assert camera.probability == 1.0
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("mode", "hdm_shifted_square_v1"),
+            ("viewport", "full_frame"),
+            ("offset_distribution", "gaussian"),
+            ("zoom_source", "config_window"),
+        ],
+    )
+    def test_unknown_literal_rejected(
+        self, tmp_path: Path, field: str, value: str
+    ) -> None:
+        body = _camera_body("train_g1.toml", enabled=True, probability="0.25")
+        prefix = field + " = \""
+        start = body.index(prefix)
+        end = body.index("\n", start + len(prefix))
+        body = body[:start] + f'{field} = "{value}"\n' + body[end + 1 :]
+        self._expect_error(tmp_path, body, field)

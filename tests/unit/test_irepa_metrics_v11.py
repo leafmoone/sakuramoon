@@ -128,7 +128,6 @@ def _measurement(
         caption_plans=(),
         spatial_crop=_spatial_zero(),
         camera_viewport=aggregate_camera_viewport(()),
-        camera_zoom_bands=(),
         transparent=TransparentWhiteCounts(
             tagged=0,
             composited=0,
@@ -292,7 +291,6 @@ def _single_sample_measurement(
             both_axes_count=0,
         ),
         camera_viewport=aggregate_camera_viewport(()),
-        camera_zoom_bands=(),
         transparent=TransparentWhiteCounts(
             tagged=0,
             composited=0,
