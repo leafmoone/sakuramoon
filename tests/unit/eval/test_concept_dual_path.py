@@ -9,12 +9,19 @@ evaluator and a fake CLIP model so no GPU or model download is needed.
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 from typing import cast
 
 import pytest
 import torch
 
-from sakuramoon.eval.concept_suite import _flatten_dual_path, run_dual_path_suite
+from sakuramoon.eval.concept_suite import (
+    CONCEPT_IMAGE_STATES,
+    _flatten_dual_path,
+    run_dual_path_suite,
+    save_state_images,
+)
 from sakuramoon.eval.concepts import (
     ConceptManifest,
     ConceptSuiteError,
@@ -156,20 +163,66 @@ def test_run_dual_path_suite_generates_five_states_with_one_shared_null() -> Non
     assert null_calls[0]["seeds"] == tuple(
         case.seed for case in canonical_cases
     )
-    # 5 x N concept images.
-    for variant, tensor in images.items():
+    # 5 x N concept images, keyed by the single shared state definition.
+    assert set(images) == set(CONCEPT_IMAGE_STATES)
+    for underscore_key in (
+        "condition_canonical",
+        "condition_swap",
+        "text_canonical",
+        "text_swap",
+    ):
+        assert underscore_key not in images
+    for tensor in images.values():
         assert tensor.shape[0] == len(manifest.concepts)
-        assert variant in {
-            "condition_canonical",
-            "condition_swap",
-            "text_canonical",
-            "text_swap",
-            "null",
-        }
     assert len(result.condition_metrics) == len(manifest.concepts)
     assert len(result.text_metrics) == len(manifest.concepts)
     assert "overall" in [agg.group for agg in result.condition_aggregates]
     assert "overall" in [agg.group for agg in result.text_aggregates]
+
+
+def test_image_save_uses_the_same_state_contract_as_the_runner() -> None:
+    # The CLI's PNG export iterates the same CONCEPT_IMAGE_STATES constant
+    # the runner's image dict is keyed by; a fake single-concept draw must
+    # produce exactly the five hyphenated PNG names with no KeyError.
+    manifest = _manifest()
+    images_dir = _tmp_images_dir()
+    images = {
+        state: torch.zeros(1, 3, 8, 8, dtype=torch.uint8)
+        for state in CONCEPT_IMAGE_STATES
+    }
+    saved = save_state_images(
+        images_dir,
+        (manifest.concepts[0].id,),
+        images,
+    )
+    assert saved == len(CONCEPT_IMAGE_STATES)
+    expected = {f"A001.{state}.png" for state in CONCEPT_IMAGE_STATES}
+    assert expected == {
+        "A001.condition-canonical.png",
+        "A001.condition-swap.png",
+        "A001.text-canonical.png",
+        "A001.text-swap.png",
+        "A001.null.png",
+    }
+    assert expected == {path.name for path in images_dir.iterdir()}
+
+
+def test_image_save_fails_fast_on_a_missing_state() -> None:
+    images = {
+        state: torch.zeros(1, 3, 8, 8, dtype=torch.uint8)
+        for state in CONCEPT_IMAGE_STATES
+    }
+    del images["text-swap"]
+    with pytest.raises(KeyError, match="text-swap"):
+        save_state_images(
+            _tmp_images_dir(),
+            ("A001",),
+            images,
+        )
+
+
+def _tmp_images_dir() -> Path:
+    return Path(tempfile.mkdtemp(prefix="concept-states-"))
 
 
 def test_score_dual_path_requires_the_same_null_features() -> None:

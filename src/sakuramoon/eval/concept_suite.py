@@ -15,6 +15,7 @@ never drift apart.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import cast
@@ -37,7 +38,51 @@ from sakuramoon.eval.features import CLIP_MODEL_ID, ClipFeatureModel
 from sakuramoon.eval.runtime import TrainingEvaluator
 from sakuramoon.eval.spec import PromptCase
 
-__all__ = ["run_concept_suite", "run_dual_path_suite"]
+__all__ = [
+    "CONCEPT_IMAGE_STATES",
+    "run_concept_suite",
+    "run_dual_path_suite",
+    "save_state_images",
+]
+
+# The single definition of the concept image states.  Both the runner's
+# image dict and the standalone CLI's PNG export use these exact names, so
+# there is no second naming layer (no underscore/hyphen aliasing).
+CONCEPT_IMAGE_STATES: tuple[str, ...] = (
+    "condition-canonical",
+    "condition-swap",
+    "text-canonical",
+    "text-swap",
+    "null",
+)
+
+
+def save_state_images(
+    images_dir: Path,
+    concept_ids: tuple[str, ...],
+    images: Mapping[str, torch.Tensor],
+) -> int:
+    """Export one PNG per concept and state; returns the file count.
+
+    Iterates the shared :data:`CONCEPT_IMAGE_STATES` against the runner's
+    image dict, so a missing state is a hard ``KeyError`` instead of a
+    silently missing PNG.  Images must be uint8 ``[N, 3, H, W]``.
+    """
+
+    import numpy as np
+    from PIL import Image
+
+    images_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for index, concept_id in enumerate(concept_ids):
+        for state in CONCEPT_IMAGE_STATES:
+            image = images[state][index]
+            array = image.permute(1, 2, 0).numpy()
+            Image.fromarray(np.ascontiguousarray(array)).save(
+                images_dir / f"{concept_id}.{state}.png"
+            )
+            count += 1
+    return count
 
 
 def load_reference_images(
@@ -224,10 +269,10 @@ def run_dual_path_suite(
         clip_refs=ref_features,
     )
     images = {
-        "condition_canonical": condition_canonical_images,
-        "condition_swap": condition_swap_images,
-        "text_canonical": text_canonical_images,
-        "text_swap": text_swap_images,
+        "condition-canonical": condition_canonical_images,
+        "condition-swap": condition_swap_images,
+        "text-canonical": text_canonical_images,
+        "text-swap": text_swap_images,
         "null": null_images,
     }
     return result, images

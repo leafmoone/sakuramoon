@@ -297,7 +297,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     from sakuramoon.config import load_config
     from sakuramoon.encoders.mage_vae import load_local_mage_vae
     from sakuramoon.encoders.qwen import load_local_qwen
-    from sakuramoon.eval.concept_suite import run_dual_path_suite
+    from sakuramoon.eval.concept_suite import (
+        run_dual_path_suite,
+        save_state_images,
+    )
     from sakuramoon.eval.concepts import (
         ConceptManifest,
         render_suite_markdown,
@@ -425,27 +428,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     markdown_path.write_bytes(markdown.encode("utf-8"))
 
     if not args.no_images:
-        import numpy as np
-        from PIL import Image
-
         images_dir = run_dir / "images"
-        images_dir.mkdir(parents=True, exist_ok=True)
-        for index, concept in enumerate(manifest.concepts):
-            for variant in (
-                "condition-canonical",
-                "condition-swap",
-                "text-canonical",
-                "text-swap",
-                "null",
-            ):
-                image = images[variant][index]
-                array = image.permute(1, 2, 0).numpy()
-                Image.fromarray(np.ascontiguousarray(array)).save(
-                    images_dir / f"{concept.id}.{variant}.png"
-                )
+        saved = save_state_images(
+            images_dir,
+            tuple(concept.id for concept in manifest.concepts),
+            images,
+        )
         print(
-            f"[concept-eval] 生成图像: {images_dir} "
-            f"(5 x {len(manifest.concepts)})",
+            f"[concept-eval] 生成图像: {images_dir} ({saved} files)",
             flush=True,
         )
 
