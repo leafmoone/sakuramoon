@@ -1,10 +1,13 @@
 """Run the standalone concept-conditioning suite on a saved checkpoint.
 
-For every concept in the suite manifest the CLI generates three images from
-one shared noise stream (canonical tag text, fully dropped condition, and the
-swap partner's tag text), extracts CLIP features for the generated images and
-the Danbooru reference posts, and reports the unified-sign margins,
-reference similarity, and self-retrieval ranking.
+For every concept in the suite manifest the CLI generates five images from
+one shared noise stream -- condition-canonical, condition-swap, the two
+text-pathway variants, and one shared fully-dropped (null) pass -- extracts
+CLIP features for the generated images and the Danbooru reference posts,
+scores both prompt pathways independently, and reports namespaced
+(``condition/...`` vs ``text/...``) margins, reference similarity, and
+self-retrieval ranking.  The online in-training suite and this CLI share
+the single ``run_dual_path_suite`` implementation.
 
 Reference posts are downloaded from Danbooru on first use and cached under
 the manifest's ``refs/`` directory (stdlib urllib only, no new dependencies).
@@ -37,9 +40,6 @@ if TYPE_CHECKING:
     import torch
 
     from sakuramoon.eval.concepts import ConceptManifest
-    from sakuramoon.eval.features import ClipFeatureModel
-    from sakuramoon.eval.runtime import TrainingEvaluator
-    from sakuramoon.eval.spec import PromptCase
     from sakuramoon.train.step import TrainableComposite
 
 _SUITE_DIR = "data/concept-benchmarks/concept-120-v1"
@@ -277,46 +277,6 @@ def load_reference_images(
     return torch.stack(images)
 
 
-def _generate_chunked(
-    evaluator: TrainingEvaluator,
-    cases: tuple[PromptCase, ...],
-    *,
-    batch_size: int,
-    null: bool,
-) -> torch.Tensor:
-    """Run the evaluator's generation pass in bounded chunks (per-pass progress)."""
-
-    import torch
-
-    label = "null" if null else "canonical/swap"
-    chunks: list[torch.Tensor] = []
-    for start in range(0, len(cases), batch_size):
-        chunk = cases[start : start + batch_size]
-        print(
-            f"[concept-eval] 生成 {label} 批次 {start + 1}-{start + len(chunk)}/"
-            f"{len(cases)}",
-            flush=True,
-        )
-        chunks.append(evaluator.generate(chunk, null=null).cpu())
-    return torch.cat(chunks)
-
-
-def _extract_features(
-    clip: ClipFeatureModel,
-    images: torch.Tensor,
-    *,
-    batch_size: int,
-) -> torch.Tensor:
-    import torch
-
-    chunks: list[torch.Tensor] = []
-    for start in range(0, images.shape[0], batch_size):
-        chunks.append(
-            clip.features(images[start : start + batch_size]).cpu()
-        )
-    return torch.cat(chunks)
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     current = os.environ.get("PYTORCH_ALLOC_CONF", "")
@@ -337,16 +297,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     from sakuramoon.config import load_config
     from sakuramoon.encoders.mage_vae import load_local_mage_vae
     from sakuramoon.encoders.qwen import load_local_qwen
+    from sakuramoon.eval.concept_suite import run_dual_path_suite
     from sakuramoon.eval.concepts import (
         ConceptManifest,
-        aggregate_metrics,
-        canonical_prompt_cases,
-        compute_concept_metrics,
         render_suite_markdown,
         suite_report_document,
-        swap_prompt_cases,
     )
-    from sakuramoon.eval.features import CLIP_MODEL_ID, ClipFeatureModel
+    from sakuramoon.eval.features import CLIP_MODEL_ID
     from sakuramoon.eval.runtime import TrainingEvaluator
 
     root = args.root.resolve(strict=True)
@@ -433,38 +390,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     ref_images = load_reference_images(ref_paths, resolution=resolution)
 
-    canonical_cases = canonical_prompt_cases(
-        manifest, height=resolution, width=resolution
-    )
-    swap_cases = swap_prompt_cases(manifest, height=resolution, width=resolution)
     batch_size = args.generation_batch_size
-
-    canonical_images = _generate_chunked(
-        evaluator, canonical_cases, batch_size=batch_size, null=False
-    )
-    null_images = _generate_chunked(
-        evaluator, canonical_cases, batch_size=batch_size, null=True
-    )
-    swap_images = _generate_chunked(
-        evaluator, swap_cases, batch_size=batch_size, null=False
-    )
-
-    print("[concept-eval] 提取 CLIP 特征", flush=True)
-    clip = ClipFeatureModel(root, device)
-    clip_canonical = _extract_features(clip, canonical_images, batch_size=batch_size)
-    clip_null = _extract_features(clip, null_images, batch_size=batch_size)
-    clip_swap = _extract_features(clip, swap_images, batch_size=batch_size)
-    clip_refs = _extract_features(clip, ref_images, batch_size=batch_size)
-
-    print("[concept-eval] 计算指标", flush=True)
-    metrics = compute_concept_metrics(
+    result, images = run_dual_path_suite(
+        evaluator,
         manifest=manifest,
-        clip_canonical=clip_canonical,
-        clip_null=clip_null,
-        clip_swap=clip_swap,
-        clip_refs=clip_refs,
+        ref_images=ref_images,
+        batch_size=batch_size,
     )
-    aggregates = aggregate_metrics(metrics)
     provenance: dict[str, object] = {
         "update": update,
         "growth_alpha": alpha,
@@ -475,8 +407,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     document = suite_report_document(
         manifest=manifest,
-        metrics=metrics,
-        aggregates=aggregates,
+        suite=result,
         provenance=provenance,
     )
 
@@ -487,14 +418,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, report_path)
-    markdown_path = run_dir / "report.md"
-    markdown_path.write_bytes(
-        render_suite_markdown(
-            metrics=metrics,
-            aggregates=aggregates,
-            suite=cast(dict[str, object], document["suite"]),
-        ).encode("utf-8")
+    markdown = render_suite_markdown(
+        suite=result, suite_meta=cast(dict[str, object], document["suite"])
     )
+    markdown_path = run_dir / "report.md"
+    markdown_path.write_bytes(markdown.encode("utf-8"))
 
     if not args.no_images:
         import numpy as np
@@ -502,25 +430,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         images_dir = run_dir / "images"
         images_dir.mkdir(parents=True, exist_ok=True)
-        for concept, canon, nulled, swapped in zip(
-            manifest.concepts,
-            canonical_images,
-            null_images,
-            swap_images,
-        ):
-            for variant, image in (
-                ("canonical", canon),
-                ("null", nulled),
-                ("swap", swapped),
+        for index, concept in enumerate(manifest.concepts):
+            for variant in (
+                "condition-canonical",
+                "condition-swap",
+                "text-canonical",
+                "text-swap",
+                "null",
             ):
+                image = images[variant][index]
                 array = image.permute(1, 2, 0).numpy()
                 Image.fromarray(np.ascontiguousarray(array)).save(
                     images_dir / f"{concept.id}.{variant}.png"
                 )
-        print(f"[concept-eval] 生成图像: {images_dir} (3 x {len(manifest.concepts)})", flush=True)
+        print(
+            f"[concept-eval] 生成图像: {images_dir} "
+            f"(5 x {len(manifest.concepts)})",
+            flush=True,
+        )
 
     print(f"[concept-eval] 报告: {report_path}", flush=True)
-    print(render_suite_markdown(metrics=metrics, aggregates=aggregates, suite=cast(dict[str, object], document["suite"])), flush=True)
+    print(markdown, flush=True)
     return 0
 
 

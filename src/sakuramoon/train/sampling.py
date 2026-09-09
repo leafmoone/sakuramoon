@@ -6,6 +6,7 @@ import dataclasses
 import json
 import math
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -110,6 +111,31 @@ _GEOMETRY_PROTOCOL = "camera-crop-v1"
 _LOCKED_FIXED_PAIR_COUNT = 4
 _LOCKED_FIXED_VARIANT_COUNT = _LOCKED_FIXED_PAIR_COUNT * _VARIANT_COUNT
 _LOCKED_TOTAL_VARIANT_COUNT = _VARIANT_COUNT + _LOCKED_FIXED_VARIANT_COUNT
+# The cohort mode and the image count map 1:1.  The runtime selects the
+# locked mode from the explicit ``fixed_cohort`` setting and treats
+# ``image_count`` as a consistency assertion on this mapping -- never by
+# guessing the mode from the count.
+_FIXED_COHORT_IMAGE_COUNT: Mapping[str, int] = {
+    "none": _VARIANT_COUNT,
+    "locked": _LOCKED_TOTAL_VARIANT_COUNT,
+}
+
+
+def _locked_cohort_for(fixed_cohort: str, image_count: int) -> bool:
+    """Runtime cohort selection from the explicit cohort mode.
+
+    Raises when the (cohort, count) pair violates the 1:1 mapping, so a
+    misconfigured combination fails fast before any generation.
+    """
+
+    expected = _FIXED_COHORT_IMAGE_COUNT.get(fixed_cohort)
+    if expected is None or image_count != expected:
+        raise ValueError(
+            "training sampling image_count must be "
+            f"{expected} for fixed_cohort={fixed_cohort!r} "
+            f"(got {image_count})"
+        )
+    return fixed_cohort == "locked"
 
 
 def _pinned_selector_update(update: int, pin: int | None) -> int | None:
@@ -694,24 +720,16 @@ class TrainingSampler:
         self.vae = vae
         self.device = device
         self.growth_alpha = growth_alpha
-        image_count = config.sampling.training.image_count
-        fixed_cohort = config.sampling.training.fixed_cohort
-        if image_count not in (
-            _VARIANT_COUNT,
-            _LOCKED_TOTAL_VARIANT_COUNT,
-        ):
-            raise ValueError(
-                "training sampling image_count must be "
-                f"{_VARIANT_COUNT} (single dynamic cohort) or "
-                f"{_LOCKED_TOTAL_VARIANT_COUNT} "
-                "(dynamic plus locked condition pairs)"
-            )
+        self._locked_cohort = _locked_cohort_for(
+            config.sampling.training.fixed_cohort,
+            config.sampling.training.image_count,
+        )
         self.fixed_condition_pairs = (
             load_fixed_condition_pairs(repository_root / config.evaluation.prompt_path)
             if config.evaluation.enabled
             else ()
         )
-        if fixed_cohort == "locked" and not self.fixed_condition_pairs:
+        if self._locked_cohort and not self.fixed_condition_pairs:
             raise ValueError(
                 "fixed_cohort=locked requires the enabled evaluation prompt "
                 "manifest with the locked condition pairs"
@@ -1309,7 +1327,9 @@ class TrainingSampler:
             padding_token_id,
         )
         image_count = self.config.sampling.training.image_count
-        locked_cohort = image_count == _LOCKED_TOTAL_VARIANT_COUNT
+        locked_cohort = _locked_cohort_for(
+            self.config.sampling.training.fixed_cohort, image_count
+        )
         items = _build_variant_items(
             pair,
             tokenizer=self.qwen.tokenizer,

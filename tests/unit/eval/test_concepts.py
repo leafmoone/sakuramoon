@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 import dataclasses
 import json
 import math
@@ -6,18 +7,27 @@ from typing import cast
 import pytest
 import torch
 
-from sakuramoon.data.caption import Tag
+from sakuramoon.data.caption import CaptionTag, Tag
+from sakuramoon.data.serialize import (
+    MAIN_SUFFIX,
+    SYSTEM_PREFIX,
+    render_caption_segments,
+)
 from sakuramoon.eval.concepts import (
     ConceptManifest,
     ConceptMetrics,
     ConceptSuiteError,
-    GroupAggregate,
+    DualPathSuite,
+    _swap_tag_identity,
     aggregate_metrics,
     canonical_prompt_cases,
     compute_concept_metrics,
     render_suite_markdown,
+    score_dual_path,
     suite_report_document,
     swap_prompt_cases,
+    text_canonical_prompt_cases,
+    text_swap_prompt_cases,
 )
 from sakuramoon.eval.spec import caption_plan_prompt_text
 
@@ -343,54 +353,52 @@ def test_aggregate_metrics_groups() -> None:
     assert character.mean_retrieval_rank == 2.0
 
 
-def _default_aggregate() -> GroupAggregate:
-    return GroupAggregate(
-        group="overall",
-        n_concepts=2,
-        mean_margin_null=0.1,
-        median_margin_null=0.1,
-        fraction_margin_null_positive=0.5,
-        mean_margin_swap=0.1,
-        median_margin_swap=0.1,
-        fraction_margin_swap_positive=0.5,
-        mean_ref_sim_canonical=0.47,
-        mean_retrieval_rank=2.5,
-        hit1_rate=0.0,
-        hit3_rate=1.0,
+def _dual_path_suite() -> DualPathSuite:
+    canonical, null, swap, refs = _normalized_vectors()
+    manifest = _manifest()
+    return score_dual_path(
+        manifest=manifest,
+        condition={"canonical": canonical, "null": null, "swap": swap},
+        text={"canonical": canonical, "null": null, "swap": swap},
+        clip_refs=refs,
     )
 
 
 def test_suite_report_document() -> None:
-    canonical, null, swap, refs = _normalized_vectors()
-    manifest = _manifest()
-    metrics = compute_concept_metrics(
-        manifest=manifest,
-        clip_canonical=canonical,
-        clip_null=null,
-        clip_swap=swap,
-        clip_refs=refs,
-    )
+    suite = _dual_path_suite()
     document = suite_report_document(
-        manifest=manifest,
-        metrics=metrics,
-        aggregates=aggregate_metrics(metrics),
+        manifest=_manifest(),
+        suite=suite,
         provenance={"update": 70000, "growth_alpha": 0.5},
     )
-    suite = cast(dict[str, object], document["suite"])
-    aggregate = cast(dict[str, object], document["aggregate"])
-    concepts = cast(list[dict[str, object]], document["concepts"])
-    assert set(suite) == {
+    meta = cast(dict[str, object], document["suite"])
+    condition = cast(dict[str, object], document["condition"])
+    text = cast(dict[str, object], document["text"])
+    assert set(meta) == {
         "schema_version",
         "n_concepts",
         "seed",
         "update",
         "growth_alpha",
+        "concept_prompt_protocol",
     }
-    assert suite["n_concepts"] == 2
-    assert suite["update"] == 70000
-    assert set(aggregate) == {"overall", "artist.high", "character.mid"}
-    assert len(concepts) == 2
-    assert concepts[0]["margin_null"] == round(
+    assert meta["schema_version"] == 2
+    assert meta["concept_prompt_protocol"] == "dual-path-v1"
+    # No un-namespaced legacy section: every metric lives under a pathway.
+    assert "aggregate" not in document and "concepts" not in document
+    assert set(cast(dict[str, object], condition["aggregate"])) == {
+        "overall",
+        "artist.high",
+        "character.mid",
+    }
+    assert set(cast(dict[str, object], text["aggregate"])) == {
+        "overall",
+        "artist.high",
+        "character.mid",
+    }
+    condition_concepts = cast(list[dict[str, object]], condition["concepts"])
+    assert len(condition_concepts) == 2
+    assert condition_concepts[0]["margin_null"] == round(
         math.sqrt(2.0) / 3.0 - 1.0 / 3.0, 6
     )
     json.dumps(document)
@@ -408,51 +416,139 @@ def _valid_metrics() -> tuple[ConceptMetrics, ...]:
 
 
 def test_suite_report_document_rejects_nonfinite() -> None:
-    first, second = _valid_metrics()
-    metrics = (
-        dataclasses.replace(first, ref_sim_canonical=float("nan")),
-        second,
+    metrics = _valid_metrics()
+    aggregates = aggregate_metrics(metrics)
+    suite = DualPathSuite(
+        condition_metrics=metrics,
+        text_metrics=metrics,
+        condition_aggregates=aggregates,
+        text_aggregates=(
+            dataclasses.replace(
+                aggregates[0],
+                mean_margin_null=float("nan"),
+            ),
+        )
+        + aggregates[1:],
     )
     with pytest.raises(ConceptSuiteError, match="not finite"):
-        suite_report_document(
-            manifest=_manifest(),
-            metrics=metrics,
-            aggregates=(
-                dataclasses.replace(
-                    _default_aggregate(),
-                    mean_margin_null=float("nan"),
-                ),
-            ),
-            provenance={},
-        )
+        suite_report_document(manifest=_manifest(), suite=suite, provenance={})
 
 
 def test_render_suite_markdown() -> None:
-    canonical, null, swap, refs = _normalized_vectors()
-    manifest = _manifest()
-    metrics = compute_concept_metrics(
-        manifest=manifest,
-        clip_canonical=canonical,
-        clip_null=null,
-        clip_swap=swap,
-        clip_refs=refs,
-    )
-    aggregates = aggregate_metrics(metrics)
+    suite = _dual_path_suite()
     document = suite_report_document(
-        manifest=manifest,
-        metrics=metrics,
-        aggregates=aggregates,
-        provenance={"update": 70000},
+        manifest=_manifest(), suite=suite, provenance={"update": 70000}
     )
     markdown = render_suite_markdown(
-        metrics=metrics,
-        aggregates=aggregates,
-        suite=cast(dict[str, object], document["suite"]),
+        suite=suite, suite_meta=cast(dict[str, object], document["suite"])
     )
     assert markdown.startswith("# concept-suite")
+    assert "## condition protocol" in markdown
+    assert "## text protocol" in markdown
     assert "| overall |" in markdown
     assert "| artist.high |" in markdown
     assert "margin_swap" in markdown
-    # Both concepts have zero swap margin; the weakest table lists them.
-    assert "| A001 | dairi | kantoku |" in markdown
+    # Both concepts have zero swap margin; the weakest table lists them in
+    # each pathway section.
+    assert markdown.count("| A001 | dairi | kantoku |") == 2
     assert markdown.endswith("\n")
+
+
+def test_swap_tag_identity_contract() -> None:
+    # The pinned Concept Manifest v1 swap contract: display stays as-is,
+    # canonical is the space-to-underscore form, and the round trip must
+    # be lossless (fail closed otherwise).
+    assert _swap_tag_identity("hong meiling") == ("hong meiling", "hong_meiling")
+    assert _swap_tag_identity("pipi (m1x mix)") == (
+        "pipi (m1x mix)",
+        "pipi_(m1x_mix)",
+    )
+    with pytest.raises(ConceptSuiteError, match="round-trip"):
+        _swap_tag_identity("a_b")
+
+
+def test_text_canonical_uses_structured_main_tag() -> None:
+    manifest = _manifest()
+    cases = text_canonical_prompt_cases(manifest, height=256, width=256)
+    # Artist: the own tag rides the main body as a structured tag; the
+    # tokenizer-facing text is rendered by the existing serializer only.
+    artist = cases[0].caption_plan
+    assert artist is not None
+    assert artist.tags == (CaptionTag("artist", Tag("dairi", "dairi")),)
+    assert artist.condition is None
+    assert artist.nl_text is None
+    body, condition_text = render_caption_segments(artist)
+    assert body == "dairi"
+    assert condition_text == ""
+    assert cases[0].prompt == SYSTEM_PREFIX + "dairi" + MAIN_SUFFIX
+    # Character: display comes from the manifest tag, the canonical ID from
+    # the explicit meta_tag; the serializer renders the display.
+    character = cases[1].caption_plan
+    assert character is not None
+    assert character.tags == (
+        CaptionTag("character", Tag("hatsune miku", "hatsune_miku")),
+    )
+    body, condition_text = render_caption_segments(character)
+    assert body == "hatsune miku"
+    assert condition_text == ""
+    assert "hatsune_miku" not in cases[1].prompt
+
+
+def test_text_swap_uses_resolved_identity_not_raw_nl() -> None:
+    manifest = _manifest()
+    cases = text_swap_prompt_cases(manifest, height=256, width=256)
+    plan = cases[0].caption_plan
+    assert plan is not None
+    assert plan.nl_text is None  # never a raw NL passthrough
+    assert plan.condition is None
+    assert plan.tags == (CaptionTag("artist", Tag("kantoku", "kantoku")),)
+    # The condition and text swap pathways carry the identical tag identity
+    # (display and canonical), so the only difference is the branch.
+    for index in range(len(manifest.concepts)):
+        condition_plan = swap_prompt_cases(manifest, height=256, width=256)[
+            index
+        ].caption_plan
+        text_plan = cases[index].caption_plan
+        assert condition_plan is not None and text_plan is not None
+        assert condition_plan.condition is not None
+        assert condition_plan.condition.tags == tuple(
+            caption_tag.tag for caption_tag in text_plan.tags
+        )
+
+
+def test_five_states_share_one_canonical_seed() -> None:
+    manifest = _manifest()
+    height = width = 256
+    groups = {
+        "condition-canonical": canonical_prompt_cases(
+            manifest, height=height, width=width
+        ),
+        "condition-swap": swap_prompt_cases(manifest, height=height, width=width),
+        "text-canonical": text_canonical_prompt_cases(
+            manifest, height=height, width=width
+        ),
+        "text-swap": text_swap_prompt_cases(
+            manifest, height=height, width=width
+        ),
+    }
+    for index in range(len(manifest.concepts)):
+        seeds = {
+            name: cases[index].seed for name, cases in groups.items()
+        }
+        assert len(set(seeds.values())) == 1  # one shared noise stream
+        prompt_ids = [cases[index].prompt_id for cases in groups.values()]
+        assert len(set(prompt_ids)) == len(prompt_ids)
+
+
+def test_own_canonical_comes_from_meta_tag_not_the_swap_helper() -> None:
+    concepts = _concepts()
+    concepts[0]["tag"] = "da iri"  # display differs from the canonical ID
+    manifest = ConceptManifest.from_bytes(_concepts_bytes(concepts))
+    canonical = canonical_prompt_cases(manifest, height=256, width=256)[0]
+    text = text_canonical_prompt_cases(manifest, height=256, width=256)[0]
+    assert canonical.caption_plan is not None
+    assert canonical.caption_plan.condition is not None
+    assert canonical.caption_plan.condition.tags == (Tag("da iri", "dairi"),)
+    assert text.caption_plan is not None
+    assert text.caption_plan.tags == (CaptionTag("artist", Tag("da iri", "dairi")),)
+    assert "da iri" in canonical.prompt

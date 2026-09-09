@@ -12,7 +12,7 @@ import math
 import re
 from itertools import pairwise
 from pathlib import PurePosixPath
-from typing import Annotated, Literal, cast
+from typing import Annotated, ClassVar, Literal, cast
 
 from pydantic import (
     BaseModel,
@@ -729,12 +729,23 @@ class TrainingSamplingConfig(StrictModel):
     fixed_cohort: Literal["none", "locked"] = "none"
     longitudinal_pin_update: PositiveInt | None = None
 
+    # The cohort mode and the image count map 1:1; the runtime selects the
+    # locked mode from ``fixed_cohort`` alone and treats ``image_count`` as
+    # a consistency assertion on this mapping.
+    _EXPECTED_COHORT_COUNT: ClassVar[dict[str, int]] = {
+        "none": 12,
+        "locked": 60,
+    }
+
     @model_validator(mode="after")
     def validate_cohort_consistency(self) -> TrainingSamplingConfig:
-        if self.fixed_cohort == "locked" and self.image_count != 60:
+        expected = self._EXPECTED_COHORT_COUNT[self.fixed_cohort]
+        if self.image_count != expected:
             raise ValueError(
-                "fixed_cohort=locked requires image_count=60 "
-                "(12 dynamic plus 4 locked condition pairs of 12 variants)"
+                f"fixed_cohort={self.fixed_cohort!r} requires "
+                f"image_count={expected} (got {self.image_count}); the cohort "
+                "mode and count map 1:1 (none=12 dynamic, locked=60 = 12 "
+                "dynamic plus 4 locked condition pairs of 12 variants)"
             )
         return self
 

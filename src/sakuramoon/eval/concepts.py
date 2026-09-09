@@ -1,16 +1,26 @@
-"""Standalone concept-conditioning benchmark suite.
+"""Standalone concept-conditioning benchmark suite (dual prompt pathway).
 
-The suite contrasts, for every concept in the draw manifest, three images
-produced from one shared noise stream per concept:
+For every concept in the draw manifest the suite generates five images
+sharing one canonical noise stream per concept, in two prompt pathways:
 
-* **canonical** -- generated with the concept's own tag text,
-* **null**      -- the identical noise with the condition fully dropped,
-* **swap**      -- the partner concept's tag text (nearest |count delta|
-  within the same type/tier band),
+* **condition pathway** (the condition branch is tested as a dedicated
+  input):
+  - **condition-canonical** -- the concept's own tag as a structured
+    condition (artist -> artist_text/style, character -> character_text/
+    identity), main text empty;
+  - **condition-swap**      -- the partner tag as the structured condition;
+* **text pathway** (the tag rides the main caption text):
+  - **text-canonical**      -- the concept's own tag as a structured main
+    tag (source artist/character by concept type), condition empty;
+  - **text-swap**           -- the partner tag as the structured main tag;
+* **shared null** -- the identical canonical-stream noise with the
+  condition fully dropped, generated once and reused by both pathways.
 
-against the concept's three Danbooru reference posts.  All comparisons use
-a single sign convention: a positive margin means the model ranked the
-intended concept above the alternative.
+Both pathways are scored independently with the same metric math
+(:func:`compute_concept_metrics`), so the reports and the flattened
+telemetry namespace every metric under ``condition/`` or ``text/``.  A
+positive margin means the model ranked the intended concept above the
+alternative against the concept's three Danbooru reference posts.
 
 * ``margin_null = ref_sim(canonical) - ref_sim(null)``
 * ``margin_swap = ref_sim(canonical) - ref_sim(swap)``
@@ -39,15 +49,21 @@ import torch
 
 from sakuramoon.data.caption import (
     CaptionPlan,
+    CaptionTag,
     ConditionRequest,
     ConditionRole,
     ConditionSource,
     Tag,
+    TagSource,
     empty_caption_dropout_hits,
 )
 from sakuramoon.eval.spec import PromptCase, caption_plan_prompt_text
 
-SUITE_SCHEMA_VERSION = 1
+SUITE_SCHEMA_VERSION = 2
+PROTOCOL = "dual-path-v1"
+# The manifest contract is its own version (v1 is unchanged by the dual-path
+# protocol); the report document schema is versioned separately.
+MANIFEST_SCHEMA_VERSION = 1
 _REF_COUNT = 3
 _SAFE_CONCEPT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$")
 _CONCEPT_TYPES = frozenset({"artist", "character"})
@@ -80,6 +96,11 @@ _GROUP_TIERS = ("high", "mid", "tail")
 _CONCEPT_CONDITION_ROUTES: Mapping[str, tuple[ConditionSource, ConditionRole]] = {
     "artist": ("artist_text", "style"),
     "character": ("character_text", "identity"),
+}
+# Text pathway: the structured main-tag source mirrors the concept type.
+_CONCEPT_MAIN_TAG_SOURCES: Mapping[str, TagSource] = {
+    "artist": "artist",
+    "character": "character",
 }
 
 
@@ -148,7 +169,7 @@ class ConceptManifest:
         document = cast(dict[str, object], parsed)
         if frozenset(document) != _TOP_LEVEL_FIELDS:
             raise ConceptSuiteError("concept manifest top-level fields are invalid")
-        if document["schema_version"] != SUITE_SCHEMA_VERSION:
+        if document["schema_version"] != MANIFEST_SCHEMA_VERSION:
             raise ConceptSuiteError("concept manifest schema version is invalid")
         seed = document["seed"]
         if type(seed) is not int or seed < 0:
@@ -284,20 +305,22 @@ def _case_seed(seed: int, concept_id: str, stream: str) -> int:
 
 
 def _concept_caption_plan(
-    concept_id: str, tag: str, meta_tag: str, concept_type: str
+    concept_id: str, display: str, canonical: str, concept_type: str
 ) -> CaptionPlan:
     """Structured condition plan for one concept tag.
 
     The tag is an explicit tag input: it becomes a structured condition tag
     at this construction boundary (surrounding whitespace stripped, empty
     tags rejected), and the existing serializer renders its display text.
-    The canonical identity comes from the manifest's ``meta_tag``.
+    The canonical identity comes from the manifest's explicit ``meta_tag``
+    for the concept's own tag, or from :func:`_swap_tag_identity` for the
+    swap field.
     """
 
-    if type(tag) is not str or not tag.strip():
+    if type(display) is not str or not display.strip():
         raise ConceptSuiteError(f"concept {concept_id} tag is empty")
-    if type(meta_tag) is not str or not meta_tag.strip():
-        raise ConceptSuiteError(f"concept {concept_id} meta_tag is empty")
+    if type(canonical) is not str or not canonical.strip():
+        raise ConceptSuiteError(f"concept {concept_id} canonical tag is empty")
     route = _CONCEPT_CONDITION_ROUTES.get(concept_type)
     if route is None:
         raise ConceptSuiteError(
@@ -309,7 +332,7 @@ def _concept_caption_plan(
         condition=ConditionRequest(
             source=source,
             role=role,
-            tags=(Tag(tag.strip(), meta_tag.strip()),),
+            tags=(Tag(display.strip(), canonical.strip()),),
         ),
         nl_text=None,
         selected_nl=None,
@@ -318,10 +341,66 @@ def _concept_caption_plan(
     )
 
 
-def _canonical_from_display(display: str) -> str:
-    """Inverse of the serializer's ``_display_text`` tag normalization."""
+def _swap_tag_identity(display: str) -> tuple[str, str]:
+    """The Concept Manifest v1 canonical contract for the ``swap`` field.
 
-    return display.replace(" ", "_")
+    ``swap.display`` is the manifest value as-is and
+    ``swap.canonical`` is ``display.replace(" ", "_")``.  Notes:
+
+    * This is the v1 contract for the manifest ``swap`` field -- **not** a
+      generic inverse of ``serialize._display_text``.  Do not apply it to
+      natural-language prompts or to arbitrary ``Tag.text`` values.
+    * A concept's own canonical identity always comes from its explicit
+      ``meta_tag``; only the swap field, which has no independent
+      ``swap_meta_tag`` in the v1 schema, uses this rule.
+    * The round trip ``display -> canonical -> display`` must be lossless.
+      A swap whose display breaks it (for example a literal underscore)
+      is rejected so the suite fails closed instead of guessing an ID.
+
+    The shipped concept-120 manifests were audited against this contract
+    (every swap passes the round trip) before it was pinned as v1.
+    """
+
+    canonical = display.replace(" ", "_")
+    if canonical.replace("_", " ") != display:
+        raise ConceptSuiteError(
+            f"swap tag {display!r} violates the manifest v1 round-trip contract"
+        )
+    return display, canonical
+
+
+def _concept_text_plan(
+    concept_id: str, display: str, canonical: str, concept_type: str
+) -> CaptionPlan:
+    """Structured main-text plan for the text pathway.
+
+    The tag rides the main caption body as a structured tag (source
+    ``artist``/``character`` by concept type); there is no condition and no
+    natural-language text, so the existing serializer alone produces the
+    tokenizer-facing text.
+    """
+
+    source = _CONCEPT_MAIN_TAG_SOURCES.get(concept_type)
+    if source is None:
+        raise ConceptSuiteError(
+            f"concept {concept_id} type {concept_type!r} has no text-path source"
+        )
+    if type(display) is not str or not display.strip():
+        raise ConceptSuiteError(f"concept {concept_id} tag is empty")
+    if type(canonical) is not str or not canonical.strip():
+        raise ConceptSuiteError(f"concept {concept_id} canonical tag is empty")
+    return CaptionPlan(
+        tags=(
+            CaptionTag(
+                source=source, tag=Tag(display.strip(), canonical.strip())
+            ),
+        ),
+        condition=None,
+        nl_text=None,
+        selected_nl=None,
+        all_condition_dropped=False,
+        dropout_hits=empty_caption_dropout_hits(),
+    )
 
 
 def canonical_prompt_cases(
@@ -329,24 +408,23 @@ def canonical_prompt_cases(
 ) -> tuple[PromptCase, ...]:
     """One prompt case per concept, conditioned on the concept's own tag."""
 
-    return tuple(
-        PromptCase(
-            prompt_id=f"{concept.id}.canonical",
-            prompt=caption_plan_prompt_text(
-                _concept_caption_plan(
-                    concept.id, concept.tag, concept.meta_tag, concept.type
-                )
-            ),
-            conditions=(),
-            seed=_case_seed(manifest.seed, concept.id, "canonical"),
-            height=height,
-            width=width,
-            caption_plan=_concept_caption_plan(
-                concept.id, concept.tag, concept.meta_tag, concept.type
-            ),
+    cases: list[PromptCase] = []
+    for concept in manifest.concepts:
+        plan = _concept_caption_plan(
+            concept.id, concept.tag, concept.meta_tag, concept.type
         )
-        for concept in manifest.concepts
-    )
+        cases.append(
+            PromptCase(
+                prompt_id=f"{concept.id}.canonical",
+                prompt=caption_plan_prompt_text(plan),
+                conditions=(),
+                seed=_case_seed(manifest.seed, concept.id, "canonical"),
+                height=height,
+                width=width,
+                caption_plan=plan,
+            )
+        )
+    return tuple(cases)
 
 
 def swap_prompt_cases(
@@ -356,33 +434,81 @@ def swap_prompt_cases(
 
     Swap cases reuse the canonical noise stream of the same concept, so a
     swap image differs from its canonical image only in the conditioning
-    text.
+    text.  The swap identity comes from the single v1 contract helper.
     """
 
-    return tuple(
-        PromptCase(
-            prompt_id=f"{concept.id}.swap",
-            prompt=caption_plan_prompt_text(
-                _concept_caption_plan(
-                    concept.id,
-                    concept.swap,
-                    _canonical_from_display(concept.swap.strip()),
-                    concept.type,
-                )
-            ),
-            conditions=(),
-            seed=_case_seed(manifest.seed, concept.id, "canonical"),
-            height=height,
-            width=width,
-            caption_plan=_concept_caption_plan(
-                concept.id,
-                concept.swap,
-                _canonical_from_display(concept.swap.strip()),
-                concept.type,
-            ),
+    cases: list[PromptCase] = []
+    for concept in manifest.concepts:
+        display, canonical = _swap_tag_identity(concept.swap.strip())
+        plan = _concept_caption_plan(concept.id, display, canonical, concept.type)
+        cases.append(
+            PromptCase(
+                prompt_id=f"{concept.id}.swap",
+                prompt=caption_plan_prompt_text(plan),
+                conditions=(),
+                seed=_case_seed(manifest.seed, concept.id, "canonical"),
+                height=height,
+                width=width,
+                caption_plan=plan,
+            )
         )
-        for concept in manifest.concepts
-    )
+    return tuple(cases)
+
+
+def text_canonical_prompt_cases(
+    manifest: ConceptManifest, *, height: int, width: int
+) -> tuple[PromptCase, ...]:
+    """Text pathway: the concept's own tag as a structured main tag.
+
+    Reuses the canonical noise stream, so a text-canonical image differs
+    from its condition-canonical image only in the prompt pathway.
+    """
+
+    cases: list[PromptCase] = []
+    for concept in manifest.concepts:
+        plan = _concept_text_plan(
+            concept.id, concept.tag, concept.meta_tag, concept.type
+        )
+        cases.append(
+            PromptCase(
+                prompt_id=f"{concept.id}.text-canonical",
+                prompt=caption_plan_prompt_text(plan),
+                conditions=(),
+                seed=_case_seed(manifest.seed, concept.id, "canonical"),
+                height=height,
+                width=width,
+                caption_plan=plan,
+            )
+        )
+    return tuple(cases)
+
+
+def text_swap_prompt_cases(
+    manifest: ConceptManifest, *, height: int, width: int
+) -> tuple[PromptCase, ...]:
+    """Text pathway: the partner tag as a structured main tag.
+
+    Uses the same :func:`_swap_tag_identity` resolution as the condition
+    swap, so both pathways carry the identical swap display/canonical
+    identity and only the prompt branch differs.
+    """
+
+    cases: list[PromptCase] = []
+    for concept in manifest.concepts:
+        display, canonical = _swap_tag_identity(concept.swap.strip())
+        plan = _concept_text_plan(concept.id, display, canonical, concept.type)
+        cases.append(
+            PromptCase(
+                prompt_id=f"{concept.id}.text-swap",
+                prompt=caption_plan_prompt_text(plan),
+                conditions=(),
+                seed=_case_seed(manifest.seed, concept.id, "canonical"),
+                height=height,
+                width=width,
+                caption_plan=plan,
+            )
+        )
+    return tuple(cases)
 
 
 @dataclass(frozen=True, slots=True)
@@ -570,59 +696,140 @@ def _group_document(aggregate: GroupAggregate) -> dict[str, object]:
     }
 
 
+def _concept_document(item: ConceptMetrics) -> dict[str, object]:
+    return {
+        "id": item.concept_id,
+        "type": item.type,
+        "tier": item.tier,
+        "tag": item.tag,
+        "swap": item.swap,
+        "ref_sim_canonical": _round(item.ref_sim_canonical),
+        "ref_sim_null": _round(item.ref_sim_null),
+        "ref_sim_swap": _round(item.ref_sim_swap),
+        "margin_null": _round(item.margin_null),
+        "margin_swap": _round(item.margin_swap),
+        "retrieval_rank": item.retrieval_rank,
+        "hit1": item.hit1,
+        "hit3": item.hit3,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class DualPathSuite:
+    """Scored dual-path result: one metrics/aggregate pair per pathway."""
+
+    condition_metrics: tuple[ConceptMetrics, ...]
+    text_metrics: tuple[ConceptMetrics, ...]
+    condition_aggregates: tuple[GroupAggregate, ...]
+    text_aggregates: tuple[GroupAggregate, ...]
+
+
+def score_dual_path(
+    *,
+    manifest: ConceptManifest,
+    condition: dict[str, torch.Tensor],
+    text: dict[str, torch.Tensor],
+    clip_refs: torch.Tensor,
+) -> DualPathSuite:
+    """Score both prompt pathways with the existing metric math.
+
+    ``condition`` and ``text`` each hold the L2-normalized CLIP feature
+    rows under the keys ``canonical``, ``null`` and ``swap``.  The two
+    pathways must share the same null features (the single shared null
+    image) and the same reference features; both metric sets are produced
+    by the same :func:`compute_concept_metrics` call pattern, so the math
+    is identical across pathways and only the canonical/swap inputs differ.
+    """
+
+    for name, features in (("condition", condition), ("text", text)):
+        for key in ("canonical", "null", "swap"):
+            if key not in features:
+                raise ConceptSuiteError(
+                    f"{name} pathway is missing the {key!r} features"
+                )
+    if not torch.equal(condition["null"], text["null"]):
+        raise ConceptSuiteError(
+            "the shared null features must be the same tensor for both pathways"
+        )
+    condition_metrics = compute_concept_metrics(
+        manifest=manifest,
+        clip_canonical=condition["canonical"],
+        clip_null=condition["null"],
+        clip_swap=condition["swap"],
+        clip_refs=clip_refs,
+    )
+    text_metrics = compute_concept_metrics(
+        manifest=manifest,
+        clip_canonical=text["canonical"],
+        clip_null=text["null"],
+        clip_swap=text["swap"],
+        clip_refs=clip_refs,
+    )
+    return DualPathSuite(
+        condition_metrics=condition_metrics,
+        text_metrics=text_metrics,
+        condition_aggregates=aggregate_metrics(condition_metrics),
+        text_aggregates=aggregate_metrics(text_metrics),
+    )
+
+
 def suite_report_document(
     *,
     manifest: ConceptManifest,
-    metrics: tuple[ConceptMetrics, ...],
-    aggregates: tuple[GroupAggregate, ...],
+    suite: DualPathSuite,
     provenance: dict[str, object],
 ) -> dict[str, object]:
-    """Machine-readable report document (TOML-safe nested dicts)."""
+    """Machine-readable report document (TOML-safe nested dicts).
 
-    if len(metrics) != len(manifest.concepts):
-        raise ConceptSuiteError("report metric count differs from the manifest")
-    suite: dict[str, object] = {
+    The two prompt pathways are namespaced under ``condition`` and
+    ``text`` so no metric alias can silently collide across pathways.
+    """
+
+    if len(suite.condition_metrics) != len(manifest.concepts):
+        raise ConceptSuiteError(
+            "condition report metric count differs from the manifest"
+        )
+    if len(suite.text_metrics) != len(manifest.concepts):
+        raise ConceptSuiteError(
+            "text report metric count differs from the manifest"
+        )
+    meta: dict[str, object] = {
         "schema_version": SUITE_SCHEMA_VERSION,
-        "n_concepts": len(metrics),
+        "n_concepts": len(suite.condition_metrics),
         "seed": manifest.seed,
+        "concept_prompt_protocol": PROTOCOL,
     }
-    suite.update(provenance)
+    meta.update(provenance)
     return {
-        "suite": suite,
-        "aggregate": {agg.group: _group_document(agg) for agg in aggregates},
-        "concepts": [
-            {
-                "id": item.concept_id,
-                "type": item.type,
-                "tier": item.tier,
-                "tag": item.tag,
-                "swap": item.swap,
-                "ref_sim_canonical": _round(item.ref_sim_canonical),
-                "ref_sim_null": _round(item.ref_sim_null),
-                "ref_sim_swap": _round(item.ref_sim_swap),
-                "margin_null": _round(item.margin_null),
-                "margin_swap": _round(item.margin_swap),
-                "retrieval_rank": item.retrieval_rank,
-                "hit1": item.hit1,
-                "hit3": item.hit3,
-            }
-            for item in metrics
-        ],
+        "suite": meta,
+        "condition": {
+            "aggregate": {
+                agg.group: _group_document(agg)
+                for agg in suite.condition_aggregates
+            },
+            "concepts": [
+                _concept_document(item) for item in suite.condition_metrics
+            ],
+        },
+        "text": {
+            "aggregate": {
+                agg.group: _group_document(agg) for agg in suite.text_aggregates
+            },
+            "concepts": [
+                _concept_document(item) for item in suite.text_metrics
+            ],
+        },
     }
 
 
-def render_suite_markdown(
-    *,
+def _pathway_markdown_section(
+    name: str,
     metrics: tuple[ConceptMetrics, ...],
     aggregates: tuple[GroupAggregate, ...],
-    suite: dict[str, object],
-    weakest: int = 10,
-) -> str:
-    """Compact human-facing report (group table + weakest swap margins)."""
-
+    weakest: int,
+) -> list[str]:
     lines: list[str] = []
-    provenance = " ".join(f"{key}={value}" for key, value in suite.items())
-    lines.append(f"# concept-suite {provenance}")
+    lines.append(f"## {name} protocol")
     lines.append("")
     lines.append(
         "| group | n | m_null μ | m_null med | %>0 | m_swap μ | %>0 | "
@@ -648,7 +855,7 @@ def render_suite_markdown(
     shown = ranked[:weakest]
     if shown:
         lines.append("")
-        lines.append(f"## 最弱 {len(shown)} 个 margin_swap")
+        lines.append(f"### {name}: 最弱 {len(shown)} 个 margin_swap")
         lines.append("")
         lines.append("| id | tag | swap | m_swap | rank |")
         lines.append("|---|---|---|---|---|")
@@ -657,21 +864,56 @@ def render_suite_markdown(
                 f"| {item.concept_id} | {item.tag} | {item.swap} "
                 f"| {item.margin_swap:.4f} | {item.retrieval_rank} |"
             )
-    return "\n".join(lines) + "\n"
+    lines.append("")
+    return lines
+
+
+def render_suite_markdown(
+    *,
+    suite: DualPathSuite,
+    suite_meta: dict[str, object],
+    weakest: int = 10,
+) -> str:
+    """Compact human-facing report with one section per prompt pathway."""
+
+    lines: list[str] = []
+    provenance = " ".join(f"{key}={value}" for key, value in suite_meta.items())
+    lines.append(f"# concept-suite {provenance}")
+    lines.append("")
+    lines.extend(
+        _pathway_markdown_section(
+            "condition",
+            suite.condition_metrics,
+            suite.condition_aggregates,
+            weakest,
+        )
+    )
+    lines.extend(
+        _pathway_markdown_section(
+            "text", suite.text_metrics, suite.text_aggregates, weakest
+        )
+    )
+    return "\n".join(lines).rstrip("\n") + "\n"
 
 
 __all__ = [
+    "MANIFEST_SCHEMA_VERSION",
+    "PROTOCOL",
     "SUITE_SCHEMA_VERSION",
     "ConceptManifest",
     "ConceptMetrics",
     "ConceptRef",
     "ConceptSpec",
     "ConceptSuiteError",
+    "DualPathSuite",
     "GroupAggregate",
     "aggregate_metrics",
     "canonical_prompt_cases",
     "compute_concept_metrics",
     "render_suite_markdown",
+    "score_dual_path",
     "suite_report_document",
     "swap_prompt_cases",
+    "text_canonical_prompt_cases",
+    "text_swap_prompt_cases",
 ]

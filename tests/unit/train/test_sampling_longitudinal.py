@@ -10,6 +10,7 @@ from sakuramoon.train.sampling import (
     _LOCKED_FIXED_PAIR_COUNT,
     _LOCKED_TOTAL_VARIANT_COUNT,
     _VARIANT_COUNT,
+    _locked_cohort_for,
     _pinned_selector_update,
 )
 
@@ -71,6 +72,48 @@ class TestSchemaCohortConsistency:
     def test_none_cohort_allows_single_cohort_count(self) -> None:
         config = TrainingSamplingConfig(image_count=12, fixed_cohort="none")
         assert config.fixed_cohort == "none"
+
+    @pytest.mark.parametrize(
+        ("fixed_cohort", "image_count"),
+        [("none", 60), ("none", 24), ("locked", 12), ("locked", 24), ("none", 1)],
+    )
+    def test_cohort_count_mapping_rejects_every_mismatch(
+        self, fixed_cohort: str, image_count: int
+    ) -> None:
+        # The cohort mode and the count map 1:1; every other combination
+        # fails fast instead of being guessed at runtime.
+        with pytest.raises(ValidationError):
+            TrainingSamplingConfig.model_validate(
+                {"fixed_cohort": fixed_cohort, "image_count": image_count}
+            )
+
+    def test_runtime_selector_uses_fixed_cohort_not_the_count(self) -> None:
+        # The runtime picks the locked mode from the explicit cohort mode;
+        # image_count is only a consistency assertion on the 1:1 mapping.
+        assert _locked_cohort_for("none", 12) is False
+        assert _locked_cohort_for("locked", 60) is True
+        with pytest.raises(ValueError, match="image_count"):
+            _locked_cohort_for("none", 60)
+        with pytest.raises(ValueError, match="image_count"):
+            _locked_cohort_for("locked", 12)
+        with pytest.raises(ValueError):
+            _locked_cohort_for("neutral", 12)
+
+    def test_live_train_g1_config_still_resolves(self) -> None:
+        # The production G1 ramp (locked cohort, 60 images) keeps resolving
+        # under the strict 1:1 mapping.
+        from pathlib import Path
+
+        from sakuramoon.config import load_config
+
+        loaded = load_config(
+            Path("train_g1.toml"),
+            config_root=Path("config"),
+            validate_secrets=False,
+        )
+        sampling = loaded.config.sampling.training
+        assert sampling.fixed_cohort == "locked"
+        assert sampling.image_count == 60
 
     def test_fixed_cohort_rejects_removed_neutral_value(self) -> None:
         with pytest.raises(ValidationError):

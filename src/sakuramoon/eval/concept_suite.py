@@ -1,11 +1,15 @@
 """In-training concept-conditioning suite (optional, after the FID pass).
 
-Runs the same five-metric suite as the standalone ``concept_eval`` CLI, but
-against the *live* model held by a :class:`TrainingEvaluator`, so the
-current training state is scored on the fixed concept draw inside the
-regular evaluation cadence.  The suite is best-effort by design: any
+Runs the dual-path concept suite (condition pathway + text pathway with a
+shared null) against the *live* model held by a :class:`TrainingEvaluator`,
+so the current training state is scored on the fixed concept draw inside
+the regular evaluation cadence.  The suite is best-effort by design: any
 failure is reported on the log and swallowed so it can never abort a
 training run.
+
+The standalone ``concept_eval`` CLI calls the same
+:func:`run_dual_path_suite` implementation, so the two entry points can
+never drift apart.
 """
 
 from __future__ import annotations
@@ -20,18 +24,20 @@ import torch
 
 from sakuramoon.eval.concepts import (
     ConceptManifest,
-    GroupAggregate,
-    aggregate_metrics,
+    DualPathSuite,
     canonical_prompt_cases,
-    compute_concept_metrics,
     render_suite_markdown,
+    score_dual_path,
     suite_report_document,
     swap_prompt_cases,
+    text_canonical_prompt_cases,
+    text_swap_prompt_cases,
 )
 from sakuramoon.eval.features import CLIP_MODEL_ID, ClipFeatureModel
 from sakuramoon.eval.runtime import TrainingEvaluator
+from sakuramoon.eval.spec import PromptCase
 
-__all__ = ["run_concept_suite"]
+__all__ = ["run_concept_suite", "run_dual_path_suite"]
 
 
 def load_reference_images(
@@ -104,7 +110,7 @@ def resolve_reference_images(
 
 def _generate_chunked(
     evaluator: TrainingEvaluator,
-    cases: tuple[object, ...],
+    cases: tuple[PromptCase, ...],
     *,
     batch_size: int,
     null: bool,
@@ -135,17 +141,116 @@ def _extract_features(
     return torch.cat(chunks)
 
 
-def _flatten_aggregates(
-    aggregates: tuple[GroupAggregate, ...],
-) -> dict[str, float]:
-    """Flatten all group aggregates into ``{group/field: value}`` metrics."""
+def run_dual_path_suite(
+    evaluator: TrainingEvaluator,
+    *,
+    manifest: ConceptManifest,
+    ref_images: torch.Tensor,
+    batch_size: int,
+    clip: ClipFeatureModel | None = None,
+) -> tuple[DualPathSuite, dict[str, torch.Tensor]]:
+    """Generate the five per-concept states and score both pathways.
+
+    Five images per concept: condition-canonical, condition-swap,
+    text-canonical, text-swap, and one shared null (generated exactly
+    once from the canonical noise stream and reused by both metric sets).
+    Generation stays bounded by ``batch_size``; the ``clip`` model may be
+    injected (unit tests) and is built on demand otherwise.
+    """
+
+    resolution = evaluator.config.train.resolution
+    condition_canonical_cases = canonical_prompt_cases(
+        manifest, height=resolution, width=resolution
+    )
+    condition_swap_cases = swap_prompt_cases(
+        manifest, height=resolution, width=resolution
+    )
+    text_canonical_cases = text_canonical_prompt_cases(
+        manifest, height=resolution, width=resolution
+    )
+    text_swap_cases = text_swap_prompt_cases(
+        manifest, height=resolution, width=resolution
+    )
+
+    condition_canonical_images = _generate_chunked(
+        evaluator, condition_canonical_cases, batch_size=batch_size, null=False
+    )
+    condition_swap_images = _generate_chunked(
+        evaluator, condition_swap_cases, batch_size=batch_size, null=False
+    )
+    text_canonical_images = _generate_chunked(
+        evaluator, text_canonical_cases, batch_size=batch_size, null=False
+    )
+    text_swap_images = _generate_chunked(
+        evaluator, text_swap_cases, batch_size=batch_size, null=False
+    )
+    # The shared null: one generation pass from the canonical noise
+    # stream, consumed by both the condition and the text metrics.
+    null_images = _generate_chunked(
+        evaluator, condition_canonical_cases, batch_size=batch_size, null=True
+    )
+
+    print("[concept-suite] 提取 CLIP 特征", flush=True)
+    clip_model = (
+        clip if clip is not None else ClipFeatureModel(evaluator.root, evaluator.device)
+    )
+    ref_features = _extract_features(
+        clip_model, ref_images, batch_size=batch_size
+    )
+    null_features = _extract_features(
+        clip_model, null_images, batch_size=batch_size
+    )
+    print("[concept-suite] 计算指标", flush=True)
+    result = score_dual_path(
+        manifest=manifest,
+        condition={
+            "canonical": _extract_features(
+                clip_model, condition_canonical_images, batch_size=batch_size
+            ),
+            "null": null_features,
+            "swap": _extract_features(
+                clip_model, condition_swap_images, batch_size=batch_size
+            ),
+        },
+        text={
+            "canonical": _extract_features(
+                clip_model, text_canonical_images, batch_size=batch_size
+            ),
+            "null": null_features,
+            "swap": _extract_features(
+                clip_model, text_swap_images, batch_size=batch_size
+            ),
+        },
+        clip_refs=ref_features,
+    )
+    images = {
+        "condition_canonical": condition_canonical_images,
+        "condition_swap": condition_swap_images,
+        "text_canonical": text_canonical_images,
+        "text_swap": text_swap_images,
+        "null": null_images,
+    }
+    return result, images
+
+
+def _flatten_dual_path(result: DualPathSuite) -> dict[str, float]:
+    """Flatten both group aggregates into namespaced metrics.
+
+    Every key carries its pathway prefix (``condition/...`` or
+    ``text/...``) so the two protocols can never alias each other in the
+    telemetry stream.
+    """
 
     flat: dict[str, float] = {}
-    for aggregate in aggregates:
-        fields = asdict(aggregate)
-        for name, value in fields.items():
-            if name != "group":
-                flat[f"{aggregate.group}/{name}"] = float(value)
+    for namespace, aggregates in (
+        ("condition", result.condition_aggregates),
+        ("text", result.text_aggregates),
+    ):
+        for aggregate in aggregates:
+            fields = asdict(aggregate)
+            for name, value in fields.items():
+                if name != "group":
+                    flat[f"{namespace}/{aggregate.group}/{name}"] = float(value)
     return flat
 
 
@@ -164,7 +269,6 @@ def run_concept_suite(
     so the suite stays aligned with the FID pass of the same update.
     """
 
-    evaluation = evaluator.evaluation
     config = evaluator.config
     resolution = config.train.resolution
 
@@ -172,52 +276,22 @@ def run_concept_suite(
     ref_paths = resolve_reference_images(manifest, refs_root)
     ref_images = load_reference_images(ref_paths, resolution=resolution)
 
-    canonical_cases = canonical_prompt_cases(
-        manifest, height=resolution, width=resolution
-    )
-    swap_cases = swap_prompt_cases(manifest, height=resolution, width=resolution)
-
-    canonical_images = _generate_chunked(
-        evaluator, canonical_cases, batch_size=batch_size, null=False
-    )
-    null_images = _generate_chunked(
-        evaluator, canonical_cases, batch_size=batch_size, null=True
-    )
-    swap_images = _generate_chunked(
-        evaluator, swap_cases, batch_size=batch_size, null=False
-    )
-
-    print("[concept-suite] 提取 CLIP 特征", flush=True)
-    clip = ClipFeatureModel(evaluator.root, evaluator.device)
-    clip_canonical = _extract_features(
-        clip, canonical_images, batch_size=batch_size
-    )
-    clip_null = _extract_features(clip, null_images, batch_size=batch_size)
-    clip_swap = _extract_features(clip, swap_images, batch_size=batch_size)
-    clip_refs = _extract_features(clip, ref_images, batch_size=batch_size)
-
-    print("[concept-suite] 计算指标", flush=True)
-    metrics = compute_concept_metrics(
+    result, _images = run_dual_path_suite(
+        evaluator,
         manifest=manifest,
-        clip_canonical=clip_canonical,
-        clip_null=clip_null,
-        clip_swap=clip_swap,
-        clip_refs=clip_refs,
+        ref_images=ref_images,
+        batch_size=batch_size,
     )
-    aggregates = aggregate_metrics(metrics)
     provenance: dict[str, object] = {
         "update": update,
         "growth_alpha": evaluator.growth_alpha,
         "checkpoint": "in-training",
         "resolution": resolution,
-        "sampling_profile": evaluation.sampling_profile,
+        "sampling_profile": evaluator.evaluation.sampling_profile,
         "clip_model_id": CLIP_MODEL_ID,
     }
     document = suite_report_document(
-        manifest=manifest,
-        metrics=metrics,
-        aggregates=aggregates,
-        provenance=provenance,
+        manifest=manifest, suite=result, provenance=provenance
     )
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -231,10 +305,9 @@ def run_concept_suite(
     markdown_path = run_dir / "report.md"
     markdown_path.write_bytes(
         render_suite_markdown(
-            metrics=metrics,
-            aggregates=aggregates,
-            suite=cast(dict[str, object], document["suite"]),
+            suite=result,
+            suite_meta=cast(dict[str, object], document["suite"]),
         ).encode("utf-8")
     )
     print(f"[concept-suite] 报告: {report_path}", flush=True)
-    return _flatten_aggregates(aggregates)
+    return _flatten_dual_path(result)
