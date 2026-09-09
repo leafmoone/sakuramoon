@@ -12,8 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Never, SupportsIndex, cast
 
+from sakuramoon.config.load import ConfigurationError
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.buckets import generate_base_buckets, scale_buckets
+from sakuramoon.data.camera_viewport import (
+    CameraViewportPolicy,
+    camera_is_active,
+    camera_stage_edge,
+)
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
     CaptionFields,
@@ -812,6 +818,24 @@ class ProductionPipelineFactory:
             self.config.data.spatial_crop,
             min_crop_retention=self.config.data.image.min_crop_retention,
         )
+        camera_policy = (
+            CameraViewportPolicy.from_config(self.config.data.camera_viewport)
+            if self.config.data.camera_viewport is not None
+            else None
+        )
+        if camera_is_active(camera_policy):
+            # Fail-fast config boundary (active camera only): the camera
+            # viewport square target must be the train.resolution square
+            # stage bucket. An effectively-off camera never calls
+            # camera_stage_edge and adds no camera-specific config
+            # requirement.
+            stage_edge = camera_stage_edge(buckets)
+            if stage_edge != self.config.train.resolution:
+                raise ConfigurationError(
+                    "camera viewport square target "
+                    f"{stage_edge} does not match train.resolution "
+                    f"{self.config.train.resolution}"
+                )
         pipeline = WebDatasetPipeline(
             shard_paths=(descriptor.local_path,),
             shard_records=(descriptor.record,),
@@ -829,6 +853,7 @@ class ProductionPipelineFactory:
             stage=self.config.run.label or self.config.run.run_id,
             cycle_index=descriptor.cycle_index,
             spatial_policy=spatial_policy,
+            camera_policy=camera_policy,
             transparent_policy=self.config.data.transparent_background,
         )
         _require_spawn_serializable(pipeline, "production pipeline")

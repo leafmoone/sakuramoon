@@ -305,6 +305,30 @@ class DataSpatialCropConfig(StrictModel):
         return self
 
 
+class DataCameraViewportConfig(StrictModel):
+    """Strict shifted-square camera viewport policy (data-strategy only).
+
+    Absent (``None``) keeps the resolved configuration byte-identical to
+    the pre-camera tree and the data path bit-identical to the ordinary
+    aspect-bucket path.  Activation is config-only: the camera path runs
+    iff ``enabled`` and ``probability > 0.0``; ``enabled = false`` is off
+    regardless of p and ``probability = 0.0`` is a legal off switch.  A
+    selected sample receives exactly one shifted-square view (short edge
+    scaled to the stage square target, uniform inclusive integer offset on
+    the long axis, R x R crop); a selected source below the target is
+    rejected, never upscaled, never returned to an ordinary bucket.  This
+    is a pure data-geometry strategy: no conditioning branch, no model /
+    loss / optimizer / LR / batch interaction.
+    """
+
+    enabled: bool
+    mode: Literal["hdm_shifted_square_v2"]
+    probability: UnitFloat
+    viewport: Literal["stage_square"]
+    offset_distribution: Literal["uniform_long_axis_inclusive"]
+    zoom_source: Literal["natural_source_aspect"]
+
+
 class DataTransparentBackgroundConfig(StrictModel):
     """Transparent-background white-composite policy (data-strategy only)."""
 
@@ -352,6 +376,7 @@ class DataConfig(StrictModel):
     buckets: DataBucketsConfig
     spatial_crop: DataSpatialCropConfig
     transparent_background: DataTransparentBackgroundConfig
+    camera_viewport: DataCameraViewportConfig | None = None
 
     @model_validator(mode="after")
     def validate_spatial_crop_retention(self) -> DataConfig:
@@ -360,6 +385,21 @@ class DataConfig(StrictModel):
             raise ValueError(
                 "spatial crop max_equivalent_zoom violates the "
                 "min_crop_retention guard (1/max_zoom**2 must reach it exactly)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_camera_spatial_exclusion(self) -> DataConfig:
+        camera = self.camera_viewport
+        if (
+            camera is not None
+            and camera.enabled
+            and camera.probability > 0.0
+            and self.spatial_crop.enabled
+        ):
+            raise ValueError(
+                "camera_viewport (enabled with positive probability) and "
+                "spatial_crop.enabled are mutually exclusive"
             )
         return self
 

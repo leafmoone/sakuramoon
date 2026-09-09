@@ -15,6 +15,7 @@ from dataclasses import replace
 import pytest
 import torch
 
+from sakuramoon.data.camera_viewport import aggregate_camera_viewport
 from sakuramoon.data.caption import CaptionDropoutCounts, ConditionRouteCounts
 from sakuramoon.data.spatial_crop import (
     SPATIAL_FALLBACK_REASONS,
@@ -126,6 +127,7 @@ def _measurement(
         captions=(),
         caption_plans=(),
         spatial_crop=_spatial_zero(),
+        camera_viewport=aggregate_camera_viewport(()),
         transparent=TransparentWhiteCounts(
             tagged=0,
             composited=0,
@@ -288,6 +290,7 @@ def _single_sample_measurement(
             abs_offset_y_sum=0.0,
             both_axes_count=0,
         ),
+        camera_viewport=aggregate_camera_viewport(()),
         transparent=TransparentWhiteCounts(
             tagged=0,
             composited=0,

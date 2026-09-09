@@ -28,6 +28,11 @@ PUBLISH_STATE_ROOT="${PUBLISH_STATE_ROOT:-${RUNTIME_ROOT}/.sm-train-state-publis
 PUBLISH_LAST_PUBLISHED="${PUBLISH_LAST_PUBLISHED:-/root/private_data/.sm-train-state-publisher/last-published-s0.txt}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
 START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-180}"
+# Data-service ready gate: the warmup barrier (N ready shards, N =
+# worker count) can take minutes on a cold cache. This is the ONLY
+# gate allowed to run long; every other component keeps
+# START_TIMEOUT_SECONDS.
+DATA_READY_TIMEOUT_SECONDS="${DATA_READY_TIMEOUT_SECONDS:-900}"
 STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-30}"
 
 DATA_LOG="${LOG_ROOT}/data-service.log"
@@ -349,7 +354,7 @@ start_detached() {
 
 wait_for_data_service() {
   local elapsed=0
-  while (( elapsed < START_TIMEOUT_SECONDS )); do
+  while (( elapsed < DATA_READY_TIMEOUT_SECONDS )); do
     if [[ -S "${DATA_SOCKET}" ]]; then
       resolve_component_pid data || die "data socket exists but data process is absent"
       log "data service ready: PID ${RESOLVED_PID}, socket ${DATA_SOCKET}"
@@ -366,7 +371,7 @@ wait_for_data_service() {
     fi
   done
   tail_component_log data
-  die "data service did not become ready within ${START_TIMEOUT_SECONDS}s"
+  die "data service did not become ready within ${DATA_READY_TIMEOUT_SECONDS}s (cold-data warmup barrier; raise DATA_READY_TIMEOUT_SECONDS for larger cold windows)"
 }
 
 latest_complete_checkpoint() {
@@ -710,6 +715,7 @@ main() {
 
   load_config_contract
   validate_integer START_TIMEOUT_SECONDS "${START_TIMEOUT_SECONDS}"
+  validate_integer DATA_READY_TIMEOUT_SECONDS "${DATA_READY_TIMEOUT_SECONDS}"
   validate_integer STOP_TIMEOUT_SECONDS "${STOP_TIMEOUT_SECONDS}"
 
   case "${action}" in

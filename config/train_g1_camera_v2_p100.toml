@@ -1,0 +1,50 @@
+# Camera v2 shifted-square canary (P100): full-probability camera policy.
+# Selected samples train one stage-edge R x R square view per source sample
+# (crop-after-scale: short edge scaled to R, long edge quantized by
+# rounding half up, uniform inclusive integer offset on the long axis);
+# selected sources whose post-EXIF short edge is below R are rejected
+# (no-upscale rule) and never returned to an ordinary bucket.
+#
+# Data strategy change only -- model architecture, optimizer, LR, batch,
+# objective and checkpoint schema are untouched. Extends the live G1 run
+# config (bs800 / lr flat / seed 44, train.resolution = 256) and overrides
+# exactly:
+#   - run identity and fully independent run/checkpoint/artifact paths
+#   - [data.camera_viewport]: p=1.0
+#
+# Activation is config-only: the camera path runs iff enabled and
+# probability > 0, so this file (enabled=true, p=1.0) is fully active.
+# [data.spatial_crop] is disabled by the inherited live G1 config, so no
+# override is needed; an active camera and spatial_crop are mutually
+# exclusive by config validator.
+#
+# NOT deployed: the canary starts only after an explicit user GO; it then
+# resumes from a COMPLETE production checkpoint via scripts/training_stack.sh
+# (see AGENTS.md for the launch contract).
+
+extends = ["train_g1.toml"]
+
+[run]
+run_id = "g1_camera_v2_p100"
+
+[paths]
+run_dir = "runs/g1_camera_v2_p100"
+checkpoint_dir = "output_model/g1_camera_v2_p100"
+artifact_dir = "artifacts/g1_camera_v2_p100"
+
+[logging]
+local_jsonl_path = "artifacts/g1_camera_v2_p100/metrics.jsonl"
+
+[wandb]
+retry_jsonl_path = "artifacts/g1_camera_v2_p100/wandb-retry.jsonl"
+
+[evaluation]
+output_dir = "output_model/evaluation/g1_camera_v2_p100"
+
+[data.camera_viewport]
+enabled = true
+mode = "hdm_shifted_square_v2"
+probability = 1.0
+viewport = "stage_square"
+offset_distribution = "uniform_long_axis_inclusive"
+zoom_source = "natural_source_aspect"

@@ -241,6 +241,7 @@ def _generate(
     device: torch.device,
     growth_alpha: float,
     plan_for: Callable[[PromptCase], CaptionPlan] = _conditional_plan,
+    coordinate_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
     height, width = cases[0].height, cases[0].width
     if any((item.height, item.width) != (height, width) for item in cases):
@@ -285,11 +286,23 @@ def _generate(
         )
         for _ in range(branch_count)
     )
-    coordinate_map = image_coordinates(
-        height // 16,
-        width // 16,
-        device=device,
-    )
+    if coordinate_map is None:
+        coordinate_map = image_coordinates(
+            height // 16,
+            width // 16,
+            device=device,
+        )
+    else:
+        expected_shape = (height // 16 * width // 16, 2)
+        if (
+            coordinate_map.ndim != 2
+            or tuple(coordinate_map.shape) != expected_shape
+            or coordinate_map.dtype != torch.float32
+            or coordinate_map.device != device
+        ):
+            raise EvaluationError(
+                "camera coordinate map must be an FP32 [tokens, 2] map on the eval device"
+            )
     inputs = TrainableCompositeInputs(
         qwen_states=qwen_states,
         main_token_indices=main_indices,

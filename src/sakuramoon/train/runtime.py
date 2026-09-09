@@ -28,6 +28,7 @@ from sakuramoon.checkpoint.policy import (
 from sakuramoon.checkpoint.schema import CheckpointManifest, RawCheckpointState
 from sakuramoon.conditioning.rope import full_canvas_crop_coordinates
 from sakuramoon.config.schema import RuntimeConfig
+from sakuramoon.data.camera_viewport import CameraViewportCounts
 from sakuramoon.data.caption import (
     CaptionDropoutCounts,
     CaptionPlan,
@@ -410,6 +411,7 @@ class RuntimeMeasurement:
     captions: tuple[SerializedCaption, ...]
     caption_plans: tuple[CaptionPlan, ...]
     spatial_crop: SpatialCropCounts
+    camera_viewport: CameraViewportCounts
     transparent: TransparentWhiteCounts
     # Phase-4 iREPA split of the per-sample losses (all FP32, shape [B]).
     # ``per_sample_loss`` is the actual backward objective:
@@ -442,6 +444,7 @@ class RuntimeMeasurement:
             captions=self.captions,
             caption_plans=self.caption_plans,
             spatial_crop=self.spatial_crop,
+            camera_viewport=self.camera_viewport,
             transparent=self.transparent,
             main_per_sample_loss=self.main_per_sample_loss.detach(),
             irepa_per_sample_loss=self.irepa_per_sample_loss.detach(),
@@ -974,6 +977,7 @@ class SingleGpuBatchRuntime:
             captions=batch.captions,
             caption_plans=tuple(caption.plan for caption in batch.captions),
             spatial_crop=batch.spatial_crop,
+            camera_viewport=batch.camera_viewport,
             transparent=batch.transparent,
             main_per_sample_loss=loss.main_per_sample,
             irepa_per_sample_loss=loss.irepa_per_sample,
