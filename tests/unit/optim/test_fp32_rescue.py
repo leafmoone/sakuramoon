@@ -319,7 +319,8 @@ def _de_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="2-rank test requires CUDA/HCU (nccl)"
+    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+    reason="2-rank test requires two visible CUDA/HCU devices (nccl)"
 )
 def test_DE_two_rank_owner_only_and_consistency(tmp_path) -> None:
     import torch.multiprocessing as mp

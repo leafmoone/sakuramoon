@@ -4,7 +4,10 @@ Verifies the telemetry-only hard-failure patch against the spec:
 
   A. BF16 fail + FP32 success          -> rescue, commit proceeds
   B. BF16 fail + FP32 above ceiling    -> hard fail, reason=above_ceiling
-  C. BF16 fail + FP32 below floor      -> hard fail, reason=below_floor
+  C. (F3) BF16 fail + FP32 below floor -> ACCEPT unchanged
+                                          (below_floor_soft_rescue; no
+                                          longer a hard-fail reason — see
+                                          tests/unit/optim/test_fp32_rescue_f3.py)
   D. BF16 fail + FP32 nonfinite        -> hard fail, reason=nonfinite
   E. local capsule writer failure           -> original CMuonSafetyError still
                                           raised (I/O never masks root cause)
@@ -360,7 +363,6 @@ def test_a_bf16_fail_fp32_success_rescues_and_commits(
     ("fp32_mode", "reason"),
     [
         ("above_ceiling", "above_ceiling"),
-        ("below_floor", "below_floor"),
         ("nonfinite", "nonfinite"),
     ],
 )
@@ -410,10 +412,9 @@ def test_bcd_hard_fail_captures_fp32_reason(
         assert math.isinf(float(rec["fp32_delta_rms"]))
     else:
         assert rec["fp32_finite"] is True
+        # F3: below_floor is a soft rescue, never a hard-fail reason.
         if reason == "above_ceiling":
             assert rec["fp32_delta_rms"] > 10.0 * (0.2 * lr)
-        elif reason == "below_floor":
-            assert rec["fp32_delta_rms"] < 0.05 * (0.2 * lr)
 
     # F2: the MINIMAL capsule lands in the LOCAL emergency root (the only
     # critical-path write), NOT the shared mirror root.
@@ -467,10 +468,9 @@ def test_bcd_hard_fail_captures_fp32_reason(
         assert meta["fp32_delta_rms"] is None or meta["fp32_delta_rms"] != meta["fp32_delta_rms"]
     else:
         assert meta["fp32_finite"] is True
+        # F3: below_floor is a soft rescue, never a hard-fail reason.
         if reason == "above_ceiling":
             assert meta["fp32_delta_rms"] > meta["ceiling"]
-        elif reason == "below_floor":
-            assert meta["fp32_delta_rms"] < meta["rescue_floor"]
     # The saved tensor is the EXACT FP32-stub input (bits preserved).
     from sakuramoon.optim.cmuon_hardfail import tensor_format_name
 
@@ -506,7 +506,9 @@ def test_e_writer_failure_still_raises_original_error(
     opt = _build_optimizer(module, tmp_path, rank=0, world_size=1, lr=lr,
                            artifact_root=tmp_path / "artifacts",
                            emergency_root=emergency)
-    _install_ns_stubs(monkeypatch, lr, "below_floor")
+    # F3: below_floor is a soft rescue; the hard-fail path is
+    # driven with an above_ceiling FP32 verdict instead.
+    _install_ns_stubs(monkeypatch, lr, "above_ceiling")
     _set_gradients(module, seed=13)
 
     with pytest.raises(CMuonSafetyError) as excinfo:
@@ -544,7 +546,9 @@ def test_f_serialization_failure_still_raises_and_leaves_no_capsule(
     module = _make_module(device)
     opt = _build_optimizer(module, tmp_path, rank=0, world_size=1, lr=lr,
                            artifact_root=tmp_path / "artifacts")
-    _install_ns_stubs(monkeypatch, lr, "below_floor")
+    # F3: below_floor is a soft rescue; the hard-fail path is
+    # driven with an above_ceiling FP32 verdict instead.
+    _install_ns_stubs(monkeypatch, lr, "above_ceiling")
     _set_gradients(module, seed=17)
 
     with pytest.raises(CMuonSafetyError) as excinfo:
@@ -790,7 +794,9 @@ def test_m2_mirror_failure_keeps_local_capsule_and_original_error(
     shared = blocker / "sub"  # mirror mkdir must fail
     opt = _build_optimizer(module, tmp_path, rank=0, world_size=1, lr=lr,
                            artifact_root=shared)
-    _install_ns_stubs(monkeypatch, lr, "below_floor")
+    # F3: below_floor is a soft rescue; the hard-fail path is
+    # driven with an above_ceiling FP32 verdict instead.
+    _install_ns_stubs(monkeypatch, lr, "above_ceiling")
     _set_gradients(module, seed=43)
 
     with pytest.raises(CMuonSafetyError) as excinfo:
@@ -802,7 +808,7 @@ def test_m2_mirror_failure_keeps_local_capsule_and_original_error(
     assert len(events) == 1, f"local capsule must survive the mirror failure: {events}"
     event = events[0]
     meta = json.loads((event / "metadata.json").read_text())
-    assert meta["fp32_failure_reason"] == "below_floor"
+    assert meta["fp32_failure_reason"] == "above_ceiling"
     tensor_name = next(
         n for n in ("input.safetensors", "input.pt") if (event / n).is_file()
     )
