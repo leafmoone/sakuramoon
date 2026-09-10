@@ -10,6 +10,10 @@ Covers the R1/R2 source contract without touching production training:
           (rank0 exact vs rank>0 deterministic) + fail-closed cases
   25-26. device-ordinal cross-validation (validate ANOTHER rank's snapshot
           against that rank's saved ordinal; CUDA-gated)
+  27-32. full RAW load admission through read_raw_checkpoint_state:
+          world2 marker-declared rank files admitted (regression), world1,
+          legacy, and fail-closed cases for markerless or mismatched
+          rank files
 """
 
 from __future__ import annotations
@@ -22,7 +26,10 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from sakuramoon.checkpoint.load import read_rank_rng_anchor
+from sakuramoon.checkpoint.load import (
+    read_rank_rng_anchor,
+    read_raw_checkpoint_state,
+)
 from sakuramoon.checkpoint.rng import (
     RankRngAnchor,
     RankRngBundle,
@@ -418,3 +425,217 @@ def test_cross_rank_validation_against_saved_ordinal(tmp_path: Path) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# 27-32. Full RAW load admission (regression: the fixed RAW sidecar upper
+# bound used to reject marker-declared rank>0 files before rank-set
+# validation could establish their legality). These drive the production
+# load entry point against complete RAW checkpoints.
+# ---------------------------------------------------------------------------
+
+_FULL_UPDATE = 100
+
+
+def _trainer_growth_documents(
+    update: int,
+) -> tuple[dict[str, object], dict[str, object]]:
+    trainer = {
+        "schema_version": 4,
+        "attempted_updates": update,
+        "successful_updates": update,
+        "effective_samples": update * 8,
+        "stage_budget": {
+            "start_successful_update": 0,
+            "terminal_successful_update": 100_000,
+        },
+        "checkpoint_cadence": {
+            "last_successful_update": update,
+            "last_wall_clock_unix_seconds": 1_700_000_000.0,
+            "every_successful_updates": 100,
+        },
+    }
+    growth = {
+        "schema_version": 4,
+        "active_slot_ids": [0],
+        "alpha": 1.0,
+        "stage": "steady",
+        "world_size": 1,
+        "resolution": 256,
+        "ramp_start_successful_update": None,
+        "ramp_updates": None,
+    }
+    return trainer, growth
+
+
+def _build_full_raw_ckpt(
+    root: Path,
+    *,
+    ranks: dict[int, dict[str, torch.Tensor]],
+    marker_world_size: int | None,
+    drop_rank_files: tuple[int, ...] = (),
+    extra_rank_files: tuple[int, ...] = (),
+) -> Path:
+    """Complete RAW checkpoint (all required sidecars + the rng face)."""
+    ckpt = root / "ckpt_full"
+    rng_dir = ckpt / "train_state" / "rng"
+    rng_dir.mkdir(parents=True)
+    trainer, growth = _trainer_growth_documents(_FULL_UPDATE)
+    (ckpt / "resolved_config.toml").write_text("[checkpoint]\n")
+    (ckpt / "train_state" / "trainer_state.json").write_text(
+        json.dumps(trainer) + "\n"
+    )
+    (ckpt / "train_state" / "growth_state.json").write_text(
+        json.dumps(growth) + "\n"
+    )
+    (ckpt / "train_state" / "optimizer.pt").write_bytes(b"pt-placeholder")
+    (ckpt / "train_state" / "optimizer_schema.json").write_text("{}\n")
+    save_file(
+        {"state": torch.zeros(2, dtype=torch.float32)},
+        str(rng_dir / "optimizer_sr.safetensors"),
+    )
+    files: list[dict[str, object]] = []
+    for rank in sorted(ranks):
+        if rank in drop_rank_files:
+            continue
+        path = rng_dir / f"rank-{rank}.safetensors"
+        save_file(ranks[rank], str(path))
+        files.append(
+            {
+                "path": f"train_state/rng/rank-{rank}.safetensors",
+                "size": path.stat().st_size,
+            }
+        )
+    for rank in sorted(extra_rank_files):
+        path = rng_dir / f"rank-{rank}.safetensors"
+        save_file(ranks[0], str(path))
+        files.append(
+            {
+                "path": f"train_state/rng/rank-{rank}.safetensors",
+                "size": path.stat().st_size,
+            }
+        )
+    if marker_world_size is not None:
+        marker_path = rng_dir / "rank_set.json"
+        marker_path.write_text(
+            json.dumps(
+                {
+                    "ranks": list(range(marker_world_size)),
+                    "schema_version": 1,
+                    "world_size": marker_world_size,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        files.append(
+            {
+                "path": "train_state/rng/rank_set.json",
+                "size": marker_path.stat().st_size,
+            }
+        )
+    for relative in (
+        "resolved_config.toml",
+        "train_state/trainer_state.json",
+        "train_state/growth_state.json",
+        "train_state/optimizer.pt",
+        "train_state/optimizer_schema.json",
+        "train_state/rng/optimizer_sr.safetensors",
+    ):
+        path = ckpt / relative
+        files.append({"path": relative, "size": path.stat().st_size})
+    model_dir = ckpt / "model"
+    model_dir.mkdir()
+    shard_name = "model-00001-of-00001.safetensors"
+    save_file(
+        {"some.fqn": torch.zeros(2, dtype=torch.float32)},
+        str(model_dir / shard_name),
+    )
+    (model_dir / "config.json").write_text('{"placeholder": true}\n')
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": 16},
+                "weight_map": {"some.fqn": shard_name},
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    nested_paths = (
+        "config.json",
+        shard_name,
+        "model.safetensors.index.json",
+    )
+    nested_files = [
+        {"path": rel, "size": (model_dir / rel).stat().st_size}
+        for rel in sorted(nested_paths)
+    ]
+    (model_dir / "manifest.json").write_text(
+        json.dumps({"files": nested_files, "schema_version": 1}) + "\n"
+    )
+    for relative in (
+        "model/manifest.json",
+        *(f"model/{rel}" for rel in sorted(nested_paths)),
+    ):
+        path = ckpt / relative
+        files.append({"path": relative, "size": path.stat().st_size})
+    files.sort(key=lambda record: record["path"])
+    manifest = {
+        "schema_version": 4,
+        "kind": "raw",
+        "identity": {"checkpoint_id": "full", "update": _FULL_UPDATE},
+        "files": files,
+    }
+    (ckpt / "manifest.json").write_text(json.dumps(manifest) + "\n")
+    (ckpt / "COMPLETE").write_bytes(b"complete\n")
+    return ckpt
+
+
+def test_raw_world2_full_load_admits_marker_rank_files(tmp_path: Path) -> None:
+    """REGRESSION: marker-declared rank>0 sidecars must pass RAW admission."""
+    snaps = {rank: _snap(BASE_SEED + rank) for rank in (0, 1)}
+    ckpt = _build_full_raw_ckpt(tmp_path, ranks=snaps, marker_world_size=2)
+    manifest, state = read_raw_checkpoint_state(ckpt)
+    assert manifest.identity.update == _FULL_UPDATE
+    assert state.trainer.successful_updates == _FULL_UPDATE
+
+
+def test_raw_world1_marker_full_load_ok(tmp_path: Path) -> None:
+    snaps = {0: _snap(BASE_SEED)}
+    ckpt = _build_full_raw_ckpt(tmp_path, ranks=snaps, marker_world_size=1)
+    manifest, _state = read_raw_checkpoint_state(ckpt)
+    assert manifest.identity.update == _FULL_UPDATE
+
+
+def test_raw_legacy_full_load_ok(tmp_path: Path) -> None:
+    """No marker: the historical rank-0-only publication must load as before."""
+    snaps = {0: _snap(BASE_SEED)}
+    ckpt = _build_full_raw_ckpt(tmp_path, ranks=snaps, marker_world_size=None)
+    read_raw_checkpoint_state(ckpt)
+
+
+def test_raw_no_marker_rank_above_zero_still_rejected(tmp_path: Path) -> None:
+    """Fail-closed guard: rank>0 WITHOUT a marker stays rejected."""
+    snaps = {rank: _snap(BASE_SEED + rank) for rank in (0, 1)}
+    ckpt = _build_full_raw_ckpt(tmp_path, ranks=snaps, marker_world_size=None)
+    with pytest.raises(CheckpointError):
+        read_raw_checkpoint_state(ckpt)
+
+
+def test_raw_marker_missing_declared_rank_file_fails(tmp_path: Path) -> None:
+    snaps = {rank: _snap(BASE_SEED + rank) for rank in (0, 1)}
+    ckpt = _build_full_raw_ckpt(
+        tmp_path, ranks=snaps, marker_world_size=2, drop_rank_files=(1,)
+    )
+    with pytest.raises(CheckpointError):
+        read_raw_checkpoint_state(ckpt)
+
+
+def test_raw_marker_undeclared_rank_file_fails(tmp_path: Path) -> None:
+    snaps = {rank: _snap(BASE_SEED + rank) for rank in (0, 1)}
+    ckpt = _build_full_raw_ckpt(
+        tmp_path, ranks=snaps, marker_world_size=2, extra_rank_files=(3,)
+    )
+    with pytest.raises(CheckpointError):
+        read_raw_checkpoint_state(ckpt)

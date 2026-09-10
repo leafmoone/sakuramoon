@@ -82,7 +82,8 @@ _OPTIONAL_RAW_SIDECARS = {
     # P2-R versioned rank-RNG contract: the marker is legal only together
     # with the EXACT per-rank file set it declares (enforced in
     # _read_rank_set_marker / _validate_raw_sidecars); rank files are never
-    # accepted by wildcard.
+    # accepted by wildcard.  rank>0 files are admitted to the sidecar upper
+    # bound only through a validated marker (see _validate_raw_sidecars).
     RANK_SET_MARKER,
     _rank_rng_file_path(0),
 }
@@ -243,14 +244,24 @@ def _validate_raw_sidecars(checkpoint: Path, manifest: CheckpointManifest) -> No
     if "train_state/data_state.json" in sidecars:
         raise CheckpointError("legacy raw data sidecar is unsupported")
     rank_marker = _read_rank_set_marker(checkpoint, sidecars)
-    if not (_RAW_SIDECARS <= sidecars <= _RAW_SIDECARS | _OPTIONAL_RAW_SIDECARS):
-        raise CheckpointError("raw checkpoint sidecars are unknown or missing")
     if rank_marker is not None:
+        # The marker already fail-closed validated marker <-> file-set
+        # equality (every declared rank file present, no undeclared rank
+        # file present). The fixed sidecar upper bound must therefore be
+        # widened to exactly the marker-declared files: a legal world>1
+        # checkpoint must not be rejected by the fixed bound before rank
+        # set validation can establish its legality.
         legal_rank_files = {
             _rank_rng_file_path(rank) for rank in rank_marker[1]
         }
-        if not legal_rank_files <= sidecars:
-            raise CheckpointError("raw checkpoint sidecars are unknown or missing")
+    else:
+        legal_rank_files = set()
+    if not (
+        _RAW_SIDECARS
+        <= sidecars
+        <= _RAW_SIDECARS | _OPTIONAL_RAW_SIDECARS | legal_rank_files
+    ):
+        raise CheckpointError("raw checkpoint sidecars are unknown or missing")
     model_records = _model_manifest_records(checkpoint / "model")
     outer_model = {
         record.path.removeprefix("model/"): record
