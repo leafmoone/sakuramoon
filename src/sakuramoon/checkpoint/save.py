@@ -19,7 +19,7 @@ from sakuramoon.checkpoint.artifact import (
     export_trainable_composite,
     validate_optimizer_coverage,
 )
-from sakuramoon.checkpoint.rng import capture_rank_rng
+from sakuramoon.checkpoint.rng import RankRngBundle, capture_rank_rng
 from sakuramoon.checkpoint.schema import (
     MAX_MODEL_SHARD_BYTES,
     CheckpointError,
@@ -38,6 +38,11 @@ from sakuramoon.optim.cmuon import HybridCMuon
 from sakuramoon.train.step import TrainableComposite
 
 _SAFETENSORS_HEADER_RESERVE_BYTES = 1024 * 1024
+_RANK_SET_MARKER = "rank_set.json"
+_RANK_SET_SCHEMA_VERSION = 1
+
+
+
 
 
 def _json_bytes(value: object) -> bytes:
@@ -229,6 +234,7 @@ def _write_raw_sidecars(
     state: RawCheckpointState,
     resolved_config: bytes,
     irepa_state: dict[str, object] | None,
+    rank_rng_bundle: RankRngBundle | None,
 ) -> None:
     _write_bytes(temporary / "resolved_config.toml", resolved_config)
     train_state = temporary / "train_state"
@@ -252,8 +258,31 @@ def _write_raw_sidecars(
     _write_json(train_state / "growth_state.json", growth)
     rng_dir = train_state / "rng"
     rng_dir.mkdir()
-    save_file(capture_rank_rng(), str(rng_dir / "rank-0.safetensors"))
-    _fsync_file(rng_dir / "rank-0.safetensors")
+    if rank_rng_bundle is None:
+        # Legacy/internal single-rank call: the historical rank-0 capture.
+        save_file(capture_rank_rng(), str(rng_dir / "rank-0.safetensors"))
+        _fsync_file(rng_dir / "rank-0.safetensors")
+    else:
+        # P2-R: every declared rank file + the versioned rank-set marker.
+        # world_size here is the SAVE-time world size (source topology),
+        # never the current resume config's world size.
+        from sakuramoon.checkpoint.rng import validate_rank_rng
+
+        for rank, tensors in sorted(rank_rng_bundle.entries):
+            saved_device = int(tensors["cuda_device_index"].item())
+            validate_rank_rng(tensors, expected_device_index=saved_device)
+            rank_path = rng_dir / f"rank-{rank}.safetensors"
+            save_file(tensors, str(rank_path))
+            _fsync_file(rank_path)
+        _write_json(
+            rng_dir / _RANK_SET_MARKER,
+            {
+                "ranks": list(rank_rng_bundle.ranks),
+                "schema_version": _RANK_SET_SCHEMA_VERSION,
+                "world_size": len(rank_rng_bundle.ranks),
+            },
+        )
+        _fsync_file(rng_dir / _RANK_SET_MARKER)
     sr_state = optimizer.sr_rng.state_dict()
     sr_tensor = sr_state.get("state")
     if not isinstance(sr_tensor, torch.Tensor):
@@ -350,6 +379,7 @@ def _save(
     resolved_config: bytes | None,
     max_shard_bytes: int,
     irepa_state: dict[str, object] | None = None,
+    rank_rng_bundle: RankRngBundle | None = None,
 ) -> CheckpointSaveResult:
     if kind not in {CheckpointKind.RAW, CheckpointKind.MODEL_ONLY}:
         raise ValueError("checkpoint artifact kind is unsupported")
@@ -389,7 +419,12 @@ def _save(
         _write_model(temporary, module, identity, kind, max_shard_bytes)
         if optimizer is not None and state is not None and resolved_config is not None:
             _write_raw_sidecars(
-                temporary, optimizer, state, resolved_config, irepa_state
+                temporary,
+                optimizer,
+                state,
+                resolved_config,
+                irepa_state,
+                rank_rng_bundle,
             )
         records = _payload_records(temporary)
         manifest = CheckpointManifest(kind=kind, identity=identity, files=records)
@@ -428,6 +463,7 @@ def save_raw_checkpoint(
     resolved_config: bytes,
     max_shard_bytes: int = MAX_MODEL_SHARD_BYTES,
     irepa_state: dict[str, object] | None = None,
+    rank_rng_bundle: RankRngBundle | None = None,
 ) -> CheckpointSaveResult:
     """Atomically publish one RAW checkpoint.
 
@@ -435,6 +471,13 @@ def save_raw_checkpoint(
     resume checkpoint (the ORIGINAL migration anchor, read once at resume);
     it is required for iREPA-enabled (schema v4) composites and must never be
     built from the current update.  v3 saves leave it ``None``.
+
+    ``rank_rng_bundle`` (P2-R): the gathered per-rank RNG snapshots captured
+    before the rank0-only write delegate; when given, the checkpoint
+    publishes ``rank-{i}.safetensors`` for every declared rank plus the
+    versioned ``rank_set.json`` marker (world size = save-time world size).
+    ``None`` keeps the historical rank-0-only publication for internal and
+    single-rank callers.
     """
 
     return _save(
@@ -447,6 +490,7 @@ def save_raw_checkpoint(
         resolved_config=resolved_config,
         max_shard_bytes=max_shard_bytes,
         irepa_state=irepa_state,
+        rank_rng_bundle=rank_rng_bundle,
     )
 
 
@@ -470,6 +514,7 @@ def save_model_only(
 
 
 __all__ = [
+    "RankRngBundle",
     "save_model_only",
     "save_raw_checkpoint",
 ]

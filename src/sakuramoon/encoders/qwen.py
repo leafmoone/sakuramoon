@@ -347,9 +347,31 @@ def probe_qwen_fast_path(
     if probe_length not in QWEN_DENSE_LENGTHS:
         raise ValueError("probe_length must be a supported Qwen dense bucket")
     device = next(encoder.model.parameters()).device
-    input_ids = torch.randint(
-        1, 32_768, (probe_rows, probe_length), device=device, dtype=torch.long
-    )
+    # P2-R (R2.62): the probe must NEVER consume or mutate the process-wide
+    # training RNG.  Two independent protections:
+    #   1. a dedicated torch.Generator for the probe token draw (fixed seed,
+    #      deterministic probe content across processes);
+    #   2. a full get_state/set_state save-restore around the draw, so even
+    #      any RNG side effect from a future code change cannot leak into
+    #      the global stream the training final bind relies on.
+    probe_generator = torch.Generator(device=device)
+    probe_generator.manual_seed(20_260_910)  # fixed P2-R probe constant
+    saved_rng_states = [torch.get_rng_state()]
+    if device.type == "cuda":
+        saved_rng_states.append(torch.cuda.get_rng_state(device))
+    try:
+        input_ids = torch.randint(
+            1,
+            32_768,
+            (probe_rows, probe_length),
+            device=device,
+            dtype=torch.long,
+            generator=probe_generator,
+        )
+    finally:
+        torch.set_rng_state(saved_rng_states[0])
+        if device.type == "cuda":
+            torch.cuda.set_rng_state(saved_rng_states[1], device)
     attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
     dense_lengths = (probe_length,) * probe_rows
     sdpa_backend = _probe_sdpa_backend()

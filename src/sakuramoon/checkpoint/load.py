@@ -22,7 +22,11 @@ from sakuramoon.checkpoint.artifact import (
     is_canonical_v4_irepa_document,
     validate_optimizer_coverage,
 )
-from sakuramoon.checkpoint.rng import restore_rank_rng, validate_rank_rng
+from sakuramoon.checkpoint.rng import (
+    RankRngAnchor,
+    restore_rank_rng,
+    validate_rank_rng,
+)
 from sakuramoon.checkpoint.schema import (
     CheckpointError,
     CheckpointIdentity,
@@ -64,10 +68,67 @@ _RAW_SIDECARS = {
     "train_state/rng/rank-0.safetensors",
     "train_state/trainer_state.json",
 }
+RANK_SET_MARKER = "train_state/rng/rank_set.json"
+_RANK_SET_SCHEMA_VERSION = 1
+
+
+def _rank_rng_file_path(rank: int) -> str:
+    return f"train_state/rng/rank-{rank}.safetensors"
+
+
 _OPTIONAL_RAW_SIDECARS = {
     "train_state/growth_migration.json",
     "train_state/irepa_state.json",
+    # P2-R versioned rank-RNG contract: the marker is legal only together
+    # with the EXACT per-rank file set it declares (enforced in
+    # _read_rank_set_marker / _validate_raw_sidecars); rank files are never
+    # accepted by wildcard.
+    RANK_SET_MARKER,
+    _rank_rng_file_path(0),
 }
+
+
+
+
+def _read_rank_set_marker(
+    checkpoint: Path, sidecars: set[str]
+) -> tuple[int, tuple[int, ...]] | None:
+    """Parse + validate the versioned rank-set marker (fail-closed).
+
+    Returns ``(world_size, ranks)`` or ``None`` for a legacy checkpoint
+    (no marker).  Any malformed marker, gap/duplicate/out-of-range rank, or
+    marker/file-set mismatch is a hard error.
+    """
+    if RANK_SET_MARKER not in sidecars:
+        return None
+    document = _mapping(_read_json(checkpoint / RANK_SET_MARKER, "rank set"), "rank set")
+    _exact_keys(document, {"schema_version", "world_size", "ranks"}, "rank set")
+    schema_version = document["schema_version"]
+    world_size = document["world_size"]
+    ranks = document["ranks"]
+    if schema_version != _RANK_SET_SCHEMA_VERSION:
+        raise CheckpointError(f"unsupported rank set schema version: {schema_version!r}")
+    if type(world_size) is not int or world_size <= 0:
+        raise CheckpointError("rank set world_size must be a positive integer")
+    if type(ranks) is not list or any(type(rank) is not int for rank in ranks):
+        raise CheckpointError("rank set ranks must be a list of integers")
+    if len(ranks) != len(set(ranks)):
+        raise CheckpointError("rank set ranks contain duplicates")
+    if len(ranks) != world_size or sorted(ranks) != list(range(world_size)):
+        raise CheckpointError(
+            "rank set ranks must be exactly 0..world_size-1 "
+            f"(got ranks={ranks!r}, world_size={world_size})"
+        )
+    expected_files = {_rank_rng_file_path(rank) for rank in ranks}
+    actual_rank_files = {
+        path for path in sidecars if path.startswith("train_state/rng/rank-")
+    }
+    if actual_rank_files != expected_files:
+        raise CheckpointError(
+            "rank set marker does not match the rank RNG file set "
+            f"(expected {sorted(expected_files)}, found {sorted(actual_rank_files)})"
+        )
+    return world_size, tuple(sorted(ranks))
 
 
 class _SafeSlice(Protocol):
@@ -181,8 +242,15 @@ def _validate_raw_sidecars(checkpoint: Path, manifest: CheckpointManifest) -> No
     }
     if "train_state/data_state.json" in sidecars:
         raise CheckpointError("legacy raw data sidecar is unsupported")
+    rank_marker = _read_rank_set_marker(checkpoint, sidecars)
     if not (_RAW_SIDECARS <= sidecars <= _RAW_SIDECARS | _OPTIONAL_RAW_SIDECARS):
         raise CheckpointError("raw checkpoint sidecars are unknown or missing")
+    if rank_marker is not None:
+        legal_rank_files = {
+            _rank_rng_file_path(rank) for rank in rank_marker[1]
+        }
+        if not legal_rank_files <= sidecars:
+            raise CheckpointError("raw checkpoint sidecars are unknown or missing")
     model_records = _model_manifest_records(checkpoint / "model")
     outer_model = {
         record.path.removeprefix("model/"): record
@@ -1430,6 +1498,10 @@ def load_raw_checkpoint(
     module: nn.Module,
     optimizer: IsolatedAdamW8bit | HybridCMuon,
     expected: CheckpointIdentity,
+    *,
+    rank: int = 0,
+    current_world_size: int = 1,
+    restore_training_rng: bool = True,
 ) -> RawCheckpointState:
     """Restore a RAW checkpoint into the supplied model and optimizer.
 
@@ -1503,19 +1575,61 @@ def load_raw_checkpoint(
             )
     else:
         raise CheckpointError("checkpoint growth state differs from model active slots")
-    try:
-        rank_rng = load_file(train_state / "rng" / "rank-0.safetensors", device="cpu")
-    except Exception:  # noqa: BLE001 - normalize Safetensors loader errors
-        raise CheckpointError("rank RNG file is unreadable") from None
-    # The persisted device ordinal is source-run metadata: every rank always
-    # rebinds the saved generator state to its own device, so a resume may
-    # move to any topology (there is no single special-cased transition).
-    if torch.cuda.is_available():
-        rank_rng = dict(rank_rng)
-        rank_rng["cuda_device_index"] = torch.tensor(
-            torch.cuda.current_device(), dtype=torch.int64
-        )
-    validate_rank_rng(rank_rng)
+    if type(rank) is not int or rank < 0:
+        raise ValueError("rank must be a non-negative integer")
+    if type(current_world_size) is not int or current_world_size <= 0:
+        raise ValueError("current_world_size must be a positive integer")
+    if rank >= current_world_size:
+        raise ValueError("rank must be within the current world size")
+    rank_rng: dict[str, torch.Tensor] | None = None
+    if restore_training_rng:
+        marker = _read_rank_set_marker(checkpoint, _sidecar_paths(checkpoint))
+        if marker is None:
+            # LEGACY: the historical rank-0 snapshot on every rank; the
+            # persisted device ordinal is source-run metadata and the state
+            # is rebound to this rank's own device (a legacy resume may move
+            # to any topology).
+            try:
+                rank_rng = load_file(
+                    train_state / "rng" / "rank-0.safetensors", device="cpu"
+                )
+            except Exception:  # noqa: BLE001 - normalize Safetensors loader errors
+                raise CheckpointError("rank RNG file is unreadable") from None
+            if torch.cuda.is_available():
+                rank_rng = dict(rank_rng)
+                rank_rng["cuda_device_index"] = torch.tensor(
+                    torch.cuda.current_device(), dtype=torch.int64
+                )
+            validate_rank_rng(rank_rng)
+        elif marker[0] == current_world_size and rank in marker[1]:
+            # NEW + SAME TOPOLOGY: this rank restores its OWN saved snapshot
+            # (bit-exact per-rank RNG recovery).
+            try:
+                rank_rng = load_file(
+                    train_state / "rng" / f"rank-{rank}.safetensors", device="cpu"
+                )
+            except Exception:  # noqa: BLE001 - normalize Safetensors loader errors
+                raise CheckpointError(f"rank {rank} RNG file is unreadable") from None
+            validate_rank_rng(
+                rank_rng,
+                expected_device_index=int(rank_rng["cuda_device_index"].item()),
+            )
+        elif rank == 0 and 0 in marker[1]:
+            # NEW + TOPOLOGY CHANGED, rank0 only: the historical rank-0
+            # snapshot, rebound to this rank's device.  Other ranks restore
+            # nothing here (the caller reseeds deterministically).
+            try:
+                rank_rng = load_file(
+                    train_state / "rng" / "rank-0.safetensors", device="cpu"
+                )
+            except Exception:  # noqa: BLE001 - normalize Safetensors loader errors
+                raise CheckpointError("rank RNG file is unreadable") from None
+            if torch.cuda.is_available():
+                rank_rng = dict(rank_rng)
+                rank_rng["cuda_device_index"] = torch.tensor(
+                    torch.cuda.current_device(), dtype=torch.int64
+                )
+            validate_rank_rng(rank_rng)
     sr_rng = _load_sr_rng(train_state / "rng" / "optimizer_sr.safetensors", optimizer)
     successful_updates = state.trainer.successful_updates
 
@@ -1589,7 +1703,8 @@ def load_raw_checkpoint(
                 "sr_rng": sr_rng,
             }
         )
-    restore_rank_rng(rank_rng)
+    if rank_rng is not None:
+        restore_rank_rng(rank_rng)
     return state
 
 
@@ -1695,6 +1810,94 @@ def _load_adamw_transition_state(
             "optimizer": optimizer_state,
             "sr_rng": sr_rng,
         }
+    )
+
+
+def _sidecar_paths(checkpoint: Path) -> set[str]:
+    manifest = read_checkpoint_manifest(checkpoint)
+    return {
+        record.path
+        for record in manifest.files
+        if not record.path.startswith("model/")
+    }
+
+
+def read_rank_rng_anchor(
+    checkpoint: Path,
+    *,
+    rank: int,
+    current_world_size: int,
+) -> RankRngAnchor:
+    """Derive the rank-local training RNG anchor of a RAW checkpoint (P2-R).
+
+    The anchor is validated material only; production rebinds the training
+    RNG from it at the FINAL bind point (after preflight, before the first
+    training draw).  Classification:
+
+    - versioned marker + source world size == current world size:
+      ``same_topology_exact`` with this rank's own snapshot;
+    - versioned marker + source world size != current: ``topology_changed``
+      (rank0 keeps the saved rank-0 snapshot when present; NEVER
+      historical-exact);
+    - no marker: ``legacy_rank0`` (rank0) / ``legacy`` (rank > 0).
+    """
+    if type(rank) is not int or rank < 0:
+        raise ValueError("rank must be a non-negative integer")
+    if type(current_world_size) is not int or current_world_size <= 0:
+        raise ValueError("current_world_size must be a positive integer")
+    if rank >= current_world_size:
+        raise ValueError("rank must be within the current world size")
+    sidecars = _sidecar_paths(checkpoint)
+    marker = _read_rank_set_marker(checkpoint, sidecars)
+    train_state = checkpoint / "train_state"
+
+    def _load_rank_file(rank_id: int) -> dict[str, torch.Tensor]:
+        try:
+            return load_file(
+                train_state / "rng" / f"rank-{rank_id}.safetensors", device="cpu"
+            )
+        except Exception:  # noqa: BLE001 - normalize Safetensors loader errors
+            raise CheckpointError(f"rank {rank_id} RNG file is unreadable") from None
+
+    def _rebind_local(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        if torch.cuda.is_available():
+            rebound = dict(tensors)
+            rebound["cuda_device_index"] = torch.tensor(
+                torch.cuda.current_device(), dtype=torch.int64
+            )
+            return rebound
+        return tensors
+
+    if marker is None:
+        if rank == 0:
+            tensors = _rebind_local(_load_rank_file(0))
+            validate_rank_rng(tensors)
+            return RankRngAnchor(
+                "legacy_rank0", source_world_size=1, tensors=tensors
+            )
+        return RankRngAnchor("legacy", source_world_size=1)
+
+    source_world_size, ranks = marker
+    if source_world_size != current_world_size:
+        if rank == 0 and 0 in ranks:
+            tensors = _rebind_local(_load_rank_file(0))
+            validate_rank_rng(tensors)
+            return RankRngAnchor(
+                "topology_changed",
+                source_world_size=source_world_size,
+                tensors=tensors,
+            )
+        return RankRngAnchor(
+            "topology_changed", source_world_size=source_world_size
+        )
+    if rank not in ranks:
+        raise CheckpointError(f"rank {rank} is not part of the checkpoint rank set")
+    tensors = _load_rank_file(rank)
+    validate_rank_rng(
+        tensors, expected_device_index=int(tensors["cuda_device_index"].item())
+    )
+    return RankRngAnchor(
+        "same_topology_exact", source_world_size=source_world_size, tensors=tensors
     )
 
 

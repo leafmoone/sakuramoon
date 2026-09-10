@@ -21,6 +21,7 @@ from sakuramoon.assets.pe_spatial import (
     require_local_pe_spatial_teacher,
 )
 from sakuramoon.checkpoint.policy import CheckpointReason
+from sakuramoon.checkpoint.rng import RankRngAnchor, RankRngBundle
 from sakuramoon.checkpoint.schema import (
     CheckpointCadence,
     CheckpointIdentity,
@@ -213,6 +214,8 @@ class _SingleGpuCheckpointPublisher(Protocol):
         state: SingleGpuUpdateState,
         reason: CheckpointReason,
         cadence: CheckpointCadence,
+        *,
+        rank_rng_bundle: RankRngBundle | None = None,
     ) -> Path: ...
 
     def apply_verified_retention(
@@ -251,6 +254,10 @@ class RestoredSingleGpuCheckpoint:
     payload_bytes: int
     module: nn.Module = field(repr=False)
     optimizer: IsolatedAdamW8bit | HybridCMuon = field(repr=False)
+    # P2-R: the validated rank-local training RNG anchor (material only).
+    # Production rebinds from it at the FINAL training-RNG bind point,
+    # after preflight.  Legacy internal callers keep ``None``.
+    rank_rng_anchor: RankRngAnchor | None = None
 
 
 def _require_restored_checkpoint(
@@ -272,19 +279,41 @@ def restore_single_gpu_checkpoint(
     module: nn.Module,
     optimizer: IsolatedAdamW8bit | HybridCMuon,
     expected: CheckpointIdentity,
+    *,
+    rank: int = 0,
+    current_world_size: int = 1,
 ) -> RestoredSingleGpuCheckpoint:
-    """Load a raw checkpoint into the supplied model and optimizer."""
+    """Load a raw checkpoint into the supplied model and optimizer.
+
+    P2-R: ``rank`` / ``current_world_size`` select the rank-aware RNG
+    semantics (same-topology exact / topology-changed / legacy fallback).
+    The validated ``rank_rng_anchor`` is carried on the returned object for
+    the FINAL training-RNG bind point (production rebinds there, after
+    preflight); the loader-level immediate restore applies only when no
+    anchor material exists to rebind later.
+    """
 
     from sakuramoon.checkpoint.load import (
         load_raw_checkpoint,
         read_checkpoint_manifest,
+        read_rank_rng_anchor,
     )
 
+    anchor = read_rank_rng_anchor(
+        checkpoint, rank=rank, current_world_size=current_world_size
+    )
     state = load_raw_checkpoint(
         checkpoint,
         module,
         optimizer,
         expected,
+        rank=rank,
+        current_world_size=current_world_size,
+        # The anchor always exists for production callers: the rebind is
+        # deferred to the final bind point, so the loader skips its own
+        # immediate restore (validation of the rank file still happens
+        # inside read_rank_rng_anchor above).
+        restore_training_rng=False,
     )
     manifest = read_checkpoint_manifest(checkpoint)
     if manifest.kind is not CheckpointKind.RAW or manifest.identity != expected:
@@ -299,6 +328,7 @@ def restore_single_gpu_checkpoint(
         payload_bytes=payload_bytes,
         module=module,
         optimizer=optimizer,
+        rank_rng_anchor=anchor,
     )
 
 
@@ -359,6 +389,8 @@ class ProductionSingleGpuCheckpointPublisher:
         state: SingleGpuUpdateState,
         reason: CheckpointReason,
         cadence: CheckpointCadence,
+        *,
+        rank_rng_bundle: RankRngBundle | None = None,
     ) -> Path:
         from sakuramoon.checkpoint.save import save_raw_checkpoint
 
@@ -398,6 +430,7 @@ class ProductionSingleGpuCheckpointPublisher:
             raw_state,
             resolved_config=self._resolved_config,
             irepa_state=self._irepa_state,
+            rank_rng_bundle=rank_rng_bundle,
         )
         path = result.path.resolve(strict=True)
         self._pending[path] = (identity, raw_state)

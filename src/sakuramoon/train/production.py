@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -11,6 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Self, cast
 
+import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
@@ -22,6 +24,7 @@ from sakuramoon.checkpoint.load import (
     read_raw_checkpoint_state,
 )
 from sakuramoon.checkpoint.policy import CheckpointCadence, CheckpointReason
+from sakuramoon.checkpoint.rng import RankRngBundle, capture_rank_rng
 from sakuramoon.checkpoint.save import save_raw_checkpoint
 from sakuramoon.checkpoint.schema import (
     CheckpointIdentity,
@@ -759,6 +762,43 @@ def _terminal_completed(config: RuntimeConfig, initial_update: int) -> bool:
     return config.train.max_updates <= initial_update
 
 
+def _deterministic_rank_rng_seed(
+    base_seed: int, rank: int, successful_updates: int
+) -> int:
+    """The historical deterministic rank reseed (legacy / topology fallback)."""
+    return base_seed + rank * 1_000_003 + successful_updates
+
+
+def _bind_final_training_rng(
+    anchor,
+    *,
+    base_seed: int,
+    rank: int,
+    successful_updates: int,
+    device: torch.device,
+) -> None:
+    """P2-R final training-RNG bind (option B: one explicit rebind at the
+    end of setup, after preflight, before the first training draw).
+
+    - exact anchors (same-topology new / legacy rank0 / topology-changed
+      rank0): restore the validated snapshot on this rank;
+    - deterministic anchors (legacy rank>0 / topology-changed rank>0):
+      reseed Python / NumPy / torch CPU / this device with the historical
+      formula.  This is the legacy fallback and is NEVER historical-exact.
+    """
+    if anchor.tensors is not None:
+        from sakuramoon.checkpoint.rng import restore_rank_rng
+
+        restore_rank_rng(anchor.tensors)
+        return
+    seed = _deterministic_rank_rng_seed(base_seed, rank, successful_updates)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)  # pyright: ignore[reportUnknownMemberType]
+    if device.type == "cuda":
+        torch.cuda.default_generators[int(device.index or 0)].manual_seed(seed)
+
+
 def _forced_production_checkpoint_reason(
     state: RawCheckpointState,
     *,
@@ -792,6 +832,7 @@ def _forced_production_checkpoint_reason(
 def _bootstrap_checkpoint(
     loaded: LoadedConfig,
     *,
+    rank: int,
     checkpoint_root: Path,
     module: TrainableComposite,
     optimizer: IsolatedAdamW8bit,
@@ -802,11 +843,18 @@ def _bootstrap_checkpoint(
     entries = tuple(checkpoint_root.iterdir())
     if entries == (bootstrap,) and (bootstrap / "COMPLETE").is_file():
         _log("复用尚未开始训练的初始化状态")
-        return restore_single_gpu_checkpoint(bootstrap, module, optimizer, identity)
+        return restore_single_gpu_checkpoint(
+            bootstrap, module, optimizer, identity, rank=rank
+        )
     if entries:
         raise ConfigurationError(
             "fresh start requires an empty configured checkpoint directory"
         )
+    # P2-R: each rank publishes its OWN post-initialization bootstrap
+    # (checkpoint_root is per-rank in the resolved production paths).  The
+    # saved RNG is the canonical POST-INITIALIZATION training RNG anchor —
+    # model/optimizer construction has already consumed the startup seed —
+    # and is reused verbatim at the final bind point.
     saved = save_raw_checkpoint(
         checkpoint_root,
         identity,
@@ -814,8 +862,11 @@ def _bootstrap_checkpoint(
         optimizer,
         _initial_raw_state(loaded.config, wall_clock=wall_clock),
         resolved_config=loaded.resolved_toml.encode("utf-8"),
+        rank_rng_bundle=RankRngBundle(((rank, capture_rank_rng()),)),
     )
-    return restore_single_gpu_checkpoint(saved.path, module, optimizer, identity)
+    return restore_single_gpu_checkpoint(
+        saved.path, module, optimizer, identity, rank=rank
+    )
 
 
 def _resume_state_for_config(
@@ -908,6 +959,8 @@ def _resume_state_for_config(
 def _restore_checkpoint(
     loaded: LoadedConfig,
     *,
+    rank: int = 0,
+    world_size: int = 1,
     checkpoint: Path,
     module: TrainableComposite,
     optimizer: IsolatedAdamW8bit | HybridCMuon,
@@ -931,7 +984,14 @@ def _restore_checkpoint(
     # the current configuration values; batch size and LR may change freely
     # across a resume because the loader replaces the saved group rates.
     _set_optimizer_learning_rate(optimizer, expected_rate)
-    restored = restore_single_gpu_checkpoint(checkpoint, module, optimizer, identity)
+    restored = restore_single_gpu_checkpoint(
+        checkpoint,
+        module,
+        optimizer,
+        identity,
+        rank=rank,
+        current_world_size=world_size,
+    )
     resumed_state = _resume_state_for_config(loaded.config, restored.state)
     # Keep the opt-in NS safety telemetry reporting absolute update numbers
     # across a resume (it was constructed with offset 0).
@@ -1095,12 +1155,38 @@ class _AccelerateCheckpointPublisher(ProductionSingleGpuCheckpointPublisher):
         state: SingleGpuUpdateState,
         reason: CheckpointReason,
         cadence: CheckpointCadence,
+        *,
+        rank_rng_bundle: RankRngBundle | None = None,
     ) -> Path:
         stage = f"checkpoint/update-{state.successful_updates}/publish-{reason.value}"
+        # P2-R: every rank captures its OWN RNG snapshot and the small
+        # gather happens BEFORE the rank0-only write delegate (the delegate
+        # itself must stay collective-free).  All ranks enter
+        # publish_update in lockstep at the checkpoint cadence.
+        own = rank_rng_bundle
+        if own is None:
+            own = RankRngBundle(((self._accelerator.process_index, capture_rank_rng()),))
+        gathered: list[RankRngBundle] = [None] * self._accelerator.num_processes
+        torch.distributed.all_gather_object(gathered, own)
+        if any(entry is None for entry in gathered):
+            raise RuntimeError("rank RNG gather produced an incomplete bundle")
+        bundle = RankRngBundle(tuple(sorted(entry.entries for entry in gathered)))
+        if self._accelerator.is_main_process:
+            payload_bytes = sum(
+                tensor.numel() * tensor.element_size()
+                for _, tensors in bundle.entries
+                for tensor in tensors.values()
+            )
+            _log(
+                f"rank RNG bundle: ranks={list(bundle.ranks)} "
+                f"payload={payload_bytes} bytes"
+            )
         published = self._progress.run_on_rank(
             stage,
             0,
-            lambda: self._delegate.publish_update(state, reason, cadence),
+            lambda: self._delegate.publish_update(
+                state, reason, cadence, rank_rng_bundle=bundle
+            ),
         )
         value = [str(published) if self._accelerator.is_main_process else ""]
         torch.distributed.broadcast_object_list(value, src=0)
@@ -1320,6 +1406,7 @@ def _run_accepted_lifecycle(
         )
         restored = _bootstrap_checkpoint(
             loaded,
+            rank=rank,
             checkpoint_root=checkpoint_root,
             module=module,
             optimizer=optimizer,
@@ -1329,6 +1416,8 @@ def _run_accepted_lifecycle(
         _log(f"恢复训练状态: {resume}")
         restored = _restore_checkpoint(
             loaded,
+            rank=rank,
+            world_size=world_size,
             checkpoint=resume,
             module=module,
             optimizer=optimizer,
@@ -1503,14 +1592,17 @@ def _run_accepted_lifecycle(
             optimizer,
             restored.state.trainer.successful_updates,
         )
-    if accelerator is not None and rank > 0:
-        resumed_seed = (
-            config.run.seed
-            + rank * 1_000_003
-            + restored.state.trainer.successful_updates
-        )
-        torch.manual_seed(resumed_seed)  # pyright: ignore[reportUnknownMemberType]
-        torch.cuda.default_generators[int(device.index or 0)].manual_seed(resumed_seed)
+    # P2-R: the rank-local training RNG is NOT rebound here.  The validated
+    # anchor (exact same-topology snapshot, historical rank-0 snapshot, or
+    # deterministic reseed spec) is bound at the FINAL bind point after
+    # preflight, immediately before the first training draw.  Model /
+    # optimizer / frozen-encoder / preflight setup may consume RNG freely;
+    # the final bind discards all of it.
+    from sakuramoon.checkpoint.load import read_rank_rng_anchor
+
+    final_rng_anchor = read_rank_rng_anchor(
+        restored.path, rank=rank, current_world_size=world_size
+    )
     distributed_sync_module: DistributedDataParallel | None
     if accelerator is None:
         forward_module: nn.Module = module
@@ -1811,6 +1903,20 @@ def _run_accepted_lifecycle(
                     _log(
                         f"开始训练: update {initial_update + 1} -> "
                         f"{config.train.max_updates}"
+                    )
+                    # P2-R FINAL training-RNG bind: after preflight and
+                    # all setup, before the first training draw.
+                    _log(
+                        f"final training RNG bind: "
+                        f"mode={final_rng_anchor.mode} "
+                        f"source_world={final_rng_anchor.source_world_size}"
+                    )
+                    _bind_final_training_rng(
+                        final_rng_anchor,
+                        base_seed=config.run.seed,
+                        rank=rank,
+                        successful_updates=initial_update,
+                        device=device,
                     )
                     loop_result = run_single_gpu_training(
                         config,

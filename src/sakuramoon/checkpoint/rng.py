@@ -1,4 +1,13 @@
-"""Safe single-rank RNG capture and restore using plain tensors."""
+"""Safe per-rank RNG capture and restore using plain tensors.
+
+P2-R contract: snapshots are validated in two layers so a rank may validate
+ANOTHER rank's snapshot against that rank's device ordinal:
+
+- structure: exact keys, dtypes, shapes, installable states (device-agnostic)
+- device: the saved ``cuda_device_index`` must equal the caller-supplied
+  ``expected_device_index`` (defaults to the current device, preserving the
+  historical single-rank contract).
+"""
 
 from __future__ import annotations
 
@@ -60,7 +69,11 @@ def capture_rank_rng() -> dict[str, torch.Tensor]:
     }
 
 
-def validate_rank_rng(tensors: dict[str, torch.Tensor]) -> None:
+def validate_rank_rng(
+    tensors: dict[str, torch.Tensor],
+    *,
+    expected_device_index: int | None = None,
+) -> None:
     if set(tensors) != _RNG_KEYS:
         raise CheckpointError("rank RNG file has unknown or missing tensors")
     scalar_dtypes = {
@@ -85,9 +98,11 @@ def validate_rank_rng(tensors: dict[str, torch.Tensor]) -> None:
     cuda_present = bool(tensors["cuda_present"].item())
     if cuda_present != torch.cuda.is_available():
         raise CheckpointError("checkpoint CUDA RNG availability does not match")
+    if expected_device_index is None:
+        expected_device_index = torch.cuda.current_device() if cuda_present else -1
     if cuda_present:
         device_index = int(tensors["cuda_device_index"].item())
-        if device_index != torch.cuda.current_device() or tensors["torch_cuda_state"].numel() == 0:
+        if device_index != expected_device_index or tensors["torch_cuda_state"].numel() == 0:
             raise CheckpointError("checkpoint CUDA RNG device does not match")
     elif int(tensors["cuda_device_index"].item()) != -1 or tensors["torch_cuda_state"].numel() != 0:
         raise CheckpointError("CPU checkpoint has invalid CUDA RNG state")
@@ -130,8 +145,12 @@ def validate_rank_rng(tensors: dict[str, torch.Tensor]) -> None:
         raise CheckpointError("rank RNG state is not restorable") from None
 
 
-def restore_rank_rng(tensors: dict[str, torch.Tensor]) -> None:
-    validate_rank_rng(tensors)
+def restore_rank_rng(
+    tensors: dict[str, torch.Tensor],
+    *,
+    expected_device_index: int | None = None,
+) -> None:
+    validate_rank_rng(tensors, expected_device_index=expected_device_index)
     python_values = cast(
         list[int],
         tensors["python_internal"].tolist(),  # pyright: ignore[reportUnknownMemberType]
@@ -160,4 +179,86 @@ def restore_rank_rng(tensors: dict[str, torch.Tensor]) -> None:
         )
 
 
-__all__ = ["capture_rank_rng", "restore_rank_rng", "validate_rank_rng"]
+class RankRngAnchor:
+    """The rank-local training RNG anchor of one checkpoint (P2-R).
+
+    ``mode`` is the recovery classification of the per-rank RNG:
+
+    - ``"same_topology_exact"``: a versioned rank-set checkpoint whose
+      SOURCE world size equals the resume world size; the rank's own saved
+      snapshot restores bit-exactly.
+    - ``"topology_changed"``: a versioned rank-set checkpoint whose source
+      world size differs from the resume world size; rank0 may keep the
+      saved rank-0 snapshot, every other rank uses the deterministic
+      reseed.  NEVER historical-exact.
+    - ``"legacy_rank0"``: a pre-rank-set checkpoint; the historical
+      rank-0 saved snapshot.
+    - ``"legacy"``: a pre-rank-set checkpoint, rank > 0; deterministic
+      reseed.  NEVER historical-exact.
+
+    ``tensors`` carries the exact snapshot (other modes leave it ``None``).
+    The anchor is validated material only; production rebinds the training
+    RNG from it at the FINAL bind point, after preflight.
+    """
+
+    __slots__ = ("mode", "source_world_size", "tensors")
+
+    def __init__(
+        self,
+        mode: str,
+        *,
+        source_world_size: int,
+        tensors: dict[str, torch.Tensor] | None = None,
+    ) -> None:
+        if mode not in {
+            "same_topology_exact",
+            "topology_changed",
+            "legacy_rank0",
+            "legacy",
+        }:
+            raise ValueError(f"unknown rank RNG anchor mode: {mode!r}")
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "source_world_size", source_world_size)
+        object.__setattr__(self, "tensors", tensors)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("RankRngAnchor is immutable")
+
+
+class RankRngBundle:
+    """Immutable per-rank RNG snapshots for one checkpoint boundary (P2-R).
+
+    Built from ``capture_rank_rng()`` on every rank and gathered to the
+    publishing rank BEFORE the rank0-only write delegate; the save path only
+    ever consumes this frozen value (never re-captures live generators).
+    """
+
+    def __init__(self, entries: tuple[tuple[int, dict[str, torch.Tensor]], ...]) -> None:
+        if not entries or any(type(rank) is not int or rank < 0 for rank, _ in entries):
+            raise ValueError("rank RNG bundle needs non-negative integer ranks")
+        ranks = tuple(rank for rank, _ in entries)
+        if len(set(ranks)) != len(ranks):
+            raise ValueError("rank RNG bundle contains duplicate ranks")
+        if any(not isinstance(tensors, dict) for _, tensors in entries):
+            raise TypeError("rank RNG bundle entries must be capture_rank_rng mappings")
+        object.__setattr__(self, "_entries", entries)
+
+    @property
+    def entries(self) -> tuple[tuple[int, dict[str, torch.Tensor]], ...]:
+        return self._entries
+
+    @property
+    def ranks(self) -> tuple[int, ...]:
+        return tuple(rank for rank, _ in self._entries)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("RankRngBundle is immutable")
+
+
+__all__ = [
+    "RankRngAnchor",
+    "RankRngBundle",
+    "capture_rank_rng",
+    "restore_rank_rng",
+    "validate_rank_rng",
+]
