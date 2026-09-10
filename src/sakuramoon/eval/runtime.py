@@ -868,6 +868,13 @@ class TrainingEvaluator:
             splits=self.evaluation.is_splits,
             device=self.device,
         )
+        # Reclaim reserved-but-unused pool segments (generation-phase
+        # temporaries) back to the driver before FID linear algebra: hipsolver
+        # workspaces are allocated OUTSIDE the caching allocator and need
+        # contiguous driver-level HBM, which the hoarded pool would otherwise
+        # withhold. Observed failure: HIPSOLVER_STATUS_ALLOC_FAILED in
+        # hipsolverDnCreate at update 140000 on a 64G DCU with ~1.6G headroom.
+        torch.cuda.empty_cache()
         fid_dimension = (
             generated.count
             if generated.centered_features is not None
