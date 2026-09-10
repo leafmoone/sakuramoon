@@ -125,3 +125,51 @@ checkpoint 与配置之间的绑定分两类：
   BENCHMARK 哨兵，加载时必须 fail-closed，属预期）。
 - Windows 本机 `os.O_NOFOLLOW`/`os.O_DIRECTORY`/`fcntl`/符号链接缺失导致的
   少数失败为平台环境差异，非回归（已在 BASE 提交同环境对照确认）。
+
+## 7. Per-rank 训练 RNG（P2-R 恢复保证）
+
+### 7.1 保存
+
+每个 rank 的 checkpoint 目录内包含**该 rank 自己的训练 RNG 快照**
+（`rank_rng_rank<NNNN>.safetensors`：Python `random`、NumPy、torch CPU、
+该 rank 设备的 CUDA 状态）与 rank 集合标记 `rank_set.json`
+（schema v1 + 源 world_size + 已排序 rank 列表）。DDP 路径下所有 rank 先在
+**rank0 写入委托之前**用 `all_gather_object` 交换快照，rank0 一次性写全集；
+写入委托只消费冻结的 `RankRngBundle`，从不重新抓取活生成器。fresh start 的
+`ckpt_0_bootstrap` 也按 per-rank 发布，保存**初始化完成后**的规范训练 RNG
+锚点（模型/优化器构造已消费启动 seed，锚点不含该消耗）。
+
+### 7.2 恢复分类（fail-closed）
+
+加载侧按源/目标拓扑把每个 rank 的 RNG 恢复分类为四种锚点模式：
+
+| 模式 | 条件 | 恢复语义 |
+| --- | --- | --- |
+| `same_topology_exact` | rank-set checkpoint 且源 world_size == 恢复 world_size | 该 rank 自己的快照，位级精确 |
+| `topology_changed` | rank-set checkpoint 且 world_size 变化 | rank0 恢复其快照（精确）；其它 rank 确定性重播种（**非**历史精确） |
+| `legacy_rank0` | 旧 checkpoint（无 `rank_set.json`）且 rank == 0 | 恢复保存的 rank-0 快照（历史行为） |
+| `legacy` | 旧 checkpoint 且 rank > 0 | 确定性重播种（**非**历史精确） |
+
+`rank_set.json` 与 per-rank 文件缺失/不一致 → fail-closed（不猜测、不部分恢复）。
+
+### 7.3 恢复后 RNG 隔离（final bind）
+
+恢复后的第一次训练随机抽取**之前**（训练前检查完成后、进入训练循环前），
+生产路径执行唯一一次显式重绑（final bind）：
+
+- 精确锚点：用恢复校验过的快照重设本 rank 的
+  Python / NumPy / torch CPU / 本设备生成器；
+- 确定性锚点：按历史公式重播种
+  `base_seed + rank * 1_000_003 + successful_updates`
+  （legacy / 拓扑变化回退；与历史 run 的位级一致性不再保证）。
+
+采样/评估链路的随机流由独立生成器驱动，与训练流隔离：Qwen fast-path 探针
+使用固定种子（20260910）的专用 `torch.Generator`，并在每次调用前后
+保存/恢复全局 RNG 状态，探针本身零训练流消耗。
+
+### 7.4 保证
+
+- 同拓扑（含 fresh bootstrap 重启）：恢复后的随机流位级精确延续；
+- 卡数变化：rank0 位级精确，rank>0 确定性重播种（确定性、可复现，
+  但非历史精确——这是拓扑变化的定义内后果）;
+- 缺失或不匹配的 per-rank RNG 材料：fail-closed，拒绝恢复。
