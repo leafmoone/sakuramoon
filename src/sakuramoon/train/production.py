@@ -1652,6 +1652,17 @@ def _run_accepted_lifecycle(
             )
         else:
             verified_checkpoints: list[Path] = []
+            # One-shot startup pool reclaim (per rank, bootstrap AND resume):
+            # hand the fragmented reserved-unallocated pool left by the
+            # restore/assembly sequence back to the driver, so the first
+            # forward grows from clean driver-level free memory instead of
+            # placement-failing on a fragmented pool at the pinned ~62.6G
+            # spike (restore-path startup OOM, blue5 2026-09-11; blue4
+            # controlled experiment on a real ckpt: no-ec OOM / with-ec PASS
+            # at 53.62 sps).  A few seconds of startup cost; steady state is
+            # untouched.
+            torch.cuda.empty_cache()
+            _log("启动池回收: empty_cache（restore 后、首 forward 前，一次性）")
             try:
                 context_provider = _ProductionMetricContext(
                     batches.ready_batch_depth_snapshot,
