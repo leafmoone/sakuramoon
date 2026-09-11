@@ -520,6 +520,14 @@ class TrainingEvaluator:
             return None
         if not self.is_main_process:
             return None
+        # Reclaim the FID/CMMD-era pool back to the driver before the suite's
+        # generation passes: the suite's driver-level HBM allocations
+        # (generation activations beyond the pinned ~62.6G pool) cannot be
+        # placed when the FID/CMMD pool fragments the ~1.4G driver free
+        # margin.  Observed failure: 145000 concept-suite HSA abort
+        # (hsaKmtAllocMemoryAlign ENOMEM 979M/1424M, silent rank death —
+        # C++-level, uncatchable by the swallow-below).
+        torch.cuda.empty_cache()
         from sakuramoon.eval.concept_suite import (
             run_concept_suite as _run_concept_suite,
         )
