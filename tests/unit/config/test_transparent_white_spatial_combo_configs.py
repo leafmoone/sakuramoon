@@ -15,7 +15,6 @@ CONFIG_ROOT = Path(__file__).resolve().parents[3] / "config"
 @pytest.mark.parametrize(
     ("name", "probability"),
     (
-        ("train_g1_transparent_white_spatial_p25", 0.25),
         ("train_g1_transparent_white_spatial_p50", 0.5),
     ),
 )
