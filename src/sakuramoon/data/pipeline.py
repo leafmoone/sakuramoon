@@ -64,7 +64,7 @@ from sakuramoon.data.transparent_white import (
 CaptionFieldsParser = Callable[[Mapping[str, object]], CaptionFields]
 MetadataAdapter = Callable[[Mapping[str, object]], Mapping[str, object]]
 RejectionObserver = Callable[[str], None]
-_IMAGE_KEYS = ("jpg", "jpeg", "png", "webp")
+_IMAGE_KEYS = ("jpg", "jpeg", "png", "webp", "avif")
 _MAX_DECODE_PIXELS = 100_000_000
 _MAX_DECODE_DIMENSION = 32_768
 _DRAFT_DECODE_MIN_PIXELS = int(

@@ -85,7 +85,7 @@ _CLASSIFICATION_VALUES = frozenset(
 )
 _YEAR_PATTERN = re.compile(r"^year [0-9]{4}(?:, (?:newest|oldest))?$")
 _MULTICAPTION_KEYS = frozenset({"long_names", "long_no_names", "short", "vibes"})
-_IMAGE_FORMATS = frozenset({"jpg", "jpeg", "png", "webp"})
+_IMAGE_FORMATS = frozenset({"jpg", "jpeg", "png", "webp", "avif"})
 
 
 def _require_spawn_serializable(value: object, name: str) -> None:
@@ -141,7 +141,7 @@ def _validate_source_contract(raw: Mapping[str, object]) -> str:
             and cast(str, source[key]) == cast(str, source[key]).strip()
             for key in ("release", "original_path")
         )
-    elif dataset in {"artstation-2D", "background-2D"}:
+    elif dataset in {"artstation-2D", "background-2D", "gamecg-2D"}:
         # The 2D publisher uses schema v1 and may leave release/path blank
         # (the WebDataset __key__ is the operational sample identity).
         valid = version == "1" and all(
