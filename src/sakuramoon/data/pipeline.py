@@ -327,14 +327,21 @@ def _metadata(sample: Mapping[str, object]) -> Mapping[str, object]:
 def _image_bytes(sample: Mapping[str, object]) -> bytes:
     present = tuple(key for key in _IMAGE_KEYS if key in sample)
     if len(present) > 1:
-        # Some pipelines publish two image payloads under one sample key
-        # (original + re-encode).  Neither is trustworthy as THE sample
-        # image, so the whole sample is skipped and counted via the
-        # rejection channel instead of crashing the worker.
+        # Two usable image payloads under one sample key: neither is
+        # trustworthy as THE sample image; skip and count.
         raise PipelineSampleRejected("multi-image")
-    if len(present) != 1 or not isinstance(sample[present[0]], bytes):
-        raise PipelineSampleError("WebDataset sample must contain exactly one image")
-    return cast(bytes, sample[present[0]])
+    if len(present) == 1 and isinstance(sample[present[0]], bytes):
+        return cast(bytes, sample[present[0]])
+    if present:
+        raise PipelineSampleError("WebDataset sample image payload is invalid")
+    # No decodable image key.  If the sample still carries a non-JSON
+    # payload (e.g. gif animations, which this corpus does not train on)
+    # it is skipped and counted; a sample with no payload at all is
+    # structural corruption and still raises.
+    payload_keys = [k for k in sample if not k.startswith("__") and k != "json"]
+    if payload_keys:
+        raise PipelineSampleRejected("unsupported-image")
+    raise PipelineSampleError("WebDataset sample must contain exactly one image")
 
 
 def _uint8_chw(image: Image.Image) -> torch.Tensor:
