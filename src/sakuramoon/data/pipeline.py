@@ -72,6 +72,7 @@ _DRAFT_DECODE_MIN_PIXELS = int(
 )
 _SAMPLE_TRACE_PATH = "/root/sakuramoon-logs/sample-trace.log"
 
+
 def _trace_sample(source_shard: str, sample_id: int, status: str) -> None:
     try:
         with open(_SAMPLE_TRACE_PATH, "a", encoding="utf-8") as fh:
@@ -325,6 +326,12 @@ def _metadata(sample: Mapping[str, object]) -> Mapping[str, object]:
 
 def _image_bytes(sample: Mapping[str, object]) -> bytes:
     present = tuple(key for key in _IMAGE_KEYS if key in sample)
+    if len(present) > 1:
+        # Some pipelines publish two image payloads under one sample key
+        # (original + re-encode).  Neither is trustworthy as THE sample
+        # image, so the whole sample is skipped and counted via the
+        # rejection channel instead of crashing the worker.
+        raise PipelineSampleRejected("multi-image")
     if len(present) != 1 or not isinstance(sample[present[0]], bytes):
         raise PipelineSampleError("WebDataset sample must contain exactly one image")
     return cast(bytes, sample[present[0]])
@@ -406,12 +413,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             or type(cycle_index) is not int
             or cycle_index < 0
             or not (
-                spatial_policy is None
-                or isinstance(spatial_policy, SpatialCropPolicy)  # pyright: ignore[reportUnnecessaryIsInstance]
+                spatial_policy is None or isinstance(spatial_policy, SpatialCropPolicy)  # pyright: ignore[reportUnnecessaryIsInstance]
             )
             or not (
-                camera_policy is None
-                or isinstance(camera_policy, CameraViewportPolicy)  # pyright: ignore[reportUnnecessaryIsInstance]
+                camera_policy is None or isinstance(camera_policy, CameraViewportPolicy)  # pyright: ignore[reportUnnecessaryIsInstance]
             )
             or not (
                 transparent_policy is None
@@ -451,7 +456,9 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             self._camera_stage_edge = 0
         self.transparent_policy = transparent_policy
         self.transparent_telemetry = (
-            transparent_telemetry if transparent_telemetry is not None else TransparentWhiteTelemetry()
+            transparent_telemetry
+            if transparent_telemetry is not None
+            else TransparentWhiteTelemetry()
         )
         # Per-shard reject counters of the reliable worker->parent channel.
         # Each lease pipeline (and its local-shard clone) owns one fixed-key
@@ -514,7 +521,16 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             return None
         if not isinstance(fields, CaptionFields):
             raise PipelineSampleError("caption field parser returned an invalid value")
-        image_bytes = _image_bytes(sample)
+        try:
+            image_bytes = _image_bytes(sample)
+        except PipelineSampleRejected as rejected:
+            _trace_sample(
+                shard_record.path,
+                metadata.id,
+                f"reject:{rejected.reason}",
+            )
+            self.rejection_observer(rejected.reason)
+            return None
         camera_plan: CameraViewportPlan | None = None
         try:
             probe_width, probe_height = _probe_image_dimensions(image_bytes)
@@ -588,7 +604,9 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                     self.transparent_telemetry.record(tw.outcome)
                     if tw.outcome.is_reject:
                         reason = tw.outcome.observer_reason
-                        assert reason is not None  # reject outcomes always carry a reason
+                        assert (
+                            reason is not None
+                        )  # reject outcomes always carry a reason
                         assert reason in self._shard_transparent_rejections
                         self._shard_transparent_rejections[reason] += 1
                         _trace_sample(
@@ -613,10 +631,7 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             # (decode guard and transparent policy): a camera-selected
             # source below the stage square target is rejected explicitly.
             # It is never upscaled and never returned to an ordinary bucket.
-            if (
-                camera_plan is not None
-                and camera_plan.fallback_reason == "no_upscale"
-            ):
+            if camera_plan is not None and camera_plan.fallback_reason == "no_upscale":
                 _trace_sample(
                     shard_record.path, metadata.id, "reject:camera_no_upscale"
                 )
@@ -835,7 +850,6 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
             padding_token_id=self.framing.padding_token_id,
             transparent_outcome=transparent_outcome,
         )
-
 
     def _iter_paths(
         self,
