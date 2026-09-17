@@ -75,7 +75,9 @@ _V2_OPTIONAL_DEFAULTS: dict[str, object] = {
     "join": {},
     "multicaptions": {},
 }
-_RATINGS = frozenset({"safe", "general", "questionable", "explicit"})
+_RATINGS = frozenset(
+    {"safe", "general", "questionable", "explicit", "sensitive"}
+)
 _NSFW_VALUES = frozenset({"sfw", "questionable", "nsfw"})
 _QUALITY_VALUES = frozenset(
     {"masterpiece", "best", "great", "good", "normal", "low", "worst"}
@@ -140,10 +142,18 @@ def _validate_source_contract(raw: Mapping[str, object]) -> str:
 def _optional_tag_from_value(
     raw: Mapping[str, object], key: str, *, allowed: frozenset[str] | None = None
 ) -> tuple[Tag, ...]:
-    """Map an explicitly blank optional metadata scalar to no tags."""
+    """Map an optional metadata scalar to tags.
+
+    Blank or null maps to no tags; a present value outside the allowed
+    vocabulary (each source pipeline carries its own small enum for these
+    bonus scoring fields) also maps to no tags rather than crashing the
+    worker — a missing bonus tag is cheap, a dead rank is not.
+    """
 
     value = raw[key]
     if value is None or value == "":
+        return ()
+    if allowed is not None and (type(value) is not str or value not in allowed):
         return ()
     return _tag_from_value(raw, key, allowed=allowed)
 

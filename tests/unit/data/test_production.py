@@ -226,6 +226,17 @@ def test_modelscope_parser_defaults_missing_caption_branches_to_none() -> None:
     assert tuple(tag.text for tag in fields.general) == ("blue_hair", "dress")
 
 
+def test_modelscope_parser_accepts_bangumi_sensitive_rating() -> None:
+    # The bangumi pipeline emits rating='sensitive', outside the danbooru
+    # vocabulary; it is a valid conditioning tag for that corpus.
+    raw = _real_row()
+    raw["rating"] = "sensitive"
+
+    assert tuple(tag.text for tag in parse_modelscope_caption_fields(raw).rating) == (
+        "sensitive",
+    )
+
+
 @pytest.mark.parametrize("value", [None, "safe", 2])
 def test_governed_modelscope_parser_rejects_invalid_nsfw(value: object) -> None:
     raw = _real_row()
