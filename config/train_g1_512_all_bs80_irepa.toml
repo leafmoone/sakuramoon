@@ -54,6 +54,13 @@ weight = 0.5
 [caption.dropout.nl]
 long_names = 0.1
 
+# Periodic sampling: add a 12-image raw cohort on top of the locked cohort —
+# real post-dropout training prompts rendered at their observed training
+# shapes (384x640, 448x576, 512x512, ...). No A/B swap, no camera variants;
+# each image is a plain single-condition CFG at the real bucket shape.
+[sampling.training]
+raw_image_count = 12
+
 # Fresh validation cohort for the v3 corpus: 7 shards deterministically
 # sampled from the v3 manifest (seed 44), auto-created + auto-downloaded on
 # first launch. The frozen s0-validation-50k-v1 cohort (v2 content) is left

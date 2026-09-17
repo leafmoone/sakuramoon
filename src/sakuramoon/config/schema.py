@@ -728,6 +728,10 @@ class TrainingSamplingConfig(StrictModel):
     output_subdir: Annotated[str, StringConstraints(min_length=1)] = "sample"
     fixed_cohort: Literal["none", "locked"] = "none"
     longitudinal_pin_update: PositiveInt | None = None
+    # Additional raw cohort: real post-dropout training prompts sampled at
+    # their observed training shapes (no A/B pairing, no swap, no camera
+    # geometry). 0 disables the group; existing runs keep 0 by default.
+    raw_image_count: Annotated[int, Field(ge=0, le=12)] = 0
 
     # The cohort mode and the image count map 1:1; the runtime selects the
     # locked mode from ``fixed_cohort`` alone and treats ``image_count`` as

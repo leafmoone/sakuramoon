@@ -68,6 +68,7 @@ VariantName = Literal[
     "A-camera-h-end",
     "A-camera-v-center",
     "A-camera-v-end",
+    "raw",
 ]
 GeometryKind = Literal[
     "canonical",
@@ -513,6 +514,65 @@ def _build_variant_items(
     result = tuple(items)
     _require_variant_batch(result)
     return result
+
+
+def _select_raw_candidates(
+    candidates: tuple[_PostDropoutPrompt, ...],
+    selector: random.Random,
+    count: int,
+) -> tuple[_PostDropoutPrompt, ...]:
+    """Deterministically pick real post-dropout training samples (raw cohort).
+
+    Only samples whose condition survived dropout are eligible, and each
+    sample id is used at most once. The selection is a pure function of the
+    candidate order and the seeded selector.
+    """
+    if type(count) is not int or count <= 0 or count > _VARIANT_COUNT:
+        raise TrainingSamplingError("raw sample count is invalid")
+    eligible: list[_PostDropoutPrompt] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate.plan.condition is None or candidate.sample_id in seen:
+            continue
+        seen.add(candidate.sample_id)
+        eligible.append(candidate)
+    if len(eligible) < count:
+        raise TrainingSamplingError(
+            f"raw cohort needs {count} distinct conditioned samples, "
+            f"found {len(eligible)}"
+        )
+    return tuple(selector.sample(eligible, count))
+
+
+def _build_raw_items(
+    selected: tuple[_PostDropoutPrompt, ...],
+    *,
+    start_ordinal: int,
+) -> tuple[TrainingSampleItem, ...]:
+    """One plain item per real sample: its post-dropout prompt at its
+    observed training shape. No A/B pairing, no swap, no camera geometry.
+    """
+    items: list[TrainingSampleItem] = []
+    for offset, candidate in enumerate(selected):
+        height, width = candidate.observed_height, candidate.observed_width
+        items.append(
+            TrainingSampleItem(
+                ordinal=start_ordinal + offset,
+                variant="raw",
+                main_source="A",
+                condition_sources=("A",),
+                sample_id=candidate.sample_id,
+                caption=candidate.caption,
+                plan=candidate.plan,
+                height=height,
+                width=width,
+                zoom=1.0,
+                virtual_canvas_size=(height, width),
+                crop_box=(0, 0, width, height),
+                coordinate_type="canonical_full_canvas",
+            )
+        )
+    return tuple(items)
 
 
 def _require_image_batch(
@@ -1277,6 +1337,157 @@ class TrainingSampler:
         )
         return images, diagnostics
 
+    def _generate_raw_batch(
+        self,
+        items: tuple[TrainingSampleItem, ...],
+        *,
+        shared_seed: int,
+        framing: FramingContract,
+    ) -> torch.Tensor:
+        """Generate one same-shape group of raw (real prompt, real shape)
+        samples with a plain N-branch CFG: no A/B pair layout, no variant
+        diagnostics, no camera geometry."""
+        height, width = _require_image_batch(items)
+        count = len(items)
+        conditional = tuple(item.caption for item in items)
+        unconditional = serialize_caption(
+            _unconditional_plan(), self.qwen.tokenizer, framing
+        )
+        captions = conditional + (unconditional,) * count
+        (
+            input_ids,
+            attention_mask,
+            main_indices,
+            main_mask,
+            main_lengths,
+            condition_indices,
+            condition_mask,
+            use_null,
+            active_condition,
+        ) = _conditioning_inputs(
+            captions, tokenizer=self.qwen.tokenizer, device=self.device
+        )
+        qwen_output = self.qwen.encoder(input_ids, attention_mask)
+        qwen_states = getattr(qwen_output, "hidden_states", None)
+        if not isinstance(qwen_states, torch.Tensor):
+            raise TrainingSamplingError("Qwen output lacks hidden states")
+        size_scale_value = 0.5 * math.log2((height * width) / float(512 * 512))
+        aspect_value = math.log2(width / float(height))
+        size_scale = torch.full(
+            (2 * count,),
+            size_scale_value,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        aspect = torch.full(
+            (2 * count,),
+            aspect_value,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        placeholders = tuple(
+            torch.empty(
+                128,
+                height // 16,
+                width // 16,
+                dtype=torch.bfloat16,
+                device=self.device,
+            )
+            for _ in range(2 * count)
+        )
+        conditional_coordinates = _coordinate_maps(items, device=self.device)
+        branch_coordinates = conditional_coordinates + conditional_coordinates
+        inputs = TrainableCompositeInputs(
+            qwen_states=qwen_states,
+            main_token_indices=main_indices,
+            main_mask=main_mask,
+            main_token_lengths=main_lengths,
+            condition_token_indices=condition_indices,
+            condition_mask=condition_mask,
+            use_null_condition=use_null,
+            active_condition_sample_indices=active_condition,
+            latents=placeholders,
+            image_coordinates=branch_coordinates,
+            timestep=torch.zeros(
+                2 * count, dtype=torch.float32, device=self.device
+            ),
+            size_scale=size_scale,
+            aspect=aspect,
+            growth_alpha=self.growth_alpha,
+        )
+        conditioning = self.composite.forward_conditioning(inputs)
+        noise = _shared_initial_noise(
+            height=height,
+            width=width,
+            shared_seed=shared_seed,
+            count=count,
+            device=self.device,
+        )
+
+        def velocity(state: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+            if state.shape != noise.shape or timestep.shape != (count,):
+                raise TrainingSamplingError(
+                    "raw sampler state or timestep batch is invalid"
+                )
+            branches = torch.cat((state, state), dim=0).to(torch.bfloat16)
+            step_inputs = dataclasses.replace(
+                inputs,
+                latents=tuple(branches.unbind(0)),
+                timestep=torch.cat((timestep, timestep), dim=0),
+            )
+            predicted = self.composite.forward_dit(step_inputs, conditioning)
+            if len(predicted) != 2 * count:
+                raise TrainingSamplingError(
+                    "DiT did not return the raw CFG prediction count"
+                )
+            return guided_velocity(
+                torch.stack(predicted[:count]),
+                torch.stack(predicted[count:]),
+                state,
+                timestep,
+                t_eps=self.config.timestep.t_eps,
+                guidance_scale=self.config.cfg.scale,
+            )
+
+        sampled = sample_profile(
+            velocity,
+            noise,
+            profile=self.config.sampling.selected,
+        )
+        if sampled.state.shape != noise.shape or sampled.state.dtype != torch.float32:
+            raise TrainingSamplingError(
+                "raw sample profile returned an invalid state batch"
+            )
+        decoded = self.vae.decode(sampled.state.to(torch.bfloat16))
+        if decoded.shape != (count, 3, height, width):
+            raise TrainingSamplingError("VAE returned an invalid raw sample batch")
+        if not bool(torch.isfinite(decoded).all().item()):
+            raise TrainingSamplingError("VAE produced nonfinite raw samples")
+        return (
+            decoded.float()
+            .add(1.0)
+            .mul(127.5)
+            .round()
+            .clamp(0.0, 255.0)
+            .to(device="cpu", dtype=torch.uint8)
+        )
+
+    @staticmethod
+    def _raw_wandb_caption(
+        item: TrainingSampleItem,
+        *,
+        shared_seed: int,
+    ) -> str:
+        return (
+            f"cohort=raw\n"
+            f"variant=raw\n"
+            f"sample_id={item.sample_id}\n"
+            f"shared_seed={shared_seed}\n"
+            f"output_size={item.width}x{item.height}\n"
+            f"body={item.caption.body}\n"
+            f"condition={item.caption.condition_text or '<null>'}"
+        )
+
     @staticmethod
     def _wandb_caption(
         item: TrainingSampleItem,
@@ -1363,6 +1574,36 @@ class TrainingSampler:
                 for item in locked_items
             )
 
+        raw_count = self.config.sampling.training.raw_image_count
+        raw_items: tuple[TrainingSampleItem, ...] = ()
+        raw_groups: list[tuple[tuple[TrainingSampleItem, ...], int]] = []
+        raw_seed_by_ordinal: dict[int, int] = {}
+        if raw_count:
+            raw_selector = random.Random(
+                f"{self.config.run.seed}\0training-sample-raw\0{selector_update}"
+            )
+            raw_selected = _select_raw_candidates(
+                candidates, raw_selector, raw_count
+            )
+            raw_items = _build_raw_items(
+                raw_selected,
+                start_ordinal=(
+                    _LOCKED_TOTAL_VARIANT_COUNT
+                    if locked_cohort
+                    else _VARIANT_COUNT
+                ),
+            )
+            by_shape: dict[tuple[int, int], list[TrainingSampleItem]] = {}
+            for raw_item in raw_items:
+                by_shape.setdefault((raw_item.height, raw_item.width), []).append(
+                    raw_item
+                )
+            for group in by_shape.values():
+                raw_seed = raw_selector.randrange(2**63)
+                raw_groups.append((tuple(group), raw_seed))
+                for raw_item in group:
+                    raw_seed_by_ordinal[raw_item.ordinal] = raw_seed
+
         step_root = self.output_root / f"step-{update}"
         step_root.mkdir(parents=True, exist_ok=False)
         was_training = self.composite.training
@@ -1391,6 +1632,15 @@ class TrainingSampler:
                         )
                         locked_batch_images.extend(locked_images)
                     fixed_images = tuple(locked_batch_images)
+                raw_images: dict[int, torch.Tensor] = {}
+                for raw_group, raw_seed in raw_groups:
+                    generated_raw = self._generate_raw_batch(
+                        raw_group,
+                        shared_seed=raw_seed,
+                        framing=framing,
+                    )
+                    for raw_item, raw_image in zip(raw_group, generated_raw):
+                        raw_images[raw_item.ordinal] = raw_image
                 dynamic_paths = tuple(
                     step_root / f"{item.ordinal + 1:02d}-{item.variant}.png"
                     for item in items
@@ -1415,6 +1665,11 @@ class TrainingSampler:
                 fixed_paths = tuple(
                     path for group in fixed_group_paths for path in group
                 )
+                raw_paths = tuple(
+                    step_root
+                    / f"{item.ordinal + 1:02d}-raw-{item.height}x{item.width}.png"
+                    for item in raw_items
+                )
                 for item, image, path in zip(items, images, dynamic_paths, strict=True):
                     array = image.permute(1, 2, 0).contiguous().numpy()
                     Image.fromarray(array).save(path)
@@ -1423,18 +1678,23 @@ class TrainingSampler:
                 ):
                     array = image.permute(1, 2, 0).contiguous().numpy()
                     Image.fromarray(array).save(path)
+                for raw_item, path in zip(raw_items, raw_paths, strict=True):
+                    raw_image = raw_images[raw_item.ordinal]
+                    array = raw_image.permute(1, 2, 0).contiguous().numpy()
+                    Image.fromarray(array).save(path)
         finally:
             self.composite.train(was_training)
             torch.cuda.empty_cache()
 
-        paths = dynamic_paths + fixed_paths
+        paths = dynamic_paths + fixed_paths + raw_paths
         expected_variant_count = (
             _LOCKED_TOTAL_VARIANT_COUNT
             if locked_cohort
             else _VARIANT_COUNT
         )
-        if len(paths) != expected_variant_count or not all(
-            path.is_file() for path in paths
+        if (
+            len(paths) != expected_variant_count + raw_count
+            or not all(path.is_file() for path in paths)
         ):
             raise TrainingSamplingError("saved sample files are incomplete")
         wandb_captions = tuple(
@@ -1462,6 +1722,14 @@ class TrainingSampler:
                             cohort=f"fixed-{label}",
                         ),
                     )
+        if raw_count:
+            for raw_item in raw_items:
+                wandb_captions = wandb_captions + (
+                    self._raw_wandb_caption(
+                        raw_item,
+                        shared_seed=raw_seed_by_ordinal[raw_item.ordinal],
+                    ),
+                )
         records = [
             _variant_metadata(
                 item,
@@ -1494,17 +1762,48 @@ class TrainingSampler:
                     )
                     for item, path in zip(locked_items, group_paths, strict=True)
                 )
+        if raw_count:
+            records.extend(
+                {
+                    "update": update,
+                    "cohort": "raw",
+                    "variant": "raw",
+                    "path": path.relative_to(self.repository_root).as_posix(),
+                    "shared_seed": raw_seed_by_ordinal[raw_item.ordinal],
+                    "sample_id": raw_item.sample_id,
+                    "output_size": {
+                        "height": raw_item.height,
+                        "width": raw_item.width,
+                    },
+                    "zoom": raw_item.zoom,
+                    "virtual_canvas_size": {
+                        "height": raw_item.virtual_canvas_size[0],
+                        "width": raw_item.virtual_canvas_size[1],
+                    },
+                    "crop_box": {
+                        "left": raw_item.crop_box[0],
+                        "top": raw_item.crop_box[1],
+                        "right": raw_item.crop_box[2],
+                        "bottom": raw_item.crop_box[3],
+                    },
+                    "coordinate_type": raw_item.coordinate_type,
+                    "resolved_plan": _plan_metadata(raw_item.plan),
+                }
+                for raw_item, path in zip(raw_items, raw_paths, strict=True)
+            )
         cohort_names = (
             ["dynamic"]
             if not locked_cohort
             else ["dynamic"]
             + [f"fixed-{label}" for _prompts, _items, _seed, label in fixed_groups]
         )
+        if raw_count:
+            cohort_names = cohort_names + ["raw"]
         state_count = (
             _LOCKED_TOTAL_VARIANT_COUNT
             if locked_cohort
             else _VARIANT_COUNT
-        )
+        ) + raw_count
         metadata = {
             "schema_version": 6 if locked_cohort else 5,
             "geometry_protocol": _GEOMETRY_PROTOCOL,
@@ -1515,7 +1814,11 @@ class TrainingSampler:
             "shared_seed": shared_seed,
             **({"selector_update": selector_update} if pin_active else {}),
             "state_count": state_count,
-            "cfg_branch_count": _CFG_BRANCH_COUNT * len(cohort_names),
+            "cfg_branch_count": sum(
+                [_CFG_BRANCH_COUNT]
+                + ([_CFG_BRANCH_COUNT] * len(fixed_groups) if locked_cohort else [])
+                + ([2 * len(group) for group, _raw_seed in raw_groups] if raw_count else [])
+            ),
             "cohort_state_count": _VARIANT_COUNT,
             "cohort_cfg_branch_count": _CFG_BRANCH_COUNT,
             "cohorts": cohort_names,
@@ -1534,6 +1837,7 @@ class TrainingSampler:
                 "A": _prompt_metadata(pair.a),
                 "B": _prompt_metadata(pair.b),
             },
+            "raw_image_count": raw_count,
             "records": records,
         }
         if locked_cohort:
@@ -1547,6 +1851,17 @@ class TrainingSampler:
                     },
                 }
                 for locked_prompts, _items, seed, label in fixed_groups
+            ]
+        if raw_count:
+            metadata["raw_groups"] = [
+                {
+                    "height": group[0].height,
+                    "width": group[0].width,
+                    "shared_seed": seed,
+                    "branch_count": 2 * len(group),
+                    "sample_ids": [item.sample_id for item in group],
+                }
+                for group, seed in raw_groups
             ]
         metadata_path = step_root / "metadata.json"
         temporary = step_root / f".metadata.{update}.tmp"
