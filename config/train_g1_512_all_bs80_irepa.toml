@@ -1,0 +1,66 @@
+# G1 512^2 run (good19, 2026-09-17): full webdataset_danbooru_v3 corpus
+# (danbooru + zerochan + bangumi, 10226 shards / 19.07TB), iREPA v1
+# (PE-Spatial teacher, weight 0.5, 1000-update ramp from the resume
+# anchor), camera v2 p=1 inherited, long_names NL dropout 0.1
+# (all-five-equal constraint removed 2026-09-17, per-branch values
+# independent).
+#
+# Batch: local 80 x accum 3 x 2 ranks = global 480. Measured feasible on
+# identical hardware (512irepa-g4 sweep, 2026-09-11): bs80 +
+# activation_checkpoint_mode="all" = 9.79s/step, 16.34 global sps,
+# ~39G peak (bs96 = measured ceiling 44.66G, bs112 OOMs in the iREPA
+# teacher math-attention fallback).
+#
+# Extends the live production camera config; overrides exactly:
+#   - [train] resolution 512 / local 80 / accum 3 / global 480 /
+#     activation_checkpoint_mode "all"
+#   - [run] run_id sm_512_bs480_iprea
+#   - [scheduler] warmup_updates 10000 (base 1000)
+#   - [data.source] + [data.manifest]: webdataset_danbooru_v3 (all shards)
+#   - [irepa]: enabled (fresh projector ramp, OFF->ON is a supported
+#     transition; teacher SHA-verified 86217607...a2a5)
+#   - [caption.dropout.nl].long_names = 0.1
+extends = ["train_g1_cmuon_production_camera_p100.toml"]
+
+[run]
+run_id = "sm_512_bs480_iprea"
+
+[scheduler]
+warmup_updates = 10000
+
+[train]
+resolution = 512
+local_batch = 80
+accumulation = 3
+global_batch = 480
+activation_checkpoint_mode = "all"
+
+[data.source]
+repo_id = "leafmoone/webdataset_danbooru_v3"
+
+[data.manifest]
+path = "data/dataset-manifest-webdataset-danbooru-v3.json"
+
+[irepa]
+enabled = true
+teacher_id = "facebook/PE-Spatial-B16-512"
+teacher_local_path = "model-irepa/pe_spatial_b16_512"
+tap_slot = 8
+projector_kernel_size = 3
+spatial_norm = "zscore"
+loss = "cosine"
+weight = 0.5
+
+[caption.dropout.nl]
+long_names = 0.1
+
+# Fresh validation cohort for the v3 corpus: 7 shards deterministically
+# sampled from the v3 manifest (seed 44), auto-created + auto-downloaded on
+# first launch. The frozen s0-validation-50k-v1 cohort (v2 content) is left
+# untouched; its samples overlap v3 training data and are no longer a valid
+# holdout. The v1 validation-prompts.json is a concept-suite asset (suite is
+# disabled in this run) and does not carry over.
+[data.validation]
+selection_path = "data/validation-cohorts/s0-validation-512-v3/validation-selection.json"
+shard_root = "data/validation-cohorts/s0-validation-512-v3/shards"
+shard_count = 7
