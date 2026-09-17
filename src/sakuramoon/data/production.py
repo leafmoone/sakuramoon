@@ -22,6 +22,7 @@ from sakuramoon.data.camera_viewport import (
 )
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
+    CaptionError,
     CaptionFields,
     NlCandidates,
     NlDropoutProbabilities,
@@ -309,12 +310,18 @@ def _modelscope_tags(raw: Mapping[str, object], key: str) -> tuple[Tag, ...]:
     tags = _nested_mapping(raw, "tags").get(key)
     if type(tags) is not list:
         raise ProductionDataError(f"ModelScope metadata tags.{key} must be a list")
-    items = cast(list[object], tags)
-    if not all(type(item) is str for item in items):
-        raise ProductionDataError(
-            f"ModelScope metadata tags.{key} must contain only strings"
-        )
-    return tuple(Tag(text=item, canonical=item) for item in cast(list[str], items))
+    # Blank/empty entries are normal in some corpus pipelines: they simply
+    # carry no tag.  Any other entry Tag cannot accept drops itself, never
+    # the whole sample.
+    parsed: list[Tag] = []
+    for item in cast(list[object], tags):
+        if not isinstance(item, str):
+            continue
+        try:
+            parsed.append(Tag(text=item, canonical=item))
+        except CaptionError:
+            continue
+    return tuple(parsed)
 
 
 def _optional_text(
