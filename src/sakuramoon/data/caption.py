@@ -286,15 +286,9 @@ class CaptionDropoutProbabilities:
                 "condition route and condition-only dropout probabilities "
                 "must sum to at most one"
             )
-        nl_values = (
-            self.nl.long_names,
-            self.nl.long_no_names,
-            self.nl.short_vibes,
-            self.nl.nl2,
-            self.nl.nl3,
-        )
-        if len(set(nl_values)) != 1:
-            raise CaptionError("all five NL dropout probabilities must be equal")
+        # Per-branch NL dropout is intentionally free: the former
+        # all-five-equal constraint was removed (2026-09-17, user decision)
+        # so individual branches (e.g. long_names) can be tuned independently.
 
 
 @dataclass(frozen=True)

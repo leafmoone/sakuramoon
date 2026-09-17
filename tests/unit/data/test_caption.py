@@ -432,15 +432,17 @@ def test_candidate_deletion_ids_require_exact_canonical_boundaries(
         )
 
 
-def test_five_nl_probabilities_must_remain_equal() -> None:
-    with pytest.raises(CaptionError, match="must be equal"):
-        CaptionDropoutProbabilities(
-            condition_route=0.0,
-            condition_only=0.0,
-            tag=0.1,
-            candidate_source=0.3,
-            nl=NlDropoutProbabilities(0.1, 0.2, 0.1, 0.1, 0.1),
-        )
+def test_nl_probabilities_may_differ_per_branch() -> None:
+    # The all-five-equal constraint was removed (2026-09-17): per-branch
+    # NL dropout is independent (e.g. long_names=0.1 vs the rest at 0.3).
+    probabilities = CaptionDropoutProbabilities(
+        condition_route=0.0,
+        condition_only=0.0,
+        tag=0.1,
+        candidate_source=0.3,
+        nl=NlDropoutProbabilities(0.1, 0.2, 0.3, 0.4, 0.5),
+    )
+    assert probabilities.nl.long_names == 0.1
 
 
 def test_condition_dropout_probabilities_must_be_mutually_bounded() -> None:
