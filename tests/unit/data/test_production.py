@@ -101,9 +101,7 @@ def test_governed_modelscope_adapter_and_caption_parser() -> None:
     assert fields.aesthetic == ()
     assert tuple(tag.text for tag in fields.quality) == ("best",)
     assert tuple(tag.text for tag in fields.anime_completeness) == ("polished",)
-    assert tuple(tag.text for tag in fields.anime_classification) == (
-        "illustration",
-    )
+    assert tuple(tag.text for tag in fields.anime_classification) == ("illustration",)
 
 
 @pytest.mark.parametrize("image_format", ["jpg", "jpeg", "png", "webp"])
@@ -123,7 +121,9 @@ def test_modelscope_parser_accepts_repository_image_contract(
     assert parse_modelscope_caption_fields(raw).quality
 
 
-def test_modelscope_parser_accepts_null_nsfw_when_character_records_are_missing() -> None:
+def test_modelscope_parser_accepts_null_nsfw_when_character_records_are_missing() -> (
+    None
+):
     raw = _real_row()
     raw["nsfw"] = None
     join = raw["join"]
@@ -184,6 +184,31 @@ def test_modelscope_parser_rejects_missing_core_fields() -> None:
     raw.pop("tags")
 
     with pytest.raises(ProductionDataError, match="core fields are missing"):
+        parse_modelscope_caption_fields(raw)
+
+
+def test_modelscope_parser_ignores_source_provenance_shape() -> None:
+    # Bangumi-style source: dataset + repository/src_filename/hash, no
+    # version/release/path keys.  Provenance fields are not consumed by
+    # training and must not be validated.
+    raw = _real_row()
+    raw["source"] = {
+        "dataset": "bangumibase",
+        "repository": "BangumiBase/gintama",
+        "src_filename": "20789.png",
+        "hash": "a3d11e10",
+    }
+    raw.pop("join")
+    raw.pop("dropout")
+
+    assert parse_modelscope_caption_fields(raw).quality
+
+
+def test_modelscope_parser_rejects_missing_dataset_name() -> None:
+    raw = _real_row()
+    raw["source"] = {"repository": "BangumiBase/gintama"}
+
+    with pytest.raises(ProductionDataError, match="source.dataset is required"):
         parse_modelscope_caption_fields(raw)
 
 
@@ -414,9 +439,7 @@ def test_accepted_stream_publishes_strict_zero_totals_without_ledger() -> None:
     )
 
     assert stream.transparent_rejection_totals() == _zero_totals()
-    assert set(stream.transparent_rejection_totals()) == set(
-        TRANSPARENT_REJECTION_KEYS
-    )
+    assert set(stream.transparent_rejection_totals()) == set(TRANSPARENT_REJECTION_KEYS)
     stream.close()
 
 
@@ -465,9 +488,7 @@ def test_accepted_stream_rejects_totals_snapshot_with_missing_key() -> None:
         _stream_identity(),
     )
 
-    with pytest.raises(
-        ProductionDataError, match="must carry exactly"
-    ):
+    with pytest.raises(ProductionDataError, match="must carry exactly"):
         stream.transparent_rejection_totals()
     stream.close()
 
@@ -484,9 +505,7 @@ def test_accepted_stream_rejects_negative_total() -> None:
         _stream_identity(),
     )
 
-    with pytest.raises(
-        ProductionDataError, match="nonnegative"
-    ):
+    with pytest.raises(ProductionDataError, match="nonnegative"):
         stream.transparent_rejection_totals()
     stream.close()
 
@@ -497,9 +516,7 @@ def test_accepted_stream_rejects_non_mapping_totals_snapshot() -> None:
         _stream_identity(),
     )
 
-    with pytest.raises(
-        ProductionDataError, match="snapshot is invalid"
-    ):
+    with pytest.raises(ProductionDataError, match="snapshot is invalid"):
         stream.transparent_rejection_totals()
     stream.close()
 

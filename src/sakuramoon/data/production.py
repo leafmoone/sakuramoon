@@ -123,40 +123,17 @@ def _require_exact_keys(
 
 
 def _validate_source_contract(raw: Mapping[str, object]) -> str:
-    """Validate the dataset-specific source identity and return its dataset."""
+    """Return the dataset name — the only source field training consumes.
 
+    Everything else under ``source`` (versions, release labels, original
+    paths, urls, hashes, repositories) is provenance nobody reads; it is
+    deliberately not validated so new source pipelines cannot brick the
+    data path over metadata shape.
+    """
     source = _nested_mapping(raw, "source")
-    _require_exact_keys(
-        source,
-        frozenset({"dataset", "dataset_version", "release", "original_path"}),
-        group="source",
-    )
-    dataset = source["dataset"]
-    version = source["dataset_version"]
-    if type(dataset) is not str or not dataset or type(version) is not str:
-        raise ProductionDataError("ModelScope metadata source contract is invalid")
-    text_ok = all(
-        type(source[key]) is str
-        and cast(str, source[key]) == cast(str, source[key]).strip()
-        and "\n" not in cast(str, source[key])
-        for key in ("release", "original_path")
-    )
-    if dataset == "danbooru":
-        valid = version == "5.9" and all(
-            bool(cast(str, source[key])) for key in ("release", "original_path")
-        ) and text_ok
-    elif dataset in {"artstation-2D", "background-2D", "gamecg-2D"}:
-        # The 2D publisher uses schema v1 and may leave release/path blank
-        # (the WebDataset __key__ is the operational sample identity).
-        valid = version == "1" and text_ok
-    else:
-        # Any other source pipeline (zerochan, bangumi, ...): structural
-        # validation only.  Dataset-specific strictness applies solely where
-        # a per-corpus contract exists above; release/path may be blank for
-        # non-danbooru corpora for the same __key__ identity reason.
-        valid = text_ok
-    if not valid:
-        raise ProductionDataError("ModelScope metadata source contract is invalid")
+    dataset = source.get("dataset")
+    if type(dataset) is not str or not dataset:
+        raise ProductionDataError("ModelScope metadata source.dataset is required")
     return dataset
 
 
@@ -252,9 +229,7 @@ def _validate_v2_contract(raw: Mapping[str, object]) -> None:
     dataset = _validate_source_contract(raw)
 
     image = _nested_mapping(raw, "image")
-    _require_exact_keys(
-        image, frozenset({"format", "width", "height"}), group="image"
-    )
+    _require_exact_keys(image, frozenset({"format", "width", "height"}), group="image")
     width = image["width"]
     height = image["height"]
     dimensions_valid = (width is None and height is None) or (
@@ -662,9 +637,9 @@ class AcceptedProductionBatchStream(Iterator[TrainingBatch]):
 
 
 _STREAM_AUTHORITY = object()
-_ACCEPTED_STREAMS: weakref.WeakValueDictionary[
-    str, AcceptedProductionBatchStream
-] = weakref.WeakValueDictionary()
+_ACCEPTED_STREAMS: weakref.WeakValueDictionary[str, AcceptedProductionBatchStream] = (
+    weakref.WeakValueDictionary()
+)
 
 
 def _issue_batch_stream(
@@ -784,9 +759,12 @@ class ProductionPipelineFactory:
             config, RuntimeConfig
         ):
             raise ProductionDataError("resolved RuntimeConfig is required")
-        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
-            repository_root, Path
-        ) or not repository_root.is_absolute():
+        if (
+            not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+                repository_root, Path
+            )
+            or not repository_root.is_absolute()
+        ):
             raise ProductionDataError("repository_root must be an absolute path")
         factory = object.__new__(cls)
         object.__setattr__(factory, "config", config)
@@ -918,9 +896,9 @@ class ProductionPipelineFactory:
         )
 
 
-_GOVERNED_FACTORIES: weakref.WeakValueDictionary[
-    str, ProductionPipelineFactory
-] = weakref.WeakValueDictionary()
+_GOVERNED_FACTORIES: weakref.WeakValueDictionary[str, ProductionPipelineFactory] = (
+    weakref.WeakValueDictionary()
+)
 
 
 __all__ = [
