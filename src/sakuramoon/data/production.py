@@ -75,9 +75,7 @@ _V2_OPTIONAL_DEFAULTS: dict[str, object] = {
     "join": {},
     "multicaptions": {},
 }
-_RATINGS = frozenset(
-    {"safe", "general", "questionable", "explicit", "sensitive"}
-)
+_RATINGS = frozenset({"safe", "general", "questionable", "explicit", "sensitive"})
 _NSFW_VALUES = frozenset({"sfw", "questionable", "nsfw"})
 _QUALITY_VALUES = frozenset(
     {"masterpiece", "best", "great", "good", "normal", "low", "worst"}
@@ -88,7 +86,6 @@ _CLASSIFICATION_VALUES = frozenset(
 )
 _YEAR_PATTERN = re.compile(r"^year [0-9]{4}(?:, (?:newest|oldest))?$")
 _MULTICAPTION_KEYS = frozenset({"long_names", "long_no_names", "short", "vibes"})
-_IMAGE_FORMATS = frozenset({"jpg", "jpeg", "png", "webp", "avif"})
 
 
 def _require_spawn_serializable(value: object, name: str) -> None:
@@ -238,22 +235,12 @@ def _validate_v2_contract(raw: Mapping[str, object]) -> None:
 
     dataset = _validate_source_contract(raw)
 
-    image = _nested_mapping(raw, "image")
-    _require_exact_keys(image, frozenset({"format", "width", "height"}), group="image")
-    width = image["width"]
-    height = image["height"]
-    dimensions_valid = (width is None and height is None) or (
-        type(width) is int
-        and cast(int, width) > 0
-        and type(height) is int
-        and cast(int, height) > 0
-    )
-    if (
-        type(image["format"]) is not str
-        or cast(str, image["format"]) not in _IMAGE_FORMATS
-        or not dimensions_valid
-    ):
-        raise ProductionDataError("ModelScope metadata image contract is invalid")
+    # The image sidecar is provenance: the pipeline probes the actual
+    # decoded bytes for its real dimensions, so nothing reads these fields.
+    # Only presence as an object is required — format/width/height values
+    # are deliberately not validated (each corpus pipeline emits its own
+    # shapes, and an animation sample is skipped later at the payload level).
+    _nested_mapping(raw, "image")
 
     tags = _nested_mapping(raw, "tags")
     _require_exact_keys(
