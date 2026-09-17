@@ -23,7 +23,7 @@
 extends = ["train_g1_cmuon_production_camera_p100.toml"]
 
 [run]
-run_id = "sm_512_bs480_iprea"
+run_id = "sm_512_bs480_iprea_v2"
 
 [scheduler]
 warmup_updates = 10000
@@ -64,3 +64,9 @@ long_names = 0.1
 selection_path = "data/validation-cohorts/s0-validation-512-v3/validation-selection.json"
 shard_root = "data/validation-cohorts/s0-validation-512-v3/shards"
 shard_count = 7
+
+# Finer save cadence than the parent production config (200): 100 updates
+# (2026-09-17, first 512 production run — tighter ckpt granularity while the
+# new base/corpus settles; ~18.5 min between saves at 16.3 sps).
+[checkpoint]
+full_every_updates = 100
