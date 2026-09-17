@@ -15,13 +15,14 @@ from pydantic import (
     Field,
     StringConstraints,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
 from sakuramoon.config.schema import DataSourceConfig
 
-DATASET_REPO_ID = "leafmoone/webdataset_danbooru_v2"
-DATASET_REVISION = "master"
+RepoIdPattern = r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"
+RevisionPattern = r"^[A-Za-z0-9._-]+$"
 
 NonEmpty = Annotated[str, StringConstraints(min_length=1, max_length=512)]
 PositiveInt = Annotated[int, Field(gt=0)]
@@ -65,10 +66,29 @@ def is_safe_shard_path(value: str) -> bool:
 
 
 class DatasetSourceIdentity(StrictModel):
-    repo_id: Literal[
-        "leafmoone/webdataset_danbooru_v2", "leafmoone/webdataset_danbooru_v3"
+    """Corpus source identity — fully config-driven ([data.source]).
+
+    ``repo_id`` is a ModelScope ``owner/name`` repository identifier and
+    ``revision`` a branch or tag.  Values are validated structurally
+    (shape only) and never matched against a hardcoded list, so pointing a
+    new corpus repository in the config requires no code change."""
+
+    repo_id: Annotated[
+        str,
+        StringConstraints(min_length=3, max_length=200, pattern=RepoIdPattern),
     ]
-    revision: Literal["master"]
+    revision: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=100, pattern=RevisionPattern),
+    ]
+
+    @field_validator("repo_id")
+    @classmethod
+    def _validate_repo_id_shape(cls, value: str) -> str:
+        owner, name = value.split("/", 1)
+        if owner in {".", ".."} or name in {".", ".."}:
+            raise ValueError("repo_id parts must not be . or ..")
+        return value
 
 
 class ShardRecord(StrictModel):
@@ -177,7 +197,9 @@ def build_dataset_manifest(
     if not remote_shards or len({item.path for item in remote_shards}) != len(
         remote_shards
     ):
-        raise RemoteManifestBuildError("remote inventory is empty or has duplicate paths")
+        raise RemoteManifestBuildError(
+            "remote inventory is empty or has duplicate paths"
+        )
     return DatasetManifest.from_shards(
         source,
         tuple(ShardRecord(path=item.path, bytes=item.bytes) for item in remote_shards),
@@ -230,8 +252,6 @@ def write_dataset_manifest(manifest: DatasetManifest, destination: Path) -> str:
 
 
 __all__ = [
-    "DATASET_REPO_ID",
-    "DATASET_REVISION",
     "DatasetManifest",
     "DatasetManifestError",
     "DatasetManifestExistsError",
