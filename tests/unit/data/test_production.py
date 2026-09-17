@@ -212,6 +212,20 @@ def test_modelscope_parser_rejects_missing_dataset_name() -> None:
         parse_modelscope_caption_fields(raw)
 
 
+def test_modelscope_parser_defaults_missing_caption_branches_to_none() -> None:
+    # Empty captions object: both NL branches absent -> no NL text, the
+    # caption plan treats it like an all-branch NL dropout (tags still
+    # condition the sample).
+    raw = _real_row()
+    raw["captions"] = {}
+
+    fields = parse_modelscope_caption_fields(raw)
+
+    assert fields.nl.nl2 is None
+    assert fields.nl.nl3 is None
+    assert tuple(tag.text for tag in fields.general) == ("blue_hair", "dress")
+
+
 @pytest.mark.parametrize("value", [None, "safe", 2])
 def test_governed_modelscope_parser_rejects_invalid_nsfw(value: object) -> None:
     raw = _real_row()

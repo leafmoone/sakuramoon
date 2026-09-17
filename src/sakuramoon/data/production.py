@@ -252,7 +252,15 @@ def _validate_v2_contract(raw: Mapping[str, object]) -> None:
         group="tags",
     )
     captions = _nested_mapping(raw, "captions")
-    _require_exact_keys(captions, frozenset({"nl2", "nl3"}), group="captions")
+    # nl2/nl3 are optional per sample (pipelines differ); absence or blank
+    # means no NL text for that branch, which the caption plan already
+    # treats like an NL dropout.  Present values must be text or null.
+    for key in ("nl2", "nl3"):
+        value = captions.get(key)
+        if value is not None and type(value) is not str:
+            raise ProductionDataError(
+                f"ModelScope metadata captions.{key} must be text or null"
+            )
     multicaptions = _nested_mapping(raw, "multicaptions")
     unknown_multicaptions = frozenset(multicaptions) - _MULTICAPTION_KEYS
     if unknown_multicaptions:
