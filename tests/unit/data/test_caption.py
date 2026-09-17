@@ -263,7 +263,9 @@ def test_artist_or_character_routing_is_deterministic_and_complementary() -> Non
     assert selected_sources == {"artist_text", "character_text"}
 
 
-def test_condition_route_and_condition_only_dropout_have_distinct_body_semantics() -> None:
+def test_condition_route_and_condition_only_dropout_have_distinct_body_semantics() -> (
+    None
+):
     fields = _fields()
     seed = _seed_for_global_dropout(False)
     normal = build_caption_plan(
@@ -291,9 +293,7 @@ def test_condition_route_and_condition_only_dropout_have_distinct_body_semantics
     )
     normal_tags = {(item.source, item.tag.canonical) for item in normal.tags}
     route_tags = {(item.source, item.tag.canonical) for item in route.tags}
-    selected_tags = {
-        (selected_source, tag.canonical) for tag in normal.condition.tags
-    }
+    selected_tags = {(selected_source, tag.canonical) for tag in normal.condition.tags}
 
     assert route.condition is None
     assert route.dropout_hits.condition_route is True

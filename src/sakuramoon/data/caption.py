@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass
 from typing import Literal, cast
 
 from sakuramoon.data.tag_identity import tag_match_key
+
+# CoT leak detection: a leaked reasoning block carries the standalone
+# token "think" (word boundary) or the unambiguous terminator "endthink",
+# each possibly XML-wrapped.  The bare substring "think" is too broad —
+# legitimate tags like "thinking" and "thinkof_think" must pass.
+_COT_MARKER = re.compile(r"\bthink\b|\bendthink\b|<\s*think|end\s*think\s*>")
+
+
+def _has_cot_marker(value: str) -> bool:
+    return _COT_MARKER.search(value) is not None
+
 
 ALL_CONDITION_DROPOUT = 0.10
 TAG_SOURCE_ORDER = (
@@ -145,9 +157,7 @@ class ConditionRouteCounts:
         if any(
             type(value) is not int or value < 0 for value in self.as_mapping().values()
         ):
-            raise CaptionError(
-                "condition route counts must be non-negative integers"
-            )
+            raise CaptionError("condition route counts must be non-negative integers")
 
     def as_mapping(self) -> dict[str, int]:
         return {
@@ -162,10 +172,7 @@ def count_condition_routes(
 ) -> ConditionRouteCounts:
     if type(sources) is not tuple or any(
         source is not None
-        and (
-            type(source) is not str
-            or source not in {"artist_text", "character_text"}
-        )
+        and (type(source) is not str or source not in {"artist_text", "character_text"})
         for source in sources
     ):
         raise CaptionError("condition route sources are invalid")
@@ -570,10 +577,10 @@ def build_caption_plan(
         raise CaptionError("caption fields must use the strict CaptionFields type")
     if type(probabilities) is not CaptionDropoutProbabilities:
         raise CaptionError("caption probabilities use an invalid type")
-    if (
-        type(condition_mode) is not str
-        or condition_mode not in {"artist", "artist_or_character"}
-    ):
+    if type(condition_mode) is not str or condition_mode not in {
+        "artist",
+        "artist_or_character",
+    }:
         raise CaptionError("condition mode is invalid")
     if type(seed) is not int or seed < 0:
         raise CaptionError("caption seed must be a non-negative integer")
@@ -698,9 +705,7 @@ def build_caption_plan(
             if condition is not None and condition.source == "character_text"
             else ()
         )
-    routed_condition = (
-        None if condition_route_hit or condition_only_hit else condition
-    )
+    routed_condition = None if condition_route_hit or condition_only_hit else condition
     tags = _shuffle_tags(
         (
             *_caption_tags("rating", rating),
