@@ -133,6 +133,60 @@ def test_modelscope_parser_accepts_null_nsfw_when_character_records_are_missing(
     assert parse_modelscope_caption_fields(raw).nsfw == ()
 
 
+def test_modelscope_parser_defaults_missing_optional_fields_to_empty() -> None:
+    # Reduced tag-only sidecar layout (zerochan / bangumi shards): no
+    # scoring, dropout, join, multicaptions, nsfw, or year metadata.
+    raw = _real_row()
+    for key in (
+        "rating",
+        "year",
+        "aesthetic",
+        "quality",
+        "anime_completeness",
+        "anime_classification",
+        "dropout",
+        "join",
+        "multicaptions",
+        "nsfw",
+    ):
+        raw.pop(key)
+    raw["source"] = {
+        "dataset": "zerochan",
+        "dataset_version": "1",
+        "release": "",
+        "original_path": "zerochan/4081431.jpg",
+    }
+
+    fields = parse_modelscope_caption_fields(raw)
+
+    assert fields.nsfw == ()
+    assert fields.rating == ()
+    assert fields.year == ()
+    assert fields.aesthetic == ()
+    assert fields.quality == ()
+    assert fields.anime_completeness == ()
+    assert fields.anime_classification == ()
+    assert fields.candidate_tags == frozenset()
+    assert tuple(tag.text for tag in fields.general) == ("blue_hair", "dress")
+    assert fields.nl.long_names is None
+    assert fields.nl.nl2 == "A blue-haired character."
+
+
+def test_modelscope_parser_ignores_unknown_extra_fields() -> None:
+    raw = _real_row()
+    raw["future_pipeline_field"] = "value"
+
+    assert parse_modelscope_caption_fields(raw).quality
+
+
+def test_modelscope_parser_rejects_missing_core_fields() -> None:
+    raw = _real_row()
+    raw.pop("tags")
+
+    with pytest.raises(ProductionDataError, match="core fields are missing"):
+        parse_modelscope_caption_fields(raw)
+
+
 @pytest.mark.parametrize("value", [None, "safe", 2])
 def test_governed_modelscope_parser_rejects_invalid_nsfw(value: object) -> None:
     raw = _real_row()

@@ -53,27 +53,28 @@ PRODUCTION_METADATA_FIELDS = MetadataFieldMapping(
     id_field="id",
 )
 
-_V2_REQUIRED_TOP_LEVEL = frozenset(
-    {
-        "aesthetic",
-        "anime_classification",
-        "anime_completeness",
-        "captions",
-        "dropout",
-        "id",
-        "image",
-        "join",
-        "multicaptions",
-        "nsfw",
-        "quality",
-        "rating",
-        "schema_version",
-        "source",
-        "tags",
-        "year",
-    }
+# Every shard must carry the core identity fields.  All other known
+# fields are optional and default to empty: the corpus mixes source
+# pipelines that emit different field sets (danbooru carries scoring plus
+# dropout/join policy metadata; zerochan and bangumi a reduced tag-only
+# layout; gamecg-2D the full set with blanks).  Absence is data, not a
+# contract violation, and unknown extra fields are ignored so a newer
+# pipeline cannot brick an older consumer.
+_V2_CORE_TOP_LEVEL = frozenset(
+    {"schema_version", "id", "source", "image", "tags", "captions"}
 )
-_V2_OPTIONAL_TOP_LEVEL = frozenset({"ai_image_corrupted"})
+_V2_OPTIONAL_DEFAULTS: dict[str, object] = {
+    "nsfw": "",
+    "rating": "",
+    "quality": "",
+    "year": "",
+    "aesthetic": "",
+    "anime_classification": "",
+    "anime_completeness": "",
+    "dropout": {},
+    "join": {},
+    "multicaptions": {},
+}
 _RATINGS = frozenset({"safe", "general", "questionable", "explicit"})
 _NSFW_VALUES = frozenset({"sfw", "questionable", "nsfw"})
 _QUALITY_VALUES = frozenset(
@@ -132,26 +133,28 @@ def _validate_source_contract(raw: Mapping[str, object]) -> str:
     )
     dataset = source["dataset"]
     version = source["dataset_version"]
-    if type(dataset) is not str or type(version) is not str:
+    if type(dataset) is not str or not dataset or type(version) is not str:
         raise ProductionDataError("ModelScope metadata source contract is invalid")
+    text_ok = all(
+        type(source[key]) is str
+        and cast(str, source[key]) == cast(str, source[key]).strip()
+        and "\n" not in cast(str, source[key])
+        for key in ("release", "original_path")
+    )
     if dataset == "danbooru":
         valid = version == "5.9" and all(
-            type(source[key]) is str
-            and bool(cast(str, source[key]))
-            and cast(str, source[key]) == cast(str, source[key]).strip()
-            for key in ("release", "original_path")
-        )
+            bool(cast(str, source[key])) for key in ("release", "original_path")
+        ) and text_ok
     elif dataset in {"artstation-2D", "background-2D", "gamecg-2D"}:
         # The 2D publisher uses schema v1 and may leave release/path blank
         # (the WebDataset __key__ is the operational sample identity).
-        valid = version == "1" and all(
-            type(source[key]) is str
-            and cast(str, source[key]) == cast(str, source[key]).strip()
-            and "\n" not in cast(str, source[key])
-            for key in ("release", "original_path")
-        )
+        valid = version == "1" and text_ok
     else:
-        valid = False
+        # Any other source pipeline (zerochan, bangumi, ...): structural
+        # validation only.  Dataset-specific strictness applies solely where
+        # a per-corpus contract exists above; release/path may be blank for
+        # non-danbooru corpora for the same __key__ identity reason.
+        valid = text_ok
     if not valid:
         raise ProductionDataError("ModelScope metadata source contract is invalid")
     return dataset
@@ -211,17 +214,29 @@ def _modelscope_nsfw_tags(
     return _tag_from_value(raw, "nsfw", allowed=_NSFW_VALUES)
 
 
-def _validate_v2_contract(raw: Mapping[str, object]) -> None:
+def _normalize_modelscope_metadata(
+    raw: Mapping[str, object],
+) -> dict[str, object]:
+    """Fill optional top-level fields with empty defaults.
+
+    Core identity fields are strictly required; anything beyond the core
+    and the known optional fields is passed through untouched.
+    """
     observed = frozenset(raw)
-    if not _V2_REQUIRED_TOP_LEVEL.issubset(observed) or not observed.issubset(
-        _V2_REQUIRED_TOP_LEVEL | _V2_OPTIONAL_TOP_LEVEL
-    ):
-        missing = sorted(_V2_REQUIRED_TOP_LEVEL - observed)
-        extra = sorted(observed - _V2_REQUIRED_TOP_LEVEL - _V2_OPTIONAL_TOP_LEVEL)
+    missing = sorted(_V2_CORE_TOP_LEVEL - observed)
+    if missing:
         raise ProductionDataError(
-            "ModelScope metadata v2 top-level fields differ: "
-            f"missing={missing!r} extra={extra!r}"
+            f"ModelScope metadata core fields are missing: {missing!r}"
         )
+    normalized: dict[str, object] = dict(raw)
+    for key, default in _V2_OPTIONAL_DEFAULTS.items():
+        if key not in normalized:
+            value: object = {} if isinstance(default, dict) else default
+            normalized[key] = value
+    return normalized
+
+
+def _validate_v2_contract(raw: Mapping[str, object]) -> None:
     if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
         raise ProductionDataError("ModelScope metadata schema_version must be 1")
     _id = raw["id"]
@@ -349,6 +364,7 @@ def parse_modelscope_caption_fields(
 ) -> CaptionFields:
     """Parse the strict v2 metadata contract used for production conditioning."""
 
+    raw = _normalize_modelscope_metadata(raw)
     _validate_v2_contract(raw)
     captions = _nested_mapping(raw, "captions")
     multicaptions = _nested_mapping(raw, "multicaptions")
@@ -394,11 +410,11 @@ def parse_modelscope_caption_fields(
             if raw["aesthetic"] == "" or raw["aesthetic"] == " "
             else _tag_from_value(raw, "aesthetic")
         ),
-        quality=_tag_from_value(raw, "quality", allowed=_QUALITY_VALUES),
-        anime_completeness=_tag_from_value(
+        quality=_optional_tag_from_value(raw, "quality", allowed=_QUALITY_VALUES),
+        anime_completeness=_optional_tag_from_value(
             raw, "anime_completeness", allowed=_COMPLETENESS_VALUES
         ),
-        anime_classification=_tag_from_value(
+        anime_classification=_optional_tag_from_value(
             raw, "anime_classification", allowed=_CLASSIFICATION_VALUES
         ),
     )
