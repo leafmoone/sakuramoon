@@ -72,6 +72,19 @@ selection_path = "data/validation-cohorts/s0-validation-512-v3/validation-select
 shard_root = "data/validation-cohorts/s0-validation-512-v3/shards"
 shard_count = 7
 
+# FID/IS/KID/CMMD evaluate on that same v3 holdout. The inherited
+# [evaluation] block (train_g1.toml) still pointed at the frozen v2 cohort,
+# whose shards no 512 host ever provisioned: the 175000 evaluation died with
+# "validation tar files are absent" and, because evaluation is due strictly on
+# `update % every_updates == 0`, that FID point is never retried. The prompt
+# manifest is built from the v3 cohort sidecars by
+# scripts/build_validation_prompts.py (schema 4, 1000 cases, dropout-free
+# plans) and must be regenerated whenever the cohort selection changes.
+[evaluation]
+prompt_path = "data/validation-cohorts/s0-validation-512-v3/validation-prompts.json"
+validation_shard_root = "data/validation-cohorts/s0-validation-512-v3/shards"
+real_sample_count = 10594
+
 # Finer save cadence than the parent production config (200): 100 updates
 # (2026-09-17, first 512 production run — tighter ckpt granularity while the
 # new base/corpus settles; ~18.5 min between saves at 16.3 sps).
