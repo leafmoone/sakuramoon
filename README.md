@@ -41,7 +41,7 @@ docs/ reports/              契约文档与审计/设计报告
 | VAE | Microsoft Mage-VAE（DiCo 单步卷积架构），128 latent 通道、16× 下采样，bf16 冻结 |
 | 目标 | 流匹配 JLT 采样 + x-prediction（模型预测干净 latent，损失在速度空间） |
 | 辅助 | iREPA（512 run）：PE-Spatial-B16-512 冻结教师 + 3×3 投影器对齐 |
-| 优化器 | AdamW8bit（8-bit 动量，512 run）；256 生产 run 用 CMuon 混合（2D 投影走 Muon） |
+| 优化器 | CMuon 混合（256 与 512 生产 run 同为 `hybrid_cmuon_canonical_ns4_fp32_rescue`）：2D 投影走 Muon，其余参数走内层 AdamW8bit（8-bit 动量） |
 | CFG | 2.9，在速度空间、各分支先 x→v 再做 CFG |
 
 ### DiT 主干（`model/dit.py`、`model/block.py`）
@@ -87,6 +87,21 @@ docs/ reports/              契约文档与审计/设计报告
   空间 z-score（γ=0.6）；学生在 DiT slot 8 后取图像 span，过 3×3 混合精度卷积
   投影器（bf16 权重 + fp32 bias，FQN 锁定 2 项），损失 = token 均 1−cosine，
   权重 0.5、1000 update 半余弦 ramp-in。
+
+### 优化器
+
+- 256 生产（cutover anchor 111500 起）与当前 512 run 同为 **`hybrid_cmuon_canonical_ns4_fp32_rescue`**
+  （base 默认是 `torchao_adamw8bit`；生产链的 `train_g1_cmuon_production.toml` 覆盖整个
+  `[optimizer]` 子树，512 toml 不覆盖 → 原样继承。部署 `resolved.toml` 已核实）：
+- **Muon** 覆盖 2D 投影（141/289 参数 = 97.8% numel）：Nesterov 动量（μ 0.95，bf16 存储）、
+  逐 chunk 五次 Newton-Schulz 正交化（4 步）、Moonlight 缩放 `α = lr·0.2·√max(d_out,d_in)`；
+  guard 参考表（decay 0.999、floor 6.575e-7）+ FP32 owner-rank rescue
+  （非有限/触顶 chunk 回退 fp32 路径）。
+- 其余 148 参数（bias/norm/文本与条件编码器/输入输出投影）走内层 **AdamW8bit**：8-bit
+  量化动量（block 256）、bf16 随机舍入（独立 SR CUDA RNG）、步进前有限梯度检查。
+- LR：base 5e-5，按全局 batch 线性缩放（reference 256）：512 run ×480/256 = 9.375e-5；
+  warmup 1000（256）/ 10000（512）；两组 weight decay 均为 0；梯度裁剪全局 L2
+  max_norm 1.0（fp32 计算）。
 
 ### 数值策略
 
@@ -163,10 +178,12 @@ cd /root/private_data/sakuramoon
 - 契约与 worked example：`docs/config-and-resume.md`。
 
 > ⚠️ 512 生产链的父配置 `train_g1_cmuon_production_camera_p100.toml` 只存在于部署
-> 树（`/root/private_data/sakuramoon/config/`），repo `config/` 里没有该文件，
-> repo 中的 512 toml 因此无法离线直接 load（继承自 `train_g1.toml` 的叶子可离线
-> 核对）。`max_updates` 同理：repo 快照 168000，部署机曾长期跑 200000——以机
-> 器上的 config 为准。
+> 树（`/root/private_data/sakuramoon-g1/config/`），repo `config/` 里没有该文件，
+> repo 中的 512 toml 因此无法离线直接 load。其内容（2026-09-18 在机核实）=
+> camera p=1.0 块 + `concept_suite_enabled = false`（160000 训练内套件崩溃，套件
+> 改离线跑），extends `train_g1_cmuon_production.toml`（repo 有，提供 CMuon 优化器
+> 子树）；部署机 `max_updates = 200000`（repo 快照 168000）。以机器 config /
+> `resolved.toml` 为准。
 
 ## 3. 发布 checkpoint 到 ModelScope
 
@@ -227,8 +244,9 @@ REPO_PATH=g1 \
   --sample-count 512 --batch-size 16 --comparison-count 16
 ```
 
-- 120-concept 全套件在训练内跑过一次 300s stall 崩溃（NCCL 看门狗），常规做法是
-  离线走 `concept_eval` CLI。
+- 120-concept 全套件在训练内跑过一次 300s stall 崩溃（NCCL 看门狗；160000 那次是
+  rank0 在 wandb submit 挂住 → rank1 在 complete barrier abort），所以 512 生产配置
+  `concept_suite_enabled = false`，常规做法是离线走 `concept_eval` CLI。
 - 训练内周期采样：每 1000 update，60 张锁定 cohort 图（+512 run 额外 12 张
   raw-cohort），`longitudinal_pin_update` 固定纵向锚点。
 
