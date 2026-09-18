@@ -35,6 +35,12 @@ multiples of 16 (the evaluator overrides both with the run resolution).
 Output is canonical JSON (sorted keys, compact separators, trailing newline)
 and is validated by a round trip through ``PromptManifest.from_canonical_bytes``
 before it is written atomically.
+
+The eight training locked-condition cohort cases (``validation-*`` ids from
+``condition_diagnostics._FIXED_CONDITION_PAIR_IDS``) are appended from
+``--locked-source`` (legacy v2 manifest): ``TrainingSampler`` hard-requires
+them in the same file the evaluator reads, and the evaluator only consumes
+the first ``sample_count`` cases, so the tail is eval-invisible.
 """
 
 from __future__ import annotations
@@ -63,6 +69,7 @@ from sakuramoon.data.production import (
     parse_modelscope_caption_fields,
 )
 from sakuramoon.eval.spec import PromptCase, PromptManifest, caption_plan_prompt_text
+from sakuramoon.train.condition_diagnostics import _FIXED_CONDITION_PAIR_IDS
 
 IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 SCHEMA_VERSION = 4
@@ -323,6 +330,41 @@ def build_manifest(
     return manifest, report
 
 
+def _with_locked_cohort(
+    manifest: PromptManifest, locked_source: Path
+) -> PromptManifest:
+    """Append the training locked-condition cohort cases.
+
+    ``TrainingSampler`` (``condition_diagnostics.load_fixed_condition_pairs``)
+    hard-requires the eight fixed ``validation-*`` prompt ids in the same
+    manifest the evaluation reads.  They were frozen with the legacy v2
+    cohort; carrying them verbatim (after the eval cases) keeps every prior
+    condition-diagnostic run comparable.
+    """
+
+    if not locked_source.is_file():
+        raise SystemExit(
+            f"locked cohort source manifest is missing: {locked_source} "
+            "(training start hard-requires its fixed condition pairs)"
+        )
+    legacy = PromptManifest.from_canonical_bytes(locked_source.read_bytes())
+    by_id = {case.prompt_id: case for case in legacy.cases}
+    wanted: list[PromptCase] = []
+    for _label, first_id, second_id in _FIXED_CONDITION_PAIR_IDS:
+        for prompt_id in (first_id, second_id):
+            try:
+                wanted.append(by_id[prompt_id])
+            except KeyError:
+                raise SystemExit(
+                    f"locked cohort source lacks {prompt_id}: {locked_source}"
+                ) from None
+    existing = {case.prompt_id for case in manifest.cases}
+    extra = tuple(case for case in wanted if case.prompt_id not in existing)
+    if not extra:
+        return manifest
+    return PromptManifest(cases=manifest.cases + extra)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, required=True, help="deployment root")
@@ -343,6 +385,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=None, help="manifest path")
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--force", action="store_true", help="overwrite an existing manifest")
+    parser.add_argument(
+        "--locked-source",
+        default=(
+            "data/validation-cohorts/s0-validation-50k-v1/validation-prompts.json"
+        ),
+        help=(
+            "legacy prompt manifest carrying the training locked condition "
+            "cohort (relative to --root); its fixed cases are appended so "
+            "load_fixed_condition_pairs keeps working after a cohort switch"
+        ),
+    )
     args = parser.parse_args(argv)
 
     root: Path = args.root.resolve()
@@ -359,6 +412,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=args.seed,
         condition_mode=condition_mode,
     )
+
+    manifest = _with_locked_cohort(manifest, (root / args.locked_source).resolve())
 
     payload = manifest.canonical_bytes()
     reloaded = PromptManifest.from_canonical_bytes(payload)
