@@ -174,13 +174,31 @@ def _required_text(raw: Mapping[str, object], key: str) -> str:
     return value
 
 
+# Tags are joined with ", " in every caption surface (body and the
+# role-explicit condition segment), so ``Tag`` rejects a tag that itself
+# contains that separator.  Real corpus values do carry it (bangumi ships
+# series names such as "don't toy with me, miss nagatoro"), and rejecting
+# them dropped the tag silently: the series identity vanished from the
+# caption with no trace and no counter.  Collapsing only the run of
+# whitespace/underscores after the comma keeps the tag and its tokens while
+# keeping the rendered surface unambiguous ("...,miss nagatoro").
+_TAG_SEPARATOR_SPAN = re.compile(r",[\s_]+")
+
+
+def _boundary_safe_tag_text(value: str) -> str:
+    """Collapse comma+space / comma+underscore inside a raw tag value."""
+
+    return _TAG_SEPARATOR_SPAN.sub(",", value)
+
+
 def _tag_from_value(
     raw: Mapping[str, object], key: str, *, allowed: frozenset[str] | None = None
 ) -> tuple[Tag, ...]:
     value = _required_text(raw, key)
     if allowed is not None and value not in allowed:
         raise ProductionDataError(f"ModelScope metadata {key} has an invalid value")
-    return (Tag(text=value, canonical=value),)
+    text = _boundary_safe_tag_text(value)
+    return (Tag(text=text, canonical=text),)
 
 
 def _modelscope_nsfw_tags(
@@ -318,7 +336,8 @@ def _modelscope_tags(raw: Mapping[str, object], key: str) -> tuple[Tag, ...]:
         if not isinstance(item, str):
             continue
         try:
-            parsed.append(Tag(text=item, canonical=item))
+            text = _boundary_safe_tag_text(item)
+            parsed.append(Tag(text=text, canonical=text))
         except CaptionError:
             continue
     return tuple(parsed)

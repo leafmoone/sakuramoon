@@ -68,8 +68,8 @@ drop_last = true
 length_sort_window_batches = 2
 
 [data.validation]
-selection_path = "data/validation-cohorts/s0-validation-50k-v1/validation-selection.json"
-shard_root = "data/validation-cohorts/s0-validation-50k-v1/shards"
+selection_path = "data/validation-cohorts/s0-validation-512-v3/validation-selection.json"
+shard_root = "data/validation-cohorts/s0-validation-512-v3/shards"
 shard_count = 7
 
 [data.image]
