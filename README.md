@@ -36,7 +36,7 @@ docs/ reports/              契约文档与审计/设计报告
 
 | 组件 | 配置 |
 |---|---|
-| 主干 | `PackedDiT`（生产路径，padding-free 变长打包）；1.57B 可训练参数（depth 20，bf16 下 3.19 GB） |
+| 主干 | `PackedDiT`（生产路径，1.57B 可训练参数，depth 20，bf16 下 3.19 GB）。名称为项目内部类名，技术本身是标准 varlen 无 padding 打包（flash-attn varlen / THD 做法，`PackedSequences` = flat tokens + cu_seqlens 边界），对照 `DenseDiT` 密集参考实现 |
 | 文本编码器 | Qwen3.5 2B（24 层，混合线性/全注意力），bf16 冻结，逐 token 7 层捕获 |
 | VAE | Microsoft Mage-VAE（DiCo 单步卷积架构），128 latent 通道、16× 下采样，bf16 冻结 |
 | 目标 | 流匹配 JLT 采样 + x-prediction（模型预测干净 latent，损失在速度空间） |
@@ -51,7 +51,12 @@ docs/ reports/              契约文档与审计/设计报告
 - **无 patch embedding**：每个 VAE latent 单元即一个 token（`[B,128,H,W] → [B,H·W,128]`
   → Linear 128→2560）。512² 图 = 32×32 = 1024 图像 token；256² = 256 个。
 - 联合序列 = `[主 caption 变长文本 | 8 条件 token | H·W 图像 token]`，全双向注意力
-  （仅 mask padding）。
+  （仅 mask padding）。生产路径把 batch 内所有样本的联合序列拼成一条扁平变长
+  张量（标准 varlen packing，`conditioning/packing.py` 的 `pack_sequences` →
+  `PackedSequences`：flat tokens + cu_seqlens + 逐样本 span），零 padding、无逐样本
+  mask，DAS FA2 varlen kernel 按边界切段——项目里真正不寻常的是打包内容本身：
+  只有图像 token 带 2D RoPE 坐标（相机取景对其做全画布仿射），iREPA 的 slot-8
+  捕获也走同一条 flat 路径。
 - 2D RoPE：head_dim 拆 nope 32 + y 48 + x 48，theta 1000，cell 中心、面积归一的
   全画布坐标；文本/条件 token 坐标固定 (0,0)。
 - 注意力输出内容门控：`attended * sigmoid(content_gate(tokens))`。
