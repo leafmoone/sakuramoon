@@ -37,7 +37,7 @@ and is validated by a round trip through ``PromptManifest.from_canonical_bytes``
 before it is written atomically.
 
 The eight training locked-condition cohort cases (``validation-*`` ids from
-``condition_diagnostics._FIXED_CONDITION_PAIR_IDS``) are appended from
+``condition_diagnostics.FIXED_CONDITION_PAIR_IDS``) are appended from
 ``--locked-source`` (legacy v2 manifest): ``TrainingSampler`` hard-requires
 them in the same file the evaluator reads, and the evaluator only consumes
 the first ``sample_count`` cases, so the tail is eval-invisible.
@@ -69,7 +69,7 @@ from sakuramoon.data.production import (
     parse_modelscope_caption_fields,
 )
 from sakuramoon.eval.spec import PromptCase, PromptManifest, caption_plan_prompt_text
-from sakuramoon.train.condition_diagnostics import _FIXED_CONDITION_PAIR_IDS
+from sakuramoon.train.condition_diagnostics import FIXED_CONDITION_PAIR_IDS
 
 IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 SCHEMA_VERSION = 4
@@ -350,7 +350,7 @@ def _with_locked_cohort(
     legacy = PromptManifest.from_canonical_bytes(locked_source.read_bytes())
     by_id = {case.prompt_id: case for case in legacy.cases}
     wanted: list[PromptCase] = []
-    for _label, first_id, second_id in _FIXED_CONDITION_PAIR_IDS:
+    for _label, first_id, second_id in FIXED_CONDITION_PAIR_IDS:
         for prompt_id in (first_id, second_id):
             try:
                 wanted.append(by_id[prompt_id])

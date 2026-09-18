@@ -11,7 +11,7 @@ import torch
 from sakuramoon.conditioning.global_condition import GlobalConditionOutput
 from sakuramoon.eval.spec import PromptCase, PromptManifest
 
-_FIXED_CONDITION_PAIR_IDS = (
+FIXED_CONDITION_PAIR_IDS = (
     (
         "style-1",
         "validation-fac64aa1d4574f386dec1fefcb2eaca0",
@@ -81,7 +81,7 @@ def load_fixed_condition_pairs(path: Path) -> tuple[FixedConditionPair, ...]:
     by_id = {case.prompt_id: case for case in manifest.cases}
     expected_ids = {
         prompt_id
-        for _label, first_id, second_id in _FIXED_CONDITION_PAIR_IDS
+        for _label, first_id, second_id in FIXED_CONDITION_PAIR_IDS
         for prompt_id in (first_id, second_id)
     }
     if not expected_ids <= set(by_id):
@@ -90,7 +90,7 @@ def load_fixed_condition_pairs(path: Path) -> tuple[FixedConditionPair, ...]:
         )
     return tuple(
         FixedConditionPair(label, by_id[first_id], by_id[second_id])
-        for label, first_id, second_id in _FIXED_CONDITION_PAIR_IDS
+        for label, first_id, second_id in FIXED_CONDITION_PAIR_IDS
     )
 
 
