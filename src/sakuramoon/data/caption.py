@@ -487,6 +487,42 @@ def _shuffle_tags(tags: tuple[CaptionTag, ...], seed: int) -> tuple[CaptionTag, 
     return tuple(shuffled)
 
 
+def _dedupe_caption_tags(tags: tuple[CaptionTag, ...]) -> tuple[CaptionTag, ...]:
+    """Keep the first occurrence of each tag identity.
+
+    Cross-source duplicates are real: a bonus scalar can repeat a general tag
+    (``anime_completeness=monochrome`` next to a general ``monochrome``) and the
+    nsfw/rating axes can agree (``questionable``).  A repeated tag spends
+    caption tokens twice and double-weights the concept, so later copies are
+    dropped here.  The pass runs after every dropout draw and after the global
+    shuffle: it removes copies and never reorders, so no RNG stream changes.
+    """
+
+    seen: set[str] = set()
+    kept: list[CaptionTag] = []
+    for item in tags:
+        key = tag_match_key(item.tag.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(item)
+    return tuple(kept)
+
+
+def _dedupe_condition_tags(tags: tuple[Tag, ...]) -> tuple[Tag, ...]:
+    """Apply the same first-occurrence rule to the condition tags."""
+
+    seen: set[str] = set()
+    kept: list[Tag] = []
+    for tag in tags:
+        key = tag_match_key(tag.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(tag)
+    return tuple(kept)
+
+
 def _field_tags(fields: CaptionFields, source: TagSource) -> tuple[Tag, ...]:
     if source == "artist":
         return fields.artists
@@ -705,7 +741,15 @@ def build_caption_plan(
             if condition is not None and condition.source == "character_text"
             else ()
         )
-    routed_condition = None if condition_route_hit or condition_only_hit else condition
+    routed_condition = (
+        None
+        if condition_route_hit or condition_only_hit or condition is None
+        else ConditionRequest(
+            source=condition.source,
+            role=condition.role,
+            tags=_dedupe_condition_tags(condition.tags),
+        )
+    )
     tags = _shuffle_tags(
         (
             *_caption_tags("rating", rating),
@@ -722,6 +766,7 @@ def build_caption_plan(
         ),
         seed,
     )
+    tags = _dedupe_caption_tags(tags)
 
     nl_hits = {
         branch: _drop(

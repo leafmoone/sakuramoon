@@ -20,6 +20,7 @@ from sakuramoon.data.caption import (
     empty_caption_dropout_hits,
 )
 from sakuramoon.data.caption import build_caption_plan as _build_caption_plan
+from sakuramoon.data.tag_identity import tag_match_key
 
 
 def _nl_probabilities(value: float = 0.0) -> NlDropoutProbabilities:
@@ -243,8 +244,16 @@ def test_artist_or_character_routing_is_deterministic_and_complementary() -> Non
             "artist" if condition.source == "artist_text" else "character"
         )
         routed.update((condition_tag_source, tag.canonical) for tag in condition.tags)
-        assert routed == expected
-        assert len(plan.tags) + len(condition.tags) == len(expected)
+        # Cross-source duplicates (candidate_general lives in both general and
+        # artist) collapse to one delivered copy, so the invariant is over tag
+        # texts rather than over (source, tag) pairs.
+        assert {canonical for _, canonical in routed} == {
+            canonical for _, canonical in expected
+        }
+        # The condition segment deliberately restates its own tags, so the
+        # invariant here is that each delivered surface is duplicate-free.
+        body_keys = [tag_match_key(item.tag.text) for item in plan.tags]
+        assert len(body_keys) == len(set(body_keys))
         if condition.source == "artist_text":
             assert condition.role == "style"
             assert not any(item.source == "artist" for item in plan.tags)
@@ -298,7 +307,13 @@ def test_condition_route_and_condition_only_dropout_have_distinct_body_semantics
     assert route.condition is None
     assert route.dropout_hits.condition_route is True
     assert route.dropout_hits.condition_only is False
-    assert route_tags == normal_tags | selected_tags
+    # The routed body carries the condition tags instead of the condition
+    # segment; the cross-source duplicate is collapsed to a single copy, so
+    # compare delivered tag texts and require the body to stay duplicate-free.
+    assert {canonical for _, canonical in route_tags} == {
+        canonical for _, canonical in normal_tags | selected_tags
+    }
+    assert len(route_tags) == len({canonical for _, canonical in route_tags})
 
     assert condition_only.condition is None
     assert condition_only.dropout_hits.condition_route is False
@@ -564,3 +579,53 @@ def test_all_condition_plan_cannot_carry_content() -> None:
             all_condition_dropped=True,
             dropout_hits=empty_caption_dropout_hits(all_condition=True),
         )
+
+
+
+def test_repeated_tag_texts_collapse_to_the_first_occurrence() -> None:
+    """Repeats and separator/case-equivalent variants keep a single copy."""
+
+    fields = replace(
+        _fields(),
+        general=(
+            Tag("blue_dress", "blue_dress"),
+            Tag("Blue Dress", "Blue Dress"),
+            Tag("soft_light", "soft_light"),
+        ),
+    )
+    plan = build_caption_plan(
+        fields,
+        _probabilities(),
+        condition_mode="artist",
+        seed=_seed_for_global_dropout(False),
+    )
+
+    assert plan.all_condition_dropped is False
+    texts = [item.tag.text for item in plan.tags]
+    assert texts.count("blue_dress") == 1
+    assert "Blue Dress" not in texts
+    keys = [tag_match_key(text) for text in texts]
+    assert len(keys) == len(set(keys))
+
+
+def test_cross_source_duplicates_never_repeat_inside_a_surface() -> None:
+    """candidate_general lives in both general and artist: one copy per surface."""
+
+    checked = 0
+    for seed in range(200):
+        plan = build_caption_plan(
+            _fields(),
+            _probabilities(),
+            condition_mode="artist_or_character",
+            seed=seed,
+        )
+        if plan.all_condition_dropped:
+            continue
+        checked += 1
+        body_keys = [tag_match_key(item.tag.text) for item in plan.tags]
+        assert len(body_keys) == len(set(body_keys))
+        assert body_keys.count("candidate_general") <= 1
+        if plan.condition is not None:
+            condition_keys = [tag_match_key(tag.text) for tag in plan.condition.tags]
+            assert len(condition_keys) == len(set(condition_keys))
+    assert checked > 100
