@@ -1,36 +1,19 @@
-"""Read-only restart-readiness audit of the clean iREPA restart candidates.
+"""Read-only iREPA migration comparison.
 
-Audits (no writes, in-memory only):
-  1. original no-iREPA ckpt_113400  (p6b-source/ckpt_113400_raw-113400-...)
-  2. migrated ckpt_113400_irepa     (p6b/migrated/ckpt_113400_irepa)
-
-Evidence produced (each line PASS/FAIL):
-  - trunk model shards bit-identical between original and migrated
-  - RNG state (rank-0 + optimizer_sr) bit-identical between original/migrated
-  - trainer_state identical: successful_updates == 113400 (zero updates since)
-  - migrated optimizer: CMuon FQN set unchanged; AdamW state for every source
-    parameter bit-identical after id renumbering; projector FQNs present in
-    groups but WITHOUT any AdamW state entry (lazy init = pristine)
-  - migrated CMuon/sr_rng/transition blocks bit-identical to source
-  - migrated projector shard == deterministic reconstruction from
-    migration_seed (20260904) via IRepaAlignment init (bit-exact)
-  - irepa_state: source_update 113400, start_successful_update 113401
-    (lambda binds exactly to 0.0 at the first update 113401)
-
-Usage:
-  PYTHONPATH=src python scripts/diag_restart_readiness.py
+Run with --source and --migrated checkpoint directories. Architecture widths,
+shard names and source update come from the input metadata. No model or
+optimizer files are modified; byte equality checks apply to this migration
+comparison only, not to arbitrary independently saved checkpoints.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
 
 import torch
-
-SOURCE = Path("/sakuramoon-runtime/p6b-source/ckpt_113400_raw-113400-update-cadence")
-MIGRATED = Path("/sakuramoon-runtime/p6b/migrated/ckpt_113400_irepa")
 
 PROJECTOR_WEIGHT_FQN = "irepa_alignment.projector.weight"
 PROJECTOR_BIAS_FQN = "irepa_alignment.projector.bias"
@@ -74,8 +57,21 @@ def _bit_equal(a: object, b: object, label: str) -> bool:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Compare a pre-iREPA checkpoint with its migrated artifact")
+    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--migrated", type=Path, required=True)
+    args = parser.parse_args()
+    SOURCE = args.source.resolve(strict=True)
+    MIGRATED = args.migrated.resolve(strict=True)
+    source_state = json.loads((SOURCE / "train_state/trainer_state.json").read_text())
+    source_update = source_state["successful_updates"]
+    if type(source_update) is not int or source_update < 0:
+        raise ValueError("source successful update is invalid")
+    architecture = json.loads((SOURCE / "model/config.json").read_text())["architecture"]
+    hidden_size = architecture["dit"]["hidden_size"]
+    index = json.loads((SOURCE / "model/model.safetensors.index.json").read_text())
     # 1) trunk model shards bit-identical
-    for shard in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
+    for shard in sorted(set(index["weight_map"].values())):
         a = (SOURCE / "model" / shard).read_bytes()
         b = (MIGRATED / "model" / shard).read_bytes()
         check(f"trunk shard {shard} identical", a == b, f"{len(a)} bytes")
@@ -91,9 +87,9 @@ def main() -> int:
     ts_m = json.loads((MIGRATED / "train_state" / "trainer_state.json").read_text())
     check("trainer_state identical", ts_s == ts_m)
     check(
-        "successful_updates == 113400 (zero training updates since save)",
-        ts_m.get("successful_updates") == 113400
-        and ts_m.get("attempted_updates") == 113400,
+        f"successful_updates == {source_update} (zero training updates since save)",
+        ts_m.get("successful_updates") == source_update
+        and ts_m.get("attempted_updates") == source_update,
     )
 
     # 4) optimizer state audit
@@ -177,8 +173,8 @@ def main() -> int:
     irepa_state = json.loads((MIGRATED / "train_state" / "irepa_state.json").read_text())
     check(
         "irepa_state anchors",
-        irepa_state.get("source_update") == 113400
-        and irepa_state.get("start_successful_update") == 113401
+        irepa_state.get("source_update") == source_update
+        and irepa_state.get("start_successful_update") == source_update + 1
         and irepa_state.get("schema_version") == 1,
         f"start_successful_update={irepa_state.get('start_successful_update')}",
     )
@@ -187,7 +183,7 @@ def main() -> int:
 
     saved_rng = torch.get_rng_state()
     try:
-        rebuilt = _projector_tensors(_deterministic_projector(2560, seed))
+        rebuilt = _projector_tensors(_deterministic_projector(hidden_size, seed))
     finally:
         torch.set_rng_state(saved_rng)
     shard = load_file(str(MIGRATED / "model" / "model-irepa-projector.safetensors"))
@@ -200,9 +196,9 @@ def main() -> int:
     w = rebuilt[PROJECTOR_WEIGHT_FQN]
     b = rebuilt[PROJECTOR_BIAS_FQN]
     check(
-        "projector numel == 2560*768*3*3 + 768",
-        w.numel() == 2560 * 768 * 3 * 3 and b.numel() == 768
-        and w.numel() + b.numel() == 17695488,
+        f"projector numel == {hidden_size}*768*3*3 + 768",
+        w.numel() == hidden_size * 768 * 3 * 3 and b.numel() == 768
+        and w.numel() + b.numel() == hidden_size * 768 * 3 * 3 + 768,
         f"total={w.numel() + b.numel()}",
     )
 

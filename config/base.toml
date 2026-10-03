@@ -47,9 +47,9 @@ persistent_workers_per_rank = "BENCHMARK_PERSISTENT_WORKERS_PER_RANK"
 ready_batches_per_rank = "BENCHMARK_READY_BATCHES_PER_RANK"
 
 [data.service]
-socket_path = "/run/sakuramoon/data-service.sock"
-ownership_lock_path = "/run/sakuramoon/data-service.lock"
-mainset_path = "/root/private_data/sakuramoon/config/data-service-mainset.json"
+socket_path = "runs/data-service.sock"
+ownership_lock_path = "runs/data-service.lock"
+mainset_path = "data/data-service-mainset.json"
 request_timeout_seconds = "BENCHMARK_SERVICE_REQUEST_TIMEOUT_SECONDS"
 lease_channel_capacity = "BENCHMARK_LEASE_CHANNEL_CAPACITY"
 ack_channel_capacity = "BENCHMARK_ACK_CHANNEL_CAPACITY"
@@ -300,7 +300,8 @@ observer_event_timeout_seconds = "BENCHMARK_METRIC_EVENT_TIMEOUT_SECONDS"
 [wandb]
 enabled = false
 project = "sakuramoon"
-entity = "2574905817leaf-jinan-university"
+# Set entity to your own W&B user/team when enabling remote logging.
+entity = ""
 offline_on_network_error = true
 queue_capacity = "BENCHMARK_WANDB_QUEUE_CAPACITY"
 replay_retry_on_start = true

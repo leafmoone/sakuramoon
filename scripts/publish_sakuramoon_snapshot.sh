@@ -5,13 +5,12 @@ umask 077
 
 # Portable snapshot publisher for the current HCU/DAS environment.
 # It does not require Docker. Secrets are intentionally not included.
-REPO_ID="${REPO_ID:-leafmoone/docker_tmp}"
+REPO_ID="${REPO_ID:?Set REPO_ID to the intended ModelScope destination}"
 REPO_TYPE="model"
-PROJECT_ROOT="${PROJECT_ROOT:-/public/home/acfb8k41va/sakuramoon}"
-RUNTIME_ROOT="${RUNTIME_ROOT:-/sakuramoon-runtime}"
-PYTHON_ENV="${PYTHON_ENV:-/root/private_data/sakuramoon-dtk-venv}"
-CODEX_CONFIG="${CODEX_CONFIG:-/root/.codex/config.toml}"
-SNAPSHOT_ROOT="${SNAPSHOT_ROOT:-/sakuramoon-bundles}"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}"
+RUNTIME_ROOT="${RUNTIME_ROOT:-${PROJECT_ROOT}}"
+PYTHON_ENV="${PYTHON_ENV:-${PROJECT_ROOT}/.venv}"
+SNAPSHOT_ROOT="${SNAPSHOT_ROOT:-${TMPDIR:-/tmp}/sakuramoon-bundles}"
 LATEST_DIR="${SNAPSHOT_ROOT}/latest"
 PART_SIZE="${PART_SIZE:-4G}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-1800}"
@@ -32,17 +31,6 @@ log() {
 }
 
 load_environment() {
-  # 2026-08-30 fix: only fall back to ai_proxy when no proxy is already configured.
-  # ai_proxy went stale (pinned dead pool 10.13.17.166) and silently broke every
-  # hub upload while the stack-injected proxy (10.16.1.51) was alive.
-  if [[ -f /root/private_data/.ai_user_info/ai_proxy ]] && [[ -z "${http_proxy:-}${HTTP_PROXY:-}" ]]; then
-    # shellcheck disable=SC1091
-    source /root/private_data/.ai_user_info/ai_proxy
-  fi
-  if [[ -f /etc/profile.d/model-tokens.sh ]]; then
-    # shellcheck disable=SC1091
-    source /etc/profile.d/model-tokens.sh
-  fi
   : "${MODELSCOPE_API_TOKEN:?MODELSCOPE_API_TOKEN is not set}"
   [[ -x "${MS_HUB_BIN}" ]] || {
     log "missing ModelScope Hub CLI: ${MS_HUB_BIN}"
@@ -56,7 +44,7 @@ load_environment() {
 
 check_sources() {
   local path
-  for path in "${PROJECT_ROOT}" "${RUNTIME_ROOT}" "${PYTHON_ENV}" "${CODEX_CONFIG}"; do
+  for path in "${PROJECT_ROOT}" "${RUNTIME_ROOT}" "${PYTHON_ENV}"; do
     [[ -e "${path}" ]] || {
       log "snapshot source is missing: ${path}"
       return 1
@@ -79,24 +67,36 @@ build_snapshot() {
   mkdir -p "${part_dir}"
 
   log "creating snapshot; runtime size may exceed 200 GiB"
-  tar --ignore-failed-read \
-    --warning=no-file-changed \
-    --exclude='sakuramoon-runtime/docker-data' \
-    --exclude='sakuramoon-runtime/docker-exec' \
-    --exclude='sakuramoon-runtime/docker-package' \
-    --exclude='sakuramoon-runtime/*.log' \
-    --exclude='sakuramoon-runtime/**/*.partial' \
-    --exclude='sakuramoon-runtime/**/*.range-*' \
-    --exclude='public/home/acfb8k41va/sakuramoon/**/*.partial' \
-    --exclude='public/home/acfb8k41va/sakuramoon/**/*.range-*' \
-    --exclude='public/home/acfb8k41va/sakuramoon/**/*.tmp' \
+  local -a sources=()
+  local source included covered
+  for source in "${PROJECT_ROOT}" "${RUNTIME_ROOT}" "${PYTHON_ENV}"; do
+    source="$(realpath -- "${source}")"
+    [[ "${source}" != / ]] || { log 'refusing to archive the filesystem root'; return 1; }
+    source="${source#/}"
+    covered=0
+    local -a retained=()
+    for included in "${sources[@]}"; do
+      if [[ "${source}" == "${included}" || "${source}" == "${included}/"* ]]; then
+        covered=1
+      fi
+      if [[ "${included}" != "${source}/"* ]]; then
+        retained+=("${included}")
+      fi
+    done
+    if [[ "${covered}" == 0 ]]; then
+      sources=("${retained[@]}" "${source}")
+    fi
+  done
+  tar --ignore-failed-read --warning=no-file-changed \
+    --exclude='.git' --exclude='.ssh' --exclude='.codex' \
+    --exclude='.env' --exclude='.env.*' --exclude='auth.json' \
+    --exclude='*.pem' --exclude='*.key' --exclude='id_rsa*' --exclude='id_ed25519*' \
+    --exclude='core' --exclude='core.*' --exclude='*.log' \
+    --exclude='*.partial' --exclude='*.range-*' --exclude='*.tmp' \
+    --exclude='docker-data' --exclude='docker-exec' --exclude='docker-package' \
+    --exclude="${SNAPSHOT_ROOT#/}" \
     --use-compress-program="zstd -T${ZSTD_THREADS} -3" \
-    -cpf "${archive}" \
-    -C / \
-    public/home/acfb8k41va/sakuramoon \
-    sakuramoon-runtime \
-    root/private_data/sakuramoon-dtk-venv \
-    root/.codex/config.toml
+    -cpf "${archive}" -C / "${sources[@]}"
 
   log "splitting snapshot into ${PART_SIZE} parts"
   split --bytes="${PART_SIZE}" --numeric-suffixes=0 --suffix-length=4 \
@@ -118,11 +118,10 @@ build_snapshot() {
     printf 'project_root=%s\n' "${PROJECT_ROOT}"
     printf 'runtime_root=%s\n' "${RUNTIME_ROOT}"
     printf 'python_env=%s\n' "${PYTHON_ENV}"
-    printf 'codex_config=%s\n' "${CODEX_CONFIG}"
     printf 'compression=zstd-3\n'
     printf 'part_size=%s\n' "${PART_SIZE}"
     printf 'parts:\n%s\n' "${parts}"
-    printf 'excluded_secrets=root/.codex/auth.json\n'
+    printf 'excluded_secrets=.env*,.ssh,.codex,auth.json,private-key-patterns\n'
   } >"${part_dir}/manifest.txt"
   printf 'ready\n' >"${part_dir}/READY"
 

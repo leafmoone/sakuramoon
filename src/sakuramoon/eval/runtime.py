@@ -365,7 +365,7 @@ def _generate(
         growth_alpha=growth_alpha,
     )
     conditioning = composite.forward_conditioning(inputs)
-    noise = _initial_noise(cases, device)
+    noise = _initial_noise(cases, device) * config.timestep.noise_scale
 
     def velocity(state: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
         branches = torch.cat((state, state), dim=0).to(torch.bfloat16)

@@ -33,6 +33,7 @@ from sakuramoon.data.caption import (
     build_caption_plan,
 )
 from sakuramoon.data.image_ops import (
+    ImageMetadataError,
     ImageRejected,
     normalize_image,
     prepare_image,
@@ -70,10 +71,12 @@ _MAX_DECODE_DIMENSION = 32_768
 _DRAFT_DECODE_MIN_PIXELS = int(
     os.environ.get("SAKURAMOON_DRAFT_DECODE_MIN_PIXELS", "16000000")
 )
-_SAMPLE_TRACE_PATH = "/root/sakuramoon-logs/sample-trace.log"
+_SAMPLE_TRACE_PATH = os.environ.get("SAKURAMOON_SAMPLE_TRACE_PATH")
 
 
 def _trace_sample(source_shard: str, sample_id: int, status: str) -> None:
+    if not _SAMPLE_TRACE_PATH:
+        return
     try:
         with open(_SAMPLE_TRACE_PATH, "a", encoding="utf-8") as fh:
             fh.write(f"{source_shard}\t{sample_id}\t{status}\n")
@@ -733,6 +736,10 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                         (spatial_plan.canvas_width, spatial_plan.canvas_height),
                         resample=Image.Resampling.LANCZOS,
                     ).crop(spatial_plan.crop_box)
+        except ImageMetadataError as error:
+            _trace_sample(shard_record.path, metadata.id, f"decode_error:exif:{error}")
+            self.rejection_observer("decode_error")
+            return None
         except ImageRejected as error:
             _trace_sample(shard_record.path, metadata.id, f"reject:{error.reason}")
             self.rejection_observer(error.reason)

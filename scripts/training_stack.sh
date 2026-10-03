@@ -5,9 +5,9 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd -P)}"
-RUNTIME_ROOT="${RUNTIME_ROOT:-/sakuramoon-runtime}"
-LOG_ROOT="${LOG_ROOT:-/root/sakuramoon-logs}"
-RUN_ROOT="${RUN_ROOT:-/run/sakuramoon}"
+RUNTIME_ROOT="${RUNTIME_ROOT:-${PROJECT_ROOT}}"
+LOG_ROOT="${LOG_ROOT:-${RUNTIME_ROOT}/logs}"
+RUN_ROOT="${RUN_ROOT:-${RUNTIME_ROOT}/runs/stack}"
 CONFIG_NAME="${CONFIG_NAME:-train_s0.toml}"
 CONFIG_ROOT="${CONFIG_ROOT:-${PROJECT_ROOT}/config}"
 VENV_ROOT="${VENV_ROOT:-${PROJECT_ROOT}/.venv}"
@@ -25,7 +25,9 @@ export SAKURAMOON_TORCHINDUCTOR_CACHE_DIR
 TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-8}"
 export TORCHINDUCTOR_COMPILE_THREADS
 PUBLISH_STATE_ROOT="${PUBLISH_STATE_ROOT:-${RUNTIME_ROOT}/.sm-train-state-publisher}"
-PUBLISH_LAST_PUBLISHED="${PUBLISH_LAST_PUBLISHED:-/root/private_data/.sm-train-state-publisher/last-published-s0.txt}"
+PUBLISH_LAST_PUBLISHED="${PUBLISH_LAST_PUBLISHED:-${PUBLISH_STATE_ROOT}/last-published.txt}"
+PUBLISH_ENABLED="${PUBLISH_ENABLED:-0}"
+[[ "${PUBLISH_ENABLED}" == 0 || "${PUBLISH_ENABLED}" == 1 ]] || { printf 'PUBLISH_ENABLED must be 0 or 1\n' >&2; exit 2; }
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
 START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-180}"
 # Data-service ready gate: the warmup barrier (N ready shards, N =
@@ -126,19 +128,14 @@ load_workload_environment() {
     export "${entry}"
   done <"${WORKLOAD_ENV_FILE}"
 
-  export HOME=/root
-  export USER=root
-  export LOGNAME=root
   export PATH="${VENV_ROOT}/bin:${PATH}"
   export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
   export PYTHONUNBUFFERED=1
-  export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
   export MIOPEN_FIND_MODE="${MIOPEN_FIND_MODE:-NORMAL}"
 
   unset RANK LOCAL_RANK WORLD_SIZE LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT RESUME
 
   : "${PATH:?PATH is missing after environment load}"
-  : "${LD_LIBRARY_PATH:?LD_LIBRARY_PATH is missing after environment load}"
   : "${PYTHONPATH:?PYTHONPATH is missing after environment load}"
   : "${DTKROOT:?DTKROOT is missing after environment load}"
   : "${MODELSCOPE_API_TOKEN:?MODELSCOPE_API_TOKEN is missing after environment load}"
@@ -436,13 +433,18 @@ start_data() {
 }
 
 start_publisher() {
+  if [[ "${PUBLISH_ENABLED}" != 1 ]]; then
+    log "checkpoint publishing disabled (set PUBLISH_ENABLED=1 and REPO_ID to opt in)"
+    return 0
+  fi
+  : "${REPO_ID:?Set REPO_ID to the intended ModelScope destination}"
   if resolve_component_pid publisher; then
     log "publisher already running: PID ${RESOLVED_PID}"
     return 0
   fi
 
   : >"${PUBLISH_LOG}"
-  # 2026-08-30: MS_HUB_BIN respects a wrapper override (venv ms-hub shebang is stale: points at /root/private_data/sakuramoon-dtk-venv/bin/python)
+  # Allow a CLI wrapper when the environment has been relocated.
   nohup env \
     SOURCE_ROOT="${CHECKPOINT_ROOT}" \
     PROJECT_ROOT="${PROJECT_ROOT}" \
@@ -501,7 +503,9 @@ start_train() {
   local checkpoint
   resolve_component_pid data || die "data service is not running"
   [[ -S "${DATA_SOCKET}" ]] || die "data service socket is missing: ${DATA_SOCKET}"
-  resolve_component_pid publisher || die "checkpoint publisher is not running"
+  if [[ "${PUBLISH_ENABLED}" == 1 ]]; then
+    resolve_component_pid publisher || die "checkpoint publisher is not running"
+  fi
   if resolve_component_pid train; then
     log "train already running: PID ${RESOLVED_PID}"
     return 0
@@ -625,7 +629,11 @@ component_status() {
 
 show_status() {
   component_status data
-  component_status publisher
+  if [[ "${PUBLISH_ENABLED}" == 1 ]]; then
+    component_status publisher
+  else
+    printf 'publisher: disabled\n'
+  fi
   component_status train
   if [[ -n "${DATA_SOCKET}" ]]; then
     if [[ -S "${DATA_SOCKET}" ]]; then
@@ -647,6 +655,9 @@ show_status() {
 adopt_stack() {
   local component
   for component in data publisher train; do
+    if [[ "${component}" == publisher && "${PUBLISH_ENABLED}" != 1 ]]; then
+      continue
+    fi
     resolve_component_pid "${component}" \
       || die "cannot adopt ${component}: no exact matching process"
     log "managed ${component}: PID ${RESOLVED_PID}"
@@ -737,7 +748,9 @@ main() {
     restart-train)
       resolve_component_pid data || die "data service must be running"
       [[ -S "${DATA_SOCKET}" ]] || die "data service socket is missing"
-      resolve_component_pid publisher || die "checkpoint publisher must be running"
+      if [[ "${PUBLISH_ENABLED}" == 1 ]]; then
+        resolve_component_pid publisher || die "checkpoint publisher must be running"
+      fi
       stop_component train
       start_train
       show_status

@@ -42,7 +42,7 @@ Launch (DTK machine, from the repository worktree):
         --config train_g1_cmuon_production.toml \\
         --config-root config \\
         --repository-root <repo> \\
-        --output-root /sakuramoon-runtime/infra-bench/p1-r1a/<sha>/<ts>
+        --output-root /path/to/runtime/infra-bench/p1-r1a/<sha>/<ts>
 """
 
 from __future__ import annotations

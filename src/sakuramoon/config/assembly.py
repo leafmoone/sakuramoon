@@ -136,7 +136,7 @@ def initialize_wandb_run(
         raise ValueError("W&B resume update must be a non-negative integer")
     init_kwargs: dict[str, Any] = {
         "project": project,
-        "entity": entity,
+        "entity": entity or None,
         "id": run_id,
         "name": run_id,
         "group": run_id,

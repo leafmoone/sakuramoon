@@ -3,11 +3,11 @@
 set -Eeuo pipefail
 umask 077
 
-# This script deliberately targets one fixed repository only.
-REPO_ID="${REPO_ID:-leafmoone/docker_tmp}"
+# The destination must be explicitly supplied by the operator.
+REPO_ID="${REPO_ID:?Set REPO_ID to the intended ModelScope destination}"
 REPO_TYPE="model"
 IMAGE_TAG="${IMAGE_TAG:-sakuramoon:hcu-dtk-26.04}"
-BUNDLE_ROOT="${BUNDLE_ROOT:-/sakuramoon-runtime/docker-package}"
+BUNDLE_ROOT="${BUNDLE_ROOT:-${TMPDIR:-/tmp}/sakuramoon-docker-package}"
 LATEST_DIR="${BUNDLE_ROOT}/latest"
 PART_SIZE="${PART_SIZE:-4G}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-1800}"
@@ -15,7 +15,7 @@ UPLOAD_WORKERS="${UPLOAD_WORKERS:-4}"
 TRY_DELETE_REPO="${TRY_DELETE_REPO:-0}"
 LOG_FILE="${LOG_FILE:-${BUNDLE_ROOT}/publish.log}"
 
-PROJECT_ROOT="${PROJECT_ROOT:-/public/home/acfb8k41va/sakuramoon}"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 MS_HUB_BIN="${MS_HUB_BIN:-${PROJECT_ROOT}/.venv/bin/ms-hub}"
 
 mkdir -p "${BUNDLE_ROOT}"
@@ -30,17 +30,6 @@ log() {
 }
 
 load_environment() {
-  # 2026-08-30 fix: only fall back to ai_proxy when no proxy is already configured.
-  # ai_proxy went stale (pinned dead pool 10.13.17.166) and silently broke every
-  # hub upload while the stack-injected proxy (10.16.1.51) was alive.
-  if [[ -f /root/private_data/.ai_user_info/ai_proxy ]] && [[ -z "${http_proxy:-}${HTTP_PROXY:-}" ]]; then
-    # shellcheck disable=SC1091
-    source /root/private_data/.ai_user_info/ai_proxy
-  fi
-  if [[ -f /etc/profile.d/model-tokens.sh ]]; then
-    # shellcheck disable=SC1091
-    source /etc/profile.d/model-tokens.sh
-  fi
   : "${MODELSCOPE_API_TOKEN:?MODELSCOPE_API_TOKEN is not set}"
   [[ -x "${MS_HUB_BIN}" ]] || {
     log "missing ModelScope Hub CLI: ${MS_HUB_BIN}"

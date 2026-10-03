@@ -52,8 +52,8 @@ from pathlib import Path
 
 import torch
 
-#: Production default artifact root (the live G1 artifacts tree).
-DEFAULT_HARD_FAIL_ROOT = "/sakuramoon-runtime/artifacts/g1/cmuon-hard-fail"
+#: Relative to the command working directory; production can override it.
+DEFAULT_HARD_FAIL_ROOT = "artifacts/cmuon-hard-fail"
 
 #: Artifact metadata schema tag.
 HARD_FAIL_ARTIFACT_SCHEMA = "sakuramoon.cmuon_hard_fail_artifact.v1"
@@ -430,13 +430,10 @@ def _final_delta_finite(diag: dict[str, object] | None) -> bool | None:
 # replay, per-iteration trace, spectrum / effective-rank analysis) are
 # OFFLINE via ``dev-tools/cmuon_hardfail_enrich.py``.
 
-#: Local-first durable emergency root for the minimal capsule. On the
-#: verified production host ``/sakuramoon-runtime`` is the local overlay
-#: filesystem (716G free) while ``/root/private_data`` is the 50G-quota
-#: NFS share — the emergency root therefore sits on local disk next to
-#: the shared forensic tree. Isolated tests MUST redirect it (never
-#: touch this path).
-DEFAULT_EMERGENCY_CAPSULE_ROOT = "/sakuramoon-runtime/cmuon-f1-emergency"
+#: Local-first emergency root, relative to the command working directory.
+#: Production should override this with a durable path on a suitable local
+#: filesystem; do not assume a particular shared-mount quota or layout.
+DEFAULT_EMERGENCY_CAPSULE_ROOT = "artifacts/cmuon-emergency"
 
 #: Schema tag for the minimal capsule metadata (F2).
 MINIMAL_CAPSULE_SCHEMA = "sakuramoon.cmuon_minimal_hardfail_capsule.v1"

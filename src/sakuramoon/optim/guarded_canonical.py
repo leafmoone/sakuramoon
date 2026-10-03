@@ -495,7 +495,7 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                         "ceiling": ceiling,
                     })
                 import os as _os
-                out_dir = "/sakuramoon-runtime/artifacts/g1"
+                out_dir = _os.environ.get("SAKURAMOON_FORENSIC_DIR", "artifacts/optimizer")
                 _os.makedirs(out_dir, exist_ok=True)
                 out_path = f"{out_dir}/guard-forensic-rank{self.rank}.json"
                 with open(out_path, "w") as _f:

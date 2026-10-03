@@ -7,7 +7,7 @@ import math
 import re
 import tomllib
 from pathlib import Path
-from typing import Any, Protocol, Self, cast
+from typing import TYPE_CHECKING, Any, Protocol, Self, cast
 
 import torch
 from safetensors import safe_open
@@ -36,9 +36,11 @@ from sakuramoon.checkpoint.schema import (
 )
 from sakuramoon.model.growth import new_slot_fqn_prefixes, new_slot_ids
 from sakuramoon.model.irepa import irepa_auxiliary_fqns
-from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
-from sakuramoon.optim.cmuon import HybridCMuon
 from sakuramoon.optim.groups import ParameterAudit, ParameterSpec
+
+if TYPE_CHECKING:
+    from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
+    from sakuramoon.optim.cmuon import HybridCMuon
 
 _TORCH_TO_SAFE_DTYPE = {
     torch.bool: "BOOL",
@@ -1520,6 +1522,8 @@ def load_raw_checkpoint(
     successful_updates = state.trainer.successful_updates
 
     _apply_model(checkpoint / "model", weight_map, current_model, dropped_fqns)
+    from sakuramoon.optim.cmuon import HybridCMuon
+
     if isinstance(optimizer, HybridCMuon):
         if type(schema_version) is int and schema_version == 2:
             _load_hybrid_state_exact(

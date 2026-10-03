@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import selectors
 import shutil
@@ -24,9 +25,9 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 import deepghs_quality_pipeline as quality
 
-REPO_ID: Final = "leafmoone/webdataset_danbooru"
-SOURCE_REVISION: Final = "master"
-TARGET_REVISION: Final = "danbooru"
+REPO_ID: Final = os.environ.get("SAKURAMOON_DATASET_REPO_ID", "leafmoone/webdataset_danbooru")
+SOURCE_REVISION: Final = os.environ.get("SAKURAMOON_DATASET_SOURCE_REVISION", "master")
+TARGET_REVISION: Final = os.environ.get("SAKURAMOON_DATASET_TARGET_REVISION", "danbooru")
 STAGES: Final = (
     "pending",
     "downloaded",
@@ -560,6 +561,8 @@ def _remote_size(token: str, remote_path: str) -> int | None:
 
 
 def _upload_child(path: Path, remote_path: str, expected_size: int) -> int:
+    if not os.environ.get("SAKURAMOON_DATASET_REPO_ID"):
+        raise OrchestrationError("set SAKURAMOON_DATASET_REPO_ID explicitly before uploading")
     token = _load_process_environment()
     _require_file(path, size=expected_size)
     existing = _remote_size(token, remote_path)
@@ -1033,7 +1036,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--manifest",
         type=Path,
-        default=Path("/sakuramoon-runtime/data/dataset-manifest.json"),
+        default=Path("data/dataset-manifest.json"),
     )
     run.add_argument(
         "--database",
@@ -1043,17 +1046,17 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--model-root",
         type=Path,
-        default=Path("/sakuramoon-runtime/quality-pipeline/models"),
+        default=Path("quality-pipeline/models"),
     )
     run.add_argument(
         "--work-root",
         type=Path,
-        default=Path("/sakuramoon-runtime/quality-pipeline/work"),
+        default=Path("quality-pipeline/work"),
     )
     run.add_argument(
         "--cache-root",
         type=Path,
-        default=Path("/sakuramoon-runtime/cache/data"),
+        default=Path("cache/data"),
     )
     run.add_argument(
         "--devices", nargs="+", default=("cuda:0", "cuda:1")
@@ -1074,17 +1077,23 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if (args.command == "upload-one" or not args.verify_only) and not os.environ.get(
+        "SAKURAMOON_DATASET_REPO_ID"
+    ):
+        raise OrchestrationError("set SAKURAMOON_DATASET_REPO_ID explicitly for a writable run")
     if args.command == "upload-one":
         return _upload_child(args.path, args.remote_path, args.expected_size)
     if (
-        args.batch_size != 128
-        or tuple(args.devices) != ("cuda:0", "cuda:1")
-        or args.download_concurrency != 8
-        or args.no_progress_timeout != 300.0
+        args.batch_size <= 0
+        or len(set(args.devices)) != len(args.devices)
+        or any(not device.startswith("cuda:") or not device[5:].isdigit() for device in args.devices)
+        or args.download_concurrency <= 0
+        or not math.isfinite(args.no_progress_timeout)
+        or args.no_progress_timeout <= 0
         or args.start_index < 0
         or (args.limit is not None and args.limit <= 0)
     ):
-        raise OrchestrationError("pipeline limits differ from the required contract")
+        raise OrchestrationError("pipeline limits must be positive and CUDA devices must be unique")
     usage = shutil.disk_usage(args.work_root.parent)
     if usage.free < 32 * 1024**3:
         raise OrchestrationError("work filesystem has less than 32 GiB free")
