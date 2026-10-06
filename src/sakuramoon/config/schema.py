@@ -1118,7 +1118,7 @@ class LoggingConfig(StrictModel):
 class WandbConfig(StrictModel):
     enabled: bool
     project: Annotated[str, StringConstraints(min_length=1)]
-    entity: Annotated[str, StringConstraints(min_length=1)]
+    entity: str = ""
     offline_on_network_error: bool
     retry_jsonl_path: Annotated[str, StringConstraints(min_length=1)]
     queue_capacity: PositiveInt

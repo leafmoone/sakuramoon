@@ -8,7 +8,7 @@ id_rsa
 id_ed25519
 
 # Python and uv
-.venv/
+.venv
 /uv.lock
 __pycache__/
 *.py[cod]
@@ -54,3 +54,19 @@ __pycache__/
 *.partial
 .ipynb_checkpoints/
 ._____temp/
+/MEMORY.md
+/logs/
+/.sm-train-state-publisher/
+/core
+/core.*
+
+# Local build outputs and review scratch material (not formal docs/tests).
+/build/
+/dist/
+*.egg-info/
+/tmp/
+/reports/
+/.agent/
+/.codex/
+/torchinductor-cache/
+/tests/unit/model/test_sdpa_backend.py

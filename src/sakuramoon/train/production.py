@@ -1541,7 +1541,7 @@ def _run_accepted_lifecycle(
     _log(f"连接数据服务: {config.data.service.socket_path}")
     # No service connection may occur before exact RAW restore and full binding.
     service_client = DataServiceClient(
-        Path(config.data.service.socket_path),
+        repository_root.resolve(strict=True) / config.data.service.socket_path,
         worker_count=(
             config.data.cache.persistent_workers_per_rank
             * config.distributed.world_size
@@ -1773,6 +1773,15 @@ def _run_accepted_lifecycle(
                             canonical_growth_alpha(restored.state.growth, update)
                         )
                         evaluation = evaluator.evaluate(update)
+                        # Every rank participates in the same named stage.
+                        # Long rank-zero-only generation must keep a heartbeat
+                        # alive while the other ranks wait.
+                        current_evaluator = evaluator
+                        suite_metrics = progress.run_on_rank(
+                            f"observer/update-{update}/concept-suite",
+                            0,
+                            lambda: current_evaluator.run_concept_suite(update),
+                        )
                         if is_main_process:
                             if evaluation is None:
                                 raise RuntimeError(
@@ -1799,7 +1808,6 @@ def _run_accepted_lifecycle(
                                 successful_update=update,
                             )
 
-                            suite_metrics = evaluator.run_concept_suite(update)
                             if suite_metrics:
                                 telemetry.submit_wandb_metrics(
                                     {

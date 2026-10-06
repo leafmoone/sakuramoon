@@ -14,8 +14,8 @@ the manifest's ``refs/`` directory (stdlib urllib only, no new dependencies).
 
 Usage:
     python -m sakuramoon.cli.concept_eval \
-        --config train_g1.toml --config-root config --root /sakuramoon-runtime \
-        --checkpoint /sakuramoon-runtime/output_model/g1/ckpt_70000_...
+        --config train_g1.toml --config-root config --root /path/to/runtime \
+        --checkpoint /path/to/runtime/output_model/g1/ckpt_70000_...
 """
 
 # pyright: reportPrivateUsage=false

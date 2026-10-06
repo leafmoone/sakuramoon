@@ -1,21 +1,29 @@
-"""HCU compatibility shim for Transformers Qwen3.5 causal-conv1d API.
+"""Qwen3.5 causal convolution: installed FLA kernels or a PyTorch reference.
 
-This module intentionally delegates to flash-linear-attention (FLA).  The
-installed FLA build contains the Triton-Ascend implementation; no CUDA
-causal-conv1d wheel is used.  The FLA import is deferred to first use so
-that importing this shim (e.g. through a Transformers model import on a
-machine without FLA) does not itself require the FLA package.
+The source-tree shim is also discovered on NVIDIA machines. It must provide
+a working reference when FLA is absent, rather than advertising a callable
+that fails only after the text model has been loaded.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from importlib.util import find_spec
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 _fla_causal_conv1d: Callable[..., Any] | None = None
 _fla_causal_conv1d_update: Callable[..., Any] | None = None
+
+
+def _activate(x: torch.Tensor, activation: str | None) -> torch.Tensor:
+    if activation is None:
+        return x
+    if activation in {"silu", "swish"}:
+        return F.silu(x)
+    raise ValueError("causal convolution supports only silu/swish activation")
 
 
 def _require_fla() -> tuple[Callable[..., Any], Callable[..., Any]]:
@@ -47,6 +55,21 @@ def causal_conv1d_fn(
         raise NotImplementedError("FLA HCU causal convolution does not support seq_idx")
     if x.ndim != 3:
         raise ValueError(f"expected [B, D, T], got {tuple(x.shape)}")
+    if find_spec("fla") is None:
+        if kwargs:
+            raise NotImplementedError(
+                "PyTorch causal convolution does not support extra state arguments"
+            )
+        if weight.ndim != 2 or weight.shape[0] != x.shape[1]:
+            raise ValueError("weight must have shape [D, kernel_width]")
+        output = F.conv1d(
+            x,
+            weight.unsqueeze(1),
+            bias,
+            padding=weight.shape[1] - 1,
+            groups=x.shape[1],
+        )[..., : x.shape[-1]]
+        return _activate(output, activation)
     causal_conv1d, _ = _require_fla()
     x_btd = x.transpose(1, 2)
     y_btd, _ = causal_conv1d(
@@ -69,6 +92,29 @@ def causal_conv1d_update(
     **kwargs,
 ) -> torch.Tensor:
     """Apply FLA HCU recurrent causal-conv update in-place on conv_state."""
+    if find_spec("fla") is None:
+        if kwargs:
+            raise NotImplementedError(
+                "PyTorch convolution update does not support extra state arguments"
+            )
+        squeeze = x.ndim == 2
+        sequence = x.unsqueeze(-1) if squeeze else x
+        if (
+            sequence.ndim != 3
+            or weight.ndim != 2
+            or sequence.shape[1] != weight.shape[0]
+        ):
+            raise ValueError("expected [B,D] or [B,D,T] input and [D,W] weights")
+        expected = (sequence.shape[0], sequence.shape[1], weight.shape[1])
+        if conv_state.shape != expected:
+            raise ValueError("conv_state must have shape [B,D,kernel_width]")
+        history = torch.cat((conv_state, sequence), dim=-1)
+        output = F.conv1d(history, weight.unsqueeze(1), bias, groups=sequence.shape[1])[
+            ..., 1:
+        ]
+        conv_state.copy_(history[..., -weight.shape[1] :])
+        output = _activate(output, activation)
+        return output.squeeze(-1) if squeeze else output
     if x.ndim != 3:
         raise ValueError(f"expected [B, D, T], got {tuple(x.shape)}")
     _, causal_conv1d_update = _require_fla()

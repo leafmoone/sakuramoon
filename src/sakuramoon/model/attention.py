@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
+from typing import Literal, cast
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.nn.attention import (
+    SDPBackend,
+    sdpa_kernel,  # pyright: ignore[reportUnknownVariableType]
+)
 
 try:
     # DAS provides a Hygon/DCU-compatible FlashAttention 2 wheel.  Keep the
@@ -140,6 +146,8 @@ def fa4_varlen_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     boundaries: AcceptedCuSeqlens,
+    *,
+    backend: Literal["flash", "sdpa"] = "flash",
 ) -> torch.Tensor:
     """Run the installed DAS FlashAttention-2 kernel on packed sequences.
 
@@ -182,6 +190,29 @@ def fa4_varlen_attention(
     if not all(tensor.is_contiguous() for tensor in (query, key, value)):
         raise ValueError("FA4 query, key, and value must be contiguous")
 
+    if backend == "sdpa":
+        # Each sample keeps its own attention domain. No padding, cross-sample
+        # attention or parameter conversion is introduced by this backend.
+        outputs: list[torch.Tensor] = []
+        offset = 0
+        for length in accepted.sequence_lengths:
+            end = offset + length
+            # DTK's automatic SDPA dispatch can load the external FlashAttention
+            # library. The explicit portable backend must not depend on it.
+            with sdpa_kernel(SDPBackend.MATH):
+                attended = F.scaled_dot_product_attention(
+                    query[offset:end].transpose(0, 1).unsqueeze(0),
+                    key[offset:end].transpose(0, 1).unsqueeze(0),
+                    value[offset:end].transpose(0, 1).unsqueeze(0),
+                    dropout_p=0.0,
+                    is_causal=False,
+                    enable_gqa=True,
+                )
+            outputs.append(attended.squeeze(0).transpose(0, 1))
+            offset = end
+        return torch.cat(outputs, dim=0).contiguous()
+    if backend != "flash":
+        raise ValueError("packed attention backend must be 'flash' or 'sdpa'")
     if _flash_attn_varlen_func is None:
         raise RuntimeError(
             "DAS flash-attn with flash_attn_varlen_func is required for packed attention"
@@ -313,6 +344,7 @@ class DenseGQAAttention(nn.Module):
         if projection_bias or dropout != 0.0:
             raise ValueError("DiT attention requires bias=false and dropout=0")
         self.hidden_size = hidden_size
+        self.allow_flash_varlen = True
         self.q_heads = q_heads
         self.kv_heads = kv_heads
         self.head_dim = head_dim
@@ -403,7 +435,8 @@ class DenseGQAAttention(nn.Module):
         value = value.view(batch, length, self.kv_heads, self.head_dim).contiguous()
         outer_lengths = _outer_mask_lengths(attention_mask)
         use_flash_varlen = (
-            _flash_attn_varlen_func is not None
+            self.allow_flash_varlen
+            and _flash_attn_varlen_func is not None
             and outer_lengths is not None
             and query.device.type == "cuda"
             and query.dtype in (torch.float16, torch.bfloat16)
@@ -411,6 +444,7 @@ class DenseGQAAttention(nn.Module):
             and batch >= 8
         )
         if use_flash_varlen:
+            assert outer_lengths is not None
             lengths, max_seqlen = outer_lengths
             valid_tokens = attention_mask.any(dim=-1).squeeze(1)
             attended = _flash_varlen_self_attention(
@@ -422,15 +456,21 @@ class DenseGQAAttention(nn.Module):
                 max_seqlen,
             )
         else:
-            attended = F.scaled_dot_product_attention(
-                query.transpose(1, 2).contiguous(),
-                key.transpose(1, 2).contiguous(),
-                value.transpose(1, 2).contiguous(),
-                attn_mask=attention_mask,
-                dropout_p=0.0,
-                is_causal=False,
-                enable_gqa=True,
-            ).transpose(1, 2).contiguous()
+            context: AbstractContextManager[object] = (
+                nullcontext()
+                if self.allow_flash_varlen
+                else cast(AbstractContextManager[object], sdpa_kernel(SDPBackend.MATH))
+            )
+            with context:
+                attended = F.scaled_dot_product_attention(
+                    query.transpose(1, 2).contiguous(),
+                    key.transpose(1, 2).contiguous(),
+                    value.transpose(1, 2).contiguous(),
+                    attn_mask=attention_mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    enable_gqa=True,
+                ).transpose(1, 2).contiguous()
         attended = attended.reshape(batch, length, self.hidden_size)
         gated = attended * torch.sigmoid(self.content_gate(tokens))
         output = self.out_proj(gated)
@@ -473,6 +513,9 @@ class FA4VarlenGQAAttention(nn.Module):
         if projection_bias or dropout != 0.0:
             raise ValueError("DiT attention requires bias=false and dropout=0")
         self.hidden_size = hidden_size
+        # Runtime-only selection; checkpoint tensor names and architecture
+        # metadata retain their original contract.
+        self.runtime_backend: Literal["flash", "sdpa"] = "flash"
         self.q_heads = q_heads
         self.kv_heads = kv_heads
         self.head_dim = head_dim
@@ -529,14 +572,38 @@ class FA4VarlenGQAAttention(nn.Module):
         key = self.k_proj(tokens).view(-1, self.kv_heads, self.head_dim)
         value = self.v_proj(tokens).view(-1, self.kv_heads, self.head_dim)
         query, key = self.qk_rope(query, key, coordinates)
-        attended = fa4_varlen_attention(
-            query.contiguous(),
-            key.contiguous(),
-            value.contiguous(),
-            boundaries,
-        ).reshape(-1, self.hidden_size)
+        if self.runtime_backend == "flash":
+            attended = fa4_varlen_attention(
+                query.contiguous(), key.contiguous(), value.contiguous(), boundaries
+            )
+        else:
+            attended = fa4_varlen_attention(
+                query.contiguous(), key.contiguous(), value.contiguous(), boundaries,
+                backend="sdpa",
+            )
+        attended = attended.reshape(-1, self.hidden_size)
         gated = attended * torch.sigmoid(self.content_gate(tokens))
         return self.out_proj(gated)
+
+
+def configure_attention_backend(
+    module: nn.Module, backend: Literal["flash", "sdpa"]
+) -> None:
+    """Select an explicit inference backend without changing saved parameters.
+
+    ``flash`` requires an installed compatible FlashAttention-2 extension
+    (DAS on DCU). ``sdpa`` uses PyTorch on NVIDIA or HIP devices. Training
+    keeps its existing FlashAttention behavior unless this is called.
+    """
+    if backend not in {"flash", "sdpa"}:
+        raise ValueError("attention backend must be 'flash' or 'sdpa'")
+    if backend == "flash" and _flash_attn_varlen_func is None:
+        raise RuntimeError("flash backend requires a compatible flash-attn installation")
+    for child in module.modules():
+        if isinstance(child, FA4VarlenGQAAttention):
+            child.runtime_backend = backend
+        elif isinstance(child, DenseGQAAttention):
+            child.allow_flash_varlen = backend == "flash"
 
 
 __all__ = [
@@ -547,6 +614,7 @@ __all__ = [
     "accept_fa4_boundaries",
     "accepted_sample_indices",
     "build_validated_cu_seqlens",
+    "configure_attention_backend",
     "dense_attention_mask",
     "fa4_varlen_attention",
 ]

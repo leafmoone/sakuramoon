@@ -212,8 +212,7 @@ invariant_check = true
 # Persist the data-service shard queue (cycle / completed_epochs /
 # current_epoch) INSIDE this production tree so training restarts and
 # interruptions resume the same cycle instead of resetting it to 0.
-# base.toml's default points at the legacy /root/private_data/sakuramoon
-# deployment path; override here for the live G1 tree only.
+# The queue path is relative to the runtime root, not the code checkout.
 [data.service]
-mainset_path = "/root/private_data/sakuramoon-g1/config/data-service-mainset.json"
+mainset_path = "data/data-service-mainset.json"
 

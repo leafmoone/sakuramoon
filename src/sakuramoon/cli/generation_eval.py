@@ -9,8 +9,8 @@ run.
 
 Usage:
     python -m sakuramoon.cli.generation_eval \
-        --config train_g1.toml --config-root config --root /sakuramoon-runtime \
-        --checkpoint /sakuramoon-runtime/eval-ckpts/ckpt_61900_...
+        --config train_g1.toml --config-root config --root /path/to/runtime \
+        --checkpoint /path/to/runtime/eval-ckpts/ckpt_61900_...
 """
 
 from __future__ import annotations

@@ -5,12 +5,17 @@ from __future__ import annotations
 import time
 import warnings
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 import torch
 from torch import nn
+from torch.nn.attention import (
+    SDPBackend,
+    sdpa_kernel,  # pyright: ignore[reportUnknownVariableType]
+)
 from transformers import (
     AutoTokenizer,
     PreTrainedTokenizerBase,
@@ -56,9 +61,10 @@ class QwenRuntime:
 class FrozenQwenEncoder(nn.Module):
     """Keep Qwen frozen and expose only the approved seven text states."""
 
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(self, model: nn.Module, *, math_sdpa: bool = False) -> None:
         super().__init__()
         self.model = model
+        self.math_sdpa = math_sdpa
         self.model.requires_grad_(False)
         self.model.eval()
         super().train(False)
@@ -105,13 +111,20 @@ class FrozenQwenEncoder(nn.Module):
             for block in HIDDEN_STATE_BLOCKS
         )
         try:
-            self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                use_cache=False,
-                output_hidden_states=False,
-                return_dict=True,
+            # DTK automatic SDPA dispatch can require external FlashAttention.
+            context: AbstractContextManager[object] = (
+                cast(AbstractContextManager[object], sdpa_kernel(SDPBackend.MATH))
+                if self.math_sdpa
+                else nullcontext()
             )
+            with context:
+                self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                    output_hidden_states=False,
+                    return_dict=True,
+                )
         finally:
             for handle in handles:
                 handle.remove()
@@ -395,6 +408,7 @@ def load_local_qwen(
     device: torch.device,
     *,
     attention_backend: str = "sdpa",
+    math_sdpa: bool = False,
 ) -> QwenRuntime:
     """Load the fixed local text model without creating the visual tower."""
 
@@ -431,7 +445,7 @@ def load_local_qwen(
     text_model.to(  # pyright: ignore[reportUnknownMemberType, reportArgumentType, reportCallIssue]
         device=device
     )
-    encoder = FrozenQwenEncoder(text_model)
+    encoder = FrozenQwenEncoder(text_model, math_sdpa=math_sdpa)
     tokenizer = cast(
         PreTrainedTokenizerBase,
         AutoTokenizer.from_pretrained(  # pyright: ignore[reportUnknownMemberType]

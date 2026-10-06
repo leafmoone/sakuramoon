@@ -113,7 +113,7 @@ _RESCUE_SANITY_LOW = 0.05
 # failure dump that predates F1). F1 keeps this path by default and only
 # redirects it (``legacy_forensic_dir``) so isolated tests never touch the
 # live artifacts tree. Telemetry-only; never feeds the safety verdict.
-LEGACY_FORENSIC_DIR_DEFAULT = "/sakuramoon-runtime/artifacts/g1"
+LEGACY_FORENSIC_DIR_DEFAULT = "artifacts/optimizer"
 
 
 @dataclass
@@ -991,20 +991,19 @@ def build_fp32_rescue(
 
     ``hard_fail_artifact_root`` (F1/F2 telemetry only): the BEST-EFFORT
     shared mirror target for hard-fail capsules; None keeps the production
-    default (``/sakuramoon-runtime/artifacts/g1/cmuon-hard-fail``). Since
+    default (``artifacts/cmuon-hard-fail``). Since
     F2 it is never on the failure critical path (the local capsule lands
     first). It never feeds the safety verdict.
 
     ``legacy_forensic_dir`` (F1 telemetry only): redirect the legacy
     per-rank forensic JSON (the analysis-only failure dump) for isolated
-    test environments; None keeps the production default (``/sakuramoon-
-    runtime/artifacts/g1``). It never feeds the safety verdict.
+    test environments; None keeps the production default (``artifacts/optimizer``). It never feeds the safety verdict.
 
     ``emergency_capsule_root`` (F2 telemetry only): the LOCAL-first
     durable emergency root where the minimal hard-fail capsule is
     published BEFORE any shared mirror; None keeps the production default
-    (``/sakuramoon-runtime/cmuon-f1-emergency``, a verified local
-    filesystem on the production host). Isolated tests MUST redirect it.
+    (``artifacts/cmuon-emergency``, relative to the working directory;
+    production must select a suitable local filesystem). Isolated tests MUST redirect it.
     It never feeds the safety verdict.
 
     ``checkpoint_source`` / ``run_id`` (F2 telemetry only): identity

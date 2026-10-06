@@ -33,6 +33,10 @@ class ImageRejected(ValueError):
         self.reason = reason
 
 
+class ImageMetadataError(ValueError):
+    """EXIF metadata cannot be normalized safely."""
+
+
 class ImageScanError(RuntimeError):
     """Image scan input or artifact publication failed."""
 
@@ -122,7 +126,14 @@ class ImageScanReport:
 def normalize_image(image: Image.Image) -> Image.Image:
     """Apply EXIF orientation once, then convert to RGB."""
 
-    return ImageOps.exif_transpose(image).convert("RGB")
+    # Pixel decoding errors retain their original type. Malformed EXIF is
+    # reported separately so the streaming pipeline can reject this image.
+    image.load()
+    try:
+        oriented = ImageOps.exif_transpose(image)
+    except TypeError as error:
+        raise ImageMetadataError(f"invalid EXIF metadata: {error}") from error
+    return oriented.convert("RGB")
 
 
 def observe_decoded_dimensions(

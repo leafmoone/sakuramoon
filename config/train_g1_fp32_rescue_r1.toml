@@ -262,7 +262,7 @@ verified_shard_lookahead = 16
 # The structural mainset (647-shard window) -- the data domain the
 # offline shadow validation ran on, with the warm preloaded cache.
 [data.service]
-mainset_path = "/root/private_data/sakuramoon/config/data-service-mainset-structural.json"
+mainset_path = "data/data-service-mainset-structural.json"
 
 # R1 isolation: no remote telemetry; the per-update metrics JSONL and the
 # built-in guard stats logger carry the R1 evidence.

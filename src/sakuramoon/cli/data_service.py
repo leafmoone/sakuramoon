@@ -118,7 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         validation_selection,
         cache,
         _root_path(root, config.data.service.mainset_path, allow_absolute=True),
-        Path(config.data.service.ownership_lock_path),
+        _root_path(root, config.data.service.ownership_lock_path, allow_absolute=True),
         identity,
         DataServiceLimits(
             download_concurrency=config.data.cache.download_concurrency,
@@ -129,7 +129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     server = DataServiceServer(
         service,
-        Path(config.data.service.socket_path),
+        _root_path(root, config.data.service.socket_path, allow_absolute=True),
         request_timeout_seconds=config.data.service.request_timeout_seconds,
     )
     stopped = threading.Event()

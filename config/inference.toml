@@ -1,0 +1,26 @@
+# Standalone inference settings. A checkpoint's resolved_config.toml can also
+# be used; only sampling, timestep and cfg are read by the inference command.
+[sampling]
+profile = "balanced"
+
+[sampling.profiles.preview]
+solver = "euler"
+steps = 28
+time_schedule = "linear"
+
+[sampling.profiles.balanced]
+solver = "heun_final_euler"
+steps = 25
+time_schedule = "linear"
+
+[sampling.profiles.reference]
+solver = "heun_final_euler"
+steps = 50
+time_schedule = "linear"
+
+[timestep]
+noise_scale = 1.0
+t_eps = 0.05
+
+[cfg]
+scale = 2.9

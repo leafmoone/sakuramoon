@@ -53,9 +53,10 @@ import random
 import sys
 import tarfile
 import tomllib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence, cast
+from typing import Any, cast
 
 from sakuramoon.data.caption import (
     CaptionDropoutProbabilities,
@@ -128,7 +129,7 @@ def _caption_settings(resolved: Mapping[str, Any]) -> tuple[str, dict[str, float
 
 
 def _domain_seed(sample_id: str, domain: str) -> int:
-    digest = hashlib.sha256(f"{domain}|{sample_id}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{domain}|{sample_id}".encode()).digest()
     return int.from_bytes(digest[:8], "big")
 
 

@@ -853,12 +853,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--scratch-root",
         type=Path,
-        default=Path("/sakuramoon-runtime/infra-bench/p1-r1b"),
+        default=Path("infra-bench/p1-r1b"),
     )
     parser.add_argument(
         "--persistent-root",
         type=Path,
-        default=Path("/sakuramoon-runtime/compile-cache/p1-r1b"),
+        default=Path("compile-cache/p1-r1b"),
     )
     parser.add_argument("--config", default="train_g1.toml")
     parser.add_argument("--config-root", default="config")
