@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.nn.attention import (
+    SDPBackend,
+    sdpa_kernel,  # pyright: ignore[reportUnknownVariableType]
+)
 
 try:
     # DAS provides a Hygon/DCU-compatible FlashAttention 2 wheel.  Keep the
@@ -192,14 +197,17 @@ def fa4_varlen_attention(
         offset = 0
         for length in accepted.sequence_lengths:
             end = offset + length
-            attended = F.scaled_dot_product_attention(
-                query[offset:end].transpose(0, 1).unsqueeze(0),
-                key[offset:end].transpose(0, 1).unsqueeze(0),
-                value[offset:end].transpose(0, 1).unsqueeze(0),
-                dropout_p=0.0,
-                is_causal=False,
-                enable_gqa=True,
-            )
+            # DTK's automatic SDPA dispatch can load the external FlashAttention
+            # library. The explicit portable backend must not depend on it.
+            with sdpa_kernel(SDPBackend.MATH):
+                attended = F.scaled_dot_product_attention(
+                    query[offset:end].transpose(0, 1).unsqueeze(0),
+                    key[offset:end].transpose(0, 1).unsqueeze(0),
+                    value[offset:end].transpose(0, 1).unsqueeze(0),
+                    dropout_p=0.0,
+                    is_causal=False,
+                    enable_gqa=True,
+                )
             outputs.append(attended.squeeze(0).transpose(0, 1))
             offset = end
         return torch.cat(outputs, dim=0).contiguous()
@@ -448,15 +456,21 @@ class DenseGQAAttention(nn.Module):
                 max_seqlen,
             )
         else:
-            attended = F.scaled_dot_product_attention(
-                query.transpose(1, 2).contiguous(),
-                key.transpose(1, 2).contiguous(),
-                value.transpose(1, 2).contiguous(),
-                attn_mask=attention_mask,
-                dropout_p=0.0,
-                is_causal=False,
-                enable_gqa=True,
-            ).transpose(1, 2).contiguous()
+            context: AbstractContextManager[object] = (
+                nullcontext()
+                if self.allow_flash_varlen
+                else cast(AbstractContextManager[object], sdpa_kernel(SDPBackend.MATH))
+            )
+            with context:
+                attended = F.scaled_dot_product_attention(
+                    query.transpose(1, 2).contiguous(),
+                    key.transpose(1, 2).contiguous(),
+                    value.transpose(1, 2).contiguous(),
+                    attn_mask=attention_mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    enable_gqa=True,
+                ).transpose(1, 2).contiguous()
         attended = attended.reshape(batch, length, self.hidden_size)
         gated = attended * torch.sigmoid(self.content_gate(tokens))
         output = self.out_proj(gated)

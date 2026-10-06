@@ -181,8 +181,8 @@ def require_data_service_storage(
     persistent_mount = mount_identity(directories[0])
     free_bytes = min(shutil.disk_usage(path).free for path in directories)
     runtime_mount = require_host_local_runtime(
-        Path(config.data.service.socket_path),
-        Path(config.data.service.ownership_lock_path),
+        repository_root.resolve(strict=True) / config.data.service.socket_path,
+        repository_root.resolve(strict=True) / config.data.service.ownership_lock_path,
     )
     return ServerBackedStorageReport(
         persistent_mount=persistent_mount,

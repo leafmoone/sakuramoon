@@ -202,7 +202,7 @@ checkpoint = Path(str(paths["checkpoint_dir"]))
 if not checkpoint.is_absolute():
     checkpoint = Path(runtime_root) / checkpoint
 print(checkpoint)
-print(service["socket_path"])
+print(Path(runtime_root).resolve() / str(service["socket_path"]))
 print(distributed["world_size"])
 PY
   )" || die "failed to load the training config contract"

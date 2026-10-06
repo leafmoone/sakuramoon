@@ -59,3 +59,14 @@ __pycache__/
 /.sm-train-state-publisher/
 /core
 /core.*
+
+# Local build outputs and review scratch material (not formal docs/tests).
+/build/
+/dist/
+*.egg-info/
+/tmp/
+/reports/
+/.agent/
+/.codex/
+/torchinductor-cache/
+/tests/unit/model/test_sdpa_backend.py

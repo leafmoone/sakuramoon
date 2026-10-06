@@ -159,7 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         module, cast(Literal["flash", "sdpa"], args.attention_backend)
     )
     qwen = load_local_qwen(
-        args.root.resolve(strict=True), device, attention_backend="sdpa"
+        args.root.resolve(strict=True), device, attention_backend="sdpa", math_sdpa=True
     )
     vae = load_local_mage_vae(args.root.resolve(strict=True), device)
     condition = None

@@ -1541,7 +1541,7 @@ def _run_accepted_lifecycle(
     _log(f"连接数据服务: {config.data.service.socket_path}")
     # No service connection may occur before exact RAW restore and full binding.
     service_client = DataServiceClient(
-        Path(config.data.service.socket_path),
+        repository_root.resolve(strict=True) / config.data.service.socket_path,
         worker_count=(
             config.data.cache.persistent_workers_per_rank
             * config.distributed.world_size
