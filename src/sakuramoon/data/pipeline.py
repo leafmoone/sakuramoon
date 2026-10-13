@@ -604,9 +604,9 @@ class WebDatasetPipeline(IterableDataset[PipelineSample]):
                             full_decode.load()
                         base_image = full_decode
                 # Transparent-background white-composite policy (sections 6-12):
-                # alpha-first, applied BEFORE resize/crop. The ordinary (untagged)
-                # path is bit-identical: NOT_TAGGED keeps the decoded image and the
-                # original caption fields untouched.
+                # alpha-first, applied BEFORE resize/crop. NOT_TAGGED keeps the
+                # decoded image and caption fields here; shared RGB normalization
+                # later white-composites any remaining transparency.
                 if self.transparent_policy is not None:
                     tw = apply_transparent_white(
                         base_image, fields, self.transparent_policy

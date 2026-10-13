@@ -23,6 +23,7 @@ from typing import cast
 import tomli_w
 import torch
 
+from sakuramoon.data.image_ops import convert_to_rgb
 from sakuramoon.eval.concepts import (
     ConceptManifest,
     DualPathSuite,
@@ -99,7 +100,7 @@ def load_reference_images(
         for path in paths:
             try:
                 with Image.open(path) as image:
-                    tensor = tvis_f.pil_to_tensor(image.convert("RGB"))
+                    tensor = tvis_f.pil_to_tensor(convert_to_rgb(image))
             except (OSError, ValueError) as error:
                 raise RuntimeError(
                     f"reference image cannot be decoded: {path}"

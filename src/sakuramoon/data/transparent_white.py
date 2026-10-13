@@ -22,9 +22,10 @@ matches) the policy:
    background, rejects it strictly and counts it (``fake_transparency`` alone
    does NOT trigger).
 
-Rejected or missing-alpha samples never reach Qwen/VAE/DiT. The ordinary
-(untagged) path is untouched and bit-identical: :func:`apply_transparent_white`
-returns ``NOT_TAGGED`` for it, leaving the image and fields unchanged.
+Rejected or missing-alpha samples never reach Qwen/VAE/DiT. For the untagged
+path, :func:`apply_transparent_white` returns ``NOT_TAGGED``, leaving the image
+and fields unchanged. Shared RGB normalization subsequently composites any
+remaining transparency onto white without changing caption fields.
 
 The rewritten trigger tag keeps its *original* ``canonical`` (the raw
 ``transparent_background``) so the dropout seed domain stays on the original

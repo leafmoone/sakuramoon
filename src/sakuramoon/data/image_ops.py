@@ -123,8 +123,22 @@ class ImageScanReport:
     dimension_scan: DimensionScanReport
 
 
+def convert_to_rgb(image: Image.Image) -> Image.Image:
+    """Composite transparency onto white before RGB conversion, without EXIF.
+
+    This pixel-only fallback also covers untagged images and PNG color-key
+    transparency. Caption policy and EXIF handling belong to the caller.
+    """
+
+    if "A" in image.getbands() or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        return Image.alpha_composite(background, rgba).convert("RGB")
+    return image.convert("RGB")
+
+
 def normalize_image(image: Image.Image) -> Image.Image:
-    """Apply EXIF orientation once, then convert to RGB."""
+    """Apply EXIF orientation once, then white-composite transparency to RGB."""
 
     # Pixel decoding errors retain their original type. Malformed EXIF is
     # reported separately so the streaming pipeline can reject this image.
@@ -133,7 +147,7 @@ def normalize_image(image: Image.Image) -> Image.Image:
         oriented = ImageOps.exif_transpose(image)
     except TypeError as error:
         raise ImageMetadataError(f"invalid EXIF metadata: {error}") from error
-    return oriented.convert("RGB")
+    return convert_to_rgb(oriented)
 
 
 def observe_decoded_dimensions(

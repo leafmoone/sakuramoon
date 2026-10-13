@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, cast
 import tomli_w
 
 from sakuramoon.cli.generation_eval import _resolve_alpha
+from sakuramoon.data.image_ops import convert_to_rgb
 
 if TYPE_CHECKING:
     import torch
@@ -257,7 +258,7 @@ def load_reference_images(
         for path in paths:
             try:
                 with Image.open(path) as image:
-                    tensor = torch.from_numpy(np.asarray(image.convert("RGB"))).permute(2, 0, 1).contiguous()
+                    tensor = torch.from_numpy(np.asarray(convert_to_rgb(image))).permute(2, 0, 1).contiguous()
             except (OSError, ValueError) as error:
                 raise RuntimeError(
                     f"reference image cannot be decoded: {path}"

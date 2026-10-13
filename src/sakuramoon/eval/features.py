@@ -26,9 +26,10 @@ from torchvision.transforms import (  # pyright: ignore[reportMissingTypeStubs]
 )
 
 from sakuramoon.assets import require_local_clip
+from sakuramoon.data.image_ops import convert_to_rgb
 
 FEATURE_CACHE_SCHEMA_VERSION = 2
-REAL_PREPROCESSING_ID = "rgb-square-stretch-bilinear-v2"
+REAL_PREPROCESSING_ID = "alpha-white-rgb-square-stretch-bilinear-v3"
 CLIP_MODEL_ID = "openai/clip-vit-large-patch14-336"
 CLIP_INPUT_SIZE = 336
 CLIP_EMBEDDING_DIM = 768
@@ -350,7 +351,7 @@ def _decode_validation_image(
 ) -> torch.Tensor:
     try:
         with Image.open(io.BytesIO(payload)) as image:
-            tensor = vision_functional.pil_to_tensor(image.convert("RGB"))
+            tensor = vision_functional.pil_to_tensor(convert_to_rgb(image))
     except (OSError, ValueError) as error:
         raise EvaluationFeatureError(
             f"validation image cannot be decoded: {sample_id}"
