@@ -33,6 +33,8 @@ from sakuramoon.data.service_protocol import (
 )
 from sakuramoon.data.validation import ValidationSelection, validate_selection_manifest
 
+_MAX_SHARD_PREPARE_ATTEMPTS = 4  # Initial request plus three retries.
+
 _QUEUE_SCHEMA_VERSION = 2
 
 _CLIENT_DISCONNECTED_ERRNOS = frozenset(
@@ -295,6 +297,7 @@ class DataSupplyService:
         )
         self._futures: dict[str, Future[CachedShard]] = {}
         self._ready: dict[str, CachedShard] = {}
+        self._prepare_attempts: dict[str, int] = {}
         self._outstanding: dict[str, ShardLeaseDescriptor] = {}
         self._worker_leases: dict[int, str] = {}
         self._retired_leases: OrderedDict[str, _RetiredLease] = OrderedDict()
@@ -393,7 +396,14 @@ class DataSupplyService:
             # per-cycle order) so the epoch boundary stays warm instead of a
             # cold-start download gap that starves the DDP ranks.
             seen = set(candidates)
+            skipped = {
+                p
+                for p, n in self._prepare_attempts.items()
+                if n >= _MAX_SHARD_PREPARE_ATTEMPTS
+            }
             for row in self.store.new(self.state.cycle + 1).rows:
+                if row.path in skipped:
+                    continue
                 if row.path in seen or occupied >= self.limits.verified_shard_lookahead:
                     break
                 seen.add(row.path)
@@ -443,28 +453,53 @@ class DataSupplyService:
             self._futures.pop(path, None)
             try:
                 result = future.result()
-            except DatasetTransientError as error:
+            except (
+                DatasetTransientError,
+                DatasetTransportError,
+                OSError,
+                ShardCacheError,
+            ) as error:
                 if self._cancelled():
                     raise _ServiceStopping from None
-                _log(f"分片下载暂时失败，保留进度并重试: {path}: {error}")
+                attempts = self._prepare_attempts.get(path, 0) + 1
+                self._prepare_attempts[path] = attempts
+                if attempts < _MAX_SHARD_PREPARE_ATTEMPTS:
+                    _log(
+                        f"分片准备失败，重试 {attempts}/{_MAX_SHARD_PREPARE_ATTEMPTS - 1}: "
+                        f"{path}: {error}"
+                    )
+                    self._futures[path] = self._executor.submit(
+                        self.cache.fetch,
+                        path,
+                        protected_paths=self._protected_paths(),
+                        progress=self._download_progress(path),
+                        cancelled=self._cancelled,
+                    )
+                    continue
+                self._replace_status(path, "completed")
+                _log(
+                    f"分片准备失败，已重试 {_MAX_SHARD_PREPARE_ATTEMPTS - 1} 次，跳过: "
+                    f"{path}: {error}"
+                )
                 continue
-            except (DatasetTransportError, OSError, ShardCacheError) as error:
-                if self._cancelled():
-                    raise _ServiceStopping from None
-                raise DataServiceError(
-                    f"data shard could not be prepared: {path}: {error}"
-                ) from None
             self._ready[path] = result
+            self._prepare_attempts.pop(path, None)
             source = "缓存" if result.fetched.cache_hit else "下载"
             _log(f"分片就绪({source}): {path}")
 
     def _wait_for_ready_count(self, count: int) -> None:
         announced = False
-        while len(self._ready) < count:
+        while True:
             if self._cancelled():
                 raise _ServiceStopping
             self._collect_completed()
-            if len(self._ready) >= count:
+            if not self._pending_paths():
+                self._force_roll_over_if_wedge()
+                if not self._pending_paths():
+                    self._commit_state(self.store.new(self.state.cycle + 1))
+                self._prepare_attempts.clear()
+            count = min(count, len(self._pending_paths()))
+            if sum(path in self._ready for path in self._pending_paths()) >= count:
                 return
             self._schedule_lookahead()
             if not self._futures:

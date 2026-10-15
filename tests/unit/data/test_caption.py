@@ -629,3 +629,39 @@ def test_cross_source_duplicates_never_repeat_inside_a_surface() -> None:
             condition_keys = [tag_match_key(tag.text) for tag in plan.condition.tags]
             assert len(condition_keys) == len(set(condition_keys))
     assert checked > 100
+
+
+def test_nl_all_drops_only_natural_language_and_preserves_tag_condition() -> None:
+    seed = _seed_for_global_dropout(False)
+    baseline = build_caption_plan(_fields(), _probabilities(), seed=seed)
+    dropped = build_caption_plan(
+        _fields(), replace(_probabilities(), nl_all=1.0), seed=seed
+    )
+
+    assert baseline.nl_text is not None
+    assert dropped.nl_text is None
+    assert dropped.selected_nl is None
+    assert dropped.tags == baseline.tags
+    assert dropped.condition == baseline.condition
+    assert dropped.dropout_hits.nl_all is True
+    assert not dropped.all_condition_dropped
+
+
+def test_nl_all_default_is_off_and_global_dropout_remains_independent() -> None:
+    assert _probabilities().nl_all == 0.0
+    plan = build_caption_plan(
+        _fields(),
+        replace(_probabilities(), nl_all=1.0),
+        seed=_seed_for_global_dropout(True),
+    )
+
+    assert plan.all_condition_dropped
+    assert plan.dropout_hits.all_condition
+    assert not plan.dropout_hits.nl_all
+    assert plan.nl_text is None
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan"), True, 1])
+def test_nl_all_probability_requires_a_bounded_float(value: object) -> None:
+    with pytest.raises(CaptionError, match="explicit floats"):
+        replace(_probabilities(), nl_all=value)  # pyright: ignore[reportArgumentType]

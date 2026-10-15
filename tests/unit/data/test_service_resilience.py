@@ -4,15 +4,15 @@ from __future__ import annotations
 import errno
 import socket
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 
-from sakuramoon.data.cache import CachedShard
+from sakuramoon.data.cache import CachedShard, ShardCache, ShardCacheError
 from sakuramoon.data.modelscope import DatasetTransientError, DatasetTransportError
 from sakuramoon.data.service import (
-    DataServiceError,
     DataServiceServer,
     DataSupplyService,
 )
@@ -51,28 +51,71 @@ def _service_with_failed_future(error: Exception) -> DataSupplyService:
     future.set_exception(error)
     service._futures = {"data/shard.tar": future}
     service._ready = {}
+    service._prepare_attempts = {}
+    service._outstanding = {}
+    service.cache = Mock(spec=ShardCache)
+    service._executor = Mock(spec=ThreadPoolExecutor)
     service._shutdown = threading.Event()
     service._external_stop = None
     return service
 
 
-def test_transient_download_failure_is_left_pending_for_retry() -> None:
-    service = _service_with_failed_future(DatasetTransientError("transfer ended early"))
+@pytest.mark.parametrize(
+    "error",
+    [
+        DatasetTransientError("transfer ended early"),
+        DatasetTransportError("shard is unavailable"),
+        OSError("disk read failed"),
+        ShardCacheError("cache entry is invalid"),
+    ],
+)
+def test_download_failure_is_retried_with_exact_reason(
+    error: Exception, capsys: pytest.CaptureFixture[str]
+) -> None:
+    service = _service_with_failed_future(error)
 
     service._collect_completed()
 
-    assert service._futures == {}
+    assert "data/shard.tar" in service._futures
+    assert service._prepare_attempts == {"data/shard.tar": 1}
     assert service._ready == {}
+    assert str(error) in capsys.readouterr().out
 
 
-def test_permanent_download_failure_keeps_exact_reason() -> None:
+def test_exhausted_shard_is_skipped_using_legacy_completed_status(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     service = _service_with_failed_future(DatasetTransportError("shard is unavailable"))
+    service._prepare_attempts["data/shard.tar"] = 3
+    replace_status = Mock()
+    monkeypatch.setattr(service, "_replace_status", replace_status)
 
-    with pytest.raises(
-        DataServiceError,
-        match=r"data/shard\.tar: shard is unavailable",
-    ):
+    service._collect_completed()
+
+    replace_status.assert_called_once_with("data/shard.tar", "completed")
+    assert service._prepare_attempts["data/shard.tar"] == 4
+    assert service._futures == {}
+    assert "shard is unavailable" in capsys.readouterr().out
+
+
+def test_unexpected_preparation_error_is_not_hidden() -> None:
+    service = _service_with_failed_future(ValueError("invalid internal state"))
+
+    with pytest.raises(ValueError, match="invalid internal state"):
         service._collect_completed()
+
+
+def test_successful_retry_clears_attempt_count() -> None:
+    service = _service_with_failed_future(DatasetTransientError("first failure"))
+    service._prepare_attempts["data/shard.tar"] = 1
+    ready: Future[CachedShard] = Future()
+    ready.set_result(Mock(spec=CachedShard, fetched=Mock(cache_hit=True)))
+    service._futures["data/shard.tar"] = ready
+
+    service._collect_completed()
+
+    assert service._prepare_attempts == {}
+    assert "data/shard.tar" in service._ready
 
 
 @pytest.mark.parametrize(

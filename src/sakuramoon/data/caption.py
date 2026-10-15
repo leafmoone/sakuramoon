@@ -3,22 +3,10 @@
 from __future__ import annotations
 
 import random
-import re
 from dataclasses import dataclass
 from typing import Literal, cast
 
 from sakuramoon.data.tag_identity import tag_match_key
-
-# CoT leak detection: a leaked reasoning block carries the standalone
-# token "think" (word boundary) or the unambiguous terminator "endthink",
-# each possibly XML-wrapped.  The bare substring "think" is too broad —
-# legitimate tags like "thinking" and "thinkof_think" must pass.
-_COT_MARKER = re.compile(r"\bthink\b|\bendthink\b|<\s*think|end\s*think\s*>")
-
-
-def _has_cot_marker(value: str) -> bool:
-    return _COT_MARKER.search(value) is not None
-
 
 ALL_CONDITION_DROPOUT = 0.10
 TAG_SOURCE_ORDER = (
@@ -42,6 +30,7 @@ CAPTION_DROPOUT_KEYS: tuple[str, ...] = (
     "condition_only",
     *TAG_SOURCE_ORDER,
     "candidate_source",
+    "nl_all",
     "long_names",
     "long_no_names",
     "short_vibes",
@@ -237,7 +226,9 @@ class CaptionFields:
     def __post_init__(self) -> None:
         for source in TAG_SOURCE_ORDER:
             values = self.artists if source == "artist" else getattr(self, source)
-            if type(values) is not tuple or any(type(tag) is not Tag for tag in values):
+            if type(values) is not tuple or any(
+                type(tag) is not Tag for tag in cast(tuple[object, ...], values)
+            ):
                 raise CaptionError(f"caption field {source} must be an exact Tag tuple")
         if type(self.nl) is not NlCandidates:
             raise CaptionError("caption NL candidates are invalid")
@@ -271,6 +262,7 @@ class CaptionDropoutProbabilities:
     tag: float
     candidate_source: float
     nl: NlDropoutProbabilities
+    nl_all: float = 0.0
 
     def __post_init__(self) -> None:
         if type(self.nl) is not NlDropoutProbabilities:
@@ -280,6 +272,7 @@ class CaptionDropoutProbabilities:
             self.condition_only,
             self.tag,
             self.candidate_source,
+            self.nl_all,
             self.nl.long_names,
             self.nl.long_no_names,
             self.nl.short_vibes,
@@ -296,6 +289,9 @@ class CaptionDropoutProbabilities:
         # Per-branch NL dropout is intentionally free: the former
         # all-five-equal constraint was removed (2026-09-17, user decision)
         # so individual branches (e.g. long_names) can be tuned independently.
+        # nl_all is an independent whole-NL gate (2026-09-29, user decision):
+        # when it hits, no NL text is selected at all, regardless of the
+        # per-branch draws.
 
 
 @dataclass(frozen=True)
@@ -315,6 +311,7 @@ class CaptionDropoutHits:
     general: bool
     artist: bool
     candidate_source: bool
+    nl_all: bool
     long_names: bool
     long_no_names: bool
     short_vibes: bool
@@ -342,6 +339,7 @@ class CaptionDropoutHits:
             "general": self.general,
             "artist": self.artist,
             "candidate_source": self.candidate_source,
+            "nl_all": self.nl_all,
             "long_names": self.long_names,
             "long_no_names": self.long_no_names,
             "short_vibes": self.short_vibes,
@@ -372,6 +370,7 @@ class CaptionDropoutCounts:
     short_vibes: int
     nl2: int
     nl3: int
+    nl_all: int = 0
 
     def __post_init__(self) -> None:
         if any(
@@ -396,6 +395,7 @@ class CaptionDropoutCounts:
             "general": self.general,
             "artist": self.artist,
             "candidate_source": self.candidate_source,
+            "nl_all": self.nl_all,
             "long_names": self.long_names,
             "long_no_names": self.long_no_names,
             "short_vibes": self.short_vibes,
@@ -423,6 +423,7 @@ def empty_caption_dropout_hits(*, all_condition: bool = False) -> CaptionDropout
         general=False,
         artist=False,
         candidate_source=False,
+        nl_all=False,
         long_names=False,
         long_no_names=False,
         short_vibes=False,
@@ -776,10 +777,14 @@ def build_caption_plan(
         )
         for branch in NL_BRANCHES
     }
+    nl_all_hit = _drop(seed, "dropout:nl_all", probabilities.nl_all)
     available_nl: tuple[tuple[NlBranch, str], ...] = tuple(
         (branch, text) for branch, text in fields.nl.available() if not nl_hits[branch]
     )
-    if available_nl:
+    if nl_all_hit:
+        # Whole-NL gate: no NL text regardless of the per-branch draws.
+        selected_nl, nl_text = None, None
+    elif available_nl:
         selected_nl, nl_text = available_nl[
             random.Random(_seed(seed, "select:nl")).randrange(len(available_nl))
         ]
@@ -808,6 +813,7 @@ def build_caption_plan(
             general=general_hit,
             artist=artist_hit,
             candidate_source=candidate_source_hit,
+            nl_all=nl_all_hit,
             long_names=nl_hits["long_names"],
             long_no_names=nl_hits["long_no_names"],
             short_vibes=nl_hits["short_vibes"],

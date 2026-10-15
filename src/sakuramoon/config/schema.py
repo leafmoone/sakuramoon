@@ -437,6 +437,7 @@ class CaptionDropoutConfig(StrictModel):
     tag: UnitFloat
     candidate_source: UnitFloat
     nl: NlDropoutConfig
+    nl_all: UnitFloat = 0.0
 
     @model_validator(mode="after")
     def validate_route_mass(self) -> CaptionDropoutConfig:

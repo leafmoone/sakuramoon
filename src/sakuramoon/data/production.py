@@ -14,7 +14,7 @@ from typing import Never, SupportsIndex, cast
 
 from sakuramoon.config.load import ConfigurationError
 from sakuramoon.config.schema import RuntimeConfig
-from sakuramoon.data.buckets import generate_base_buckets, scale_buckets
+from sakuramoon.data.buckets import StageEdge, generate_base_buckets, scale_buckets
 from sakuramoon.data.camera_viewport import (
     CameraViewportPolicy,
     camera_is_active,
@@ -804,7 +804,7 @@ class ProductionPipelineFactory:
         object.__setattr__(
             factory,
             "rejection_observer",
-            cast(RejectionObserver, rejection_observer),
+            rejection_observer,
         )
         object.__setattr__(factory, "factory_identity", secrets.token_hex(32))
         object.__setattr__(factory, "_owner_pid", os.getpid())
@@ -834,10 +834,11 @@ class ProductionPipelineFactory:
                 nl2=dropout.nl.nl2,
                 nl3=dropout.nl.nl3,
             ),
+            nl_all=dropout.nl_all,
         )
         buckets = scale_buckets(
             generate_base_buckets(self.config.data.buckets),
-            self.config.train.resolution,
+            cast(StageEdge, self.config.train.resolution),
         )
         spatial_policy = SpatialCropPolicy.from_config(
             self.config.data.spatial_crop,
