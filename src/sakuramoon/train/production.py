@@ -1054,6 +1054,7 @@ def _runtime(
     device: torch.device,
     repository_root: Path,
     resume: Path | None,
+    condition_diagnostics_every: int | None = None,
 ) -> SingleGpuBatchRuntime:
     index = int(device.index or 0)
     irepa_teacher: FrozenPESpatialEncoder | None = None
@@ -1104,10 +1105,7 @@ def _runtime(
         irepa_gamma=irepa_gamma,
         irepa_eps=irepa_eps,
         irepa_schedule=irepa_schedule,
-        condition_diagnostics=(
-            config.condition_diagnostics is not None
-            and config.condition_diagnostics.enabled
-        ),
+        condition_diagnostics_every=condition_diagnostics_every,
     )
 
 
@@ -1684,6 +1682,16 @@ def _run_accepted_lifecycle(
     primary: BaseException | None = None
     result: ProductionTrainingResult | None = None
     try:
+        # The runtime computes the condition diagnostics facts in
+        # measure() (before the optimizer step) when the in-flight
+        # update's number hits the cadence; None = feature off (or
+        # calibration, which bypasses the stream entirely).
+        cd_config = config.condition_diagnostics
+        condition_diagnostics_every = (
+            cd_config.log_every_n
+            if cd_config is not None and cd_config.enabled and not in_calibration
+            else None
+        )
         runtime = _runtime(
             config,
             qwen=qwen,
@@ -1694,6 +1702,7 @@ def _run_accepted_lifecycle(
             device=device,
             repository_root=repository_root,
             resume=resume,
+            condition_diagnostics_every=condition_diagnostics_every,
         )
         if in_calibration:
             publisher: ProductionSingleGpuCheckpointPublisher = (
@@ -1949,7 +1958,6 @@ def _run_accepted_lifecycle(
                         log_every_n=cd_config.log_every_n,
                         flush_every_records=cd_config.flush_every_records,
                         slot_ids=tuple(module.dit.active_slot_ids),
-                        composite=module,
                     )
                 try:
                     with telemetry:

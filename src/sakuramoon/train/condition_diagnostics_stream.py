@@ -9,9 +9,11 @@ optimizer flow, and the schema-12 output are byte-identical to a run
 without this feature.
 
 Quantity definitions (v1).  Activation facts come from the LAST
-accumulated microbatch of the update (the expensive conditioner
-recompute runs only when the record cadence is due); the gradient
-shares are measured at the update boundary:
+accumulated microbatch of the update; the runtime's ``measure()`` computes
+them when the record cadence is due — mid-update, BEFORE
+``optimizer.step()`` — so they always use the weights and condition tokens
+that forward fed to the DiT.  Gradient shares are measured at the update
+boundary:
 
 - ``condition_token_rms_active_pre_norm``: RMS of the raw (pre-norm) Qwen
   states gathered at the condition positions of active samples — exactly
@@ -368,13 +370,18 @@ class ConditionDiagnosticsRecorder:
     One instance per rank, each bound to its own file, so records from
     different ranks never interleave.  The update cadence is
     ``log_every_n``; fsync follows the sink's ``flush_every_records``.
+    The record's activation facts are the SCALAR dict the runtime's
+    ``measure()`` computed (mid-update, before ``optimizer.step()``); a
+    retried update appends to the same per-rank file, so a failed update
+    may appear more than once and ``successful_update`` is not strictly
+    monotonic within a file (the main metrics stream has the same
+    behavior).
     """
 
     def __init__(
         self,
         path: Path,
         *,
-        composite: TrainableComposite,
         rank: int,
         world_size: int,
         log_every_n: int,
@@ -387,7 +394,6 @@ class ConditionDiagnosticsRecorder:
         _positive_int("flush_every_records", flush_every_records)
         if not slot_ids or len(set(slot_ids)) != len(slot_ids):
             raise ValueError("slot_ids must be nonempty and unique")
-        self._composite = composite
         self._rank = rank
         self._world_size = world_size
         self._log_every_n = log_every_n
@@ -420,10 +426,11 @@ class ConditionDiagnosticsRecorder:
     def maybe_record(self, observation: SuccessfulTrainingObservation) -> None:
         """Callback bound to the runtime's per-update observation hook.
 
-        The cadence gate comes FIRST: updates that will not be recorded
-        pay nothing (no conditioner recompute).  When the cadence is due,
-        the facts are computed from the LAST microbatch's reference-only
-        capture under ``no_grad``.
+        The cadence gate comes FIRST: off-cadence updates pay nothing.
+        When due, the record carries the scalar facts the runtime
+        computed in ``measure()`` — mid-update, before
+        ``optimizer.step()`` — from the LAST microbatch; if the runtime
+        did not carry them the stream fails closed instead of guessing.
         """
 
         successful_update = observation.loop.update.state.successful_updates
@@ -432,20 +439,16 @@ class ConditionDiagnosticsRecorder:
         microbatches = observation.microbatches
         if not microbatches:
             raise ValueError("observation carries no microbatch measurements")
-        capture = microbatches[-1].condition_diagnostics
-        if capture is None:
+        condition_facts = microbatches[-1].condition_diagnostics
+        if condition_facts is None:
             raise ValueError(
-                "the runtime did not carry a condition capture; "
+                "the runtime did not carry condition activation facts; "
                 "the stream is enabled without the runtime capture flag"
             )
-        inputs, condition = capture
-        facts = compute_condition_activation_facts(
-            self._composite, inputs, condition
-        )
         self.record_update(
             successful_update=successful_update,
             update=observation.loop.update,
-            activation_facts=facts,
+            activation_facts=condition_facts,
         )
 
     def close(self) -> None:

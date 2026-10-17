@@ -508,10 +508,6 @@ def test_recorder_writes_versioned_per_rank_jsonl(tmp_path: Path) -> None:
     }.items():
         with ConditionDiagnosticsRecorder(
             path,
-            composite=cast(
-                TrainableComposite,
-                _mini_composite(_mini_conditioner(), active=True),
-            ),
             rank=rank,
             world_size=2,
             log_every_n=2,
@@ -546,13 +542,9 @@ def test_recorder_writes_versioned_per_rank_jsonl(tmp_path: Path) -> None:
 
 @LINUX_ONLY
 def test_recorder_rejects_invalid_construction(tmp_path: Path) -> None:
-    composite = cast(
-        TrainableComposite, _mini_composite(_mini_conditioner(), active=True)
-    )
     with pytest.raises(TypeError, match="log_every_n"):
         ConditionDiagnosticsRecorder(
             tmp_path / "x.jsonl",
-            composite=composite,
             rank=0,
             world_size=1,
             log_every_n=0,
@@ -562,7 +554,6 @@ def test_recorder_rejects_invalid_construction(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="slot_ids"):
         ConditionDiagnosticsRecorder(
             tmp_path / "x.jsonl",
-            composite=composite,
             rank=0,
             world_size=1,
             log_every_n=1,
@@ -572,34 +563,37 @@ def test_recorder_rejects_invalid_construction(tmp_path: Path) -> None:
 
 
 @LINUX_ONLY
-def test_recorder_maybe_record_computes_facts_only_when_cadence_due(
+def test_recorder_maybe_record_writes_stored_facts_only_when_cadence_due(
     tmp_path: Path,
 ) -> None:
     """Cadence gate first: off-cadence updates pay nothing; on-cadence
-    updates compute the facts from the reference-only capture."""
+    updates land the SCALAR facts the runtime's measure() stored (before
+    the optimizer step) — no capture, no recompute in the recorder."""
 
+    conditioner = _mini_conditioner()
     composite = cast(
-        TrainableComposite, _mini_composite(_mini_conditioner(), active=True)
+        TrainableComposite, _mini_composite(conditioner, active=True)
+    )
+    inputs = _mini_inputs(2)
+    condition = ConditionTokenOutput(
+        tokens=torch.randn(2, 3, 16),
+        mask=torch.ones(2, 3, dtype=torch.bool),
+        active_mask=torch.ones(2, dtype=torch.bool),
+    )
+    # Exactly what measure() stores in the last microbatch's measurement.
+    stored_facts = compute_condition_activation_facts(
+        composite, inputs, condition
     )
     path = tmp_path / diagnostics_file_name()
     with ConditionDiagnosticsRecorder(
         path,
-        composite=composite,
         rank=0,
         world_size=1,
         log_every_n=2,
         flush_every_records=1,
         slot_ids=(3, 7),
     ) as recorder:
-        inputs = _mini_inputs(2)
-        condition = ConditionTokenOutput(
-            tokens=torch.randn(2, 3, 16),
-            mask=torch.ones(2, 3, dtype=torch.bool),
-            active_mask=torch.ones(2, dtype=torch.bool),
-        )
-        # The observation fake carries exactly what maybe_record reads:
-        # the last microbatch's reference-only capture + the update result.
-        measurement = SimpleNamespace(condition_diagnostics=(inputs, condition))
+        measurement = SimpleNamespace(condition_diagnostics=dict(stored_facts))
 
         def _observation(successful_update: int) -> object:
             update = _mini_update_result(
@@ -619,8 +613,7 @@ def test_recorder_maybe_record_computes_facts_only_when_cadence_due(
         # creates the (empty) file at construction, so assert zero content.
         recorder.maybe_record(_observation(1))  # type: ignore[arg-type]
         assert path.read_text() == ""
-        # Update 2: cadence due -> the record's facts were computed from
-        # the capture (real floats, not placeholders).
+        # Update 2: cadence due -> the stored facts land verbatim.
         recorder.maybe_record(_observation(2))  # type: ignore[arg-type]
         lines = path.read_text().splitlines()
         assert len(lines) == 1
@@ -628,27 +621,95 @@ def test_recorder_maybe_record_computes_facts_only_when_cadence_due(
         assert document["schema_version"] == CONDITION_DIAGNOSTICS_SCHEMA_VERSION
         assert document["successful_update"] == 2
         assert document["active_samples"] == 2
-        assert isinstance(
-            document["condition_global_norm_weight_rms"], float
-        )
+        for key, value in stored_facts.items():
+            assert document[key] == value
         assert document["condition_grad_share_pre_clip"] == pytest.approx(
             0.9 / 2.0
         )
 
 
 @LINUX_ONLY
-def test_recorder_maybe_record_rejects_missing_capture(
+def test_recorded_facts_are_computed_before_optimizer_step(
     tmp_path: Path,
 ) -> None:
-    """Stream enabled without the runtime capture flag fails closed on the
+    """REGRESSION (cadence-gate rework, rejected 2026-10-17): the record
+    must carry the facts measured BEFORE ``optimizer.step()``.
+
+    If the compute is ever moved out of ``measure()`` into the
+    observation hook (which runs after the step), the record would carry
+    the POST-step values and this test fails: one AdamW step (lr=1e-4)
+    moves the conditioner's ``base_hidden_rms`` by ~6e-4, orders of
+    magnitude above float noise and JSON round-trip (exact).
+    """
+
+    conditioner = _mini_conditioner()
+    composite = cast(
+        TrainableComposite, _mini_composite(conditioner, active=True)
+    )
+    inputs = _mini_inputs(2)
+    condition = ConditionTokenOutput(
+        tokens=torch.randn(2, 3, 16),
+        mask=torch.ones(2, 3, dtype=torch.bool),
+        active_mask=torch.ones(2, dtype=torch.bool),
+    )
+    # What measure() stores mid-update, before the step:
+    pre_facts = compute_condition_activation_facts(
+        composite, inputs, condition
+    )
+    pre_base = pre_facts["base_hidden_rms"]
+    # One optimizer step on the SAME module (the DiT conditioner's
+    # parameters) moves the weights — exactly what finish_update does
+    # between measure() and the success observer.
+    for parameter in conditioner.parameters():
+        parameter.grad = torch.full_like(parameter, 0.01)
+    torch.optim.AdamW(conditioner.parameters(), lr=1e-4).step()  # pyright: ignore[reportUnknownMemberType]
+    post_facts = compute_condition_activation_facts(
+        composite, inputs, condition
+    )
+    post_base = post_facts["base_hidden_rms"]
+    # Sanity: the step must actually move the facts, else the test is
+    # vacuous (reviewer-measured relative shift ~6.5e-4).
+    assert pre_base is not None and post_base is not None
+    assert abs(post_base - pre_base) > 1e-5
+
+    # The runtime stored the PRE facts in the last microbatch's
+    # measurement; the recorder lands them verbatim.
+    measurement = SimpleNamespace(condition_diagnostics=dict(pre_facts))
+    update = _mini_update_result(
+        pre_condition=0.9, post_condition=0.7, successful_update=1
+    )
+    observation = cast(
+        "SuccessfulTrainingObservation",
+        SimpleNamespace(
+            loop=SimpleNamespace(update=update),
+            microbatches=(measurement,),
+        ),
+    )
+    path = tmp_path / diagnostics_file_name()
+    with ConditionDiagnosticsRecorder(
+        path,
+        rank=0,
+        world_size=1,
+        log_every_n=1,
+        flush_every_records=1,
+        slot_ids=(3, 7),
+    ) as recorder:
+        recorder.maybe_record(observation)  # type: ignore[arg-type]
+    document = json.loads(path.read_text().splitlines()[0])
+    # The landed values are the pre-step ones, not the post-step ones.
+    assert document["base_hidden_rms"] == pre_base
+    assert document["base_hidden_rms"] != post_base
+
+
+@LINUX_ONLY
+def test_recorder_maybe_record_rejects_missing_facts(
+    tmp_path: Path,
+) -> None:
+    """Stream enabled without the runtime facts fails closed on the
     first cadence-due update."""
 
-    composite = cast(
-        TrainableComposite, _mini_composite(_mini_conditioner(), active=True)
-    )
     with ConditionDiagnosticsRecorder(
         tmp_path / diagnostics_file_name(),
-        composite=composite,
         rank=0,
         world_size=1,
         log_every_n=1,
@@ -666,7 +727,7 @@ def test_recorder_maybe_record_rejects_missing_capture(
                 microbatches=(measurement,),
             ),
         )
-        with pytest.raises(ValueError, match="condition capture"):
+        with pytest.raises(ValueError, match="condition activation facts"):
             recorder.maybe_record(observation)  # type: ignore[arg-type]
 
 

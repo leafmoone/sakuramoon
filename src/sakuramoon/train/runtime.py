@@ -26,7 +26,6 @@ from sakuramoon.checkpoint.policy import (
     CheckpointReason,
 )
 from sakuramoon.checkpoint.schema import CheckpointManifest, RawCheckpointState
-from sakuramoon.conditioning.condition_tokens import ConditionTokenOutput
 from sakuramoon.conditioning.rope import full_canvas_crop_coordinates
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.camera_viewport import CameraViewportCounts
@@ -65,6 +64,9 @@ from sakuramoon.objective.irepa import (
     spatial_zscore_target,
 )
 from sakuramoon.telemetry.timers import AnyPhaseTimer
+from sakuramoon.train.condition_diagnostics_stream import (
+    compute_condition_activation_facts,
+)
 from sakuramoon.train.loop import (
     LoopResult,
     SingleGpuTrainingLoop,
@@ -438,15 +440,13 @@ class RuntimeMeasurement:
     irepa_weighted_per_sample_loss: torch.Tensor
     irepa_cosine: torch.Tensor
     irepa_lambda: float
-    # Opt-in condition-side diagnostics (per-rank JSONL stream): a
-    # reference-only capture for this microbatch (composite inputs + the
-    # condition output object), None unless the runtime capture flag is
-    # enabled.  No computed values live here — the detached conditioner
-    # recompute happens at the recorder's cadence gate, so this field
-    # holds plain references and detaches nothing.
-    condition_diagnostics: tuple[
-        TrainableCompositeInputs, ConditionTokenOutput
-    ] | None = None
+    # Opt-in condition-side diagnostics (per-rank JSONL stream): the
+    # SCALAR facts computed in ``measure()`` — mid-update, BEFORE
+    # ``optimizer.step()`` — only when the record cadence is due for this
+    # in-flight update (last-microbatch value wins).  No tensor references
+    # are retained, so no extra VRAM residency.  None unless enabled and
+    # due; the default path is byte-identical.
+    condition_diagnostics: dict[str, float | int | None] | None = None
 
     def detached(self) -> RuntimeMeasurement:
         """Drop the autograd graph before handing facts to an async observer."""
@@ -649,7 +649,7 @@ class SingleGpuBatchRuntime:
         irepa_gamma: float = 0.6,
         irepa_eps: float = 1e-6,
         irepa_schedule: IRepaLambdaSchedule | None = None,
-        condition_diagnostics: bool = False,
+        condition_diagnostics_every: int | None = None,
     ) -> None:
         if device.type != "cuda" or not torch.cuda.is_available():
             raise ValueError("single-GPU production runtime requires CUDA")
@@ -671,8 +671,16 @@ class SingleGpuBatchRuntime:
                 raise ValueError(f"{name} must be a finite TOML float")
         if type(growth_alpha) is not float or not 0.0 <= growth_alpha <= 1.0:
             raise ValueError("growth_alpha must be a float in [0,1]")
-        if type(condition_diagnostics) is not bool:
-            raise ValueError("condition_diagnostics must be a bool")
+        if (
+            condition_diagnostics_every is not None
+            and (
+                type(condition_diagnostics_every) is not int
+                or condition_diagnostics_every < 1
+            )
+        ):
+            raise ValueError(
+                "condition_diagnostics_every must be None or a positive int"
+            )
         if (
             type(torch_compile_enabled) is not bool
             or torch_compile_backend != "inductor"
@@ -748,10 +756,11 @@ class SingleGpuBatchRuntime:
         # set_growth_alpha); 0.0 until the first binding.  A lambda of 0.0
         # still runs the FULL teacher/capture/projector/z-score/cosine path.
         self.irepa_weight = 0.0
-        # Opt-in per-rank condition diagnostics: capture detached activation
-        # facts per microbatch.  When disabled, measure() never computes
-        # them, so the default path is byte-identical.
-        self.condition_diagnostics = condition_diagnostics
+        # Opt-in per-rank condition diagnostics: ``measure()`` computes
+        # detached activation facts (before the optimizer step) when the
+        # in-flight update's number is a multiple of this cadence.  None
+        # = disabled: no compute, no retention — byte-identical path.
+        self.condition_diagnostics_every = condition_diagnostics_every
 
     def set_growth_alpha(self, value: float) -> None:
         """Select the canonical alpha before starting one successful update."""
@@ -951,7 +960,11 @@ class SingleGpuBatchRuntime:
         )
 
     def measure(
-        self, batch: TrainingBatch, *, phase_timer: AnyPhaseTimer | None = None
+        self,
+        batch: TrainingBatch,
+        *,
+        phase_timer: AnyPhaseTimer | None = None,
+        update_number: int | None = None,
     ) -> RuntimeMeasurement:
         prepared = self.prepare(batch, phase_timer=phase_timer)
         dit_flops = self.dit_flop_counter.count(prepared.inputs)
@@ -995,20 +1008,31 @@ class SingleGpuBatchRuntime:
             for value in batch.sample_ids.detach().cpu().unbind()
         )
         shape_key = f"{batch.target_height}x{batch.target_width}x{batch.dense_length}"
-        condition_capture: tuple[
-            TrainableCompositeInputs, ConditionTokenOutput
-        ] | None = None
-        if self.condition_diagnostics:
-            # Reference-only capture; the detached conditioner recompute is
-            # deferred to the recorder's cadence gate (maybe_record), so
-            # updates that will not be recorded pay nothing here.
-            last_conditioning = self.composite.last_conditioning
-            if last_conditioning is None:
+        # Opt-in condition diagnostics: when the in-flight update's number
+        # is due on the cadence, compute the detached facts HERE — before
+        # any gradient work and before ``optimizer.step()`` — so they use
+        # the same weights and the same condition tokens this forward
+        # feeds to the DiT (never a mixed pre/post-step state).  Only
+        # scalar floats are kept (no tensor references, no VRAM cost);
+        # later microbatches overwrite, so the last one is what lands.
+        condition_facts: dict[str, float | int | None] | None = None
+        every = self.condition_diagnostics_every
+        if every is not None:
+            if update_number is None:
                 raise RuntimeError(
-                    "condition diagnostics are enabled but the composite "
-                    "captured no condition output for this forward"
+                    "condition diagnostics are enabled but measure() got no"
+                    " update number"
                 )
-            condition_capture = (prepared.inputs, last_conditioning)
+            if update_number % every == 0:
+                last_conditioning = self.composite.last_conditioning
+                if last_conditioning is None:
+                    raise RuntimeError(
+                        "condition diagnostics are enabled but the composite "
+                        "captured no condition output for this forward"
+                    )
+                condition_facts = compute_condition_activation_facts(
+                    self.composite, prepared.inputs, last_conditioning
+                )
         return RuntimeMeasurement(
             per_sample_loss=loss.per_sample,
             image_tokens=image_tokens,
@@ -1033,7 +1057,7 @@ class SingleGpuBatchRuntime:
             irepa_weighted_per_sample_loss=loss.irepa_weighted_per_sample,
             irepa_cosine=loss.irepa_cosine,
             irepa_lambda=loss.irepa_lambda,
-            condition_diagnostics=condition_capture,
+            condition_diagnostics=condition_facts,
         )
 
     def _loss(
@@ -1371,7 +1395,11 @@ def _run_single_gpu_training(
         def measure_batch(batch: TrainingBatch) -> torch.Tensor:
             if active_phase_timer is None:
                 raise RuntimeError("training update phase timer was not initialized")
-            measurement = runtime.measure(batch, phase_timer=active_phase_timer)
+            measurement = runtime.measure(
+                batch,
+                phase_timer=active_phase_timer,
+                update_number=next_growth_update,
+            )
             pending_measurements.append(measurement.detached())
             return measurement.per_sample_loss
 
