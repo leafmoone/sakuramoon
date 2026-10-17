@@ -202,12 +202,13 @@ def test_optimizer_config_guard_contract():
         references={"a#chunk0": 1e-3, "b": 2e-3},
     )
     cfg = OptimizerConfig(
-        name="hybrid_cmuon_guarded_canonical", cmuon_guard=guard, **_opt_common()
+        name="hybrid_cmuon_guarded_canonical", cmuon_guard=guard,
+        cmuon_lr_multiplier=1.0, adamw_lr_multiplier=1.0, **_opt_common()
     )
     assert cfg.cmuon_guard.guard_ratio == 0.05
     # guarded name requires an enabled guard with references
     with pytest.raises(ValueError):
-        OptimizerConfig(name="hybrid_cmuon_guarded_canonical", **_opt_common())
+        OptimizerConfig(name="hybrid_cmuon_guarded_canonical", cmuon_lr_multiplier=1.0, adamw_lr_multiplier=1.0, **_opt_common())
     bare = CMuonGuardConfig(
         guard_ratio=0.05,
         reference_decay=0.999,
@@ -218,13 +219,14 @@ def test_optimizer_config_guard_contract():
     )
     with pytest.raises(ValueError):
         OptimizerConfig(
-            name="hybrid_cmuon_guarded_canonical", cmuon_guard=bare, **_opt_common()
+            name="hybrid_cmuon_guarded_canonical", cmuon_guard=bare,
+            cmuon_lr_multiplier=1.0, adamw_lr_multiplier=1.0, **_opt_common()
         )
     # the guard is only valid for the guarded candidate
     with pytest.raises(ValueError):
-        OptimizerConfig(name="hybrid_cmuon", cmuon_guard=guard, **_opt_common())
+        OptimizerConfig(name="hybrid_cmuon", cmuon_guard=guard, cmuon_lr_multiplier=1.0, adamw_lr_multiplier=1.0, **_opt_common())
     with pytest.raises(ValueError):
-        OptimizerConfig(name="torchao_adamw8bit", cmuon_guard=guard, **_opt_common())
+        OptimizerConfig(name="torchao_adamw8bit", cmuon_guard=guard, cmuon_lr_multiplier=1.0, adamw_lr_multiplier=1.0, **_opt_common())
 
 
 # ---------------------------------------------------------------------------

@@ -932,6 +932,8 @@ class OptimizerConfig(StrictModel):
         "hybrid_cmuon_canonical_ns4_fp32_rescue",
     ]
     base_lr: PositiveFloat
+    cmuon_lr_multiplier: PositiveFloat = 1.0
+    adamw_lr_multiplier: PositiveFloat = 1.0
     reference_batch: PositiveInt
     lr_scaling: Literal["linear_global_batch", "none"]
     betas: Annotated[tuple[Float, Float], BeforeValidator(_toml_array_to_tuple)]

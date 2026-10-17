@@ -15,6 +15,11 @@ name = "hybrid_cmuon_canonical_ns4_fp32_rescue"
 base_lr = 5e-05
 reference_batch = 256
 lr_scaling = "linear_global_batch"
+# Algorithm-specific multipliers applied on top of the governed base LR:
+# CMuon keeps the scheduled rate, every AdamW parameter group is scaled down.
+# Both default to 1.0 in the schema, so omitting them preserves older behaviour.
+cmuon_lr_multiplier = 1.0
+adamw_lr_multiplier = 0.6
 betas = [0.9, 0.95]
 eps = 1e-08
 block_size = 256

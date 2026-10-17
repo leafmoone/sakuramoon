@@ -272,7 +272,6 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
     # -- step: two-phase atomic --------------------------------------------
 
     def step(self) -> None:
-        self._sync_learning_rate()  # pyright: ignore[reportPrivateUsage]
         self._validate_finite_gradients()  # pyright: ignore[reportPrivateUsage]
         mu = self.cfg.momentum
         lr = self.cfg.lr

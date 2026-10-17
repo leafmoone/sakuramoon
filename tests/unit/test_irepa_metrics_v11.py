@@ -193,8 +193,8 @@ def _observation(
     return observation, context
 
 
-def test_schema_version_is_11_and_irepa_phases_are_core() -> None:
-    assert TRAINING_METRIC_SCHEMA_VERSION == 11
+def test_schema_version_is_12_and_irepa_phases_are_core() -> None:
+    assert TRAINING_METRIC_SCHEMA_VERSION == 12
     assert "irepa_teacher" in CORE_TIMING_PHASES
     assert "irepa_projector" in CORE_TIMING_PHASES
     assert "irepa_teacher" in TIMING_PHASES
@@ -479,3 +479,25 @@ def test_metric_rejects_a_negative_irepa_loss() -> None:
     )
     with pytest.raises(ValueError, match="irepa_loss"):
         replace(metric, irepa_loss=-0.1)
+
+
+@pytest.mark.parametrize("rates", [(1e-4, 1e-4, 6e-5), (1e-4, 0.0, 1e-4)])
+def test_algorithm_learning_rates_reach_jsonl_and_wandb(rates: tuple[float, float, float]) -> None:
+    observation, context = _observation(
+        lambda_weight=0.0, irepa=None, projector_grad_norm=0.0, total_loss=1.5
+    )
+    observation = replace(
+        observation, learning_rate=rates[0], learning_rate_cmuon=rates[1],
+        learning_rate_adamw=rates[2],
+    )
+    metric = build_training_metric(observation, context=context, recorded_at_unix_ns=1)
+    for payload in (metric.as_json_mapping(), metric.as_wandb_mapping()):
+        assert payload["learning_rate"] == rates[0]
+        assert payload["learning_rate_cmuon"] == rates[1]
+        assert payload["learning_rate_adamw"] == rates[2]
+    for field in ("learning_rate_cmuon", "learning_rate_adamw"):
+        for bad in (float("nan"), float("inf"), -1.0):
+            with pytest.raises((TypeError, ValueError)):
+                replace(observation, **{field: bad})
+            with pytest.raises((TypeError, ValueError)):
+                replace(metric, **{field: bad})

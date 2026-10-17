@@ -301,7 +301,6 @@ def install_structural_calibration(
     dummy = None
 
     def structural_step() -> None:
-        optimizer._sync_learning_rate()  # pyright: ignore[reportPrivateUsage]
         optimizer._validate_finite_gradients()  # pyright: ignore[reportPrivateUsage]
         mu = optimizer.cfg.momentum
         lr = float(optimizer.cfg.lr)

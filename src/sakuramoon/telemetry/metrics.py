@@ -66,7 +66,8 @@ NOISE_T_BIN_LABELS = tuple(
 # projector grad norm, and the irepa_teacher / irepa_projector timing phases.
 # When iREPA is absent/disabled, main_loss == total_loss, the irepa_* loss
 # fields are exactly 0.0 (no NaN sentinels), and both irepa phases are 0.0.
-TRAINING_METRIC_SCHEMA_VERSION = 11
+# v12: independent effective CMuon/AdamW rates; learning_rate remains the hybrid base.
+TRAINING_METRIC_SCHEMA_VERSION = 12
 DROPOUT_KEYS = CAPTION_DROPOUT_KEYS
 def _spatial_default_fallback_reasons(effective_batch: int) -> Mapping[str, int]:
     """Default spatial-crop table for an update with no spatial activity.
@@ -138,6 +139,8 @@ class TrainingMetric:
     dropout_hits: Mapping[str, int]
     condition_routes: Mapping[str, int]
     phase_seconds: Mapping[str, float]
+    learning_rate_cmuon: float = 0.0
+    learning_rate_adamw: float | None = None
     growth_alpha: float = 1.0
     growth_new_slot_grad_norm: float = 0.0
     growth_new_block_grad_norm: float = 0.0
@@ -174,6 +177,11 @@ class TrainingMetric:
     irepa_projector_grad_norm: float = 0.0
 
     def __post_init__(self) -> None:
+        if self.learning_rate_adamw is None:
+            object.__setattr__(self, "learning_rate_adamw", self.learning_rate)
+        adamw_rate = self.learning_rate_adamw
+        if adamw_rate is not None:
+            _finite_float("learning_rate_adamw", adamw_rate, minimum=0.0)
         _nonnegative_int("successful_update", self.successful_update, positive=True)
         _nonnegative_int("recorded_at_unix_ns", self.recorded_at_unix_ns, positive=True)
         for name in ("total_loss", "high_noise_loss", "low_noise_loss"):
@@ -199,6 +207,7 @@ class TrainingMetric:
             "condition_encoder_grad_norm",
             "condition_global_projection_grad_norm",
             "learning_rate",
+            "learning_rate_cmuon",
             "timestep_min",
             "timestep_max",
             "timestep_mean",
@@ -442,6 +451,8 @@ class TrainingMetric:
             ),
             "clip_fraction": self.clip_fraction,
             "learning_rate": self.learning_rate,
+            "learning_rate_cmuon": self.learning_rate_cmuon,
+            "learning_rate_adamw": self.learning_rate_adamw,
             "timestep_min": self.timestep_min,
             "timestep_max": self.timestep_max,
             "timestep_mean": self.timestep_mean,

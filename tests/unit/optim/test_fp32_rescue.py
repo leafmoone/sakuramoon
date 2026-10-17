@@ -160,9 +160,10 @@ def test_H_schema_rejects_name_without_guard() -> None:
         "cmuon_ns": {"attention_q": 4},
     }
     with pytest.raises(ValueError, match="cmuon_guard"):
-        OptimizerConfig(**base)
+        OptimizerConfig(cmuon_lr_multiplier=1.0, adamw_lr_multiplier=1.0, **base)
     with pytest.raises(ValueError, match="references"):
         OptimizerConfig(
+            cmuon_lr_multiplier=1.0, adamw_lr_multiplier=1.0,
             **base,
             cmuon_guard=CMuonGuardConfig(
                 guard_ratio=0.05,
@@ -175,6 +176,7 @@ def test_H_schema_rejects_name_without_guard() -> None:
         )
     # the guard section IS accepted for the new name
     OptimizerConfig(
+        cmuon_lr_multiplier=1.0, adamw_lr_multiplier=1.0,
         **base,
         cmuon_guard=CMuonGuardConfig(
             guard_ratio=0.05,

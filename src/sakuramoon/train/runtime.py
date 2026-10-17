@@ -464,6 +464,8 @@ class SuccessfulTrainingObservation:
     learning_rate: float
     gpu_memory_allocated_bytes: int
     gpu_memory_reserved_bytes: int
+    learning_rate_cmuon: float = 0.0
+    learning_rate_adamw: float | None = None
 
     def __post_init__(self) -> None:
         if len(self.microbatches) != self.loop.update.microbatches:
@@ -490,10 +492,11 @@ class SuccessfulTrainingObservation:
             )
         ):
             raise ValueError("observation tensors must be detached from autograd")
-        if type(self.learning_rate) is not float or not math.isfinite(
-            self.learning_rate
-        ):
-            raise ValueError("observation learning rate must be finite")
+        if self.learning_rate_adamw is None:
+            object.__setattr__(self, "learning_rate_adamw", self.learning_rate)
+        for rate in (self.learning_rate, self.learning_rate_cmuon, self.learning_rate_adamw):
+            if type(rate) is not float or not math.isfinite(rate) or rate < 0.0:
+                raise ValueError("observation learning rates must be finite and nonnegative")
         if (
             type(self.gpu_memory_allocated_bytes) is not int
             or self.gpu_memory_allocated_bytes < 0
@@ -1185,7 +1188,7 @@ def require_checkpoint_cadence_binding(
         raise ValueError("restored checkpoint cadence differs from resolved config")
 
 
-def _optimizer_learning_rate(optimizer: StepOptimizer) -> float:
+def _optimizer_adamw_learning_rate(optimizer: StepOptimizer) -> float:
     wrapped = getattr(optimizer, "optimizer", None)
     groups = getattr(wrapped, "param_groups", None)
     if (
@@ -1214,6 +1217,22 @@ def _optimizer_learning_rate(optimizer: StepOptimizer) -> float:
         raise ValueError("production optimizer learning rates differ across groups")
     rate = rates.pop()
     return rate
+
+
+def _optimizer_learning_rates(optimizer: StepOptimizer) -> tuple[float, float, float]:
+    """Capture the base, CMuon and AdamW rates USED by this update.
+
+    Nonhybrid learning_rate retains its effective-AdamW meaning; CMuon is zero.
+    Hybrid learning_rate is the governed base (historically both effective rates).
+    """
+    adamw = _optimizer_adamw_learning_rate(optimizer)
+    cfg = getattr(optimizer, "cfg", None)
+    if cfg is None:
+        return adamw, 0.0, adamw
+    from sakuramoon.optim.cmuon import HybridCMuon
+
+    hybrid = cast(HybridCMuon, optimizer)
+    return hybrid.learning_rate, hybrid.cfg.lr, adamw
 
 
 def _run_single_gpu_training(
@@ -1275,13 +1294,13 @@ def _run_single_gpu_training(
         target_successful_updates = config.train.max_updates
         pending_measurements: list[RuntimeMeasurement] = []
         active_phase_timer: AnyPhaseTimer | None = None
-        active_learning_rate: float | None = None
+        active_learning_rates: tuple[float, float, float] | None = None
         next_growth_update = state.successful_updates + 1
 
         def update_started(timer: AnyPhaseTimer | None) -> None:
-            nonlocal active_learning_rate, active_phase_timer
+            nonlocal active_learning_rates, active_phase_timer
             active_phase_timer = timer
-            active_learning_rate = _optimizer_learning_rate(optimizer)
+            active_learning_rates = _optimizer_learning_rates(optimizer)
             runtime.set_growth_alpha(
                 canonical_growth_alpha(
                     raw_state.growth,
@@ -1307,12 +1326,12 @@ def _run_single_gpu_training(
             return measurement.per_sample_loss
 
         def observe_update(observation: SuccessfulLoopObservation) -> None:
-            nonlocal active_learning_rate, active_phase_timer, next_growth_update
+            nonlocal active_learning_rates, active_phase_timer, next_growth_update
             microbatches = tuple(pending_measurements)
             update_timer = observation.phase_timer
             if update_timer is None or update_timer is not active_phase_timer:
                 raise RuntimeError("training observation phase timer identity changed")
-            if active_learning_rate is None:
+            if active_learning_rates is None:
                 raise RuntimeError("training update learning rate was not captured")
             if observation.update.state.successful_updates != next_growth_update:
                 raise RuntimeError("growth alpha update edge changed during the update")
@@ -1326,7 +1345,9 @@ def _run_single_gpu_training(
                 loop=observation,
                 microbatches=microbatches,
                 phase_timer=update_timer,
-                learning_rate=active_learning_rate,
+                learning_rate=active_learning_rates[0],
+                learning_rate_cmuon=active_learning_rates[1],
+                learning_rate_adamw=active_learning_rates[2],
                 gpu_memory_allocated_bytes=allocated,
                 gpu_memory_reserved_bytes=reserved,
             )
@@ -1339,7 +1360,7 @@ def _run_single_gpu_training(
                     flush=True,
                 )
             pending_measurements.clear()
-            active_learning_rate = None
+            active_learning_rates = None
             active_phase_timer = None
             next_growth_update += 1
 

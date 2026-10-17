@@ -47,6 +47,22 @@
 - `effective_global_batch()` = `train.local_batch * train.accumulation * distributed.world_size`
 - `scaled_learning_rate()` = `linear` 时 `base_lr * effective_global_batch() / reference_batch`，`none` 时 `base_lr`
 
+### 独立优化器学习率
+
+`optimizer.cmuon_lr_multiplier` 与 `optimizer.adamw_lr_multiplier` 均为正有限数，
+默认 `1.0`。混合优化器在每个成功更新边界显式设置
+`CMuon LR = scheduled_base * cmuon_lr_multiplier`、
+`AdamW LR = scheduled_base * adamw_lr_multiplier`（所有 AdamW groups）。
+CMuon 的 Moonlight、weight decay 和 LR 相关安全阈值使用自己的有效 LR；
+非混合 AdamW 路径仅使用 AdamW multiplier。
+
+指标 schema v12 的 `learning_rate` 对混合优化器仍表示共同调度基准，
+`learning_rate_cmuon` / `learning_rate_adamw` 表示该次更新实际使用的有效 LR；
+非混合路径前者为 `0.0`、后者等于原有 `learning_rate`。
+修改 TOML 在受控的完整 checkpoint resume 后生效，不支持热重载。
+恢复保留原 AdamW moments / quantization / step、CMuon momentum 和 SR RNG，
+以当前配置和已恢复成功更新坐标重设两个 LR，不重启 warmup、不改变路由或状态格式。
+
 ## 2. 拓扑与扩容
 
 - 历史拓扑不连续：`depth=16` → 16 个非连续槽；`depth=20` = 16 槽 ∪ {2,8,14,20}；

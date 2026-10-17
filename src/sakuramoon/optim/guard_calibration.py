@@ -163,10 +163,9 @@ def install_guard_calibration(
         handle.output_path.write_text("", encoding="utf-8")
 
     def shadow_step() -> None:
-        # Same pre-step checks as production (finite grads; LR sync). The
+        # Same pre-step finite-gradient checks as production. The
         # private calls are the sanctioned seam: the shadow step must reuse
         # the exact production logic, not a copy.
-        optimizer._sync_learning_rate()  # pyright: ignore[reportPrivateUsage]
         optimizer._validate_finite_gradients()  # pyright: ignore[reportPrivateUsage]
         mu = optimizer.cfg.momentum
         started = time.perf_counter()

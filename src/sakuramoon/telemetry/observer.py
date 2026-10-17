@@ -582,6 +582,8 @@ def build_training_metric(
         ),
         clip_fraction=float(coefficient < 1.0),
         learning_rate=observation.learning_rate,
+        learning_rate_cmuon=observation.learning_rate_cmuon,
+        learning_rate_adamw=observation.learning_rate_adamw,
         timestep_min=timestep_min,
         timestep_max=timestep_max,
         timestep_mean=timestep_mean,

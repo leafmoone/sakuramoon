@@ -425,6 +425,23 @@ def _build_optimizer(
     world_size: int = 1,
     checkpoint_source: str | None = None,
 ) -> IsolatedAdamW8bit | HybridCMuon:
+    optimizer = _build_optimizer_unscaled(
+        config, module, telemetry_logger=telemetry_logger, rank=rank,
+        world_size=world_size, checkpoint_source=checkpoint_source,
+    )
+    _set_optimizer_learning_rate(optimizer, config.scaled_learning_rate(), config)
+    return optimizer
+
+
+def _build_optimizer_unscaled(
+    config: RuntimeConfig,
+    module: TrainableComposite,
+    *,
+    telemetry_logger: Callable[[str], None] | None = None,
+    rank: int = 0,
+    world_size: int = 1,
+    checkpoint_source: str | None = None,
+) -> IsolatedAdamW8bit | HybridCMuon:
     optimizer = config.optimizer
     common = {
         "lr": config.scaled_learning_rate(),
@@ -600,9 +617,15 @@ def _optimizer_learning_rate_scalars(
 def _optimizer_learning_rate_matches(
     optimizer: IsolatedAdamW8bit | HybridCMuon,
     expected: float,
+    config: RuntimeConfig | None = None,
 ) -> bool:
     if type(expected) is not float or not math.isfinite(expected) or expected < 0.0:
         raise ValueError("governed learning rate must be a finite nonnegative float")
+    if not isinstance(optimizer, IsolatedAdamW8bit):
+        cmuon_expected = expected * (config.optimizer.cmuon_lr_multiplier if config else 1.0)
+        if optimizer.cfg.lr != cmuon_expected or optimizer.learning_rate != expected:
+            return False
+    expected *= config.optimizer.adamw_lr_multiplier if config else 1.0
     for actual in _optimizer_learning_rate_scalars(optimizer):
         if isinstance(actual, float):
             if actual != expected:
@@ -621,8 +644,11 @@ def _optimizer_learning_rate_matches(
 
 
 def _set_optimizer_learning_rate(
-    optimizer: IsolatedAdamW8bit | HybridCMuon, learning_rate: float
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
+    learning_rate: float,
+    config: RuntimeConfig | None = None,
 ) -> None:
+    """Explicitly schedule each algorithm; LR changes never mutate optimizer state."""
     if (
         type(learning_rate) is not float
         or not math.isfinite(learning_rate)
@@ -631,13 +657,20 @@ def _set_optimizer_learning_rate(
         raise ValueError("governed learning rate must be a finite nonnegative float")
     groups = optimizer.optimizer.param_groups
     current_rates = _optimizer_learning_rate_scalars(optimizer)
+    cmuon_rate = learning_rate * (config.optimizer.cmuon_lr_multiplier if config else 1.0)
+    adamw_rate = learning_rate * (config.optimizer.adamw_lr_multiplier if config else 1.0)
+    if not math.isfinite(cmuon_rate) or not math.isfinite(adamw_rate):
+        raise ValueError("effective optimizer learning rates must be finite")
+    if not isinstance(optimizer, IsolatedAdamW8bit):
+        optimizer.cfg = replace(optimizer.cfg, lr=cmuon_rate)
+        optimizer.learning_rate = learning_rate
     for group, current in zip(groups, current_rates, strict=True):
         if isinstance(current, float):
-            group["lr"] = learning_rate
+            group["lr"] = adamw_rate
         else:
             assert isinstance(current, torch.Tensor)
             with torch.no_grad():
-                current.fill_(learning_rate)
+                current.fill_(adamw_rate)
 
 
 def _config_learning_rate(config: RuntimeConfig, update: int) -> float:
@@ -692,8 +725,8 @@ class _SuccessfulUpdateLrScheduler:
         self.last_successful_update = restored_successful_update
         expected = self._rate(restored_successful_update + 1)
         if fresh:
-            _set_optimizer_learning_rate(optimizer, expected)
-        elif not _optimizer_learning_rate_matches(optimizer, expected):
+            _set_optimizer_learning_rate(optimizer, expected, config)
+        elif not _optimizer_learning_rate_matches(optimizer, expected, config):
             raise ValueError(
                 "restored optimizer learning rate differs from governed schedule state"
             )
@@ -709,7 +742,9 @@ class _SuccessfulUpdateLrScheduler:
     def __call__(self, successful_update: int) -> None:
         if successful_update != self.last_successful_update + 1:
             raise ValueError("learning-rate scheduler updates must be consecutive")
-        _set_optimizer_learning_rate(self.optimizer, self._rate(successful_update + 1))
+        _set_optimizer_learning_rate(
+            self.optimizer, self._rate(successful_update + 1), self.config
+        )
         self.last_successful_update = successful_update
 
 
@@ -930,7 +965,7 @@ def _restore_checkpoint(
     # overwrites the source checkpoint's saved per-group learning rates with
     # the current configuration values; batch size and LR may change freely
     # across a resume because the loader replaces the saved group rates.
-    _set_optimizer_learning_rate(optimizer, expected_rate)
+    _set_optimizer_learning_rate(optimizer, expected_rate, loaded.config)
     restored = restore_single_gpu_checkpoint(checkpoint, module, optimizer, identity)
     resumed_state = _resume_state_for_config(loaded.config, restored.state)
     # Keep the opt-in NS safety telemetry reporting absolute update numbers

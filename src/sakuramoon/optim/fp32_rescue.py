@@ -220,7 +220,6 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
         # F2 process-local counter (telemetry only; not persisted — the
         # persisted event identity is ``observations``).
         self._steps_this_process += 1
-        self._sync_learning_rate()  # pyright: ignore[reportPrivateUsage]
         self._validate_finite_gradients()  # pyright: ignore[reportPrivateUsage]
         mu = self.cfg.momentum
         lr = self.cfg.lr

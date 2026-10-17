@@ -1173,8 +1173,7 @@ def test_hybrid_checkpoint_full_path_resume(tmp_path):
         chunk_rescale_sqrt_n=False,
         **_opt_common_lr(LR * 2),
     )
-    # The scheduler/checkpoint-restore only writes the inner torch groups:
-    # the resumed run starts from a DIFFERENT (current) lr/weight-decay.
+    # The resumed run starts from a DIFFERENT (current) lr/weight-decay.
     _set_group_lr(hybrid2.adamw.optimizer, LR * 2)
     for group in hybrid2.adamw.optimizer.param_groups:
         group["weight_decay"] = 0.01
@@ -1487,17 +1486,13 @@ def test_hybrid_telemetry_wired_into_step():
     for u in (102, 104):
         assert {p[1] for p in parsed if int(p[0]) == u} == set(CMUON_ROLES)
 
-    # The scheduler only writes the inner torch groups; step() must sync the
-    # Moonlight scale from them (cfg.lr follows the scheduled rate).
+    # Mutating AdamW groups must NOT overwrite the independent CMuon rate.
+    cmuon_lr = hybrid.cfg.lr
     new_lr = LR * 3
     _set_group_lr(hybrid.adamw.optimizer, new_lr)
     _seed_grads(model, 55)
     hybrid.step()
-    # The inner lr group holds a float32 tensor; the sync reads it back through
-    # float32, so compare with float32 tolerance, not exact equality.
-    assert math.isclose(hybrid.cfg.lr, new_lr, rel_tol=1e-6), (
-        f"Moonlight scale did not follow the inner LR: {hybrid.cfg.lr} != {new_lr}"
-    )
+    assert hybrid.cfg.lr == cmuon_lr
     # step 5 is off-cycle: no extra log lines.
     assert len(logs) == 2 * len(CMUON_ROLES)
 

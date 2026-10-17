@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
 import torch
@@ -816,6 +816,9 @@ class HybridCMuon:
     ) -> None:
         self.routing = routing
         self.cfg = cfg
+        # Governed base for telemetry only; neither rate is read from AdamW.
+        # Scheduling updates this and cfg.lr explicitly (not checkpoint state).
+        self.learning_rate = cfg.lr
         self.adamw = adamw
         self.audit = routing.full_audit
         self.sr_rng = sr_rng
@@ -846,30 +849,6 @@ class HybridCMuon:
 
     # -- interface ---------------------------------------------------------
 
-    def _sync_learning_rate(self) -> None:
-        """Keep the CMuon Moonlight scale on the governed learning rate.
-
-        The production LR scheduler (and checkpoint restore) update only the
-        inner torch optimizer's parameter groups. The CMuon part scales its
-        updates with ``cfg.lr`` (Moonlight) and its weight-decay term, so it
-        must observe the same scheduled rate. Sync from the inner groups at
-        every step (a no-op float read; the groups always share one lr).
-        Reads ``self.optimizer`` (the attribute production rebinds after
-        accelerator.prepare) so scheduler writes and this read always agree.
-        """
-        groups = self.optimizer.param_groups
-        if not groups:
-            return
-        raw = groups[0].get("lr")
-        if type(raw) is torch.Tensor:
-            lr = float(raw.item())
-        elif type(raw) is float:
-            lr = raw
-        else:
-            return
-        if math.isfinite(lr) and lr > 0.0 and lr != self.cfg.lr:
-            self.cfg = replace(self.cfg, lr=lr)
-
     def _validate_finite_gradients(self) -> None:
         gradients = [
             spec.parameter.grad
@@ -888,7 +867,6 @@ class HybridCMuon:
             raise FloatingPointError("hybrid optimizer received a nonfinite gradient")
 
     def step(self) -> None:
-        self._sync_learning_rate()
         self._validate_finite_gradients()
         # AdamW part (its params), under the isolated SR RNG. Route through
         # self.optimizer (the attribute production rebinds after
