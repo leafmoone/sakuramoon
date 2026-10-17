@@ -1,0 +1,8 @@
+# Parents intentionally kept outside this repository.
+#
+# `scripts/check_configs.py` resolves every `extends` edge inside `config/`.
+# A missing parent is an error unless it is declared here.  Declaring a file
+# records a deployment boundary; it does not assert that the file exists in
+# this checkout and does not make the config self-contained.
+[external]
+"train_g1_cmuon_production_camera_p100.toml" = "deployment-only parent; not distributed with the repository"
