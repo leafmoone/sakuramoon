@@ -12,8 +12,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Self, cast
 
 import torch
-from accelerate import Accelerator
-from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
+from accelerate import Accelerator  # pyright: ignore[reportMissingTypeStubs]
+from accelerate.utils import (  # pyright: ignore[reportMissingTypeStubs]
+    DistributedDataParallelKwargs,
+    InitProcessGroupKwargs,
+)
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 
@@ -69,10 +72,15 @@ from sakuramoon.optim.structural_calibration import (
 
 if TYPE_CHECKING:
     from sakuramoon.optim.cmuon import HybridCMuon
+    from sakuramoon.optim.cmuon_forensic import ForensicConfig
 from sakuramoon.storage import repository_directory
 from sakuramoon.telemetry.observer import UpdateMetricContext
 from sakuramoon.telemetry.timers import PhaseTimer
 from sakuramoon.train.benchmark import BenchmarkTrace
+from sakuramoon.train.condition_diagnostics_stream import (
+    ConditionDiagnosticsRecorder,
+    diagnostics_file_name,
+)
 from sakuramoon.train.preflight import (
     ProductionSingleGpuCheckpointPublisher,
     RestoredSingleGpuCheckpoint,
@@ -443,37 +451,36 @@ def _build_optimizer_unscaled(
     checkpoint_source: str | None = None,
 ) -> IsolatedAdamW8bit | HybridCMuon:
     optimizer = config.optimizer
-    common = {
-        "lr": config.scaled_learning_rate(),
-        "betas": optimizer.betas,
-        "eps": optimizer.eps,
-        "block_size": optimizer.block_size,
-        "bf16_stochastic_round": optimizer.bf16_stochastic_round,
-        "matrix_weight_decay": optimizer.matrix_weight_decay,
-        "sensitive_weight_decay": optimizer.sensitive_weight_decay,
-        "sr_seed": config.run.seed,
-    }
+    # Locked-policy scalars, named explicitly (not spread through a dict):
+    # the builder signatures are typed per-parameter, and a dict spread loses
+    # that precision for the type checker.
+    common_lr = config.scaled_learning_rate()
+    common_betas = optimizer.betas
+    common_eps = optimizer.eps
+    common_block_size = optimizer.block_size
+    common_bf16_stochastic_round = optimizer.bf16_stochastic_round
+    common_matrix_weight_decay = optimizer.matrix_weight_decay
+    common_sensitive_weight_decay = optimizer.sensitive_weight_decay
+    common_sr_seed = config.run.seed
     if optimizer.name == "hybrid_cmuon":
         from sakuramoon.optim.cmuon import build_hybrid_cmuon
 
         telemetry = optimizer.cmuon_ns_telemetry
-        telemetry_kwargs = {
-            "ns_telemetry_enabled": bool(telemetry.enabled) if telemetry else False,
-            "ns_telemetry_log_every_n": telemetry.log_every_n if telemetry else 100,
-            "ns_telemetry_logger": telemetry_logger,
-            "ns_telemetry_update_offset": 0,
-        }
-        if telemetry is not None and telemetry.roles:
-            telemetry_kwargs["ns_telemetry_roles"] = tuple(telemetry.roles)
+        ns_telemetry_enabled = bool(telemetry.enabled) if telemetry else False
+        ns_telemetry_log_every_n = telemetry.log_every_n if telemetry else 100
+        ns_telemetry_roles: tuple[str, ...] | None = (
+            tuple(telemetry.roles) if telemetry is not None and telemetry.roles else None
+        )
         # Forensic routing ablation (empty for the candidate under test): the
         # excluded roles route to the AdamW8bit fallback, split stays complete.
-        telemetry_kwargs["exclude_roles"] = tuple(optimizer.cmuon_routing_exclude)
+        exclude_roles = tuple(optimizer.cmuon_routing_exclude)
+        forensic: ForensicConfig | None = None
         if optimizer.cmuon_forensic is not None and optimizer.cmuon_forensic.enabled:
             from sakuramoon.optim.cmuon_forensic import ForensicConfig
 
             # Built on EVERY rank (the rank comparison needs all ranks); the
             # logger is main-rank only so the log lines are not duplicated.
-            telemetry_kwargs["forensic"] = ForensicConfig(
+            forensic = ForensicConfig(
                 enabled=True,
                 ring_size=optimizer.cmuon_forensic.ring_size,
                 ceiling_multiplier=optimizer.cmuon_forensic.ceiling_multiplier,
@@ -486,20 +493,44 @@ def _build_optimizer_unscaled(
             # Per-role (per-spec) NS depth: canonical role->depth map.
             return build_hybrid_cmuon(
                 module,
+                lr=common_lr,
+                betas=common_betas,
+                eps=common_eps,
+                block_size=common_block_size,
+                bf16_stochastic_round=common_bf16_stochastic_round,
+                matrix_weight_decay=common_matrix_weight_decay,
+                sensitive_weight_decay=common_sensitive_weight_decay,
+                sr_seed=common_sr_seed,
                 ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
                 momentum_dtype=optimizer.cmuon_momentum_dtype,
                 chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
-                **telemetry_kwargs,
-                **common,
+                ns_telemetry_enabled=ns_telemetry_enabled,
+                ns_telemetry_log_every_n=ns_telemetry_log_every_n,
+                ns_telemetry_logger=telemetry_logger,
+                ns_telemetry_roles=ns_telemetry_roles,
+                exclude_roles=exclude_roles,
+                forensic=forensic,
             )
         # Legacy scalar NS depth (every role identical).
         return build_hybrid_cmuon(
             module,
+            lr=common_lr,
+            betas=common_betas,
+            eps=common_eps,
+            block_size=common_block_size,
+            bf16_stochastic_round=common_bf16_stochastic_round,
+            matrix_weight_decay=common_matrix_weight_decay,
+            sensitive_weight_decay=common_sensitive_weight_decay,
+            sr_seed=common_sr_seed,
             ns_steps=optimizer.cmuon_ns_steps,
             momentum_dtype=optimizer.cmuon_momentum_dtype,
             chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
-            **telemetry_kwargs,
-            **common,
+            ns_telemetry_enabled=ns_telemetry_enabled,
+            ns_telemetry_log_every_n=ns_telemetry_log_every_n,
+            ns_telemetry_logger=telemetry_logger,
+            ns_telemetry_roles=ns_telemetry_roles,
+            exclude_roles=exclude_roles,
+            forensic=forensic,
         )
     if optimizer.name in (
         "hybrid_cmuon_guarded_canonical",
@@ -537,6 +568,14 @@ def _build_optimizer_unscaled(
 
             return build_fp32_rescue(
                 module,
+                lr=common_lr,
+                betas=common_betas,
+                eps=common_eps,
+                block_size=common_block_size,
+                bf16_stochastic_round=common_bf16_stochastic_round,
+                matrix_weight_decay=common_matrix_weight_decay,
+                sensitive_weight_decay=common_sensitive_weight_decay,
+                sr_seed=common_sr_seed,
                 ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
                 guard_cfg=GuardedCanonicalGuardConfig(
                     guard_ratio=guard.guard_ratio,
@@ -554,10 +593,17 @@ def _build_optimizer_unscaled(
                 stats_logger=stats_logger,
                 checkpoint_source=checkpoint_source,
                 run_id=config.run.run_id,
-                **common,
             )
         return build_guarded_canonical(
             module,
+            lr=common_lr,
+            betas=common_betas,
+            eps=common_eps,
+            block_size=common_block_size,
+            bf16_stochastic_round=common_bf16_stochastic_round,
+            matrix_weight_decay=common_matrix_weight_decay,
+            sensitive_weight_decay=common_sensitive_weight_decay,
+            sr_seed=common_sr_seed,
             ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
             guard_cfg=GuardedCanonicalGuardConfig(
                 guard_ratio=guard.guard_ratio,
@@ -573,9 +619,18 @@ def _build_optimizer_unscaled(
             momentum_dtype=optimizer.cmuon_momentum_dtype,
             chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
             stats_logger=stats_logger,
-            **common,
         )
-    return build_adamw8bit(module, **common)
+    return build_adamw8bit(
+        module,
+        lr=common_lr,
+        betas=common_betas,
+        eps=common_eps,
+        block_size=common_block_size,
+        bf16_stochastic_round=common_bf16_stochastic_round,
+        matrix_weight_decay=common_matrix_weight_decay,
+        sensitive_weight_decay=common_sensitive_weight_decay,
+        sr_seed=common_sr_seed,
+    )
 
 
 def _optimizer_learning_rate_scalars(
@@ -829,7 +884,7 @@ def _bootstrap_checkpoint(
     *,
     checkpoint_root: Path,
     module: TrainableComposite,
-    optimizer: IsolatedAdamW8bit,
+    optimizer: IsolatedAdamW8bit | HybridCMuon,
     wall_clock: float,
 ) -> RestoredSingleGpuCheckpoint:
     identity = CheckpointIdentity("bootstrap", 0)
@@ -978,9 +1033,11 @@ def _restore_checkpoint(
     return replace(restored, state=resumed_state)
 
 
-def _hybrid_cmuon_class() -> type:
+def _hybrid_cmuon_class() -> type[HybridCMuon]:
     """Runtime access to HybridCMuon (imported lazily; the default path,
-    torchao_adamw8bit, never pays for the experimental module)."""
+    torchao_adamw8bit, never pays for the experimental module).
+    The annotation is resolved from the TYPE_CHECKING import so isinstance
+    checks narrow statically."""
     from sakuramoon.optim.cmuon import HybridCMuon
 
     return HybridCMuon
@@ -1047,6 +1104,10 @@ def _runtime(
         irepa_gamma=irepa_gamma,
         irepa_eps=irepa_eps,
         irepa_schedule=irepa_schedule,
+        condition_diagnostics=(
+            config.condition_diagnostics is not None
+            and config.condition_diagnostics.enabled
+        ),
     )
 
 
@@ -1328,7 +1389,13 @@ def _run_accepted_lifecycle(
         f"(新槽位: {list(new_growth_slots) or '无'})"
     )
     module = build_trainable_composite_from_config(
-        config, device=device, new_slot_ids=new_growth_slots
+        config,
+        device=device,
+        new_slot_ids=new_growth_slots,
+        condition_diagnostics=(
+            config.condition_diagnostics is not None
+            and config.condition_diagnostics.enabled
+        ),
     )
     _log("构建优化器")
     optimizer = _build_optimizer(
@@ -1551,7 +1618,9 @@ def _run_accepted_lifecycle(
         forward_module: nn.Module = module
         distributed_sync_module = None
     else:
-        prepared_module, prepared_optimizer = accelerator.prepare(
+        # accelerate ships no type stubs; prepare returns the DDP-wrapped
+        # module and the re-wrapped optimizer positionally.
+        prepared_module, prepared_optimizer = accelerator.prepare(  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
             module,
             optimizer.optimizer,
         )
@@ -1856,53 +1925,90 @@ def _run_accepted_lifecycle(
                 # Calibration: the per-update observer (sampling / W&B /
                 # evaluation / named barrier) is fully bypassed; both ranks
                 # skip it, so no barrier is lost.
-                calibration_observer = (
+                calibration_observer: Callable[
+                    [SuccessfulTrainingObservation], None
+                ] = (
                     (lambda observation: None)
                     if in_calibration
                     else observe_successful_update
                 )
-                with telemetry:
-                    _log(
-                        f"开始训练: update {initial_update + 1} -> "
-                        f"{config.train.max_updates}"
+                # Opt-in per-rank condition diagnostics stream: every rank
+                # appends to its own versioned JSONL file (never shared, so
+                # records cannot interleave).  Config section absent = this
+                # whole block stays None and nothing below runs.
+                condition_diagnostics_recorder = None
+                cd_config = config.condition_diagnostics
+                if cd_config is not None and cd_config.enabled and not in_calibration:
+                    condition_diagnostics_recorder = ConditionDiagnosticsRecorder(
+                        artifact_root
+                        / "diagnostics"
+                        / f"rank-{rank}"
+                        / diagnostics_file_name(),
+                        rank=rank,
+                        world_size=world_size,
+                        log_every_n=cd_config.log_every_n,
+                        flush_every_records=cd_config.flush_every_records,
+                        slot_ids=tuple(module.dit.active_slot_ids),
                     )
-                    loop_result = run_single_gpu_training(
-                        config,
-                        preflight=accepted,
-                        runtime=runtime,
-                        module=module,
-                        optimizer=optimizer,
-                        batches=batches,
-                        scheduler_step=scheduler,
-                        checkpoint_publisher=publisher,
-                        diagnostic_root=(
-                            artifact_root / "diagnostics" / f"rank-{rank}"
-                        ),
-                        failure_id=lambda phase, state: (
-                            f"{phase}-{state.attempted_updates}"
-                        ),
-                        restored_checkpoint=restored,
-                        phase_timer=telemetry.phase_timer,
-                        successful_update_observer=calibration_observer,
-                        forced_checkpoint=(
-                            lambda update: _forced_production_checkpoint_reason(
-                                restored.state,
-                                initial_update=initial_update,
-                                update=update,
-                                terminal_update=config.train.max_updates,
-                            )
-                        ),
-                        verified_checkpoint_observer=verified_checkpoints.append,
-                        backward=(
-                            None if accelerator is None else accelerator.backward
-                        ),
-                        no_sync=(
-                            None
-                            if distributed_sync_module is None
-                            else distributed_sync_module.no_sync
-                        ),
-                        log_updates=is_main_process,
-                    )
+                try:
+                    with telemetry:
+                        _log(
+                            f"开始训练: update {initial_update + 1} -> "
+                            f"{config.train.max_updates}"
+                        )
+                        loop_result = run_single_gpu_training(
+                            config,
+                            preflight=accepted,
+                            runtime=runtime,
+                            module=module,
+                            optimizer=optimizer,
+                            batches=batches,
+                            scheduler_step=scheduler,
+                            checkpoint_publisher=publisher,
+                            diagnostic_root=(
+                                artifact_root / "diagnostics" / f"rank-{rank}"
+                            ),
+                            failure_id=lambda phase, state: (
+                                f"{phase}-{state.attempted_updates}"
+                            ),
+                            restored_checkpoint=restored,
+                            phase_timer=telemetry.phase_timer,
+                            successful_update_observer=calibration_observer,
+                            forced_checkpoint=(
+                                lambda update: _forced_production_checkpoint_reason(
+                                    restored.state,
+                                    initial_update=initial_update,
+                                    update=update,
+                                    terminal_update=config.train.max_updates,
+                                )
+                            ),
+                            verified_checkpoint_observer=verified_checkpoints.append,
+                            backward=(
+                                None
+                                if accelerator is None
+                                else cast(
+                                    Callable[[torch.Tensor], None],
+                                    accelerator.backward,  # pyright: ignore[reportUnknownMemberType]
+                                )
+                            ),
+                            no_sync=(
+                                None
+                                if distributed_sync_module is None
+                                else distributed_sync_module.no_sync
+                            ),
+                            log_updates=is_main_process,
+                            condition_grad_share=(
+                                condition_diagnostics_recorder is not None
+                            ),
+                            condition_diagnostic_observer=(
+                                condition_diagnostics_recorder.maybe_record
+                                if condition_diagnostics_recorder is not None
+                                else None
+                            ),
+                        )
+                finally:
+                    if condition_diagnostics_recorder is not None:
+                        condition_diagnostics_recorder.close()
                 if not verified_checkpoints and not in_calibration:
                     raise RuntimeError(
                         "production training completed without a durable checkpoint"

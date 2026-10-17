@@ -64,6 +64,9 @@ from sakuramoon.objective.irepa import (
     spatial_zscore_target,
 )
 from sakuramoon.telemetry.timers import AnyPhaseTimer
+from sakuramoon.train.condition_diagnostics_stream import (
+    compute_condition_activation_facts,
+)
 from sakuramoon.train.loop import (
     LoopResult,
     SingleGpuTrainingLoop,
@@ -113,7 +116,9 @@ def require_distributed_forward_module(
         raise TypeError(
             "distributed forward must remain an uncompiled DistributedDataParallel"
         )
-    if forward_module.module is not composite:
+    # ``DistributedDataParallel.module`` has no stable stub type in the
+    # torch type stubs; the isinstance above pins the runtime type.
+    if forward_module.module is not composite:  # pyright: ignore[reportUnknownMemberType]
         raise ValueError(
             "DistributedDataParallel must wrap the original trainable composite"
         )
@@ -151,8 +156,9 @@ def compile_packed_dit_blocks(
         not isinstance(block, PackedDiTBlock) for block in blocks
     ):
         raise TypeError("PackedDiT block registry is inconsistent")
-    if any(
-        child._forward_pre_hooks or child._forward_hooks
+    if any(  # pyright: ignore[reportUnknownArgumentType]
+        # Private hook registries: nn.Module stubs type these only partially.
+        child._forward_pre_hooks or child._forward_hooks  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType, reportPrivateUsage]
         for block in blocks
         for child in block.modules()
     ):
@@ -163,7 +169,7 @@ def compile_packed_dit_blocks(
     parameter_ids = tuple(id(parameter) for parameter in composite.parameters())
     state_keys = tuple(composite.state_dict())
     for block in blocks:
-        block.compile(
+        block.compile(  # pyright: ignore[reportUnknownMemberType]
             backend=backend,
             mode=mode,
             fullgraph=False,
@@ -297,8 +303,17 @@ class ActualDitFlopCounter:
         self._block_linear_flops = sum(
             self._linear_flops(item) for item in block_linears
         )
+        # ``blocks`` come from an nn.ModuleDict (values() -> nn.Module);
+        # the isinstance checks above pin the concrete registry, so cast
+        # for typed FLOP arithmetic.
         self._attention_flops = sum(
-            4 * item.q_heads * item.head_dim for item in attentions
+            4
+            * item.q_heads
+            * item.head_dim
+            for item in (
+                cast(DenseGQAAttention | FA4VarlenGQAAttention, attention)
+                for attention in attentions
+            )
         )
         if min(
             self._image_linear_flops,
@@ -315,7 +330,9 @@ class ActualDitFlopCounter:
     def count(self, inputs: TrainableCompositeInputs) -> int:
         """Return exact forward matmul FLOPs for accepted composite inputs."""
 
-        if not isinstance(inputs, TrainableCompositeInputs):
+        # Defensive runtime guard for untyped callers; the declared
+        # parameter type already pins this for typed code.
+        if not isinstance(inputs, TrainableCompositeInputs):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError("DiT FLOP counting requires TrainableCompositeInputs")
         batch = len(inputs.latents)
         if (
@@ -423,6 +440,10 @@ class RuntimeMeasurement:
     irepa_weighted_per_sample_loss: torch.Tensor
     irepa_cosine: torch.Tensor
     irepa_lambda: float
+    # Opt-in condition-side diagnostics (per-rank JSONL stream): detached
+    # scalar facts for this microbatch, None unless the runtime capture flag
+    # is enabled.  Plain floats/ints — nothing to detach.
+    condition_diagnostics: dict[str, float | int | None] | None = None
 
     def detached(self) -> RuntimeMeasurement:
         """Drop the autograd graph before handing facts to an async observer."""
@@ -451,6 +472,7 @@ class RuntimeMeasurement:
             irepa_weighted_per_sample_loss=self.irepa_weighted_per_sample_loss.detach(),
             irepa_cosine=self.irepa_cosine.detach(),
             irepa_lambda=self.irepa_lambda,
+            condition_diagnostics=self.condition_diagnostics,
         )
 
 
@@ -624,6 +646,7 @@ class SingleGpuBatchRuntime:
         irepa_gamma: float = 0.6,
         irepa_eps: float = 1e-6,
         irepa_schedule: IRepaLambdaSchedule | None = None,
+        condition_diagnostics: bool = False,
     ) -> None:
         if device.type != "cuda" or not torch.cuda.is_available():
             raise ValueError("single-GPU production runtime requires CUDA")
@@ -645,6 +668,8 @@ class SingleGpuBatchRuntime:
                 raise ValueError(f"{name} must be a finite TOML float")
         if type(growth_alpha) is not float or not 0.0 <= growth_alpha <= 1.0:
             raise ValueError("growth_alpha must be a float in [0,1]")
+        if type(condition_diagnostics) is not bool:
+            raise ValueError("condition_diagnostics must be a bool")
         if (
             type(torch_compile_enabled) is not bool
             or torch_compile_backend != "inductor"
@@ -720,6 +745,10 @@ class SingleGpuBatchRuntime:
         # set_growth_alpha); 0.0 until the first binding.  A lambda of 0.0
         # still runs the FULL teacher/capture/projector/z-score/cosine path.
         self.irepa_weight = 0.0
+        # Opt-in per-rank condition diagnostics: capture detached activation
+        # facts per microbatch.  When disabled, measure() never computes
+        # them, so the default path is byte-identical.
+        self.condition_diagnostics = condition_diagnostics
 
     def set_growth_alpha(self, value: float) -> None:
         """Select the canonical alpha before starting one successful update."""
@@ -963,6 +992,19 @@ class SingleGpuBatchRuntime:
             for value in batch.sample_ids.detach().cpu().unbind()
         )
         shape_key = f"{batch.target_height}x{batch.target_width}x{batch.dense_length}"
+        condition_facts: dict[str, float | int | None] | None = None
+        if self.condition_diagnostics:
+            # Detached recompute from the captured condition output + the
+            # composite's own modules; no autograd, no extra RNG draws.
+            last_conditioning = self.composite.last_conditioning
+            if last_conditioning is None:
+                raise RuntimeError(
+                    "condition diagnostics are enabled but the composite "
+                    "captured no condition output for this forward"
+                )
+            condition_facts = compute_condition_activation_facts(
+                self.composite, prepared.inputs, last_conditioning
+            )
         return RuntimeMeasurement(
             per_sample_loss=loss.per_sample,
             image_tokens=image_tokens,
@@ -987,6 +1029,7 @@ class SingleGpuBatchRuntime:
             irepa_weighted_per_sample_loss=loss.irepa_weighted_per_sample,
             irepa_cosine=loss.irepa_cosine,
             irepa_lambda=loss.irepa_lambda,
+            condition_diagnostics=condition_facts,
         )
 
     def _loss(
@@ -1256,6 +1299,9 @@ def _run_single_gpu_training(
     backward: Callable[[torch.Tensor], None] | None = None,
     no_sync: Callable[[], AbstractContextManager[None]] | None = None,
     log_updates: bool = True,
+    condition_grad_share: bool = False,
+    condition_diagnostic_observer: Callable[[SuccessfulTrainingObservation], None]
+    | None = None,
 ) -> LoopResult:
     """Run the locked loop after all ownership and assembly objects are ready."""
 
@@ -1351,6 +1397,10 @@ def _run_single_gpu_training(
                 gpu_memory_allocated_bytes=allocated,
                 gpu_memory_reserved_bytes=reserved,
             )
+            if condition_diagnostic_observer is not None:
+                # Per-rank condition diagnostics stream: local-first, outside
+                # the rank-0-funneled main observer.
+                condition_diagnostic_observer(emitted)
             successful_update_observer(emitted)
             if log_updates:
                 print(
@@ -1433,6 +1483,7 @@ def _run_single_gpu_training(
             ),
             backward=backward,
             no_sync=no_sync,
+            condition_grad_share=condition_grad_share,
         )
         result = loop.run(stream)
     except BaseException as error:  # noqa: BLE001
@@ -1476,12 +1527,25 @@ def run_single_gpu_training(
     backward: Callable[[torch.Tensor], None] | None = None,
     no_sync: Callable[[], AbstractContextManager[None]] | None = None,
     log_updates: bool = True,
+    condition_grad_share: bool = False,
+    condition_diagnostic_observer: Callable[[SuccessfulTrainingObservation], None]
+    | None = None,
 ) -> LoopResult:
     """Run production training with the exact publisher accepted by preflight."""
 
+    if type(condition_grad_share) is not bool:
+        raise ValueError("condition_grad_share must be a bool")
+    if condition_diagnostic_observer is not None and not callable(
+        condition_diagnostic_observer
+    ):
+        raise ValueError("condition_diagnostic_observer must be callable")
+
     from sakuramoon.train.preflight import ProductionSingleGpuCheckpointPublisher
 
-    if not isinstance(
+    # Defensive runtime guard for untyped callers; every concrete publisher
+    # in production subclasses this type, so the declared parameter already
+    # pins it for typed code.
+    if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         checkpoint_publisher, ProductionSingleGpuCheckpointPublisher
     ):
         stream = require_accepted_production_batch_stream(batches)
@@ -1516,6 +1580,8 @@ def run_single_gpu_training(
         backward=backward,
         no_sync=no_sync,
         log_updates=log_updates,
+        condition_grad_share=condition_grad_share,
+        condition_diagnostic_observer=condition_diagnostic_observer,
     )
 
 

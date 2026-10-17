@@ -10,6 +10,13 @@ permissions:
 jobs:
   static:
     runs-on: ubuntu-latest
+    env:
+      # Select CPU wheels explicitly; the default PyPI torch build is large
+      # and the hosted runner has no accelerator.  The full dependency set is
+      # required here: pyright type-checks changed files against the project's
+      # third-party types (torch, transformers, ...), so a dev-only env would
+      # report every training import as missing.
+      UV_TORCH_BACKEND: cpu
     steps:
       - uses: actions/checkout@v6
         with:
@@ -21,9 +28,9 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
-      # Static checks do not need the training stack.  --no-sync prevents
-      # `uv run` from silently resolving the full default dependency set.
-      - run: uv sync --no-install-project --only-group dev
+      # --no-install-project skips only the editable project link; the
+      # project dependencies themselves must be present for pyright.
+      - run: uv sync --no-install-project --group dev
       - run: uv run --no-sync ruff check .
       - name: pyright (changed python files)
         run: |
@@ -60,6 +67,7 @@ jobs:
           PYTHONPATH=src uv run --no-sync pytest
           tests/unit/test_training_metrics_audit.py
           tests/unit/config/test_config_closure.py
+          tests/unit/train/test_condition_diagnostics_stream.py
           -q
 
   contracts:

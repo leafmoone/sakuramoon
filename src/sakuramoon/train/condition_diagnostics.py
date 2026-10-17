@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +9,12 @@ import torch
 
 from sakuramoon.conditioning.global_condition import GlobalConditionOutput
 from sakuramoon.eval.spec import PromptCase, PromptManifest
+from sakuramoon.train.tensor_metrics import (
+    TrainingSamplingError,
+    metric_float,
+    tensor_cosine,
+    tensor_rms,
+)
 
 FIXED_CONDITION_PAIR_IDS = (
     (
@@ -33,10 +38,6 @@ FIXED_CONDITION_PAIR_IDS = (
         "validation-5821ee0f6504d5eb4cb4135a17aee3fc",
     ),
 )
-
-
-class TrainingSamplingError(RuntimeError):
-    """A periodic training sample or condition diagnostic is invalid."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,32 +93,6 @@ def load_fixed_condition_pairs(path: Path) -> tuple[FixedConditionPair, ...]:
         FixedConditionPair(label, by_id[first_id], by_id[second_id])
         for label, first_id, second_id in FIXED_CONDITION_PAIR_IDS
     )
-
-
-def tensor_rms(tensor: torch.Tensor) -> torch.Tensor:
-    if not tensor.is_floating_point() or tensor.numel() == 0:
-        raise TrainingSamplingError(
-            "diagnostic tensor must be nonempty floating point"
-        )
-    return tensor.float().square().mean().sqrt()
-
-
-def tensor_cosine(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
-    if first.shape != second.shape or first.numel() == 0:
-        raise TrainingSamplingError("diagnostic cosine tensors must match")
-    left = first.float().flatten()
-    right = second.float().flatten()
-    denominator = left.norm() * right.norm()
-    if denominator <= 1e-12:
-        raise TrainingSamplingError("diagnostic cosine is undefined at zero norm")
-    return torch.dot(left, right) / denominator
-
-
-def metric_float(name: str, value: torch.Tensor) -> float:
-    result = float(value.detach().cpu().item())
-    if not math.isfinite(result):
-        raise TrainingSamplingError(f"condition diagnostic is nonfinite: {name}")
-    return result
 
 
 def condition_representation_diagnostics(
@@ -186,7 +161,12 @@ def global_path_diagnostics(
     diagnostics = {
         name: metric_float(name, value) for name, value in values.items()
     }
-    if global_a.float().norm() > 1e-12 and global_b.float().norm() > 1e-12:
+    # Skip the cosine when either vector is degenerate (norm <= 1e-12);
+    # compared via squared norm to stay on the fully typed torch surface.
+    if (
+        global_a.float().square().sum() > 1e-24
+        and global_b.float().square().sum() > 1e-24
+    ):
         diagnostics["global_A_B_cosine"] = metric_float(
             "global_A_B_cosine", tensor_cosine(global_a, global_b)
         )

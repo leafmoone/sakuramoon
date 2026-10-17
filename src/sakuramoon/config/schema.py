@@ -1292,6 +1292,24 @@ class IRepaConfig(StrictModel):
         return self
 
 
+class ConditionDiagnosticsConfig(StrictModel):
+    """Opt-in per-rank condition-side diagnostic stream.
+
+    ``[condition_diagnostics]`` absent (or ``enabled = false``) = feature
+    absent: the training path, the optimizer flow, and the schema-12
+    TrainingMetric output are byte-identical to a run without this section.
+    When enabled, every rank appends one versioned JSONL record (cadence
+    ``log_every_n`` successful updates) to
+    ``<artifact_dir>/diagnostics/rank-<n>/condition-diagnostics-v<ver>.jsonl``
+    using the thread-safe ``DurableJsonlSink``; the stream is versioned
+    independently of ``TRAINING_METRIC_SCHEMA_VERSION``.
+    """
+
+    enabled: bool = False
+    log_every_n: PositiveInt = 1
+    flush_every_records: PositiveInt = 1
+
+
 class RuntimeConfig(StrictModel):
     schema_version: Literal[1]
     run: RunConfig
@@ -1318,6 +1336,7 @@ class RuntimeConfig(StrictModel):
     timing: TimingConfig
     evaluation: EvaluationConfig
     irepa: IRepaConfig | None = None
+    condition_diagnostics: ConditionDiagnosticsConfig | None = None
 
     @model_validator(mode="after")
     def validate_train_batch(self) -> RuntimeConfig:
