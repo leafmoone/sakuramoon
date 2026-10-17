@@ -12,7 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v10
+        with:
+          # Full history so `origin/dev...HEAD` can compute a merge-base;
+          # a shallow clone makes the diff below fail or silently empty.
+          fetch-depth: 0
+      # astral-sh/setup-uv has no floating `v10` major tag (only v1-v7
+      # float), so the action must be pinned to a concrete version.
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
       # Static checks do not need the training stack.  --no-sync prevents
@@ -21,9 +27,12 @@ jobs:
       - run: uv run --no-sync ruff check .
       - name: pyright (changed python files)
         run: |
-          git fetch origin dev --depth=1 || true
-          files=$(git diff --name-only origin/dev...HEAD -- \
-            'src/**/*.py' 'tests/**/*.py' 'scripts/**/*.py' || true)
+          # :(glob) is required: without it `*` does not cross `/` and
+          # `scripts/**/*.py` matches nothing in scripts/ itself.
+          # --diff-filter=d skips removed files; the diff must fail the
+          # job if it cannot be computed, never pass as "no changed files".
+          files=$(git diff --name-only --diff-filter=d origin/dev...HEAD -- \
+            ':(glob)src/**/*.py' ':(glob)tests/**/*.py' ':(glob)scripts/**/*.py')
           if [ -n "$files" ]; then
             uv run --no-sync pyright $files
           else
@@ -38,7 +47,8 @@ jobs:
       UV_TORCH_BACKEND: cpu
     steps:
       - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v10
+      # Pinned to a concrete version: see the note in the static job.
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
       - run: uv sync --no-install-project --group dev
