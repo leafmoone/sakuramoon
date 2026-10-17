@@ -60,11 +60,14 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
-      - run: uv sync --no-install-project --group dev
-      # Start with the dependency-closed tests added by this branch.  The
-      # optimizer suite is intentionally not in the first gate: it needs
-      # torchao and exercises torch.compile/triton paths that must be
-      # verified on the runner before they can become a required check.
+      # Same optional deps as the static job: the condition-diagnostics
+      # structural guard imports sakuramoon.train.runtime, whose module
+      # chain needs webdataset/einops (train extra) and pe_spatial deps
+      # (eval extra).  CPU wheel selection comes from the job env above.
+      - run: uv sync --no-install-project --group dev --extra train --extra eval
+      # The optimizer suite is intentionally not in this pytest gate: it
+      # exercises torch.compile/triton paths that must be verified on the
+      # runner before they can become a required check.
       - run: >-
           PYTHONPATH=src uv run --no-sync pytest
           tests/unit/test_training_metrics_audit.py
