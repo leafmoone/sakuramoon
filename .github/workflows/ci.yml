@@ -29,8 +29,10 @@ jobs:
         with:
           python-version: "3.12"
       # --no-install-project skips only the editable project link; the
-      # project dependencies themselves must be present for pyright.
-      - run: uv sync --no-install-project --group dev
+      # project dependencies themselves must be present for pyright.  The
+      # train/eval extras carry accelerate, torchao, webdataset and the
+      # evaluation stack that the training/production import graph imports.
+      - run: uv sync --no-install-project --group dev --extra train --extra eval
       - run: uv run --no-sync ruff check .
       - name: pyright (changed python files)
         run: |
