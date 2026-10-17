@@ -615,9 +615,10 @@ def test_recorder_maybe_record_computes_facts_only_when_cadence_due(
                 ),
             )
 
-        # Update 1: cadence 2 not due -> no write, no capture compute.
+        # Update 1: cadence 2 not due -> nothing is WRITTEN.  The sink
+        # creates the (empty) file at construction, so assert zero content.
         recorder.maybe_record(_observation(1))  # type: ignore[arg-type]
-        assert not path.exists()
+        assert path.read_text() == ""
         # Update 2: cadence due -> the record's facts were computed from
         # the capture (real floats, not placeholders).
         recorder.maybe_record(_observation(2))  # type: ignore[arg-type]
