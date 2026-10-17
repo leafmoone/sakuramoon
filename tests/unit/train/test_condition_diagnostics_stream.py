@@ -632,14 +632,18 @@ def test_recorder_maybe_record_writes_stored_facts_only_when_cadence_due(
 def test_recorded_facts_are_computed_before_optimizer_step(
     tmp_path: Path,
 ) -> None:
-    """REGRESSION (cadence-gate rework, rejected 2026-10-17): the record
-    must carry the facts measured BEFORE ``optimizer.step()``.
+    """The landed record carries the measurement's stored facts VERBATIM,
+    and those facts are a PRE-step snapshot.
 
-    If the compute is ever moved out of ``measure()`` into the
-    observation hook (which runs after the step), the record would carry
-    the POST-step values and this test fails: one AdamW step (lr=1e-4)
-    moves the conditioner's ``base_hidden_rms`` by ~6e-4, orders of
-    magnitude above float noise and JSON round-trip (exact).
+    What this test proves: the recorder lands exactly the scalar facts the
+    runtime's ``measure()`` stored on the measurement — and the difference
+    between a pre-step snapshot and a post-step recompute is large enough
+    to matter (one AdamW lr=1e-4 step moves ``base_hidden_rms`` by ~4e-3
+    abs / 3.9e-4 rel; JSON round-trip of the landed floats is exact, so
+    ``==`` against the pre-step value is a real check).  It does NOT pin
+    the compute site (it feeds the recorder a measurement fake, bypassing
+    ``measure()``) — ``test_compute_site_pinned_to_measure_not_observer``
+    pins that structurally, because tests/ has no runtime fixture.
     """
 
     conditioner = _mini_conditioner()
@@ -699,6 +703,59 @@ def test_recorded_facts_are_computed_before_optimizer_step(
     # The landed values are the pre-step ones, not the post-step ones.
     assert document["base_hidden_rms"] == pre_base
     assert document["base_hidden_rms"] != post_base
+
+
+def test_compute_site_pinned_to_measure_not_observer() -> None:
+    """STRUCTURAL guard: the facts compute call sits inside
+    ``SingleGpuBatchRuntime.measure`` and nowhere in the observer hook —
+    pinned at METHOD level, not class or module level.
+
+    Why source-level: a behavior-level test cannot pin the compute site
+    because tests/ has no runtime fixture — ``SingleGpuBatchRuntime``
+    requires CUDA plus the full forward graph, so no test here can drive
+    a real update and observe WHEN ``measure()`` ran relative to
+    ``optimizer.step()``.  (Root requirement,
+    2026-10-17: the guard must go RED if the compute is moved back into
+    the observer; verified by temporarily re-adding the call to
+    ``maybe_record`` and watching this test fail, then reverting.)
+
+    Why method-level getsource: a class- or module-level source string is
+    satisfied by the import line or a comment (``runtime.py`` imports
+    ``compute_condition_activation_facts`` at module scope), so the name
+    would pass there even if the call lived elsewhere.  Only the METHOD
+    body pins "the call happens inside ``measure()``"; the assertion uses
+    the call form ``compute_condition_activation_facts(`` (with
+    parenthesis) for the same reason.
+
+    Pinning rationale: computing at the observation hook (which runs
+    AFTER ``optimizer.step()``) yields a mixed post-step-weight /
+    pre-step-token state with no physical meaning.
+    """
+
+    import inspect
+
+    from sakuramoon.train.runtime import SingleGpuBatchRuntime
+
+    # (a) The compute call must live in measure()'s body.
+    measure_source = inspect.getsource(SingleGpuBatchRuntime.measure)
+    assert "compute_condition_activation_facts(" in measure_source
+    # (b) The observer hook must NOT carry it.
+    recorder_source = inspect.getsource(
+        ConditionDiagnosticsRecorder.maybe_record
+    )
+    assert "compute_condition_activation_facts(" not in recorder_source
+    # (c) The recorder constructor must not take the composite back —
+    # its presence is what would make a recompute-in-the-observer
+    # relapse look plausible (contract regression guard).
+    signature = inspect.signature(ConditionDiagnosticsRecorder.__init__)
+    assert "composite" not in signature.parameters
+    # (d) The cadence number comes from next_growth_update — the same
+    # in-flight update number the loop asserts against the landed
+    # successful_update — not a self-computed counter.
+    runtime_source = Path(inspect.getfile(SingleGpuBatchRuntime)).read_text(
+        encoding="utf-8"
+    )
+    assert "update_number=next_growth_update" in runtime_source
 
 
 @LINUX_ONLY
