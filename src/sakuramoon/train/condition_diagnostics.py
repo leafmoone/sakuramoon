@@ -161,12 +161,10 @@ def global_path_diagnostics(
     diagnostics = {
         name: metric_float(name, value) for name, value in values.items()
     }
-    # Skip the cosine when either vector is degenerate (norm <= 1e-12);
-    # compared via squared norm to stay on the fully typed torch surface.
-    if (
-        global_a.float().square().sum() > 1e-24
-        and global_b.float().square().sum() > 1e-24
-    ):
+    # ``norm()`` is kept verbatim for bit-exact equivalence with the
+    # historical sampling diagnostics; type-stub ignores do not change
+    # the computation.
+    if global_a.float().norm() > 1e-12 and global_b.float().norm() > 1e-12:  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         diagnostics["global_A_B_cosine"] = metric_float(
             "global_A_B_cosine", tensor_cosine(global_a, global_b)
         )

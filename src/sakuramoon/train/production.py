@@ -1949,6 +1949,7 @@ def _run_accepted_lifecycle(
                         log_every_n=cd_config.log_every_n,
                         flush_every_records=cd_config.flush_every_records,
                         slot_ids=tuple(module.dit.active_slot_ids),
+                        composite=module,
                     )
                 try:
                     with telemetry:

@@ -7,7 +7,7 @@ import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import torch
@@ -25,6 +25,7 @@ from sakuramoon.train.condition_diagnostics_stream import (
     ConditionDiagnosticsRecorder,
     # Private helpers are exercised directly: unit tests of the stream's
     # numeric contract (mirrors the repo's targeted-ignore convention).
+    _finite_float_or_none,  # pyright: ignore[reportPrivateUsage]
     _grad_share,  # pyright: ignore[reportPrivateUsage]
     _masked_rms,  # pyright: ignore[reportPrivateUsage]
     _per_sample_rms_mean,  # pyright: ignore[reportPrivateUsage]
@@ -40,6 +41,11 @@ from sakuramoon.train.step import (
     TrainableComposite,
     TrainableCompositeInputs,
 )
+
+if TYPE_CHECKING:
+    # Type-only: sakuramoon.train.runtime pulls the full training import
+    # graph (webdataset, ...) that the CPU unit gate does not install.
+    from sakuramoon.train.runtime import SuccessfulTrainingObservation
 
 LINUX_ONLY = pytest.mark.skipif(
     sys.platform != "linux",
@@ -59,7 +65,10 @@ def test_condition_diagnostics_config_defaults_off() -> None:
     default = ConditionDiagnosticsConfig()
     assert default.enabled is False
     assert default.log_every_n == 1
-    assert default.flush_every_records == 1
+    # One fsync per 100 records by default: this stream fsyncs on the
+    # training thread (unlike the async main metrics stream), so the
+    # per-record fsync is an explicit opt-in via flush_every_records = 1.
+    assert default.flush_every_records == 100
     on = ConditionDiagnosticsConfig(enabled=True, log_every_n=4)
     assert on.enabled is True
     assert on.log_every_n == 4
@@ -106,6 +115,19 @@ def test_grad_share() -> None:
     assert _grad_share(0.0, 0.0) is None
     with pytest.raises(ValueError, match="finite"):
         _grad_share(float("inf"), 1.0)
+
+
+def test_finite_float_or_none_advisory_policy() -> None:
+    # Reuses tensor_metrics.metric_float; only the policy differs —
+    # nonfinite values become ``null`` instead of raising.
+    assert _finite_float_or_none("x", torch.tensor(1.5)) == pytest.approx(1.5)
+    assert _finite_float_or_none("x", torch.tensor(float("nan"))) is None
+    assert _finite_float_or_none("x", torch.tensor(float("inf"))) is None
+    # The RMS sign invariant is kept on top of metric_float (nonfinite
+    # values are advisory and never reach the sign check).
+    with pytest.raises(ValueError, match="must not be negative"):
+        _finite_float_or_none("x_rms", torch.tensor(-1.0))
+    assert _finite_float_or_none("x_rms", torch.tensor(float("nan"))) is None
 
 
 def test_slot_cosine_values() -> None:
@@ -486,6 +508,10 @@ def test_recorder_writes_versioned_per_rank_jsonl(tmp_path: Path) -> None:
     }.items():
         with ConditionDiagnosticsRecorder(
             path,
+            composite=cast(
+                TrainableComposite,
+                _mini_composite(_mini_conditioner(), active=True),
+            ),
             rank=rank,
             world_size=2,
             log_every_n=2,
@@ -520,9 +546,13 @@ def test_recorder_writes_versioned_per_rank_jsonl(tmp_path: Path) -> None:
 
 @LINUX_ONLY
 def test_recorder_rejects_invalid_construction(tmp_path: Path) -> None:
+    composite = cast(
+        TrainableComposite, _mini_composite(_mini_conditioner(), active=True)
+    )
     with pytest.raises(TypeError, match="log_every_n"):
         ConditionDiagnosticsRecorder(
             tmp_path / "x.jsonl",
+            composite=composite,
             rank=0,
             world_size=1,
             log_every_n=0,
@@ -532,12 +562,111 @@ def test_recorder_rejects_invalid_construction(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="slot_ids"):
         ConditionDiagnosticsRecorder(
             tmp_path / "x.jsonl",
+            composite=composite,
             rank=0,
             world_size=1,
             log_every_n=1,
             flush_every_records=1,
             slot_ids=(),
         )
+
+
+@LINUX_ONLY
+def test_recorder_maybe_record_computes_facts_only_when_cadence_due(
+    tmp_path: Path,
+) -> None:
+    """Cadence gate first: off-cadence updates pay nothing; on-cadence
+    updates compute the facts from the reference-only capture."""
+
+    composite = cast(
+        TrainableComposite, _mini_composite(_mini_conditioner(), active=True)
+    )
+    path = tmp_path / diagnostics_file_name()
+    with ConditionDiagnosticsRecorder(
+        path,
+        composite=composite,
+        rank=0,
+        world_size=1,
+        log_every_n=2,
+        flush_every_records=1,
+        slot_ids=(3, 7),
+    ) as recorder:
+        inputs = _mini_inputs(2)
+        condition = ConditionTokenOutput(
+            tokens=torch.randn(2, 3, 16),
+            mask=torch.ones(2, 3, dtype=torch.bool),
+            active_mask=torch.ones(2, dtype=torch.bool),
+        )
+        # The observation fake carries exactly what maybe_record reads:
+        # the last microbatch's reference-only capture + the update result.
+        measurement = SimpleNamespace(condition_diagnostics=(inputs, condition))
+
+        def _observation(successful_update: int) -> object:
+            update = _mini_update_result(
+                pre_condition=0.9,
+                post_condition=0.7,
+                successful_update=successful_update,
+            )
+            return cast(
+                "SuccessfulTrainingObservation",
+                SimpleNamespace(
+                    loop=SimpleNamespace(update=update),
+                    microbatches=(measurement,),
+                ),
+            )
+
+        # Update 1: cadence 2 not due -> no write, no capture compute.
+        recorder.maybe_record(_observation(1))  # type: ignore[arg-type]
+        assert not path.exists()
+        # Update 2: cadence due -> the record's facts were computed from
+        # the capture (real floats, not placeholders).
+        recorder.maybe_record(_observation(2))  # type: ignore[arg-type]
+        lines = path.read_text().splitlines()
+        assert len(lines) == 1
+        document = json.loads(lines[0])
+        assert document["schema_version"] == CONDITION_DIAGNOSTICS_SCHEMA_VERSION
+        assert document["successful_update"] == 2
+        assert document["active_samples"] == 2
+        assert isinstance(
+            document["condition_global_norm_weight_rms"], float
+        )
+        assert document["condition_grad_share_pre_clip"] == pytest.approx(
+            0.9 / 2.0
+        )
+
+
+@LINUX_ONLY
+def test_recorder_maybe_record_rejects_missing_capture(
+    tmp_path: Path,
+) -> None:
+    """Stream enabled without the runtime capture flag fails closed on the
+    first cadence-due update."""
+
+    composite = cast(
+        TrainableComposite, _mini_composite(_mini_conditioner(), active=True)
+    )
+    with ConditionDiagnosticsRecorder(
+        tmp_path / diagnostics_file_name(),
+        composite=composite,
+        rank=0,
+        world_size=1,
+        log_every_n=1,
+        flush_every_records=1,
+        slot_ids=(3, 7),
+    ) as recorder:
+        measurement = SimpleNamespace(condition_diagnostics=None)
+        update = _mini_update_result(
+            pre_condition=0.9, post_condition=0.7, successful_update=1
+        )
+        observation = cast(
+            "SuccessfulTrainingObservation",
+            SimpleNamespace(
+                loop=SimpleNamespace(update=update),
+                microbatches=(measurement,),
+            ),
+        )
+        with pytest.raises(ValueError, match="condition capture"):
+            recorder.maybe_record(observation)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -687,3 +816,38 @@ def test_composite_condition_diagnostics_flag_contract() -> None:
     enabled.enable_condition_diagnostics()
     assert set(enabled.state_dict()) == before
     assert set(enabled.parameters()) == set(disabled.parameters())
+
+
+def test_forward_conditioning_zero_capture_off_then_identity_capture_on(
+) -> None:
+    """Gate 2 (zero capture): a REAL ``forward_conditioning`` call writes
+    nothing while the flag is off, and — once enabled — stores exactly the
+    returned condition object (identity, not a copy)."""
+
+    def _condition_stub(*_args: Any) -> ConditionTokenOutput:
+        return ConditionTokenOutput(
+            tokens=torch.randn(2, 3, 16),
+            mask=torch.ones(2, 3, dtype=torch.bool),
+            active_mask=torch.ones(2, dtype=torch.bool),
+        )
+
+    def _text_stub(*_args: Any) -> object:
+        return SimpleNamespace()
+
+    composite = TrainableComposite(
+        dit=object(),  # type: ignore[arg-type]
+        text=cast(Any, _text_stub),
+        condition_tokens=cast(Any, _condition_stub),
+    )
+    inputs = _mini_inputs(2)
+    # Disabled: the forward runs, and NOTHING is captured.
+    _text, condition = composite.forward_conditioning(inputs)
+    assert isinstance(condition, ConditionTokenOutput)
+    assert composite.last_conditioning is None
+    # Enabled: the capture is the very object this forward returned.
+    composite.enable_condition_diagnostics()
+    _text, condition = composite.forward_conditioning(inputs)
+    assert composite.last_conditioning is condition
+    # A second forward replaces the reference (always the LATEST).
+    _text, condition = composite.forward_conditioning(inputs)
+    assert composite.last_conditioning is condition

@@ -27,7 +27,36 @@
 [sampling]             # profile 驱动（用户自定 profiles 表）
 [evaluation]
 [irepa]                # 可选；缺表 = 特性不存在
+[condition_diagnostics] # 可选；缺表 = 特性不存在（§1.1）
 ```
+
+### 1.1 [condition_diagnostics]（可选，默认关）
+
+条件侧独立诊断流（`train/condition_diagnostics_stream.py`，schema v1，
+与 TrainingMetric schema 12 独立版本化；不修改 schema 12）：
+
+```toml
+[condition_diagnostics]
+enabled = true            # 缺表或 false = 特性不存在：训练路径、优化器流程、
+                          # schema-12 输出与未启用时逐字节一致
+log_every_n = 500         # 每 N 个成功 update，每个 rank 追加一条记录
+flush_every_records = 100 # 每 N 条记录 fsync 一次（默认 100；本流在训练线程
+                          # 写盘，设 1 = 每条一次 fsync，热路径开销显著）
+```
+
+- 每个 rank 写自己的 `<artifact_dir>/diagnostics/rank-<n>/condition-diagnostics-v1.jsonl`
+  （线程安全 `DurableJsonlSink`，O_APPEND/0o600）；记录字段：条件侧激活事实
+  （token RMS、active/null 比例、global-path RMS、per-slot cosine）+
+  pre/post-clip 条件侧 union 梯度范数与占比。
+- 开销：仅 cadence 到期时重算一次 conditioner 前向（`no_grad`，取最后一个
+  microbatch）；其余 update 只存引用，无张量运算。
+- 重试的 update 会向同一 per-rank 文件追加，失败 update 可能重复出现
+  （主 metrics 流同行为）。
+- 实现注记：`tensor_rms` / `tensor_cosine` / `metric_float` /
+  `TrainingSamplingError` 四个纯函数从 `train/condition_diagnostics.py`
+  **逐字搬迁**（数值行为不变，`condition_diagnostics.py` 改为 re-export）
+  到 `train/tensor_metrics.py`——per-update 诊断路径不应拖入 `eval.spec` /
+  `conditioning.global_condition` 的采样期导入图。
 
 关键执行字段：
 

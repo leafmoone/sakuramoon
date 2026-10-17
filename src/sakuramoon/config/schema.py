@@ -1303,11 +1303,18 @@ class ConditionDiagnosticsConfig(StrictModel):
     ``<artifact_dir>/diagnostics/rank-<n>/condition-diagnostics-v<ver>.jsonl``
     using the thread-safe ``DurableJsonlSink``; the stream is versioned
     independently of ``TRAINING_METRIC_SCHEMA_VERSION``.
+
+    ``flush_every_records``: records per ``fsync``.  Unlike the main
+    metrics stream (whose sink writes on an async observer thread), this
+    stream fsyncs ON the training thread, so the default is 100 — one
+    crash can lose at most ~100 advisory records, and the final
+    ``close()`` always fsyncs.  Set 1 to pay a per-record fsync in the
+    hot path.
     """
 
     enabled: bool = False
     log_every_n: PositiveInt = 1
-    flush_every_records: PositiveInt = 1
+    flush_every_records: PositiveInt = 100
 
 
 class RuntimeConfig(StrictModel):

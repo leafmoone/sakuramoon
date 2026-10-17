@@ -69,6 +69,7 @@ jobs:
           PYTHONPATH=src uv run --no-sync pytest
           tests/unit/test_training_metrics_audit.py
           tests/unit/config/test_config_closure.py
+          tests/unit/config/test_condition_diagnostics_config.py
           tests/unit/train/test_condition_diagnostics_stream.py
           -q
 

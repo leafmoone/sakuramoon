@@ -26,6 +26,7 @@ from sakuramoon.checkpoint.policy import (
     CheckpointReason,
 )
 from sakuramoon.checkpoint.schema import CheckpointManifest, RawCheckpointState
+from sakuramoon.conditioning.condition_tokens import ConditionTokenOutput
 from sakuramoon.conditioning.rope import full_canvas_crop_coordinates
 from sakuramoon.config.schema import RuntimeConfig
 from sakuramoon.data.camera_viewport import CameraViewportCounts
@@ -64,9 +65,6 @@ from sakuramoon.objective.irepa import (
     spatial_zscore_target,
 )
 from sakuramoon.telemetry.timers import AnyPhaseTimer
-from sakuramoon.train.condition_diagnostics_stream import (
-    compute_condition_activation_facts,
-)
 from sakuramoon.train.loop import (
     LoopResult,
     SingleGpuTrainingLoop,
@@ -440,10 +438,15 @@ class RuntimeMeasurement:
     irepa_weighted_per_sample_loss: torch.Tensor
     irepa_cosine: torch.Tensor
     irepa_lambda: float
-    # Opt-in condition-side diagnostics (per-rank JSONL stream): detached
-    # scalar facts for this microbatch, None unless the runtime capture flag
-    # is enabled.  Plain floats/ints — nothing to detach.
-    condition_diagnostics: dict[str, float | int | None] | None = None
+    # Opt-in condition-side diagnostics (per-rank JSONL stream): a
+    # reference-only capture for this microbatch (composite inputs + the
+    # condition output object), None unless the runtime capture flag is
+    # enabled.  No computed values live here — the detached conditioner
+    # recompute happens at the recorder's cadence gate, so this field
+    # holds plain references and detaches nothing.
+    condition_diagnostics: tuple[
+        TrainableCompositeInputs, ConditionTokenOutput
+    ] | None = None
 
     def detached(self) -> RuntimeMeasurement:
         """Drop the autograd graph before handing facts to an async observer."""
@@ -992,19 +995,20 @@ class SingleGpuBatchRuntime:
             for value in batch.sample_ids.detach().cpu().unbind()
         )
         shape_key = f"{batch.target_height}x{batch.target_width}x{batch.dense_length}"
-        condition_facts: dict[str, float | int | None] | None = None
+        condition_capture: tuple[
+            TrainableCompositeInputs, ConditionTokenOutput
+        ] | None = None
         if self.condition_diagnostics:
-            # Detached recompute from the captured condition output + the
-            # composite's own modules; no autograd, no extra RNG draws.
+            # Reference-only capture; the detached conditioner recompute is
+            # deferred to the recorder's cadence gate (maybe_record), so
+            # updates that will not be recorded pay nothing here.
             last_conditioning = self.composite.last_conditioning
             if last_conditioning is None:
                 raise RuntimeError(
                     "condition diagnostics are enabled but the composite "
                     "captured no condition output for this forward"
                 )
-            condition_facts = compute_condition_activation_facts(
-                self.composite, prepared.inputs, last_conditioning
-            )
+            condition_capture = (prepared.inputs, last_conditioning)
         return RuntimeMeasurement(
             per_sample_loss=loss.per_sample,
             image_tokens=image_tokens,
@@ -1029,7 +1033,7 @@ class SingleGpuBatchRuntime:
             irepa_weighted_per_sample_loss=loss.irepa_weighted_per_sample,
             irepa_cosine=loss.irepa_cosine,
             irepa_lambda=loss.irepa_lambda,
-            condition_diagnostics=condition_facts,
+            condition_diagnostics=condition_capture,
         )
 
     def _loss(

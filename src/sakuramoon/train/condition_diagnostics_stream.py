@@ -9,8 +9,9 @@ optimizer flow, and the schema-12 output are byte-identical to a run
 without this feature.
 
 Quantity definitions (v1).  Activation facts come from the LAST
-accumulated microbatch of the update; the gradient shares are measured at
-the update boundary:
+accumulated microbatch of the update (the expensive conditioner
+recompute runs only when the record cadence is due); the gradient
+shares are measured at the update boundary:
 
 - ``condition_token_rms_active_pre_norm``: RMS of the raw (pre-norm) Qwen
   states gathered at the condition positions of active samples — exactly
@@ -44,6 +45,12 @@ Diagnostics are advisory: a nonfinite activation value is recorded as
 ``null`` (never a training failure).  Structural contract violations
 (shape or key mismatch) raise, because they indicate a code bug rather
 than a data condition.
+
+The stream is append-only and durable per write.  If an update is later
+retried (data-service redelivery of the same attempt), its record is
+appended to the SAME per-rank file, so a failed update may appear more
+than once; readers should treat ``successful_update`` as non-monotonic
+exactly like the main schema-12 metrics stream.
 """
 
 from __future__ import annotations
@@ -63,7 +70,12 @@ from sakuramoon.train.step import (
     TrainableComposite,
     TrainableCompositeInputs,
 )
-from sakuramoon.train.tensor_metrics import tensor_rms
+from sakuramoon.train.tensor_metrics import (
+    TrainingSamplingError,
+    metric_float,
+    tensor_cosine,
+    tensor_rms,
+)
 
 if TYPE_CHECKING:
     from sakuramoon.train.runtime import SuccessfulTrainingObservation
@@ -102,10 +114,12 @@ def _positive_int(name: str, value: int) -> None:
 
 
 def _finite_float_or_none(name: str, value: torch.Tensor) -> float | None:
-    """A nonfinite diagnostic value is recorded as ``null`` (advisory)."""
+    """``metric_float`` with the advisory policy: a nonfinite value is
+    recorded as ``null`` (never a training failure)."""
 
-    result = float(value.detach().cpu().item())
-    if not math.isfinite(result):
+    try:
+        result = metric_float(name, value)
+    except TrainingSamplingError:
         return None
     if result < 0.0 and name.endswith("_rms"):
         raise ValueError(f"{name} must not be negative")
@@ -139,26 +153,27 @@ def _slot_cosine(
     active_indices: torch.Tensor,
 ) -> float | None:
     """Mean over active samples of cosine(slot modulation w/ condition,
-    slot modulation base-only).  ``shared_*`` are ``[B, M]``; ``bias`` is
-    ``[M]``.  ``None`` when undefined (no active samples or a zero-norm
-    vector)."""
+    slot modulation base-only); each row goes through the shared
+    ``tensor_cosine`` so the convention matches the sampling-time
+    diagnostics.  ``shared_*`` are ``[B, M]``; ``bias`` is ``[M]``.
+    ``None`` when undefined (no active samples or a zero-norm vector)."""
 
     if active_indices.numel() == 0:
         return None
-    left = (
-        shared_with_condition.index_select(0, active_indices) + bias
-    ).float().reshape(active_indices.numel(), -1)
-    right = (
-        shared_base_only.index_select(0, active_indices) + bias
-    ).float().reshape(active_indices.numel(), -1)
-    left_norm = torch.sqrt(left.square().sum(dim=1))
-    right_norm = torch.sqrt(right.square().sum(dim=1))
-    if bool(((left_norm * right_norm) <= 1e-12).any()):
-        return None
-    cosine = (left * right).sum(dim=1) / (left_norm * right_norm)
-    if not bool(cosine.isfinite().all()):
-        return None
-    return float(cosine.mean().item())
+    bias_f = bias.float()
+    left = shared_with_condition.index_select(0, active_indices).float()
+    left = left + bias_f
+    right = shared_base_only.index_select(0, active_indices).float()
+    right = right + bias_f
+    rows = left.shape[0]
+    total = 0.0
+    for row in range(rows):
+        try:
+            value = tensor_cosine(left[row], right[row])
+        except TrainingSamplingError:
+            return None
+        total += float(value)
+    return total / rows
 
 
 def compute_condition_activation_facts(
@@ -359,6 +374,7 @@ class ConditionDiagnosticsRecorder:
         self,
         path: Path,
         *,
+        composite: TrainableComposite,
         rank: int,
         world_size: int,
         log_every_n: int,
@@ -371,6 +387,7 @@ class ConditionDiagnosticsRecorder:
         _positive_int("flush_every_records", flush_every_records)
         if not slot_ids or len(set(slot_ids)) != len(slot_ids):
             raise ValueError("slot_ids must be nonempty and unique")
+        self._composite = composite
         self._rank = rank
         self._world_size = world_size
         self._log_every_n = log_every_n
@@ -401,19 +418,32 @@ class ConditionDiagnosticsRecorder:
         self._sink.write(record)
 
     def maybe_record(self, observation: SuccessfulTrainingObservation) -> None:
-        """Callback bound to the runtime's per-update observation hook."""
+        """Callback bound to the runtime's per-update observation hook.
 
+        The cadence gate comes FIRST: updates that will not be recorded
+        pay nothing (no conditioner recompute).  When the cadence is due,
+        the facts are computed from the LAST microbatch's reference-only
+        capture under ``no_grad``.
+        """
+
+        successful_update = observation.loop.update.state.successful_updates
+        if successful_update % self._log_every_n != 0:
+            return
         microbatches = observation.microbatches
         if not microbatches:
             raise ValueError("observation carries no microbatch measurements")
-        facts = microbatches[-1].condition_diagnostics
-        if facts is None:
+        capture = microbatches[-1].condition_diagnostics
+        if capture is None:
             raise ValueError(
-                "the runtime did not carry condition activation facts; "
+                "the runtime did not carry a condition capture; "
                 "the stream is enabled without the runtime capture flag"
             )
+        inputs, condition = capture
+        facts = compute_condition_activation_facts(
+            self._composite, inputs, condition
+        )
         self.record_update(
-            successful_update=observation.loop.update.state.successful_updates,
+            successful_update=successful_update,
             update=observation.loop.update,
             activation_facts=facts,
         )

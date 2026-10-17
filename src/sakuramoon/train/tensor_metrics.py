@@ -30,10 +30,13 @@ def tensor_cosine(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
         raise TrainingSamplingError("diagnostic cosine tensors must match")
     left = first.float().flatten()
     right = second.float().flatten()
-    denominator = torch.sqrt(left.square().sum()) * torch.sqrt(right.square().sum())
-    if bool((denominator <= 1e-12).any()):
+    # Verbatim from 9826ffe (``Tensor.norm()``): bit-exact equivalence with
+    # the historical sampling diagnostics outranks stub cleanliness.  The
+    # ignores are type-checker directives; they do not change the math.
+    denominator = left.norm() * right.norm()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if denominator <= 1e-12:  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         raise TrainingSamplingError("diagnostic cosine is undefined at zero norm")
-    return torch.dot(left, right) / denominator
+    return torch.dot(left, right) / denominator  # pyright: ignore[reportUnknownVariableType]
 
 
 def metric_float(name: str, value: torch.Tensor) -> float:
