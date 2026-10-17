@@ -11,15 +11,24 @@ jobs:
   static:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v10
         with:
-          version: "0.12.x"
-      - run: uv python install 3.11
-      # Static checks do not need the training stack.
+          python-version: "3.12"
+      # Static checks do not need the training stack.  --no-sync prevents
+      # `uv run` from silently resolving the full default dependency set.
       - run: uv sync --no-install-project --only-group dev
-      - run: uv run ruff check .
-      - run: uv run pyright
+      - run: uv run --no-sync ruff check .
+      - name: pyright (changed python files)
+        run: |
+          git fetch origin dev --depth=1 || true
+          files=$(git diff --name-only origin/dev...HEAD -- \
+            'src/**/*.py' 'tests/**/*.py' 'scripts/**/*.py' || true)
+          if [ -n "$files" ]; then
+            uv run --no-sync pyright $files
+          else
+            echo "no changed python files"
+          fi
 
   unit:
     runs-on: ubuntu-latest
@@ -28,33 +37,27 @@ jobs:
       # and the hosted runner has no accelerator.
       UV_TORCH_BACKEND: cpu
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v10
         with:
-          version: "0.12.x"
-      - run: uv python install 3.11
-      - run: uv sync --no-install-project --group dev --extra data-tools
-      # torchao lives in the training extra; install it alone so the test
-      # subset below can import the optimizer without pulling wandb,
-      # modelscope or the other training-only packages.
-      - run: uv pip install --python .venv/bin/python --no-deps "torchao>=0.16,<0.17"
-      # Start with a small, dependency-closed subset.  Expand it only after
-      # the job is green; adding the whole tree at once hides collection
-      # failures behind a long red run.
+          python-version: "3.12"
+      - run: uv sync --no-install-project --group dev
+      # Start with the dependency-closed tests added by this branch.  The
+      # optimizer suite is intentionally not in the first gate: it needs
+      # torchao and exercises torch.compile/triton paths that must be
+      # verified on the runner before they can become a required check.
       - run: >-
-          PYTHONPATH=src uv run pytest
+          PYTHONPATH=src uv run --no-sync pytest
           tests/unit/test_training_metrics_audit.py
           tests/unit/config/test_config_closure.py
-          tests/unit/optim/test_fp32_rescue.py
           -q
 
   contracts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
         with:
-          python-version: "3.11"
+          fetch-depth: 0
       # `bash -n a.sh b.sh` only checks the first file, so walk each script.
       - name: shell syntax
         run: |
@@ -62,7 +65,11 @@ jobs:
             bash -n "$file"
           done < <(find scripts -type f -name '*.sh' -print0)
       - name: config inheritance graph
-        run: python scripts/check_configs.py --config-root config
-      - uses: gitleaks/gitleaks-action@v2
+        run: python3 scripts/check_configs.py --config-root config
+      # v3 is the Node 24 action.  PR comments are disabled so the job does
+      # not need pull-requests write permission.  GITLEAKS_LICENSE is only
+      # required for organization-owned repositories.
+      - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"

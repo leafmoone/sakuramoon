@@ -18,7 +18,7 @@ import sys
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 EXTERNAL_MANIFEST = "external-parents.toml"
 SCHEMA_VERSION = 1
@@ -27,8 +27,8 @@ SCHEMA_VERSION = 1
 @dataclass
 class ConfigFile:
     path: str
-    extends: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
+    extends: list[str] = field(default_factory=list[str])
+    errors: list[str] = field(default_factory=list[str])
 
 
 @dataclass
@@ -46,38 +46,64 @@ def _relative(path: Path, root: Path) -> str:
         return path.as_posix()
 
 
-def _load_external(path: Path) -> dict[str, str]:
+def _load_external(path: Path, root: Path) -> dict[str, str]:
     if not path.is_file():
         return {}
-    payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    payload = cast(
+        dict[str, object], tomllib.loads(path.read_text(encoding="utf-8"))
+    )
     external = payload.get("external", {})
-    if type(external) is not dict:
-        raise ValueError("external-parents.toml: [external] must be a table")
+    if not isinstance(external, dict):
+        raise TypeError("external-parents.toml: [external] must be a table")
     result: dict[str, str] = {}
-    for key, value in external.items():
+    for raw_key, value in cast(dict[object, object], external).items():
+        if type(raw_key) is not str:
+            raise TypeError("external-parents.toml: keys must be strings")
         if type(value) is not str:
             raise ValueError(
                 "external-parents.toml: keys must be quoted; "
-                f"{key!r} parsed as a nested table"
+                f"{raw_key!r} parsed as a nested table"
             )
-        result[key] = value
+        key = raw_key
+        candidate = Path(key)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError(
+                "external-parents.toml: keys must be root-relative without '..'; "
+                f"got {key!r}"
+            )
+        try:
+            normalized = (root / candidate).resolve().relative_to(root).as_posix()
+        except ValueError as exc:
+            raise ValueError(
+                "external-parents.toml: key escapes the config root; "
+                f"got {key!r}"
+            ) from exc
+        result[normalized] = value
     return result
 
 
 def _read_config(path: Path) -> ConfigFile:
     record = ConfigFile(path=path.as_posix())
     try:
-        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+        payload = cast(
+            dict[str, object],
+            tomllib.loads(path.read_text(encoding="utf-8")),
+        )
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         record.errors.append(f"invalid TOML: {type(exc).__name__}")
         return record
     raw = payload.get("extends", [])
-    if type(raw) is not list or any(type(item) is not str for item in raw):
+    if not isinstance(raw, list):
         record.errors.append("extends must be an array of relative TOML paths")
         return record
-    if len(raw) != len(set(raw)):
+    items = cast(list[object], raw)
+    if any(type(item) is not str for item in items):
+        record.errors.append("extends must be an array of relative TOML paths")
+        return record
+    extends = cast(list[str], items)
+    if len(extends) != len(set(extends)):
         record.errors.append("extends contains duplicate paths")
-    record.extends = list(raw)
+    record.extends = extends
     return record
 
 
@@ -91,8 +117,8 @@ def check(config_root: Path) -> dict[str, Any]:
     root = config_root.resolve()
     manifest_path = root / EXTERNAL_MANIFEST
     try:
-        external = _load_external(manifest_path)
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError) as exc:
+        external = _load_external(manifest_path, root)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, TypeError, ValueError) as exc:
         return {
             "schema_version": SCHEMA_VERSION,
             "config_root": str(root),
@@ -105,7 +131,11 @@ def check(config_root: Path) -> dict[str, Any]:
             "errors": [{"path": str(manifest_path), "error": str(exc)}],
             "ok": False,
         }
-    files = sorted(path for path in root.rglob("*.toml") if path != manifest_path)
+    files = sorted(
+        path
+        for path in root.rglob("*.toml")
+        if path != manifest_path and path.is_file()
+    )
     records = [_read_config(path) for path in files]
     by_path = {_relative(Path(record.path), root): record for record in records}
 
@@ -123,7 +153,7 @@ def check(config_root: Path) -> dict[str, Any]:
             if target.is_file():
                 references.append(Reference(name, entry, target_name, "resolved"))
                 edges[name].add(target_name)
-            elif entry in external or target_name in external:
+            elif target_name in external:
                 references.append(Reference(name, entry, target_name, "external"))
             else:
                 references.append(Reference(name, entry, target_name, "missing"))
@@ -165,6 +195,12 @@ def check(config_root: Path) -> dict[str, Any]:
         "invalid": invalid,
         "cycles": cycles,
         "errors": errors,
+        "notes": [
+            (
+                "Only extends edges resolvable inside this checkout are traversed; "
+                "cycles through external or missing parents are not visible."
+            )
+        ],
         "ok": ok,
     }
 

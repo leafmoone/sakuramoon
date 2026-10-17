@@ -108,6 +108,37 @@ def test_reports_invalid_toml(tmp_path: Path) -> None:
     assert report["errors"][0]["path"].endswith("broken.toml")
 
 
+def test_external_keys_are_root_relative(tmp_path: Path) -> None:
+    _write(tmp_path / "sub" / "child.toml", "extends = ['base.toml']\n")
+    _write(
+        tmp_path / "external-parents.toml",
+        "[external]\n\"base.toml\" = 'root-only'\n",
+    )
+
+    root_key = checker.check(tmp_path)
+    assert root_key["ok"] is False
+    assert root_key["missing"][0]["target"] == "sub/base.toml"
+
+    _write(
+        tmp_path / "external-parents.toml",
+        "[external]\n\"sub/base.toml\" = 'deployment-only'\n",
+    )
+    nested_key = checker.check(tmp_path)
+    assert nested_key["ok"] is True
+    assert nested_key["external"][0]["target"] == "sub/base.toml"
+
+
+def test_absolute_extends_is_invalid(tmp_path: Path) -> None:
+    absolute = (tmp_path / "outside.toml").as_posix()
+    _write(tmp_path / "child.toml", f"extends = ['{absolute}']\n")
+
+    report = checker.check(tmp_path)
+
+    assert report["ok"] is False
+    assert report["invalid"][0]["entry"] == absolute
+    assert any("absolute" in item["error"] for item in report["errors"])
+
+
 def test_repository_configs_resolve(tmp_path: Path) -> None:
     """The checked-in config tree must pass once external parents are declared."""
 

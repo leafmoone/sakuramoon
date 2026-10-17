@@ -5,35 +5,50 @@ The audit separates three questions that are easy to conflate:
 
 * which update numbers are present in the file;
 * which telemetry rows are missing inside a requested window;
-* which rows are exact duplicates or disagree with another row for the same
-  update.
+* which rows are byte-identical, which repeat the same payload, and which
+  disagree with another row for the same update.
 
-A missing telemetry row is reported as a telemetry gap.  It is not evidence
-that the trainer never executed that update: the source run may have stopped
-at a save boundary, and the target run may resume at the next update.
+A missing telemetry row is a telemetry gap, not evidence that the trainer
+never executed that update: the source run may have stopped at a save
+boundary, and the target run may resume at the next update.
 
-The tool is intentionally read-only and standard-library only.  It does not
-hash the input (the project keeps no project-level artifact hashes); it
-records size, modification time, line counts and update coverage instead.
+Duplicate detection ignores ``recorded_at_unix_ns``.  The producer writes a
+fresh timestamp into every row, so a rewritten row is never byte-identical
+even when its payload is unchanged.
+
+The tool is read-only and standard-library only.  It does not persist hashes
+of the input; the transient digests below exist only to separate the three
+duplicate buckets.
 """
 
 from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
+import math
 import statistics
 import sys
-from collections.abc import Iterable, Iterator
+import zlib
+from collections import Counter
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO, cast
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+VOLATILE_KEYS = frozenset({"recorded_at_unix_ns"})
+MAX_MALFORMED = 50
+MAX_MISSING_RANGES = 1000
 MISSING_ROW_NOTE = (
     "Missing telemetry rows are gaps in this file, not proof that the "
     "corresponding updates were never executed."
+)
+NONFINITE_NOTE = (
+    "The current producer writes nonfinite_count as a constant 0; a zero "
+    "total does not by itself prove that every update was finite."
 )
 
 
@@ -42,6 +57,11 @@ class WindowStatistics:
     """Descriptive statistics for one update window."""
 
     rows: int
+    source_rows: int
+    loss_field: str
+    loss_field_used: str | None
+    loss_fallback: bool
+    loss_missing_rows: int
     loss_mean: float | None
     loss_median: float | None
     pre_clip_median: float | None
@@ -49,11 +69,21 @@ class WindowStatistics:
     clip_fraction_mean: float | None
     clipped_updates: int
     nonfinite_total: int
+    invalid_numeric_values: int
 
 
-def _open_text(path: Path) -> Any:
+@dataclass
+class _UpdateValues:
+    loss: float | None = None
+    total_loss: float | None = None
+    pre_clip: float | None = None
+    clip_fraction: float | None = None
+    nonfinite: int | None = None
+
+
+def _open_text(path: Path) -> TextIO:
     if path.suffix == ".gz":
-        return gzip.open(path, "rt", encoding="utf-8")
+        return cast(TextIO, gzip.open(path, "rt", encoding="utf-8"))
     return path.open("r", encoding="utf-8")
 
 
@@ -62,42 +92,128 @@ def _iter_lines(path: Path) -> Iterator[tuple[int, str]]:
         yield from enumerate(handle, 1)
 
 
-def _update_of(row: dict[str, Any]) -> int | None:
+def _update_of(row: dict[str, object]) -> int | None:
     value = row.get("successful_update")
-    if type(value) is int:
-        return value
-    return None
+    return value if type(value) is int else None
 
 
-def _number(row: dict[str, Any], key: str) -> float | None:
+def _number(
+    row: dict[str, object],
+    key: str,
+    invalid: list[int],
+) -> float | None:
     value = row.get(key)
     if type(value) is int or type(value) is float:
-        return float(value)
+        number = float(value)
+        if not math.isfinite(number):
+            invalid[0] += 1
+            return None
+        return number
     return None
 
 
-def _loss_of(row: dict[str, Any], field: str) -> float | None:
-    value = _number(row, field)
-    if value is not None:
+def _count(
+    row: dict[str, object],
+    key: str,
+    invalid: list[int],
+) -> int | None:
+    value = row.get(key)
+    if type(value) is int:
         return value
-    return _number(row, "total_loss")
+    if type(value) is float and not math.isfinite(value):
+        invalid[0] += 1
+    return None
 
 
-def _summarize(rows: Iterable[dict[str, Any]], loss_field: str) -> WindowStatistics:
-    rows = list(rows)
-    losses = [value for row in rows if (value := _loss_of(row, loss_field)) is not None]
-    gradients = [
-        value
-        for row in rows
-        if (value := _number(row, "pre_clip_grad_norm")) is not None
-    ]
-    clip_fractions = [
-        value
-        for row in rows
-        if (value := _number(row, "clip_fraction")) is not None
-    ]
+def _digest(text: str) -> bytes:
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
+
+
+def _canonical_payload(row: dict[str, object]) -> str:
+    payload = {key: value for key, value in row.items() if key not in VOLATILE_KEYS}
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _missing_ranges(
+    start: int,
+    end: int,
+    present: set[int],
+) -> tuple[list[list[int]], bool, int]:
+    ranges: list[list[int]] = []
+    truncated = False
+    count = 0
+    run_start: int | None = None
+    for update in range(start, end + 1):
+        if update in present:
+            if run_start is not None:
+                ranges.append([run_start, update - 1])
+                run_start = None
+        elif run_start is None:
+            run_start = update
+        count += update not in present
+    if run_start is not None:
+        ranges.append([run_start, end])
+    if len(ranges) > MAX_MISSING_RANGES:
+        ranges = ranges[:MAX_MISSING_RANGES]
+        truncated = True
+    return ranges, truncated, count
+
+
+def _choose_loss(
+    values: dict[int, _UpdateValues],
+    updates: list[int],
+    field: str,
+) -> tuple[str | None, bool, list[float], int]:
+    requested = [values[update].loss for update in updates]
+    if any(value is not None for value in requested):
+        chosen = requested
+        used: str | None = field
+        fallback = False
+    else:
+        totals = [values[update].total_loss for update in updates]
+        if any(value is not None for value in totals):
+            chosen = totals
+            used = "total_loss"
+            fallback = True
+        else:
+            chosen = []
+            used = None
+            fallback = False
+    losses: list[float] = []
+    for value in chosen:
+        if value is not None:
+            losses.append(value)
+    requested_missing = sum(1 for value in requested if value is None)
+    return used, fallback, losses, requested_missing
+
+
+def _summarize(
+    values: dict[int, _UpdateValues],
+    updates: list[int],
+    *,
+    field: str,
+    source_rows: int,
+    invalid: int,
+) -> WindowStatistics:
+    used, fallback, losses, missing = _choose_loss(values, updates, field)
+    gradients: list[float] = []
+    clips: list[float] = []
+    nonfinite = 0
+    for update in updates:
+        item = values[update]
+        if item.pre_clip is not None:
+            gradients.append(item.pre_clip)
+        if item.clip_fraction is not None:
+            clips.append(item.clip_fraction)
+        if item.nonfinite is not None:
+            nonfinite += item.nonfinite
     return WindowStatistics(
-        rows=len(rows),
+        rows=len(updates),
+        source_rows=source_rows,
+        loss_field=field,
+        loss_field_used=used,
+        loss_fallback=fallback,
+        loss_missing_rows=missing,
         loss_mean=round(statistics.fmean(losses), 6) if losses else None,
         loss_median=round(statistics.median(losses), 6) if losses else None,
         pre_clip_median=(
@@ -105,14 +221,11 @@ def _summarize(rows: Iterable[dict[str, Any]], loss_field: str) -> WindowStatist
         ),
         pre_clip_max=round(max(gradients), 6) if gradients else None,
         clip_fraction_mean=(
-            round(statistics.fmean(clip_fractions), 6) if clip_fractions else None
+            round(statistics.fmean(clips), 6) if clips else None
         ),
-        clipped_updates=sum(1 for value in clip_fractions if value > 0.0),
-        nonfinite_total=sum(
-            int(value)
-            for row in rows
-            if (value := _number(row, "nonfinite_count")) is not None
-        ),
+        clipped_updates=sum(1 for value in clips if value > 0.0),
+        nonfinite_total=nonfinite,
+        invalid_numeric_values=invalid,
     )
 
 
@@ -125,76 +238,131 @@ def audit(
 ) -> dict[str, Any]:
     """Return an audit report for ``path``.
 
-    ``start`` and ``end`` are inclusive update bounds.  When omitted, the
-    window is the full update range present in the file.
+    ``start`` and ``end`` are inclusive update bounds.  When only one bound is
+    given, the other is inferred from the updates present in the file.  An
+    empty file with no usable update rows reports ``status=no_update_rows``
+    rather than a zero-length, apparently complete window.
     """
 
-    parsed: list[tuple[int, str, dict[str, Any]]] = []
+    present: set[int] = set()
+    values: dict[int, _UpdateValues] = {}
+    payload_digests: dict[int, set[bytes]] = {}
+    line_counts: Counter[int] = Counter()
+    line_digests: dict[int, set[bytes]] = {}
+
     malformed: list[dict[str, Any]] = []
-    for line_number, raw in _iter_lines(path):
-        text = raw.strip()
-        if not text:
-            continue
-        try:
-            row = json.loads(text)
-        except json.JSONDecodeError as exc:
-            malformed.append(
-                {"line": line_number, "error": f"{type(exc).__name__}: {exc.msg}"}
+    malformed_total = 0
+    schema_versions: set[int] = set()
+    total_lines = 0
+    blank_lines = 0
+    rows = 0
+    rows_without_update = 0
+    invalid = [0]
+    container_error: str | None = None
+
+    try:
+        for line_number, raw in _iter_lines(path):
+            total_lines += 1
+            text = raw.strip()
+            if not text:
+                blank_lines += 1
+                continue
+            try:
+                loaded: object = json.loads(text)
+            except json.JSONDecodeError as exc:
+                malformed_total += 1
+                if len(malformed) < MAX_MALFORMED:
+                    malformed.append(
+                        {
+                            "line": line_number,
+                            "error": f"{type(exc).__name__}: {exc.msg}",
+                        }
+                    )
+                continue
+            if type(loaded) is not dict:
+                malformed_total += 1
+                if len(malformed) < MAX_MALFORMED:
+                    malformed.append(
+                        {"line": line_number, "error": "row is not an object"}
+                    )
+                continue
+            row = cast(dict[str, object], loaded)
+            rows += 1
+            update = _update_of(row)
+            if update is None:
+                rows_without_update += 1
+                continue
+            present.add(update)
+            schema_version = _count(row, "schema_version", invalid)
+            if schema_version is not None:
+                schema_versions.add(schema_version)
+            payload = _canonical_payload(row)
+            payload_digests.setdefault(update, set()).add(_digest(payload))
+            line_counts[update] += 1
+            line_digests.setdefault(update, set()).add(_digest(text))
+            values[update] = _UpdateValues(
+                loss=_number(row, loss_field, invalid),
+                total_loss=_number(row, "total_loss", invalid),
+                pre_clip=_number(row, "pre_clip_grad_norm", invalid),
+                clip_fraction=_number(row, "clip_fraction", invalid),
+                nonfinite=_count(row, "nonfinite_count", invalid),
             )
-            continue
-        if type(row) is not dict:
-            malformed.append({"line": line_number, "error": "row is not an object"})
-            continue
-        parsed.append((line_number, text, row))
+    except (EOFError, OSError, zlib.error) as exc:
+        container_error = f"{type(exc).__name__}: {exc}"
 
-    updates = [
-        update
-        for _, _, row in parsed
-        if (update := _update_of(row)) is not None
-    ]
-    present = set(updates)
-    first_update = min(updates) if updates else None
-    last_update = max(updates) if updates else None
-    window_start = start if start is not None else first_update
-    window_end = end if end is not None else last_update
-
-    selected: list[dict[str, Any]] = []
-    exact_duplicates = 0
-    if window_start is not None and window_end is not None:
+    first_update = min(present) if present else None
+    last_update = max(present) if present else None
+    if not present:
+        window_status = "no_update_rows"
+        window_start = start
+        window_end = end
+        expected: int | None = None
+        missing_ranges: list[list[int]] = []
+        missing_truncated = False
+        missing_count = 0
+        selected: list[int] = []
+        conflicting: list[int] = []
+        same_payload_extra = 0
+        byte_identical_extra = 0
+        selected_rows = 0
+    else:
+        window_status = "ok"
+        window_start = start if start is not None else first_update
+        window_end = end if end is not None else last_update
+        if window_start is None or window_end is None:
+            raise ValueError("window bounds could not be resolved")
         if window_start > window_end:
             raise ValueError("start must not be greater than end")
-        seen_text: set[str] = set()
-        by_update: dict[int, list[str]] = {}
-        for _, text, row in parsed:
-            update = _update_of(row)
-            if update is None or not window_start <= update <= window_end:
-                continue
-            selected.append(row)
-            if text in seen_text:
-                exact_duplicates += 1
-            seen_text.add(text)
-            by_update.setdefault(update, []).append(text)
-        conflicting = sorted(
-            update for update, texts in by_update.items() if len(set(texts)) > 1
+        selected = sorted(
+            update for update in present if window_start <= update <= window_end
         )
         expected = window_end - window_start + 1
-        distinct_updates = len(by_update)
-        missing = sorted(
-            update for update in range(window_start, window_end + 1)
-            if update not in present
+        missing_ranges, missing_truncated, missing_count = _missing_ranges(
+            window_start, window_end, present
         )
-    else:
-        conflicting = []
-        expected = 0
-        distinct_updates = 0
-        missing = []
+        conflicting = sorted(
+            update
+            for update in selected
+            if len(payload_digests.get(update, set())) > 1
+        )
+        same_payload_extra = sum(
+            line_counts[update] - len(payload_digests[update])
+            for update in selected
+        )
+        byte_identical_extra = sum(
+            line_counts[update] - len(line_digests[update])
+            for update in selected
+        )
+        selected_rows = sum(line_counts[update] for update in selected)
 
-    schema_versions = sorted(
-        {
-            int(value)
-            for _, _, row in parsed
-            if type(value := row.get("schema_version")) is int
-        }
+    statistics_payload = asdict(
+        _summarize(
+            values,
+            selected,
+            field=loss_field,
+            source_rows=selected_rows,
+            invalid=invalid[0],
+        )
     )
     stat = path.stat()
     return {
@@ -206,28 +374,36 @@ def audit(
             "modified": datetime.fromtimestamp(stat.st_mtime)
             .astimezone()
             .isoformat(timespec="seconds"),
-            "rows": len(parsed),
-            "malformed_rows": len(malformed),
+            "total_lines": total_lines,
+            "blank_lines": blank_lines,
+            "rows": rows,
+            "malformed_rows": malformed_total,
+            "rows_without_update": rows_without_update,
             "first_update": first_update,
             "last_update": last_update,
-            "schema_versions": schema_versions,
+            "schema_versions": sorted(schema_versions),
+            "container_error": container_error,
         },
         "window": {
+            "status": window_status,
             "start": window_start,
             "end": window_end,
             "expected_updates": expected,
-            "selected_rows": len(selected),
-            "distinct_updates": distinct_updates,
+            "selected_rows": selected_rows,
+            "distinct_updates": len(selected),
             "coverage": (
-                round(distinct_updates / expected, 6) if expected else None
+                round(len(selected) / expected, 6) if expected else None
             ),
-            "missing_updates": missing,
-            "exact_duplicate_rows": exact_duplicates,
+            "missing_count": missing_count,
+            "missing_ranges": missing_ranges,
+            "missing_ranges_truncated": missing_truncated,
+            "same_payload_extra_rows": same_payload_extra,
+            "byte_identical_extra_rows": byte_identical_extra,
             "conflicting_updates": conflicting,
         },
-        "statistics": asdict(_summarize(selected, loss_field)),
-        "malformed": malformed[:50],
-        "notes": [MISSING_ROW_NOTE],
+        "statistics": statistics_payload,
+        "malformed": malformed,
+        "notes": [MISSING_ROW_NOTE, NONFINITE_NOTE],
     }
 
 
@@ -243,6 +419,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.out is not None and args.out.resolve() == args.metrics.resolve():
+        raise SystemExit("--out must not point at the audited input")
     report = audit(
         args.metrics,
         start=args.start,
