@@ -41,7 +41,11 @@ from sakuramoon.train.step import (
     TrainableComposite,
     TrainableCompositeInputs,
 )
-from sakuramoon.train.tensor_metrics import tensor_cosine
+from sakuramoon.train.tensor_metrics import (
+    TrainingSamplingError,
+    tensor_cosine,
+    tensor_cosine_rows,
+)
 
 if TYPE_CHECKING:
     # Type-only: sakuramoon.train.runtime pulls the full training import
@@ -187,10 +191,17 @@ def _rowwise_slot_cosine_reference(
 
 
 def test_slot_cosine_vectorized_matches_rowwise_reference() -> None:
-    """Numerical-equivalence regression (Phase 1 fix 2a): the
-    no-per-row-conversion ``_slot_cosine`` must produce BITWISE-identical
-    values to the old per-row loop on the same inputs — same tensor_cosine
-    primitive calls per row, double-precision mean."""
+    """Numerical-equivalence regression (Phase 1 fix 2a, reviewer
+    rework): the batched ``_slot_cosine`` (shared primitive
+    ``tensor_cosine_rows``) must stay NUMERICALLY equivalent to the old
+    per-row scalar path (row-by-row ``tensor_cosine``) on the same
+    inputs.  Bitwise identity does NOT hold — the batched reduction
+    kernels order float32 additions differently from per-row
+    ``torch.dot``; the measured bound is 6.6e-7 absolute over 5671
+    random comparisons (2000 seeds/shapes/scales, CPU), so the bound
+    asserted here is 1e-6 (10x margin).  That is three orders of
+    magnitude below the ~4e-3 weight-update drift these diagnostics
+    exist to track."""
 
     generator = torch.Generator()
     generator.manual_seed(2026)
@@ -210,7 +221,34 @@ def test_slot_cosine_vectorized_matches_rowwise_reference() -> None:
                     left, right, bias, active
                 )
                 actual = _slot_cosine(left, right, bias, active)
-                assert reference == actual  # bitwise, not approx
+                assert reference == pytest.approx(actual, abs=1e-6)
+
+
+def test_tensor_cosine_rows_matches_scalar_and_error_contract() -> None:
+    """Shared batched primitive contract (Phase 1 fix 2a, reviewer
+    rework): per-row values within the batched float32-reduction bound
+    of the scalar ``tensor_cosine``; same zero-norm error contract; the
+    same invalid-shape rejection; returns ``[N]``."""
+
+    left = torch.tensor([[3.0, 4.0, 0.5], [1.0, 2.0, 0.25], [6.0, 8.0, 1.0]])
+    right = torch.tensor([[3.0, 0.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0]])
+    rows = tensor_cosine_rows(left, right)
+    assert rows.shape == (3,)
+    for i in range(3):
+        assert rows[i].item() == pytest.approx(
+            tensor_cosine(left[i], right[i]).item(), abs=1e-6
+        )
+    # zero-norm row: same error contract as the scalar primitive
+    zero = left.clone()
+    zero[1] = 0.0
+    with pytest.raises(TrainingSamplingError, match="zero norm"):
+        tensor_cosine_rows(zero, right)
+    # invalid pairs
+    with pytest.raises(TrainingSamplingError, match="non-empty"):
+        tensor_cosine_rows(left, left[:, :2])
+    empty = left[0:0]
+    with pytest.raises(TrainingSamplingError, match="non-empty"):
+        tensor_cosine_rows(empty, empty)
 
 
 def test_slot_cosine_nonfinite_inputs_are_advisory_none() -> None:

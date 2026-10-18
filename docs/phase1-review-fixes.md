@@ -2,6 +2,12 @@
 
 对应 root 2026-10-17 执行单。工作区：隔离 worktree `D:/WORK/.sakuramoon-p1fix`
 （detached HEAD @ 6a85df8）。基线：origin/dev + 本分支既有提交。
+**修订记录**：2026-10-18 复审（85cbbf3）两条 P1 后重做 2a——
+(1) 首版 2a 的 `torch.empty(rows)` 无 device 参数，CUDA 下逐行 DtoH、
+无收益（§1.2/§2 已更正）；(2) 余弦数学从 stream 回收到共享模块的
+批量原语 `tensor_cosine_rows`，标量 `tensor_cosine` 逐字未动。
+§4.1 的 CI/本地测试口径一并更正（CI unit 门 46/0 vs 本地 7 文件集合
+68/5）。
 
 ## 1. 已修复的问题与对应测试
 
@@ -28,19 +34,36 @@
 
 ### 1.2 性能优化（执行单第 2 条）
 
-**2a `_slot_cosine` 去逐样本标量转换**
-（`condition_diagnostics_stream.py:150`）：
+**2a `_slot_cosine` 去逐样本标量转换**（复审 P1 后重做）：
 
-- 数学不变：每行仍是 `tensor_cosine` 的**同一组原语调用**
-  （`left[row].norm() * right[row].norm()` 分母 + 1e-12 阈值 +
-  `torch.dot` 商），active 样本语义与零范数处理契约（任一行分母
-  ≤1e-12 → `None`）不变。`tensor_cosine` 本体未动。
-- 变化仅在管道：逐行结果累积进设备张量，**消除每样本一次
-  GPU→Python 标量转换**（旧版 `float(value)` 逐行强制同步，DCU 上
-  反复打断异步流水）。整次调用只有约 5 次整张量同步
-  （2×isfinite + any() + isfinite(cosines) + 最终 float），与行数无关。
-- 均值用 `cosines.double().mean()`：500 组随机输入下与旧版
-  "逐行 float() + Python double 顺序累加"**逐位相同**（见下方等价回归测试）。
+- 共享工具集中提供**真批量**原语 `tensor_cosine_rows`
+  （`src/sakuramoon/train/tensor_metrics.py`）：与标量 `tensor_cosine`
+  同一数学定义（float32、逐行 `x.norm() * y.norm()` 分母 + 1e-12
+  阈值 + dot/分母商），`[N,D]` 进 `[N]` 出，**在输入设备上整张量
+  内核完成**——无 Python 行循环、无逐行内核启动、无逐行
+  device→host 拷贝；零范数行抛 `TrainingSamplingError`（与标量原语
+  同一错误契约），stream 照旧 catch → `None`。
+- 标量 `tensor_cosine` **逐字未动**（9826ffe 版本，采样时诊断的
+  逐位等价保证不受影响）；stream 的 `_slot_cosine` 只剩诊断
+  advisory 层（非有限输入/结果 → `None`、空 active → `None`、
+  `double().mean()`），不再持有第二份余弦实现（85cbbf3 把
+  norm/dot/quotient 复制进 stream 的问题，按复审意见已回收到
+  共享模块）。
+- **85cbbf3 首版 2a 的设备 bug（复审 P1-1）如实记录**：
+  `torch.empty(rows)` 无 device 参数，CUDA 环境下是 CPU 张量，
+  `buffer[row] = CUDA_scalar` 逐行 DtoH——本机全 CPU 验证从未暴露，
+  首版报告"设备张量累积、约 5 次同步"的说法在 CUDA 下不成立。
+  复审 RTX 4060 profile 证据：旧版 40 次 DtoH，85cbbf3 新版 42 次
+  （两次 CPU buffer 写入 × 20 行 + 2 次 pinned），**无收益**。
+  本版彻底删除累积 buffer：所有中间量由输入张量在输入设备上派生，
+  整次调用 device→host 同步恰好 5 次（2×isfinite 输入 + 阈值 any()
+  + isfinite(cosines) + 最终 mean 的 float），与行数无关。
+- **数值等价而非逐位等价（如实）**：批量归约内核与逐行
+  `torch.dot` 的 float32 加法顺序不同，逐位相同不可达（本机
+  2000 组随机种子/形状/尺度共 5671 次对比实测最差 **6.6e-7
+  绝对差**，均值近零时相对差放大至 ~6e-3）。诊断是 advisory，
+  跟踪的是 ~4e-3 量级的权重更新漂移，1e-6 级噪声低三个数量级；
+  等价测试按 `abs=1e-6`（10× margin）断言。
 
 **2b 消除 microbatch 重复计算**（root 指定实现方式，选项 1）：
 
@@ -72,10 +95,12 @@
 
 测试：
 - 数值等价：`test_slot_cosine_vectorized_matches_rowwise_reference`
-  (:189) —— 向量化结果与逐行参考实现（6a85df8 原实现，保留在测试里做
-  参考）**逐位相等**（`==`，非 approx），20 组形状×尺度组合 + 分段
-  active 子集。实现改错（换批量 GEMM 点积、换均值归约、改阈值语义）
-  会红。
+  —— 批量 `_slot_cosine` 与旧逐行标量路径（逐行 `tensor_cosine`，
+  参考实现保留在测试里）按 `abs=1e-6` 等价（实测边界 6.6e-7，
+  10× margin；逐位不等价的依据写在测试 docstring）。
+- 共享原语契约：`test_tensor_cosine_rows_matches_scalar_and_error_contract`
+  —— 逐行值在等价界内、零范数行抛 `TrainingSamplingError`、
+  非法形状/空拒绝、`[N]` 返回。
 - 非诊断路径不受影响 + 接线钉住：结构守卫扩展
   （:817 起）——
   - (e) `measure` 方法源必须含
@@ -119,20 +144,33 @@ loop 协议变更必须更新 3 个既有调用方文件，使其进入改动集
 
 ## 2. 诊断开销优化前后的测量
 
-**合成基准（CPU，非生产）** —— Windows CPU 环境，`_slot_cosine` 同输入
-对比，n=300 均值，B=20（生产 local_batch），值逐位相等：
+### 2a（复审 P1 重做后）
 
-| 配置 | 旧（逐行 float 转换） | 新（张量累积） | 说明 |
+**GPU 侧（复审 RTX 4060 / torch 2.11.0+cu128 profile，B=20/M=64）**：
+
+| 版本 | DtoH 拷贝 | 总同步 |
+|---|---|---|
+| 6a85df8 旧版（逐行 float()） | 40（pinned） | 40 |
+| 85cbbf3 首版（CPU buffer 逐行写入） | 40（pageable）+2（pinned） | 42 |
+| 本版（共享批量原语） | **分析值 5 次**（未在本机复测，无 GPU） | 5 |
+
+本版的 5 = 2×isfinite 输入 + 阈值 `any()` + isfinite(cosines) + 最终
+`float(mean)`，全部是整张量谓词/标量归约，**与行数无关**；无累积
+buffer、无逐行内核启动、无 Python 行循环（中间量全部由输入张量在
+输入设备上派生，设备归属由构造保证，不存在 85cbbf3 那种 CPU buffer）。
+**本机无 GPU，4060 上的实际 DtoH 计数请复审用同一 profile 方法复测
+后确认。**
+
+**合成基准（CPU wall-clock，非生产，n=300 均值）**：
+
+| 配置 | 旧（逐行 float 转换） | 本版（共享批量原语） | 说明 |
 |---|---|---|---|
-| B=20, M=64 | 549.8 µs/次 | 602.4 µs/次 | 0.91× |
-| B=20, M=256 | 534.2 µs/次 | 601.7 µs/次 | 0.89× |
+| B=20, M=64 | 551.9 µs/次 | 147.5 µs/次 | 0.27× |
+| B=20, M=256 | 652.8 µs/次 | 202.7 µs/次 | 0.31× |
 
-**CPU 上无收益甚至略慢，这是预期且如实记录**：CPU 路径上没有
-device→host 同步壁垒，`float()` 很便宜，而新实现多几次整张量
-`isfinite/any` 启动开销。2a 的收益机制在 GPU/DCU：旧版每行一次
-`float(value)` = 每 slot 每到期 microbatch **B 次强制同步**打断异步
-流水；新版固定约 5 次整张量同步，与 B 无关。**DCU/last42 上的真实
-数字需训练机复验**（本机无 GPU，不冒称生产性能）。
+CPU 上 3.5–3.7× 来自消除 Python 行循环（2B 次逐行调度和 2B 次
+float() 调用）；GPU 上的收益机制则是逐行 DtoH 同步消除（40→5）。
+DCU/last42 真实数字需训练机复验，不冒称生产性能。
 
 **2b 条件器前向次数 K→1（结构性事实，非测量）**：
 修复前到期 update 的每个 microbatch 都调一次
@@ -157,12 +195,18 @@ update 省 19 次条件器前向（该前向与训练前向同规模）。
 ### 4.1 已运行（worktree，主区 venv：Python 3.12.13 / torch 2.13.0+cpu /
 pyright 1.1.414，`PYTHONPATH=src`）
 
-- CI unit 门 4 文件 + 受影响的 loop/step 测试：
-  `pytest tests/unit/test_training_metrics_audit.py tests/unit/config/test_config_closure.py
+- CI unit 门 4 文件 + 受影响的 loop/step 测试（7 文件集合，本地
+  Windows）：`pytest tests/unit/test_training_metrics_audit.py
+  tests/unit/config/test_config_closure.py
   tests/unit/config/test_condition_diagnostics_config.py
-  tests/unit/train/test_condition_diagnostics_stream.py tests/unit/train/test_step.py
-  tests/unit/train/test_g1_alpha_runtime.py tests/unit/train/test_irepa_lambda_binding.py`
-  → **67 passed, 5 skipped**（skip 全为 LINUX_ONLY 标记，本机 Windows）。
+  tests/unit/train/test_condition_diagnostics_stream.py
+  tests/unit/train/test_step.py tests/unit/train/test_g1_alpha_runtime.py
+  tests/unit/train/test_irepa_lambda_binding.py`
+  → **68 passed, 5 skipped**（skip 全为 LINUX_ONLY 标记，本机 Windows）。
+  口径澄清（复审指出）：CI unit 门（Linux）实测是 **46 passed /
+  0 skipped**（仅门内 4 文件，无 LINUX_ONLY 可跳），本交付消息此前
+  误把本地 7 文件集合的 67/5 当作 CI 口径；两者都是真实数字，但
+  范围不同。
 - 全 `tests/unit`（排除 7 个既有环境缺依赖的收集错误文件：fcntl×6、
   onnxruntime×1，均与基线相同）→ **26 failed, 1308 passed, 80 skipped**。
   26 个失败逐一与主区基线（未改动的 6a85df8）比对：同测试同样失败
@@ -184,18 +228,21 @@ pyright 1.1.414，`PYTHONPATH=src`）
 
 ### 4.3 剩余风险
 
-1. **2a 的 DCU 收益未实测**：CPU 基准显示 0.9×（如实记录）；
-   GPU 侧收益依赖"同步次数减少"机制，需在 last42 用
-   `config/train_g1.toml` 量级（B=20, M≈slot 宽度）复测
-   微基准 + 端到端到期 update 耗时。
-2. **`torch.manual_seed` 的 torch-stub 缺口**（torch 2.13 的
+1. **2a 的 GPU DtoH 计数是分析值（5 次），未在 GPU 上复测**：
+   本机无 GPU；4060 上的实际计数请复审用同一 profile 方法复测
+   确认（机制：无逐行拷贝，仅 5 次整张量谓词/标量归约，见 §2）。
+2. **批量归约的数值边界随 torch 版本可漂移**：`abs=1e-6` 断言基于
+   torch 2.13.0+cpu 实测边界 6.6e-7；torch 版本升级改变批量归约
+   内核实现时边界可能漂移——等价测试会在 CI 红，届时重新实测
+   定界（数学定义本身不变）。
+3. **`torch.manual_seed` 的 torch-stub 缺口**（torch 2.13 的
    manual_seed 参数在 stub 里是 Unknown）：按项目既有 ignore 模式
    处理，若 CI 锁定的 torch 版本 stub 修复后这些 ignore 变成冗余，
    可顺手删除（无功能影响）。
-3. **2b 的测试覆盖是"结构钉住 + 数值等价"组合**：
+4. **2b 的测试覆盖是"结构钉住 + 数值等价"组合**：
    `measure()` 无法在无 runtime fixture 的 tests/ 里行为级驱动
    （CUDA + 完整前向图），故"只在最后 microbatch 计算"由方法级
    源码守卫钉住（与既有 (a)/(b)/(c)/(d) 守卫同型，root 已认可该
    模式）；若 loop 未来引入 retry/跳 microbatch 语义，
    `microbatch_index == accumulation - 1` 的接线需同步复核。
-4. **sampling.py 本地 pyright 4 个 artifact**（见 4.1 注）：以 CI 为准。
+5. **sampling.py 本地 pyright 4 个 artifact**（见 4.1 注）：以 CI 为准。

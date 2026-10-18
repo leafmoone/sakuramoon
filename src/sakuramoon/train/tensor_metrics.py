@@ -39,6 +39,40 @@ def tensor_cosine(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
     return torch.dot(left, right) / denominator  # pyright: ignore[reportUnknownVariableType]
 
 
+def tensor_cosine_rows(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+    """Row-wise cosine, BATCHED, with the same definition as ``tensor_cosine``.
+
+    ``first``/``second`` must be 2-D tensors of the same non-empty shape
+    ``[N, D]``; returns the per-row cosines ``[N]`` **on the inputs'
+    device** — a handful of whole-tensor kernels, no per-row kernel
+    launches, no per-row device-to-host copy.  The definition is the
+    scalar primitive's: float32, the per-row ``x.norm() * y.norm()``
+    denominator with the 1e-12 threshold, dot / denominator quotient.
+
+    Raises ``TrainingSamplingError`` when any row is undefined (its
+    denominator is at/below the threshold) or the inputs are not a valid
+    pair, so callers keep the scalar path's error contract.
+
+    Per-row values are NOT guaranteed bitwise-identical to applying
+    ``tensor_cosine`` row by row: the batched reduction kernels order
+    float32 additions differently.  The measured bound is recorded in the
+    equivalence test; the definition, threshold and error contract are
+    unchanged.
+    """
+
+    if first.shape != second.shape or first.ndim != 2 or first.numel() == 0:
+        raise TrainingSamplingError(
+            "diagnostic cosine rows must be a non-empty [N, D] pair"
+        )
+    left = first.float()
+    right = second.float()
+    # The same math tensor_cosine makes, batched per row.
+    denominator = left.norm(dim=1) * right.norm(dim=1)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if bool((denominator <= 1e-12).any()):  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
+        raise TrainingSamplingError("diagnostic cosine is undefined at zero norm")
+    return torch.einsum("nd,nd->n", left, right) / denominator  # pyright: ignore[reportUnknownVariableType]
+
+
 def metric_float(name: str, value: torch.Tensor) -> float:
     result = float(value.detach().cpu().item())
     if not math.isfinite(result):
@@ -50,5 +84,6 @@ __all__ = [
     "TrainingSamplingError",
     "metric_float",
     "tensor_cosine",
+    "tensor_cosine_rows",
     "tensor_rms",
 ]

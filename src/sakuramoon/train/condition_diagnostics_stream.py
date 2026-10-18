@@ -75,6 +75,7 @@ from sakuramoon.train.step import (
 from sakuramoon.train.tensor_metrics import (
     TrainingSamplingError,
     metric_float,
+    tensor_cosine_rows,
     tensor_rms,
 )
 
@@ -156,21 +157,16 @@ def _slot_cosine(
     """Mean over active samples of cosine(slot modulation w/ condition,
     slot modulation base-only).
 
-    Each row uses the EXACT ``tensor_cosine`` primitive calls (the
-    ``left[row].norm() * right[row].norm()`` denominator with its 1e-12
-    threshold and the ``torch.dot`` quotient) — the 9826ffe shared-primitive
-    math is preserved row for row, and the double-precision mean is
-    bitwise-equal to the previous per-row ``float()`` + Python-sequential
-    accumulation (500-case regression, see the equivalence test).  What
-    changed is only the plumbing: no per-sample device-to-Python scalar
-    conversion (the old loop's ``float(value)`` stalled the async pipeline
-    once per sample per slot on DCU); the rows accumulate into device
-    tensors and a handful of whole-tensor checks sync.
+    The cosine math lives in the shared batched primitive
+    ``tensor_metrics.tensor_cosine_rows`` — the scalar ``tensor_cosine``
+    definition applied per row, as a handful of whole-tensor kernels on
+    the inputs' device (no per-row kernel launches, no per-row
+    device-to-host copy; the scalar ``tensor_cosine`` itself is
+    untouched).  This wrapper adds only the diagnostic advisory policy
+    on top: nonfinite input or result -> ``None`` (never a training
+    failure), no active samples -> ``None``.
 
-    ``shared_*`` are ``[B, M]``; ``bias`` is ``[M]``.  ``None`` when
-    undefined: no active samples, a zero-norm row, or a nonfinite
-    input/result — nonfinite is advisory under the diagnostic contract,
-    never a training failure.
+    ``shared_*`` are ``[B, M]``; ``bias`` is ``[M]``.
     """
 
     if active_indices.numel() == 0:
@@ -180,26 +176,18 @@ def _slot_cosine(
         shared_with_condition.index_select(0, active_indices).float() + bias_f
     ).flatten(1)
     right = (shared_base_only.index_select(0, active_indices).float() + bias_f).flatten(1)
-    # Nonfinite input -> advisory None (the old float() path would have
-    # let NaN/inf through to the record and the JSONL writer).
+    # Nonfinite input -> advisory None (the shared primitive's float() cast
+    # would otherwise let NaN/inf through to the record and the JSONL writer).
     if not torch.isfinite(left).all() or not torch.isfinite(right).all():
         return None
-    rows = left.shape[0]
-    denominator = torch.empty(rows)
-    dots = torch.empty(rows)
-    for row in range(rows):
-        # The same primitive calls tensor_cosine makes, per row.
-        denominator[row] = (
-            left[row].norm() * right[row].norm()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        )
-        dots[row] = torch.dot(left[row], right[row])
-    if bool((denominator <= 1e-12).any()):
+    try:
+        cosines = tensor_cosine_rows(left, right)
+    except TrainingSamplingError:
+        # any row at/below the 1e-12 zero-norm threshold: undefined
         return None
-    cosines = dots / denominator
     if not torch.isfinite(cosines).all():
         return None
-    # double-precision mean: bitwise-equal to the old per-row float()
-    # accumulation order (verified by the equivalence test).
+    # double-precision mean keeps the accumulation error at float64 level
     return float(cosines.double().mean())
 
 
