@@ -255,7 +255,7 @@ def test_slot_cosine_vectorized_matches_rowwise_reference() -> None:
                 batch, width, generator=generator, dtype=torch.float32
             ).cuda()
             bias = torch.randn(width, generator=generator, dtype=torch.float32).cuda()
-            active = torch.arange(batch)  # full-active on device
+            active = torch.arange(batch, device=left.device)  # full-active on device
             reference = _rowwise_slot_cosine_reference(left, right, bias, active)
             actual = _slot_cosine(left, right, bias, active)
             assert reference == pytest.approx(actual, abs=1e-5)
