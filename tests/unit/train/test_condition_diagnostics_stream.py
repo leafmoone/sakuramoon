@@ -41,6 +41,7 @@ from sakuramoon.train.step import (
     TrainableComposite,
     TrainableCompositeInputs,
 )
+from sakuramoon.train.tensor_metrics import tensor_cosine
 
 if TYPE_CHECKING:
     # Type-only: sakuramoon.train.runtime pulls the full training import
@@ -159,6 +160,114 @@ def test_slot_cosine_values() -> None:
         ]
     )
     assert expected == pytest.approx(direct.item())
+
+
+def _rowwise_slot_cosine_reference(
+    shared_with_condition: torch.Tensor,
+    shared_base_only: torch.Tensor,
+    bias: torch.Tensor,
+    active_indices: torch.Tensor,
+) -> float | None:
+    """The 6a85df8 per-row implementation, kept as the equivalence
+    reference: row-by-row ``tensor_cosine`` calls + per-row ``float()``
+    conversion + Python-sequential double accumulation."""
+
+    if active_indices.numel() == 0:
+        return None
+    bias_f = bias.float()
+    left = shared_with_condition.index_select(0, active_indices).float()
+    left = left + bias_f
+    right = shared_base_only.index_select(0, active_indices).float()
+    right = right + bias_f
+    rows = left.shape[0]
+    total = 0.0
+    for row in range(rows):
+        total += float(tensor_cosine(left[row], right[row]))
+    return total / rows
+
+
+def test_slot_cosine_vectorized_matches_rowwise_reference() -> None:
+    """Numerical-equivalence regression (Phase 1 fix 2a): the
+    no-per-row-conversion ``_slot_cosine`` must produce BITWISE-identical
+    values to the old per-row loop on the same inputs — same tensor_cosine
+    primitive calls per row, double-precision mean."""
+
+    generator = torch.Generator()
+    generator.manual_seed(2026)
+    for batch, width in [
+        (1, 64),
+        (5, 32),
+        (20, 64),  # production local_batch scale
+        (23, 255),
+    ]:
+        for scale in (1e-4, 1.0, 1e3):
+            left = torch.randn(batch, width, generator=generator) * scale
+            right = torch.randn(batch, width, generator=generator) * scale
+            bias = torch.randn(width, generator=generator)
+            for start in range(0, batch, 3):
+                active = torch.arange(start, min(start + 4, batch))
+                reference = _rowwise_slot_cosine_reference(
+                    left, right, bias, active
+                )
+                actual = _slot_cosine(left, right, bias, active)
+                assert reference == actual  # bitwise, not approx
+
+
+def test_slot_cosine_nonfinite_inputs_are_advisory_none() -> None:
+    """Fix 1: nonfinite input or result -> None (advisory), never a value
+    that could reach the JSONL writer."""
+
+    a = torch.tensor([[3.0, 4.0], [1.0, 2.0]])
+    zero = torch.zeros(2)
+    nan_left = a.clone()
+    nan_left[0, 0] = float("nan")
+    assert _slot_cosine(nan_left, a, zero, torch.tensor([0, 1])) is None
+    inf_right = a.clone()
+    inf_right[1, 1] = float("inf")
+    assert _slot_cosine(a, inf_right, zero, torch.tensor([0, 1])) is None
+    nan_bias = torch.tensor([1.0, float("nan")])
+    assert _slot_cosine(a, a, nan_bias, torch.tensor([0, 1])) is None
+    # Finite input with a finite result is still a plain float.
+    assert _slot_cosine(a, a, zero, torch.tensor([0, 1])) == pytest.approx(1.0)
+
+
+def test_record_builder_validates_slot_cosine_finiteness() -> None:
+    """Fix 1: the finiteness check covers ALL fact keys (including
+    slot_cosine_*), not just the base keys; a valid record must pass
+    json.dumps(allow_nan=False)."""
+
+    update = _mini_update_result(pre_condition=0.9, post_condition=0.7)
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        polluted = dict(_mini_facts(), slot_cosine_03=bad)  # type: ignore[dict-item]
+        with pytest.raises(ValueError, match="must be finite or null"):
+            build_condition_diagnostic_record(
+                successful_update=1,
+                rank=0,
+                world_size=1,
+                update=update,
+                activation_facts=polluted,
+                slot_ids=(3, 7),
+            )
+    # A fully-finite record serializes under the sink's allow_nan=False.
+    valid = build_condition_diagnostic_record(
+        successful_update=1,
+        rank=0,
+        world_size=1,
+        update=update,
+        activation_facts=_mini_facts(),
+        slot_ids=(3, 7),
+    )
+    json.dumps(valid, allow_nan=False)
+    # ... and null slots (undefined cosine) are fine, as per the contract.
+    with_null = build_condition_diagnostic_record(
+        successful_update=1,
+        rank=0,
+        world_size=1,
+        update=update,
+        activation_facts=dict(_mini_facts(), slot_cosine_07=None),  # type: ignore[dict-arg]
+        slot_ids=(3, 7),
+    )
+    json.dumps(with_null, allow_nan=False)
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +865,21 @@ def test_compute_site_pinned_to_measure_not_observer() -> None:
         encoding="utf-8"
     )
     assert "update_number=next_growth_update" in runtime_source
+    # (e) The compute runs ONLY on the update's final microbatch (Phase 1
+    # fix 2b): one conditioner recompute per due update, off-cadence and
+    # non-final microbatches pay nothing.  Pinned in source for the same
+    # reason as (a): no runtime fixture can drive measure() in tests/.
+    assert "if every is not None and is_final_microbatch:" in measure_source
+    assert "is_final_microbatch=microbatch_index" in runtime_source
+    assert "config.train.accumulation - 1" in runtime_source
+    # (f) The loop hands the microbatch index to the loss_fn (measure
+    # wrapper); without it the final-microbatch gate has no signal.
+    from sakuramoon.train.loop import SingleGpuTrainingLoop
+
+    loop_source = Path(inspect.getfile(SingleGpuTrainingLoop)).read_text(
+        encoding="utf-8"
+    )
+    assert "self.loss_fn(batch, microbatch_index)" in loop_source
 
 
 @LINUX_ONLY

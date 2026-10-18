@@ -443,9 +443,10 @@ class RuntimeMeasurement:
     # Opt-in condition-side diagnostics (per-rank JSONL stream): the
     # SCALAR facts computed in ``measure()`` — mid-update, BEFORE
     # ``optimizer.step()`` — only when the record cadence is due for this
-    # in-flight update (last-microbatch value wins).  No tensor references
-    # are retained, so no extra VRAM residency.  None unless enabled and
-    # due; the default path is byte-identical.
+    # in-flight update and this is its final microbatch (one recompute per
+    # due update).  No tensor references are retained, so no extra VRAM
+    # residency.  None unless enabled and due; the default path is
+    # byte-identical.
     condition_diagnostics: dict[str, float | int | None] | None = None
 
     def detached(self) -> RuntimeMeasurement:
@@ -965,6 +966,7 @@ class SingleGpuBatchRuntime:
         *,
         phase_timer: AnyPhaseTimer | None = None,
         update_number: int | None = None,
+        is_final_microbatch: bool = True,
     ) -> RuntimeMeasurement:
         prepared = self.prepare(batch, phase_timer=phase_timer)
         dit_flops = self.dit_flop_counter.count(prepared.inputs)
@@ -1009,15 +1011,18 @@ class SingleGpuBatchRuntime:
         )
         shape_key = f"{batch.target_height}x{batch.target_width}x{batch.dense_length}"
         # Opt-in condition diagnostics: when the in-flight update's number
-        # is due on the cadence, compute the detached facts HERE — before
-        # any gradient work and before ``optimizer.step()`` — so they use
-        # the same weights and the same condition tokens this forward
-        # feeds to the DiT (never a mixed pre/post-step state).  Only
-        # scalar floats are kept (no tensor references, no VRAM cost);
-        # later microbatches overwrite, so the last one is what lands.
+        # is due on the cadence AND this is the update's FINAL microbatch,
+        # compute the detached facts HERE — before any gradient work and
+        # before ``optimizer.step()`` — so they use the same weights and
+        # the same condition tokens this forward feeds to the DiT (never a
+        # mixed pre/post-step state, and never a second forward on stale
+        # data).  Exactly ONE conditioner recompute per due update (the
+        # final microbatch's, which is what lands); non-final and
+        # off-cadence microbatches pay nothing.  Only scalar floats are
+        # kept (no tensor references, no VRAM cost).
         condition_facts: dict[str, float | int | None] | None = None
         every = self.condition_diagnostics_every
-        if every is not None:
+        if every is not None and is_final_microbatch:
             if update_number is None:
                 raise RuntimeError(
                     "condition diagnostics are enabled but measure() got no"
@@ -1392,13 +1397,17 @@ def _run_single_gpu_training(
                     runtime.irepa_schedule.weight_for_update(next_growth_update)
                 )
 
-        def measure_batch(batch: TrainingBatch) -> torch.Tensor:
+        def measure_batch(
+            batch: TrainingBatch, microbatch_index: int
+        ) -> torch.Tensor:
             if active_phase_timer is None:
                 raise RuntimeError("training update phase timer was not initialized")
             measurement = runtime.measure(
                 batch,
                 phase_timer=active_phase_timer,
                 update_number=next_growth_update,
+                is_final_microbatch=microbatch_index
+                == config.train.accumulation - 1,
             )
             pending_measurements.append(measurement.detached())
             return measurement.per_sample_loss

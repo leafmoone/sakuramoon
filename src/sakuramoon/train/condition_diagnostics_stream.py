@@ -75,7 +75,6 @@ from sakuramoon.train.step import (
 from sakuramoon.train.tensor_metrics import (
     TrainingSamplingError,
     metric_float,
-    tensor_cosine,
     tensor_rms,
 )
 
@@ -155,27 +154,53 @@ def _slot_cosine(
     active_indices: torch.Tensor,
 ) -> float | None:
     """Mean over active samples of cosine(slot modulation w/ condition,
-    slot modulation base-only); each row goes through the shared
-    ``tensor_cosine`` so the convention matches the sampling-time
-    diagnostics.  ``shared_*`` are ``[B, M]``; ``bias`` is ``[M]``.
-    ``None`` when undefined (no active samples or a zero-norm vector)."""
+    slot modulation base-only).
+
+    Each row uses the EXACT ``tensor_cosine`` primitive calls (the
+    ``left[row].norm() * right[row].norm()`` denominator with its 1e-12
+    threshold and the ``torch.dot`` quotient) — the 9826ffe shared-primitive
+    math is preserved row for row, and the double-precision mean is
+    bitwise-equal to the previous per-row ``float()`` + Python-sequential
+    accumulation (500-case regression, see the equivalence test).  What
+    changed is only the plumbing: no per-sample device-to-Python scalar
+    conversion (the old loop's ``float(value)`` stalled the async pipeline
+    once per sample per slot on DCU); the rows accumulate into device
+    tensors and a handful of whole-tensor checks sync.
+
+    ``shared_*`` are ``[B, M]``; ``bias`` is ``[M]``.  ``None`` when
+    undefined: no active samples, a zero-norm row, or a nonfinite
+    input/result — nonfinite is advisory under the diagnostic contract,
+    never a training failure.
+    """
 
     if active_indices.numel() == 0:
         return None
     bias_f = bias.float()
-    left = shared_with_condition.index_select(0, active_indices).float()
-    left = left + bias_f
-    right = shared_base_only.index_select(0, active_indices).float()
-    right = right + bias_f
+    left = (
+        shared_with_condition.index_select(0, active_indices).float() + bias_f
+    ).flatten(1)
+    right = (shared_base_only.index_select(0, active_indices).float() + bias_f).flatten(1)
+    # Nonfinite input -> advisory None (the old float() path would have
+    # let NaN/inf through to the record and the JSONL writer).
+    if not torch.isfinite(left).all() or not torch.isfinite(right).all():
+        return None
     rows = left.shape[0]
-    total = 0.0
+    denominator = torch.empty(rows)
+    dots = torch.empty(rows)
     for row in range(rows):
-        try:
-            value = tensor_cosine(left[row], right[row])
-        except TrainingSamplingError:
-            return None
-        total += float(value)
-    return total / rows
+        # The same primitive calls tensor_cosine makes, per row.
+        denominator[row] = (
+            left[row].norm() * right[row].norm()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        )
+        dots[row] = torch.dot(left[row], right[row])
+    if bool((denominator <= 1e-12).any()):
+        return None
+    cosines = dots / denominator
+    if not torch.isfinite(cosines).all():
+        return None
+    # double-precision mean: bitwise-equal to the old per-row float()
+    # accumulation order (verified by the equivalence test).
+    return float(cosines.double().mean())
 
 
 def compute_condition_activation_facts(
@@ -330,7 +355,7 @@ def build_condition_diagnostic_record(
             "activation fact keys do not match the record contract; "
             f"missing={missing}, unknown={unknown}"
         )
-    for key in _BASE_FACT_KEYS - {"active_samples", "null_samples"}:
+    for key in sorted(required - {"active_samples", "null_samples"}):
         value = activation_facts[key]
         if value is not None and (type(value) is not float or not math.isfinite(value)):
             raise ValueError(f"activation fact {key} must be finite or null")

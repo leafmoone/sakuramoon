@@ -67,7 +67,7 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         *,
         module: nn.Module,
         optimizer: StepOptimizer,
-        loss_fn: Callable[[BatchT], torch.Tensor],
+        loss_fn: Callable[[BatchT, int], torch.Tensor],
         accumulation_steps: int,
         target_successful_updates: int,
         checkpoint_every_successful_updates: int,
@@ -261,7 +261,7 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                     )
                     with sync_context:
                         active_detection_boundary = "runtime"
-                        per_sample_loss = self.loss_fn(batch)
+                        per_sample_loss = self.loss_fn(batch, microbatch_index)
                         active_detection_boundary = "backward"
                         with self._record(phase_timer, "backward"):
                             step.backward(per_sample_loss)
