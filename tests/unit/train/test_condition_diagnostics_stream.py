@@ -193,15 +193,22 @@ def _rowwise_slot_cosine_reference(
 def test_slot_cosine_vectorized_matches_rowwise_reference() -> None:
     """Numerical-equivalence regression (Phase 1 fix 2a, reviewer
     rework): the batched ``_slot_cosine`` (shared primitive
-    ``tensor_cosine_rows``) must stay NUMERICALLY equivalent to the old
-    per-row scalar path (row-by-row ``tensor_cosine``) on the same
+    ``tensor_cosine_rows``) must stay NUMERICALLY equivalent to the
+    old per-row scalar path (row-by-row ``tensor_cosine``) on the same
     inputs.  Bitwise identity does NOT hold — the batched reduction
     kernels order float32 additions differently from per-row
-    ``torch.dot``; the measured bound is 6.6e-7 absolute over 5671
-    random comparisons (2000 seeds/shapes/scales, CPU), so the bound
-    asserted here is 1e-6 (10x margin).  That is three orders of
-    magnitude below the ~4e-3 weight-update drift these diagnostics
-    exist to track."""
+    ``torch.dot``.
+
+    The asserted bound ``abs=1e-6`` is a BOUNDING MEASUREMENT taken on
+    torch 2.13.0+cpu (worst measured 6.6e-7 over 5671 random
+    comparisons; real headroom ~1.52x, small by design of this bound),
+    NOT a universal guarantee: the reviewer independently measured
+    1.47e-6 (> 1e-6) on torch 2.11 CPU at full-active B=20/M=15360.
+    Across torch versions/shapes this test is EXPECTED to drift and go
+    red.  When it does: re-measure the worst diff on that environment
+    and re-bound with the rationale recorded here — do NOT silently
+    widen the threshold.  (The diagnostics track ~4e-3-scale weight
+    drift; any 1e-6-class bound is three orders below that.)"""
 
     generator = torch.Generator()
     generator.manual_seed(2026)
@@ -212,16 +219,48 @@ def test_slot_cosine_vectorized_matches_rowwise_reference() -> None:
         (23, 255),
     ]:
         for scale in (1e-4, 1.0, 1e3):
-            left = torch.randn(batch, width, generator=generator) * scale
-            right = torch.randn(batch, width, generator=generator) * scale
-            bias = torch.randn(width, generator=generator)
-            for start in range(0, batch, 3):
-                active = torch.arange(start, min(start + 4, batch))
+            # explicit float32 inputs: never depend on the global default
+            # dtype (the 85cbbf3 buffer class of bug)
+            left = torch.randn(
+                batch, width, generator=generator, dtype=torch.float32
+            ) * scale
+            right = torch.randn(
+                batch, width, generator=generator, dtype=torch.float32
+            ) * scale
+            bias = torch.randn(width, generator=generator, dtype=torch.float32)
+            # full-active (all rows reduced at once) plus strided windows
+            for start in range(-1, batch, 3):
+                if start < 0:
+                    active = torch.arange(batch)
+                else:
+                    active = torch.arange(start, min(start + 4, batch))
                 reference = _rowwise_slot_cosine_reference(
                     left, right, bias, active
                 )
                 actual = _slot_cosine(left, right, bias, active)
                 assert reference == pytest.approx(actual, abs=1e-6)
+    # GPU branch (reviewer follow-up): the 85cbbf3 CPU-buffer bug was
+    # invisible to CPU-only verification, so the equivalence check also
+    # runs on CUDA where available.  The ACTUAL bound on DCU/GPU is
+    # UNMEASURED: 1e-5 is a conservative placeholder, not a verified
+    # bound (the CPU bound is 1e-6 on torch 2.13.0+cpu; torch 2.11 CPU
+    # already showed 1.47e-6).  A red run re-measures and re-bounds
+    # with recorded rationale — never a silent widening.
+    if torch.cuda.is_available():
+        for batch, width in [(20, 64), (23, 255)]:
+            left = torch.randn(
+                batch, width, generator=generator, dtype=torch.float32
+            ).cuda()
+            right = torch.randn(
+                batch, width, generator=generator, dtype=torch.float32
+            ).cuda()
+            bias = torch.randn(width, generator=generator, dtype=torch.float32).cuda()
+            active = torch.arange(batch)  # full-active on device
+            reference = _rowwise_slot_cosine_reference(left, right, bias, active)
+            actual = _slot_cosine(left, right, bias, active)
+            assert reference == pytest.approx(actual, abs=1e-5)
+            del left, right, bias, reference, actual
+            torch.cuda.synchronize()
 
 
 def test_tensor_cosine_rows_matches_scalar_and_error_contract() -> None:
@@ -230,8 +269,12 @@ def test_tensor_cosine_rows_matches_scalar_and_error_contract() -> None:
     of the scalar ``tensor_cosine``; same zero-norm error contract; the
     same invalid-shape rejection; returns ``[N]``."""
 
-    left = torch.tensor([[3.0, 4.0, 0.5], [1.0, 2.0, 0.25], [6.0, 8.0, 1.0]])
-    right = torch.tensor([[3.0, 0.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0]])
+    left = torch.tensor(
+        [[3.0, 4.0, 0.5], [1.0, 2.0, 0.25], [6.0, 8.0, 1.0]], dtype=torch.float32
+    )
+    right = torch.tensor(
+        [[3.0, 0.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0]], dtype=torch.float32
+    )
     rows = tensor_cosine_rows(left, right)
     assert rows.shape == (3,)
     for i in range(3):
@@ -255,18 +298,52 @@ def test_slot_cosine_nonfinite_inputs_are_advisory_none() -> None:
     """Fix 1: nonfinite input or result -> None (advisory), never a value
     that could reach the JSONL writer."""
 
-    a = torch.tensor([[3.0, 4.0], [1.0, 2.0]])
-    zero = torch.zeros(2)
+    a = torch.tensor([[3.0, 4.0], [1.0, 2.0]], dtype=torch.float32)
+    zero = torch.zeros(2, dtype=torch.float32)
     nan_left = a.clone()
     nan_left[0, 0] = float("nan")
     assert _slot_cosine(nan_left, a, zero, torch.tensor([0, 1])) is None
     inf_right = a.clone()
     inf_right[1, 1] = float("inf")
     assert _slot_cosine(a, inf_right, zero, torch.tensor([0, 1])) is None
-    nan_bias = torch.tensor([1.0, float("nan")])
+    nan_bias = torch.tensor([1.0, float("nan")], dtype=torch.float32)
     assert _slot_cosine(a, a, nan_bias, torch.tensor([0, 1])) is None
+    # Finite inputs producing a NONFINITE result (float32 overflow in the
+    # norm product: 1e20-scale rows -> inf denominator, inf/inf -> NaN):
+    # advisory None, never a NaN record value (reviewer follow-up).
+    huge = torch.full((2, 4), 1e20, dtype=torch.float32)
+    assert (
+        _slot_cosine(huge, huge, torch.zeros(4, dtype=torch.float32), torch.tensor([0, 1]))
+        is None
+    )
     # Finite input with a finite result is still a plain float.
     assert _slot_cosine(a, a, zero, torch.tensor([0, 1])) == pytest.approx(1.0)
+
+
+def test_slot_cosine_is_independent_of_global_default_dtype() -> None:
+    """85cbbf3's `torch.empty(rows)` buffer silently took the global
+    default dtype (under set_default_dtype(float64) the old/new results
+    diverged: 0.9599999785423279 vs 0.96 — same temporary-buffer class as
+    the missing device argument).  The current path creates no
+    untyped buffer: identical values regardless of the global default,
+    for explicit-float32 inputs."""
+
+    generator = torch.Generator()
+    generator.manual_seed(7)
+    left = torch.randn(8, 32, generator=generator, dtype=torch.float32)
+    right = torch.randn(8, 32, generator=generator, dtype=torch.float32)
+    bias = torch.randn(32, generator=generator, dtype=torch.float32)
+    active = torch.arange(8)
+    expected = _slot_cosine(left, right, bias, active)
+    expected_rows = tensor_cosine_rows(left, right)
+    old_default = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        assert _slot_cosine(left, right, bias, active) == expected
+        # the shared primitive itself, not just the wrapper
+        assert torch.equal(tensor_cosine_rows(left, right), expected_rows)
+    finally:
+        torch.set_default_dtype(old_default)
 
 
 def test_record_builder_validates_slot_cosine_finiteness() -> None:

@@ -7,7 +7,12 @@
 无收益（§1.2/§2 已更正）；(2) 余弦数学从 stream 回收到共享模块的
 批量原语 `tensor_cosine_rows`，标量 `tensor_cosine` 逐字未动。
 §4.1 的 CI/本地测试口径一并更正（CI unit 门 46/0 vs 本地 7 文件集合
-68/5）。
+68/5）。同日复审补充后第二轮（本提交）：等价测试加 full-active
+batch 与 available-GPU 分支、全部测试输入显式 float32（85cbbf3 的
+临时 buffer 还依赖全局 default dtype，同属临时张量问题）；非有限
+测试加"有限输入导致非有限结果"（float32 溢出 inf/inf→NaN→advisory
+None）；新增 default-dtype 独立性回归；§2 并入复审 4060 合成
+GPU wall-clock（不支持泛称 GPU 加速，收益主体仍是 2b 的 K→1）。
 
 ## 1. 已修复的问题与对应测试
 
@@ -63,7 +68,9 @@
   2000 组随机种子/形状/尺度共 5671 次对比实测最差 **6.6e-7
   绝对差**，均值近零时相对差放大至 ~6e-3）。诊断是 advisory，
   跟踪的是 ~4e-3 量级的权重更新漂移，1e-6 级噪声低三个数量级；
-  等价测试按 `abs=1e-6`（10× margin）断言。
+  等价测试按 `abs=1e-6` 断言——**实测余量约 1.52×（不是 10×）**，
+  且这只是基于 torch 2.13.0+cpu 的一次定界，不是跨环境硬保证
+  （见 §4.3-2）。
 
 **2b 消除 microbatch 重复计算**（root 指定实现方式，选项 1）：
 
@@ -96,11 +103,28 @@
 测试：
 - 数值等价：`test_slot_cosine_vectorized_matches_rowwise_reference`
   —— 批量 `_slot_cosine` 与旧逐行标量路径（逐行 `tensor_cosine`，
-  参考实现保留在测试里）按 `abs=1e-6` 等价（实测边界 6.6e-7，
-  10× margin；逐位不等价的依据写在测试 docstring）。
+  参考实现保留在测试里）按 `abs=1e-6` 等价（torch 2.13.0+cpu
+  实测边界 6.6e-7，**实测余量约 1.52×**；逐位不等价的依据写在
+  测试 docstring）。**边界不是跨环境通用上界**：复审在 torch 2.11
+  CPU、full-active B=20/M=15360 上实测到 1.47e-6，已**超过** 1e-6
+  ——不同 torch 版本/形状会漂移，所以测试红了是预期内的信号：
+  **重测定界，不静默放宽**（写进测试 docstring 与 §4.3-2）。复审
+  补充后：覆盖 **full-active batch**（20/23 行全 active 同时归约，
+  不再只有 ≤4 行窗口；full-active 边界 torch 2.13.0+cpu 实测
+  1.8e-7）+ **available-GPU 分支**（CUDA 可用时同比较在设备上跑；
+  **DCU/GPU 上的实际边界仍未测量**，1e-5 是保守占位、非已验证
+  上界，last42 复测定界）；全部输入显式 `dtype=torch.float32`。
+- default-dtype 独立性：`test_slot_cosine_is_independent_of_global_default_dtype`
+  —— 85cbbf3 的 `torch.empty(rows)` 无 dtype，`set_default_dtype(float64)`
+  下新旧结果分歧（0.9599999785423279 vs 0.96）；当前路径不创建任何
+  未显式类型的临时张量（生产代码 grep 零 buffer 创建），测试把这条
+  钉死（wrapper 与共享原语都断言）。
 - 共享原语契约：`test_tensor_cosine_rows_matches_scalar_and_error_contract`
   —— 逐行值在等价界内、零范数行抛 `TrainingSamplingError`、
   非法形状/空拒绝、`[N]` 返回。
+- 非有限：`test_slot_cosine_nonfinite_inputs_are_advisory_none` 增加
+  **有限输入导致非有限结果**分支（1e20 量级 → 范数积溢出 inf/inf
+  → NaN → advisory None，旧实现会落 NaN 进记录）。
 - 非诊断路径不受影响 + 接线钉住：结构守卫扩展
   （:817 起）——
   - (e) `measure` 方法源必须含
@@ -172,6 +196,16 @@ CPU 上 3.5–3.7× 来自消除 Python 行循环（2B 次逐行调度和 2B 次
 float() 调用）；GPU 上的收益机制则是逐行 DtoH 同步消除（40→5）。
 DCU/last42 真实数字需训练机复验，不冒称生产性能。
 
+**合成 GPU wall-clock（复审 RTX 4060 / torch 2.11.0+cu128，B=20，
+非生产、非 DCU、非端到端；"新"列针对 85cbbf3，非本提交）**：
+M=64 旧 2985.6µs → 新 2749.4µs（1.086×），M=15360 旧 2867.5µs →
+新 2985.6µs（0.960×）。**如实结论：不支持泛称 GPU 加速**——同步
+次数下降（profiler 证据）不等于 wall-clock 加速，该合成负载在 4060
+上并非同步瓶颈。本报告不主张 2a 的 wall-clock 收益；2a 的主张限于
+（a）逐行 DtoH 消除（结构事实，待 4060 复测 857362f 计数）、
+（b）诊断值语义不变（数值等价测试）。**真正的开销主体收益是 2b 的
+K→1**（见下）。
+
 **2b 条件器前向次数 K→1（结构性事实，非测量）**：
 修复前到期 update 的每个 microbatch 都调一次
 `compute_condition_activation_facts`（accumulation=K 时 K 次，前 K-1 次
@@ -202,11 +236,12 @@ pyright 1.1.414，`PYTHONPATH=src`）
   tests/unit/train/test_condition_diagnostics_stream.py
   tests/unit/train/test_step.py tests/unit/train/test_g1_alpha_runtime.py
   tests/unit/train/test_irepa_lambda_binding.py`
-  → **68 passed, 5 skipped**（skip 全为 LINUX_ONLY 标记，本机 Windows）。
+  → **69 passed, 5 skipped**（skip 全为 LINUX_ONLY 标记，本机 Windows）。
   口径澄清（复审指出）：CI unit 门（Linux）实测是 **46 passed /
-  0 skipped**（仅门内 4 文件，无 LINUX_ONLY 可跳），本交付消息此前
-  误把本地 7 文件集合的 67/5 当作 CI 口径；两者都是真实数字，但
-  范围不同。
+  0 skipped**（仅门内 4 文件，无 LINUX_ONLY 可跳；上一提交 857362f
+  为 47/0，本提交门内 +1 新测试，以 CI 日志实测为准）；本行 69/5
+  是本地 Windows 7 文件集合（含 5 个 LINUX_ONLY skip），此前交付
+  消息误把该口径当 CI 口径，两者都是真实数字但范围不同。
 - 全 `tests/unit`（排除 7 个既有环境缺依赖的收集错误文件：fcntl×6、
   onnxruntime×1，均与基线相同）→ **26 failed, 1308 passed, 80 skipped**。
   26 个失败逐一与主区基线（未改动的 6a85df8）比对：同测试同样失败
@@ -231,10 +266,14 @@ pyright 1.1.414，`PYTHONPATH=src`）
 1. **2a 的 GPU DtoH 计数是分析值（5 次），未在 GPU 上复测**：
    本机无 GPU；4060 上的实际计数请复审用同一 profile 方法复测
    确认（机制：无逐行拷贝，仅 5 次整张量谓词/标量归约，见 §2）。
-2. **批量归约的数值边界随 torch 版本可漂移**：`abs=1e-6` 断言基于
-   torch 2.13.0+cpu 实测边界 6.6e-7；torch 版本升级改变批量归约
-   内核实现时边界可能漂移——等价测试会在 CI 红，届时重新实测
-   定界（数学定义本身不变）。
+2. **等价测试的数值边界是定界，不是硬保证（复审独立复测证实）**：
+   `abs=1e-6` 断言基于 torch 2.13.0+cpu 实测边界 6.6e-7，**实测余量
+   约 1.52×**（不是 10×）；且复审在 torch 2.11 CPU、full-active
+   B=20/M=15360 上实测 1.47e-6，**已超过 1e-6**——该断言不是跨
+   torch 版本/形状/环境的通用上界。因此等价测试**会跨版本漂移变
+   红，这是设计内的行为**：红了说明归约内核/边界变了，处理方式是
+   在对应环境重测最差差值、重新定界并记录依据，**不静默放宽
+   阈值**。GPU 分支的 1e-5 同理：DCU/GPU 实际边界未测量，保守占位。
 3. **`torch.manual_seed` 的 torch-stub 缺口**（torch 2.13 的
    manual_seed 参数在 stub 里是 Unknown）：按项目既有 ignore 模式
    处理，若 CI 锁定的 torch 版本 stub 修复后这些 ignore 变成冗余，
