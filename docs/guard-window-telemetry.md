@@ -154,3 +154,17 @@ session 的所有 cleanup 成功。
   伪造、计数守恒）。
 - 最终 hosted Linux CI 实跑（真实 `DurableJsonlSink`，不设速度断言）与
   未验 native 边界以提交后的 CI 结果为准。
+
+## 未验证边界（明确不覆盖）
+
+以下项**未运行、未验证**，CI 也不能代验（hosted Linux x86_64 CPU only）：
+
+- Hygon DCU / DTK / RCCL 多 rank 实机；
+- GPU / NCCL 多 rank 实机；
+- native TorchAO AdamW8bit / SR 路径（测试用 CPU 适配器边界）；
+- 生产 checkpoint 文件级 restore 与真实模型吞吐（测试用真实
+  optimizer outer state 与合成 fixture）；
+- 发布后目录项（directory entry）crash durability（只保证文件已
+  fsync + 原子可见）。
+
+本特性在这些环境上启用前需按本文件的契约另做实机验收。
