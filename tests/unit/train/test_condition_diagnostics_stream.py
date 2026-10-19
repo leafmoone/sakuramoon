@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -1025,6 +1027,159 @@ def test_recorder_maybe_record_rejects_missing_facts(
         )
         with pytest.raises(ValueError, match="condition activation facts"):
             recorder.maybe_record(observation)  # type: ignore[arg-type]
+
+
+@LINUX_ONLY
+@pytest.mark.parametrize("phase", ["write", "close"])
+def test_recorder_fsync_failure_closes_fd_and_disables_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], phase: str,
+) -> None:
+    recorder = ConditionDiagnosticsRecorder(
+        tmp_path / "fault.jsonl", rank=0, world_size=1,
+        log_every_n=1, flush_every_records=1, slot_ids=(3, 7),
+    )
+    synced: list[int] = []
+
+    def fail_sync(fd: int) -> None:
+        synced.append(fd)
+        raise OSError(5, "injected diagnostic fsync failure")
+
+    monkeypatch.setattr(os, "fsync", fail_sync)
+    if phase == "write":
+        recorder.record_update(
+            successful_update=1,
+            update=_mini_update_result(pre_condition=0.9, post_condition=0.7),
+            activation_facts=_mini_facts(),
+        )
+    recorder.close()
+    assert synced
+    attempts = len(synced)
+    # Even an invalid observation is ignored once the I/O fault disables
+    # the recorder: no inspection, no repeated write/close, no warning spam.
+    recorder.maybe_record(cast("SuccessfulTrainingObservation", object()))
+    recorder.close()
+    assert len(synced) == attempts
+    for fd in synced:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    stderr = capsys.readouterr().err
+    assert stderr.count(f"[condition_diagnostics] {phase} failed") == 1
+
+
+@LINUX_ONLY
+def test_real_recorder_close_io_fault_preserves_training_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = RuntimeError("original model failure")
+    synced: list[int] = []
+
+    def fail_sync(fd: int) -> None:
+        synced.append(fd)
+        raise OSError(5, "close fsync failed")
+
+    with pytest.raises(RuntimeError) as caught, ConditionDiagnosticsRecorder(
+        tmp_path / "fault.jsonl", rank=0, world_size=1,
+        log_every_n=1, flush_every_records=1, slot_ids=(3, 7),
+    ):
+        monkeypatch.setattr(os, "fsync", fail_sync)
+        raise original
+    assert caught.value is original
+    assert len(synced) == 1
+    with pytest.raises(OSError):
+        os.fstat(synced[0])
+
+
+@LINUX_ONLY
+def test_write_io_fault_then_close_bug_is_optional_and_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sakuramoon.telemetry.metrics import DurableJsonlSink
+
+    recorder = ConditionDiagnosticsRecorder(
+        tmp_path / "fault.jsonl", rank=0, world_size=1,
+        log_every_n=1, flush_every_records=1, slot_ids=(3, 7),
+    )
+    close_calls: list[int] = []
+    original_close = DurableJsonlSink.close
+
+    def fail_write(self: DurableJsonlSink, payload: Mapping[str, object]) -> None:
+        raise OSError(5, "optional write failure")
+
+    def close_then_bug(self: DurableJsonlSink) -> None:
+        original_close(self)
+        close_calls.append(1)
+        raise RuntimeError("optional cleanup bug")
+
+    monkeypatch.setattr(DurableJsonlSink, "write", fail_write)
+    monkeypatch.setattr(DurableJsonlSink, "close", close_then_bug)
+    recorder.record_update(
+        successful_update=1,
+        update=_mini_update_result(pre_condition=0.9, post_condition=0.7),
+        activation_facts=_mini_facts(),
+    )
+    recorder.maybe_record(cast("SuccessfulTrainingObservation", object()))
+    recorder.close()
+    assert close_calls == [1]
+
+
+@LINUX_ONLY
+def test_context_cleanup_bug_keeps_original_training_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sakuramoon.telemetry.metrics import DurableJsonlSink
+
+    original = ValueError("loss failure")
+    original_close = DurableJsonlSink.close
+
+    def close_then_bug(self: DurableJsonlSink) -> None:
+        original_close(self)
+        raise RuntimeError("optional cleanup bug")
+
+    monkeypatch.setattr(DurableJsonlSink, "close", close_then_bug)
+    with pytest.raises(ValueError) as caught, ConditionDiagnosticsRecorder(
+        tmp_path / "fault.jsonl", rank=0, world_size=1,
+        log_every_n=1, flush_every_records=1, slot_ids=(3, 7),
+    ):
+        raise original
+    assert caught.value is original
+
+
+@LINUX_ONLY
+def test_optional_io_failure_does_not_change_real_cpu_step_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = ConditionDiagnosticsRecorder(
+        tmp_path / "fault.jsonl", rank=0, world_size=1,
+        log_every_n=1, flush_every_records=1, slot_ids=(3, 7),
+    )
+
+    def fail_sync(_fd: int) -> None:
+        raise OSError(28, "injected disk full")
+
+    monkeypatch.setattr(os, "fsync", fail_sync)
+
+    def train(record: bool) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor]:
+        torch.manual_seed(411)  # pyright: ignore[reportUnknownMemberType]
+        module = _ConditionSideModule()
+        losses: list[torch.Tensor] = []
+        for index in range(3):
+            update = _run_one_update(module, condition_grad_share=True)
+            losses.append(update.mean_loss.detach().clone())
+            if record:
+                recorder.record_update(
+                    successful_update=index + 1, update=update,
+                    activation_facts=_mini_facts(),
+                )
+        weights = torch.cat([p.detach().flatten() for p in module.parameters()])
+        return losses, weights, torch.get_rng_state()
+
+    baseline = train(False)
+    failed_diagnostics = train(True)
+    recorder.close()
+    assert all(torch.equal(a, b) for a, b in zip(baseline[0], failed_diagnostics[0], strict=True))
+    assert torch.equal(baseline[1], failed_diagnostics[1])
+    assert torch.equal(baseline[2], failed_diagnostics[2])
 
 
 # ---------------------------------------------------------------------------

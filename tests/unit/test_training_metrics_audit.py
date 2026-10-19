@@ -6,8 +6,9 @@ import gzip
 import importlib.util
 import json
 import math
+import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
@@ -184,12 +185,16 @@ def test_rows_without_update_are_counted(tmp_path: Path) -> None:
     assert report["file"]["rows_without_update"] == 2
 
 
-def test_out_must_not_overwrite_the_input(tmp_path: Path) -> None:
+def test_out_must_not_overwrite_the_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
     path = tmp_path / "metrics.jsonl"
     _write_rows(path, [_row(5, main_loss=0.5)])
 
-    with pytest.raises(SystemExit, match="--out"):
+    with pytest.raises(SystemExit) as caught:
         audit_module.main([str(path), "--out", str(path)])
+    assert caught.value.code == 2
+    assert "--out" in capsys.readouterr().err
 
 
 def test_truncated_gzip_is_reported_not_raised(tmp_path: Path) -> None:
@@ -201,3 +206,116 @@ def test_truncated_gzip_is_reported_not_raised(tmp_path: Path) -> None:
     report = audit_module.audit(path, start=5, end=5, loss_field="main_loss")
 
     assert report["file"]["container_error"]
+
+
+@pytest.mark.parametrize("to_file", [False, True])
+def test_cli_read_error_returns_nonzero_with_partial_statistics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], to_file: bool,
+) -> None:
+    path = tmp_path / "metrics.jsonl"
+    path.touch()
+
+    def broken_lines(_path: Path) -> Iterator[tuple[int, str]]:
+        yield 1, json.dumps(_row(5, main_loss=0.5)) + "\n"
+        raise OSError(5, "injected mid-read failure")
+
+    monkeypatch.setattr(audit_module, "_iter_lines", broken_lines)
+    out = tmp_path / "report.json"
+    args = [str(path)] + (["--out", str(out)] if to_file else [])
+    assert audit_module.main(args) == 1
+    captured = capsys.readouterr()
+    report = json.loads(out.read_text() if to_file else captured.out)
+    assert report["file"]["rows"] == 1
+    assert "injected mid-read failure" in report["file"]["container_error"]
+    assert report["statistics"]["loss_mean"] == 0.5
+    assert report["statistics"]["rows"] == 1
+    assert "partial report" in captured.err
+
+
+def test_cli_read_and_metadata_failure_keeps_partial_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "metrics.jsonl"
+    path.touch()
+
+    def broken_lines(_path: Path) -> Iterator[tuple[int, str]]:
+        yield 1, json.dumps(_row(5, main_loss=0.5)) + "\n"
+        path.unlink()
+        raise OSError(5, "backing file disappeared mid-read")
+
+    monkeypatch.setattr(audit_module, "_iter_lines", broken_lines)
+    assert audit_module.main([str(path)]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["statistics"]["loss_mean"] == 0.5
+    assert "backing file disappeared" in report["file"]["container_error"]
+    assert "metadata: FileNotFoundError" in report["file"]["container_error"]
+    assert report["file"]["bytes"] is None
+    assert report["file"]["modified"] is None
+
+
+@pytest.mark.parametrize("to_file", [False, True])
+def test_cli_truncated_gzip_process_exit_and_partial_report(
+    tmp_path: Path, to_file: bool,
+) -> None:
+    path = tmp_path / "metrics.jsonl.gz"
+    # A complete first gzip member is emitted before the truncated next
+    # member fails.  This deterministically preserves the first statistics.
+    first = gzip.compress((json.dumps(_row(5, main_loss=0.5)) + "\n").encode())
+    second = gzip.compress(b'{"successful_update":6}\n')
+    path.write_bytes(first + second[:10])
+    out = tmp_path / "report.json"
+    args = [sys.executable, str(SCRIPT), str(path)]
+    if to_file:
+        args += ["--out", str(out)]
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    assert result.returncode == 1
+    report = json.loads(out.read_text() if to_file else result.stdout)
+    assert report["file"]["rows"] == 1
+    assert report["statistics"]["loss_mean"] == 0.5
+    assert "EOFError" in report["file"]["container_error"]
+    assert "partial report" in result.stderr
+
+
+@pytest.mark.parametrize("kind", ["missing", "window", "inferred_window"])
+def test_cli_invalid_arguments_are_clear_nonzero(
+    tmp_path: Path, kind: str,
+) -> None:
+    path = tmp_path / "metrics.jsonl"
+    if kind != "missing":
+        _write_rows(path, [_row(5, main_loss=0.5)])
+    args = [sys.executable, str(SCRIPT), str(path)]
+    if kind == "window":
+        args += ["--start", "6", "--end", "5"]
+    if kind == "inferred_window":
+        args += ["--start", "6"]
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    assert result.returncode == 2
+    assert "error:" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_output_write_error_is_clear_nonzero(tmp_path: Path) -> None:
+    path = tmp_path / "metrics.jsonl"
+    _write_rows(path, [_row(5, main_loss=0.5)])
+    out = tmp_path / "absent" / "report.json"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(path), "--out", str(out)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 3
+    assert "cannot write --out" in result.stderr
+    assert str(out) in result.stderr
+    assert "FileNotFoundError" in result.stderr
+
+
+def test_cli_success_still_returns_zero(tmp_path: Path) -> None:
+    path = tmp_path / "metrics.jsonl"
+    _write_rows(path, [_row(5, main_loss=0.5)])
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["file"]["container_error"] is None

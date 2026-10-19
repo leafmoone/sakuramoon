@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import stat
@@ -22,6 +23,8 @@ from sakuramoon.data.spatial_crop import (
     ZOOM_HISTOGRAM_LABELS,
 )
 from sakuramoon.data.transparent_white import TRANSPARENT_REJECTION_KEYS
+
+logger = logging.getLogger(__name__)
 
 CORE_TIMING_PHASES = (
     "data",
@@ -101,6 +104,34 @@ def _nonnegative_int(name: str, value: int, *, positive: bool = False) -> None:
     if type(value) is not int or value < (1 if positive else 0):
         boundary = "positive" if positive else "nonnegative"
         raise TypeError(f"{name} must be a {boundary} integer")
+
+
+def _warn(message: str, *args: object) -> None:
+    """Best-effort warning that cannot raise or mask anything.
+
+    A broken logging handler must never replace the exception a cleanup
+    path is in the middle of preserving.
+    """
+    try:
+        # _warn is only called from exception handlers and must attach
+        # the active traceback.
+        logger.warning(message, *args, exc_info=True)  # noqa: LOG014
+    except BaseException:  # noqa: BLE001,S110 - preserve the already-active primary
+        pass
+
+
+def _attempt_close(fd: int, context: str) -> None:
+    """Best-effort single close attempt for cleanup paths.
+
+    One attempt per call: a failed close is never retried here (retrying
+    risks acting on a recycled descriptor).  Called only while preserving
+    an earlier failure: even a cleanup interrupt must not replace that
+    original exception.
+    """
+    try:
+        os.close(fd)
+    except BaseException as error:  # noqa: BLE001 - cleanup must never replace the primary
+        _warn("Failed to close %s: %s", context, error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +350,9 @@ class TrainingMetric:
                 "spatial_zoom_histogram",
                 _spatial_default_zoom_histogram(),
             )
+        # Defaults above establish these invariants through object.__setattr__.
+        assert self.spatial_fallback_reasons is not None
+        assert self.spatial_zoom_histogram is not None
         if set(self.spatial_fallback_reasons) != set(SPATIAL_FALLBACK_REASONS):
             raise ValueError(
                 "spatial crop fallback reasons must contain every fixed key"
@@ -428,6 +462,8 @@ class TrainingMetric:
         )
 
     def as_json_mapping(self) -> dict[str, object]:
+        assert self.spatial_fallback_reasons is not None  # established in __post_init__
+        assert self.spatial_zoom_histogram is not None
         return {
             "schema_version": TRAINING_METRIC_SCHEMA_VERSION,
             "successful_update": self.successful_update,
@@ -502,6 +538,8 @@ class TrainingMetric:
         }
 
     def as_wandb_mapping(self) -> dict[str, int | float]:
+        assert self.spatial_fallback_reasons is not None  # established in __post_init__
+        assert self.spatial_zoom_histogram is not None
         payload: dict[str, int | float] = {}
         for key, value in self.as_json_mapping().items():
             if type(value) is int or type(value) is float:
@@ -573,10 +611,25 @@ class TrainingMetric:
 
 
 class DurableJsonlSink:
-    """Thread-safe append-only JSONL with explicit fsync cadence."""
+    """Thread-safe append-only JSONL with explicit fsync cadence.
+
+    The destination fd is released exactly once on every failure path
+    after open.  A failing close only warns while an earlier exception
+    already owns the error report (constructor failure, failing final
+    fsync, active with-block exception); otherwise the close error is
+    the primary error of close().
+    """
 
     def __init__(self, path: Path, *, fsync_every_records: int) -> None:
+        # Everything that can be prepared without the destination fd is
+        # prepared BEFORE os.open: no failure may occur after the fd is
+        # held except the open-sequence below, which owns its own cleanup.
         _nonnegative_int("fsync_every_records", fsync_every_records, positive=True)
+        self.path = path
+        self.fsync_every_records = fsync_every_records
+        self._pending = 0
+        self._closed = False
+        self._lock = threading.Lock()
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.is_symlink():
             raise ValueError("JSONL destination may not be a symlink")
@@ -585,24 +638,31 @@ class DurableJsonlSink:
             os.O_APPEND | os.O_CREAT | os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW
         )
         self._fd = os.open(path, flags, 0o600)
-        metadata = os.fstat(self._fd)
-        if not stat.S_ISREG(metadata.st_mode):
-            os.close(self._fd)
-            raise ValueError("JSONL destination must be a regular file")
-        if stat.S_IMODE(metadata.st_mode) != 0o600:
-            os.close(self._fd)
-            raise PermissionError("JSONL destination must use mode 0600")
-        if not existed:
-            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        self.path = path
-        self.fsync_every_records = fsync_every_records
-        self._pending = 0
-        self._closed = False
-        self._lock = threading.Lock()
+        try:
+            metadata = os.fstat(self._fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("JSONL destination must be a regular file")
+            if stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise PermissionError("JSONL destination must use mode 0600")
+            if not existed:
+                directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                except BaseException:
+                    _attempt_close(directory_fd, "JSONL sink destination directory")
+                    raise
+                else:
+                    # A failing directory close is the primary error of the
+                    # constructor: it propagates and the outer handler
+                    # releases the destination fd exactly once.
+                    os.close(directory_fd)
+        except BaseException:
+            # Every failure after os.open (fstat, checks, directory fsync,
+            # even KeyboardInterrupt) releases the destination fd exactly
+            # once; a failed cleanup only warns so the original exception
+            # always survives.
+            _attempt_close(self._fd, "JSONL sink destination")
+            raise
 
     def write(self, payload: Mapping[str, object]) -> None:
         line = (
@@ -632,16 +692,40 @@ class DurableJsonlSink:
         with self._lock:
             if self._closed:
                 return
-            os.fsync(self._fd)
-            os.close(self._fd)
             self._closed = True
-            self._pending = 0
+            try:
+                os.fsync(self._fd)
+            except BaseException:
+                # A failing (or interrupting) fsync still releases the fd
+                # exactly once; the original exception always survives.
+                _attempt_close(self._fd, "JSONL sink")
+                raise
+            else:
+                # The single close failure is the primary error of
+                # close(): it propagates and is never retried.
+                os.close(self._fd)
+            finally:
+                self._pending = 0
 
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *_: object) -> None:
-        self.close()
+    def __exit__(self, *_args: object) -> None:
+        # Retain the existing variadic interface; context managers pass
+        # (exception type, exception instance, traceback).
+        if len(_args) < 2 or _args[1] is None:
+            self.close()
+            return
+        try:
+            self.close()
+        except BaseException as error:  # noqa: BLE001 - preserve the with-block exception
+            # Cleanup must never replace the exception the with-block is
+            # already raising; a close failure only warns here.
+            _warn(
+                "JSONL sink close failed during cleanup; original exception "
+                "preserved: %s",
+                error,
+            )
 
 
 class AsyncMetricSink(Protocol):

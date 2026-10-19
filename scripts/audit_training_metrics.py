@@ -19,6 +19,10 @@ even when its payload is unchanged.
 The tool is read-only and standard-library only.  It does not persist hashes
 of the input; the transient digests below exist only to separate the three
 duplicate buckets.
+
+Exit status: 0 when the audit completed; 1 when the input container failed
+mid-read (the partial report is still emitted); 2 for invalid arguments or
+inverted window bounds; 3 when the report could not be written to ``--out``.
 """
 
 from __future__ import annotations
@@ -50,6 +54,14 @@ NONFINITE_NOTE = (
     "The current producer writes nonfinite_count as a constant 0; a zero "
     "total does not by itself prove that every update was finite."
 )
+EXIT_OK = 0
+EXIT_CONTAINER_ERROR = 1
+EXIT_USAGE = 2
+EXIT_WRITE_ERROR = 3
+
+
+class WindowBoundsError(ValueError):
+    """The requested or inferred window has start greater than end."""
 
 
 @dataclass(frozen=True)
@@ -307,7 +319,7 @@ def audit(
                 clip_fraction=_number(row, "clip_fraction", invalid),
                 nonfinite=_count(row, "nonfinite_count", invalid),
             )
-    except (EOFError, OSError, zlib.error) as exc:
+    except (EOFError, OSError, UnicodeDecodeError, zlib.error) as exc:
         container_error = f"{type(exc).__name__}: {exc}"
 
     first_update = min(present) if present else None
@@ -332,7 +344,10 @@ def audit(
         if window_start is None or window_end is None:
             raise ValueError("window bounds could not be resolved")
         if window_start > window_end:
-            raise ValueError("start must not be greater than end")
+            raise WindowBoundsError(
+                f"window start {window_start} is greater than window end "
+                f"{window_end}; file updates span {first_update}..{last_update}"
+            )
         selected = sorted(
             update for update in present if window_start <= update <= window_end
         )
@@ -364,16 +379,28 @@ def audit(
             invalid=invalid[0],
         )
     )
-    stat = path.stat()
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        # A stream may fail because its backing path disappeared.  Metadata
+        # lookup must not throw away the rows and original read error.
+        stat = None
+        detail = f"{type(exc).__name__}: {exc}"
+        container_error = (
+            f"{container_error}; metadata: {detail}" if container_error else detail
+        )
     return {
         "schema_version": SCHEMA_VERSION,
         "audited_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "file": {
             "path": str(path),
-            "bytes": stat.st_size,
-            "modified": datetime.fromtimestamp(stat.st_mtime)
-            .astimezone()
-            .isoformat(timespec="seconds"),
+            "bytes": stat.st_size if stat is not None else None,
+            "modified": (
+                datetime.fromtimestamp(stat.st_mtime)
+                .astimezone()
+                .isoformat(timespec="seconds")
+                if stat is not None else None
+            ),
             "total_lines": total_lines,
             "blank_lines": blank_lines,
             "rows": rows,
@@ -414,25 +441,55 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--end", type=int, default=None, help="inclusive update")
     parser.add_argument("--loss-field", default="main_loss")
     parser.add_argument("--out", type=Path, default=None)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.metrics.is_file():
+        parser.error(
+            f"metrics input does not exist or is not a file: {args.metrics}"
+        )
+    if args.start is not None and args.end is not None and args.start > args.end:
+        parser.error(
+            f"--start {args.start} must not be greater than --end {args.end}"
+        )
+    if args.out is not None and args.out.resolve() == args.metrics.resolve():
+        parser.error("--out must not point at the audited input")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the audit CLI and return the exit status documented above."""
     args = _parse_args(argv)
-    if args.out is not None and args.out.resolve() == args.metrics.resolve():
-        raise SystemExit("--out must not point at the audited input")
-    report = audit(
-        args.metrics,
-        start=args.start,
-        end=args.end,
-        loss_field=args.loss_field,
-    )
+    try:
+        report = audit(
+            args.metrics,
+            start=args.start,
+            end=args.end,
+            loss_field=args.loss_field,
+        )
+    except WindowBoundsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.out is None:
         print(rendered)
     else:
-        args.out.write_text(rendered + "\n", encoding="utf-8")
-    return 0
+        try:
+            args.out.write_text(rendered + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(
+                f"error: cannot write --out {args.out}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return EXIT_WRITE_ERROR
+    container_error = report["file"]["container_error"]
+    if container_error is not None:
+        print(
+            "error: input container failed mid-read; partial report emitted: "
+            f"{container_error}",
+            file=sys.stderr,
+        )
+        return EXIT_CONTAINER_ERROR
+    return EXIT_OK
 
 
 if __name__ == "__main__":

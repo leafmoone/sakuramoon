@@ -58,7 +58,9 @@ exactly like the main schema-12 metrics stream.
 from __future__ import annotations
 
 import math
+import sys
 import time
+import traceback
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
@@ -377,6 +379,16 @@ def build_condition_diagnostic_record(
     return record
 
 
+def _warn_condition_io(message: str, error: Exception) -> None:
+    # Same best-effort stderr/traceback pattern as Guard Window: even the
+    # warning must not replace a training error when stderr is broken.
+    try:
+        print(f"[condition_diagnostics] {message}", file=sys.stderr, flush=True)
+        traceback.print_exception(error, file=sys.stderr)
+    except Exception:  # noqa: BLE001,S110 - a broken stderr must not mask training
+        pass
+
+
 class ConditionDiagnosticsRecorder:
     """Per-rank durable writer for the condition diagnostics stream.
 
@@ -388,7 +400,8 @@ class ConditionDiagnosticsRecorder:
     retried update appends to the same per-rank file, so a failed update
     may appear more than once and ``successful_update`` is not strictly
     monotonic within a file (the main metrics stream has the same
-    behavior).
+    behavior).  Ordinary sink I/O faults warn once and disable this
+    recorder; structural/record contract errors still propagate.
     """
 
     def __init__(
@@ -411,6 +424,8 @@ class ConditionDiagnosticsRecorder:
         self._world_size = world_size
         self._log_every_n = log_every_n
         self._slot_ids = slot_ids
+        self._disabled = False
+        self._closed = False
         self._sink = DurableJsonlSink(
             path, fsync_every_records=flush_every_records
         )
@@ -424,7 +439,7 @@ class ConditionDiagnosticsRecorder:
     ) -> None:
         """Write one record when the update cadence is due (no-op otherwise)."""
 
-        if successful_update % self._log_every_n != 0:
+        if self._disabled or successful_update % self._log_every_n != 0:
             return
         record = build_condition_diagnostic_record(
             successful_update=successful_update,
@@ -434,7 +449,15 @@ class ConditionDiagnosticsRecorder:
             activation_facts=activation_facts,
             slot_ids=self._slot_ids,
         )
-        self._sink.write(record)
+        try:
+            self._sink.write(record)
+        except OSError as error:
+            # Catch only the optional sink I/O, never record validation or
+            # model/loss/optimizer work.  Disable before cleanup/logging so
+            # later observations cannot repeatedly hit the broken stream.
+            self._disabled = True
+            _warn_condition_io("write failed; disabling this rank's stream", error)
+            self.close()
 
     def maybe_record(self, observation: SuccessfulTrainingObservation) -> None:
         """Callback bound to the runtime's per-update observation hook.
@@ -446,6 +469,8 @@ class ConditionDiagnosticsRecorder:
         did not carry them the stream fails closed instead of guessing.
         """
 
+        if self._disabled:
+            return
         successful_update = observation.loop.update.state.successful_updates
         if successful_update % self._log_every_n != 0:
             return
@@ -465,7 +490,14 @@ class ConditionDiagnosticsRecorder:
         )
 
     def close(self) -> None:
-        self._sink.close()
+        if self._closed:
+            return
+        self._disabled = True
+        self._closed = True
+        try:
+            self._sink.close()
+        except Exception as error:  # noqa: BLE001 - optional cleanup must not mask training
+            _warn_condition_io("close failed; ignoring (diagnostics only)", error)
 
     def __enter__(self) -> Self:
         return self

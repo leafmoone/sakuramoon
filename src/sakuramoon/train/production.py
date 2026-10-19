@@ -1955,8 +1955,9 @@ def _run_accepted_lifecycle(
                 condition_diagnostics_recorder = None
                 cd_config = config.condition_diagnostics
                 if cd_config is not None and cd_config.enabled and not in_calibration:
-                    condition_diagnostics_recorder = ConditionDiagnosticsRecorder(
-                        artifact_root
+                    condition_diagnostics_recorder = _construct_condition_diagnostics(
+                        build=ConditionDiagnosticsRecorder,
+                        path=artifact_root
                         / "diagnostics"
                         / f"rank-{rank}"
                         / diagnostics_file_name(),
@@ -1973,24 +1974,24 @@ def _run_accepted_lifecycle(
                 # after the session claim is non-raising by contract.
                 guard_window_recorder: GuardWindowRecorder | None = None
                 gw_config = config.guard_window
-                if gw_config is not None and gw_config.enabled and not in_calibration:
-                    guard_window_recorder = _construct_guard_window(
-                        build=_build_guard_window,
-                        artifact_root=artifact_root,
-                        run_id=config.run.run_id,
-                        session_id=gw_config.session_id,
-                        window_updates=gw_config.window_updates,
-                        optimizer=optimizer,
-                        rank=rank,
-                        world_size=world_size,
-                        restored=restored,
-                        verified_checkpoints=verified_checkpoints,
-                        launch_kind="fresh_bootstrap"
-                        if resume is None
-                        else "user_resume",
-                    )
                 guard_window_run_outcome = "unknown"
                 try:
+                    if gw_config is not None and gw_config.enabled and not in_calibration:
+                        guard_window_recorder = _construct_guard_window(
+                            build=_build_guard_window,
+                            artifact_root=artifact_root,
+                            run_id=config.run.run_id,
+                            session_id=gw_config.session_id,
+                            window_updates=gw_config.window_updates,
+                            optimizer=optimizer,
+                            rank=rank,
+                            world_size=world_size,
+                            restored=restored,
+                            verified_checkpoints=verified_checkpoints,
+                            launch_kind="fresh_bootstrap"
+                            if resume is None
+                            else "user_resume",
+                        )
                     with telemetry:
                         _log(
                             f"开始训练: update {initial_update + 1} -> "
@@ -2056,9 +2057,10 @@ def _run_accepted_lifecycle(
                     guard_window_run_outcome = "raised"
                     raise
                 finally:
-                    _close_guard_window(guard_window_recorder, guard_window_run_outcome)
-                    if condition_diagnostics_recorder is not None:
-                        condition_diagnostics_recorder.close()
+                    try:
+                        _close_guard_window(guard_window_recorder, guard_window_run_outcome)
+                    finally:
+                        _close_condition_diagnostics(condition_diagnostics_recorder)
                 if not verified_checkpoints and not in_calibration:
                     raise RuntimeError(
                         "production training completed without a durable checkpoint"
@@ -2124,6 +2126,50 @@ def _run_accepted_lifecycle(
         raise cleanup
     assert result is not None
     return result
+
+
+def _construct_condition_diagnostics(
+    *,
+    build: Callable[..., ConditionDiagnosticsRecorder],
+    **kwargs: Any,
+) -> ConditionDiagnosticsRecorder | None:
+    """Disable optional sink I/O failures; configuration/code errors still raise."""
+    try:
+        return build(**kwargs)
+    except OSError as error:
+        try:
+            print(
+                "[condition_diagnostics] stream construction failed; "
+                "disabling this rank's stream",
+                file=sys.stderr,
+                flush=True,
+            )
+            traceback.print_exception(error, file=sys.stderr)
+        except Exception:  # noqa: BLE001,S110 - a broken stderr must not mask training
+            pass
+        return None
+
+
+def _close_condition_diagnostics(
+    recorder: ConditionDiagnosticsRecorder | None,
+) -> None:
+    # Match Guard Window's close guard: diagnostics cleanup is best-effort
+    # on clean and exceptional exits, including an original ExceptionGroup.
+    # BaseException deliberately retains the existing interpreter rules.
+    if recorder is None:
+        return
+    try:
+        recorder.close()
+    except Exception as error:  # noqa: BLE001 - diagnostics must not change the outcome
+        try:
+            print(
+                "[condition_diagnostics] close failed; ignoring (diagnostics only)",
+                file=sys.stderr,
+                flush=True,
+            )
+            traceback.print_exception(error, file=sys.stderr)
+        except Exception:  # noqa: BLE001,S110 - a broken stderr must not mask training
+            pass
 
 
 def _close_guard_window(
