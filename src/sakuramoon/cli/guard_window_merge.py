@@ -386,6 +386,11 @@ def merge_records(
             not (set(row) & {"schema_version", "run_id", "session_id", "window_id"}),
             "modern identity is not allowed in explicit legacy mode",
         )
+        if "rank" in row:
+            _require(
+                _int(row["rank"], "legacy rank") == 0,
+                "rank0_owner_only legacy mode cannot relabel a nonzero rank",
+            )
         legacy.append(
             {
                 "record": row,

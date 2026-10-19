@@ -875,3 +875,14 @@ def test_launch_kind_is_required_and_part_of_rank_identity(kind: object) -> None
     rows[1]["launch"]["launch_kind"] = kind
     with pytest.raises(ValueError, match="launch_kind|identity"):
         _merged(rows)
+
+
+@pytest.mark.parametrize("rank", [1, -1, True])
+def test_explicit_legacy_never_relabels_another_rank_as_rank0(rank: object) -> None:
+    with pytest.raises(ValueError, match="rank"):
+        merge.merge_records(
+            [],
+            start_update=1,
+            end_update=2,
+            legacy_records=[{"rank": rank, "fp32_rescues": 3}],
+        )
