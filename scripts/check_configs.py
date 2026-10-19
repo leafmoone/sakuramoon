@@ -1,13 +1,21 @@
 """Structural checks for the TOML config inheritance graph.
 
-This checker answers a narrower question than ``load_config``: can every
-``extends`` edge be resolved inside this checkout, and is the graph acyclic?
-It deliberately does not validate business schema, secrets or runtime assets;
-those belong to separate checks and need deployment inputs.
+Unlike the trusted-path runtime loader, this checker only traverses resolved
+paths inside the config root.  It does not validate business schema, secrets or
+runtime assets; those belong to separate checks and need deployment inputs.
 
-Parents that are intentionally kept outside the repository are declared in
-``external-parents.toml``.  A declared external parent is reported as
-``external`` and does not fail the check; an undeclared missing parent does.
+``external-parents.toml`` uses ``[external]`` entries mapping exact TOML paths
+to descriptive strings.  Keys are relative to the config root (not an including
+file); explicit ``..`` components may name outside parents.  Each key authorizes
+only its resolved target, never a directory or sibling.  Existing root-relative
+declarations remain valid.  Declared targets are opaque ``external`` leaves,
+whether present or missing: their TOML is never read and their edges are not
+traversed.  The manifest itself must resolve inside the config root and is
+not an inheritance node unless explicitly declared external.
+
+Local source and target identities are canonical, matching runtime inheritance
+through symlink aliases.  Relative ``..`` and symlinks are allowed only when the
+resolved target stays inside the root or is explicitly declared external.
 """
 
 from __future__ import annotations
@@ -46,39 +54,44 @@ def _relative(path: Path, root: Path) -> str:
         return path.as_posix()
 
 
-def _load_external(path: Path, root: Path) -> dict[str, str]:
-    if not path.is_file():
+def _load_external(path: Path, root: Path) -> dict[Path, str]:
+    """Load exact canonical targets; declarations never authorize subtrees."""
+    if not path.resolve().is_relative_to(root):
+        raise ValueError("external-parents.toml: manifest escapes the config root")
+    if not path.exists():
         return {}
-    payload = cast(
-        dict[str, object], tomllib.loads(path.read_text(encoding="utf-8"))
-    )
+    if not path.is_file():
+        raise ValueError("external-parents.toml: manifest must be a file")
+    payload = cast(dict[str, object], tomllib.loads(path.read_text(encoding="utf-8")))
     external = payload.get("external", {})
     if not isinstance(external, dict):
         raise TypeError("external-parents.toml: [external] must be a table")
-    result: dict[str, str] = {}
+    result: dict[Path, str] = {}
     for raw_key, value in cast(dict[object, object], external).items():
         if type(raw_key) is not str:
             raise TypeError("external-parents.toml: keys must be strings")
         if type(value) is not str:
             raise ValueError(
-                "external-parents.toml: keys must be quoted; "
-                f"{raw_key!r} parsed as a nested table"
+                "external-parents.toml: values must be strings and keys must be quoted; "
+                f"{raw_key!r} may have parsed as a nested table"
             )
         key = raw_key
         candidate = Path(key)
-        if candidate.is_absolute() or ".." in candidate.parts:
+        if candidate.anchor:
             raise ValueError(
-                "external-parents.toml: keys must be root-relative without '..'; "
+                f"external-parents.toml: keys must be root-relative; got {key!r}"
+            )
+        target = (root / candidate).resolve()
+        if (
+            candidate.suffix != ".toml"
+            or target.suffix != ".toml"
+            or (target.exists() and not target.is_file())
+        ):
+            raise ValueError(
+                "external-parents.toml: keys must name individual TOML files; "
                 f"got {key!r}"
             )
-        try:
-            normalized = (root / candidate).resolve().relative_to(root).as_posix()
-        except ValueError as exc:
-            raise ValueError(
-                "external-parents.toml: key escapes the config root; "
-                f"got {key!r}"
-            ) from exc
-        result[normalized] = value
+        result[target] = value
     return result
 
 
@@ -91,6 +104,9 @@ def _read_config(path: Path) -> ConfigFile:
         )
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         record.errors.append(f"invalid TOML: {type(exc).__name__}")
+        return record
+    except OSError as exc:
+        record.errors.append(f"cannot read config: {type(exc).__name__}")
         return record
     raw = payload.get("extends", [])
     if not isinstance(raw, list):
@@ -107,18 +123,22 @@ def _read_config(path: Path) -> ConfigFile:
     return record
 
 
-def _target(source: Path, entry: str) -> Path:
-    return (source.parent / entry).resolve()
-
-
 def check(config_root: Path) -> dict[str, Any]:
+    """Check local canonical files and edges without reading external TOML."""
     if not config_root.is_dir():
         raise ValueError(f"config root is not a directory: {config_root}")
     root = config_root.resolve()
     manifest_path = root / EXTERNAL_MANIFEST
     try:
         external = _load_external(manifest_path, root)
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, TypeError, ValueError) as exc:
+    except (
+        OSError,
+        RuntimeError,
+        UnicodeDecodeError,
+        tomllib.TOMLDecodeError,
+        TypeError,
+        ValueError,
+    ) as exc:
         return {
             "schema_version": SCHEMA_VERSION,
             "config_root": str(root),
@@ -131,12 +151,33 @@ def check(config_root: Path) -> dict[str, Any]:
             "errors": [{"path": str(manifest_path), "error": str(exc)}],
             "ok": False,
         }
-    files = sorted(
-        path
-        for path in root.rglob("*.toml")
-        if path != manifest_path and path.is_file()
-    )
-    records = [_read_config(path) for path in files]
+
+    manifest_target = manifest_path.resolve()
+    records_by_path: dict[Path, ConfigFile] = {}
+    path_errors: list[dict[str, str]] = []
+    for path in sorted(root.rglob("*.toml")):
+        if path == manifest_path:
+            continue
+        try:
+            canonical = path.resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            path_errors.append(
+                {
+                    "path": str(path),
+                    "error": f"cannot resolve config: {type(exc).__name__}",
+                }
+            )
+            continue
+        if canonical in external or canonical == manifest_target:
+            continue
+        if not canonical.is_relative_to(root):
+            path_errors.append(
+                {"path": str(path), "error": "config path escapes the config root"}
+            )
+            continue
+        if canonical.is_file() and canonical not in records_by_path:
+            records_by_path[canonical] = _read_config(canonical)
+    records = list(records_by_path.values())
     by_path = {_relative(Path(record.path), root): record for record in records}
 
     references: list[Reference] = []
@@ -144,17 +185,36 @@ def check(config_root: Path) -> dict[str, Any]:
     for name, record in by_path.items():
         source = Path(record.path)
         for entry in record.extends:
-            if Path(entry).is_absolute():
+            if Path(entry).anchor:
                 references.append(Reference(name, entry, entry, "invalid"))
-                record.errors.append(f"extends entry is absolute: {entry}")
+                record.errors.append(f"extends entry is absolute or anchored: {entry}")
                 continue
-            target = _target(source, entry)
+            try:
+                target = (source.parent / entry).resolve()
+            except (OSError, RuntimeError, ValueError) as exc:
+                references.append(Reference(name, entry, entry, "invalid"))
+                record.errors.append(
+                    f"cannot resolve extends entry: {entry} ({type(exc).__name__})"
+                )
+                continue
             target_name = _relative(target, root)
-            if target.is_file():
+            if target in external:
+                references.append(Reference(name, entry, target_name, "external"))
+            elif not target.is_relative_to(root):
+                references.append(Reference(name, entry, target_name, "invalid"))
+                record.errors.append(f"extends target escapes the config root: {entry}")
+            elif target == manifest_target:
+                references.append(Reference(name, entry, target_name, "invalid"))
+                record.errors.append("extends cannot target the external manifest")
+            elif target.is_file():
+                if target not in records_by_path:
+                    # A resolved edge must have a checked graph node, not a
+                    # hidden leaf (e.g. a file outside the *.toml inventory).
+                    references.append(Reference(name, entry, target_name, "invalid"))
+                    record.errors.append(f"extends target is not a checked TOML file: {entry}")
+                    continue
                 references.append(Reference(name, entry, target_name, "resolved"))
                 edges[name].add(target_name)
-            elif target_name in external:
-                references.append(Reference(name, entry, target_name, "external"))
             else:
                 references.append(Reference(name, entry, target_name, "missing"))
 
@@ -176,7 +236,7 @@ def check(config_root: Path) -> dict[str, Any]:
     for name in sorted(edges):
         visit(name, [], done)
 
-    errors = [
+    errors = path_errors + [
         {"path": record.path, "error": error}
         for record in records
         for error in record.errors
@@ -188,7 +248,7 @@ def check(config_root: Path) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "config_root": str(root),
-        "files": len(files),
+        "files": len(records),
         "references": [asdict(ref) for ref in references],
         "external": external_refs,
         "missing": missing,
@@ -197,8 +257,9 @@ def check(config_root: Path) -> dict[str, Any]:
         "errors": errors,
         "notes": [
             (
-                "Only extends edges resolvable inside this checkout are traversed; "
-                "cycles through external or missing parents are not visible."
+                "Only resolved targets inside the config root are traversed; "
+                "cycles through declared external or missing parents are not visible. "
+                "The files count excludes external targets and deduplicates aliases."
             )
         ],
         "ok": ok,

@@ -336,5 +336,5 @@ def test_success_path_close_fault_cleans_temp_and_raises(
     with pytest.raises(OSError, match="close fault"):
         gp._make_temp(tmp_path / ".tmp", target)  # pyright: ignore[reportPrivateUsage]
     for calls in captured.values():
-        assert len(calls) <= 2  # the retry is the second and final attempt
+        assert len(calls) == 1  # never retry a possibly recycled descriptor
     assert not list((tmp_path / ".tmp").iterdir())

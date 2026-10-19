@@ -13,10 +13,9 @@ Phase 2 design):
   (O_EXCL) refuses session_id reuse for that rank without touching training;
 - a snapshot or publication failure latches DISABLED for the whole session
   (stderr + traceback, NEVER raised into training): the stream never writes
-  another formal record in this session (an explicit missing tail), because
-  the shared DurableJsonlSink is known to be able to leak one FD per
-  incomplete init/close — per-window recovery after such faults would leak
-  without bound.  Only a new session (new process + new session_id) starts
+  another formal record in this session (an explicit missing tail).
+  Recovering later windows could falsely imply continuous comparable
+  coverage.  Only a new session (new process + new session_id) starts
   recording again; the on-disk sequence shows the gap.
 - only trainer-successful updates are observed (single hook next to the
   condition-diagnostics observer); failed attempts abort the run (fail
@@ -475,15 +474,13 @@ class GuardWindowRecorder:
         record = self._build_record(
             self._window_start, end, baseline, absolute, run_outcome
         )
-        line = (
-            json.dumps(record, allow_nan=False, separators=(",", ":")) + "\n"
-        ).encode()
         target = self._rank_dir / f"guard-window-u{self._window_start}-{end}.jsonl"
 
         def prepare(temp: Path) -> None:
-            sink = DurableJsonlSink(temp, fsync_every_records=1)
-            sink.write(json.loads(line))
-            sink.close()  # fsync + close, both before the link (precommit)
+            # The sink owns serialization and closes even when write fails;
+            # both fsync and close still precede the atomic link.
+            with DurableJsonlSink(temp, fsync_every_records=1) as sink:
+                sink.write(record)
 
         result = publish_atomically(target, self._temp_dir, prepare)
         if result.status is PublicationStatus.TARGET_EXISTS:

@@ -16,13 +16,21 @@ Duplicate detection ignores ``recorded_at_unix_ns``.  The producer writes a
 fresh timestamp into every row, so a rewritten row is never byte-identical
 even when its payload is unchanged.
 
+A conflicting update (two rows with different payloads for one update) is
+excluded from statistics entirely instead of resolving to whichever row
+happened to be read last; the statistics describe conflict-free updates
+only, and ``window.conflicting_update_count`` identifies them.
+
 The tool is read-only and standard-library only.  It does not persist hashes
 of the input; the transient digests below exist only to separate the three
 duplicate buckets.
 
-Exit status: 0 when the audit completed; 1 when the input container failed
-mid-read (the partial report is still emitted); 2 for invalid arguments or
-inverted window bounds; 3 when the report could not be written to ``--out``.
+Exit status: 0 when the audit completed without conflicts; 1 when the input
+container failed mid-read (the partial report is still emitted); 2 for
+invalid arguments or inverted window bounds; 3 when the report could not be
+written to ``--out``; 4 when the audited window contains conflicting updates
+(the report is still emitted and those updates are excluded from
+statistics).
 """
 
 from __future__ import annotations
@@ -30,22 +38,30 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import itertools
 import json
 import math
 import statistics
 import sys
 import zlib
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO, cast
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 VOLATILE_KEYS = frozenset({"recorded_at_unix_ns"})
 MAX_MALFORMED = 50
 MAX_MISSING_RANGES = 1000
+EXIT_OK = 0
+EXIT_CONTAINER_ERROR = 1
+EXIT_USAGE = 2
+EXIT_WRITE_ERROR = 3
+EXIT_CONFLICTS = 4
+
+
 MISSING_ROW_NOTE = (
     "Missing telemetry rows are gaps in this file, not proof that the "
     "corresponding updates were never executed."
@@ -54,10 +70,10 @@ NONFINITE_NOTE = (
     "The current producer writes nonfinite_count as a constant 0; a zero "
     "total does not by itself prove that every update was finite."
 )
-EXIT_OK = 0
-EXIT_CONTAINER_ERROR = 1
-EXIT_USAGE = 2
-EXIT_WRITE_ERROR = 3
+CONFLICT_NOTE = (
+    "Updates whose rows conflict are excluded from statistics; see "
+    "window.conflicting_updates and statistics.conflicting_updates_excluded."
+)
 
 
 class WindowBoundsError(ValueError):
@@ -82,6 +98,7 @@ class WindowStatistics:
     clipped_updates: int
     nonfinite_total: int
     invalid_numeric_values: int
+    conflicting_updates_excluded: int
 
 
 @dataclass
@@ -149,26 +166,25 @@ def _canonical_payload(row: dict[str, object]) -> str:
 def _missing_ranges(
     start: int,
     end: int,
-    present: set[int],
+    updates_present: Sequence[int],
 ) -> tuple[list[list[int]], bool, int]:
+    """Compact the gaps of sorted in-window updates into [first, last] runs.
+
+    ``updates_present`` must already be sorted and restricted to the window.
+    The scan walks the present updates rather than the window, so a 10**12
+    wide window with a few rows stays O(len(updates_present)); the missing
+    count is exact even when the range list is truncated.
+    """
     ranges: list[list[int]] = []
-    truncated = False
-    count = 0
-    run_start: int | None = None
-    for update in range(start, end + 1):
-        if update in present:
-            if run_start is not None:
-                ranges.append([run_start, update - 1])
-                run_start = None
-        elif run_start is None:
-            run_start = update
-        count += update not in present
-    if run_start is not None:
-        ranges.append([run_start, end])
-    if len(ranges) > MAX_MISSING_RANGES:
-        ranges = ranges[:MAX_MISSING_RANGES]
-        truncated = True
-    return ranges, truncated, count
+    cursor = start
+    # A sentinel closes the final gap without copying the input sequence.
+    for update in itertools.chain(updates_present, (end + 1,)):
+        if update > cursor:
+            if len(ranges) == MAX_MISSING_RANGES:
+                return ranges, True, (end - start + 1) - len(updates_present)
+            ranges.append([cursor, update - 1])
+        cursor = update + 1
+    return ranges, False, (end - start + 1) - len(updates_present)
 
 
 def _choose_loss(
@@ -206,6 +222,7 @@ def _summarize(
     field: str,
     source_rows: int,
     invalid: int,
+    conflicting_excluded: int,
 ) -> WindowStatistics:
     used, fallback, losses, missing = _choose_loss(values, updates, field)
     gradients: list[float] = []
@@ -238,6 +255,7 @@ def _summarize(
         clipped_updates=sum(1 for value in clips if value > 0.0),
         nonfinite_total=nonfinite,
         invalid_numeric_values=invalid,
+        conflicting_updates_excluded=conflicting_excluded,
     )
 
 
@@ -333,6 +351,8 @@ def audit(
         missing_truncated = False
         missing_count = 0
         selected: list[int] = []
+        clean_selected: list[int] = []
+        clean_rows = 0
         conflicting: list[int] = []
         same_payload_extra = 0
         byte_identical_extra = 0
@@ -353,13 +373,20 @@ def audit(
         )
         expected = window_end - window_start + 1
         missing_ranges, missing_truncated, missing_count = _missing_ranges(
-            window_start, window_end, present
+            window_start, window_end, selected
         )
-        conflicting = sorted(
-            update
-            for update in selected
-            if len(payload_digests.get(update, set())) > 1
-        )
+        conflicting = [
+            update for update in selected if len(payload_digests[update]) > 1
+        ]
+        if conflicting:
+            window_status = "conflicting_updates"
+        conflicting_set = set(conflicting)
+        # Conflicting updates are kept out of the statistics so no
+        # last-read-wins value is ever presented as the update's value.
+        clean_selected = [
+            update for update in selected if update not in conflicting_set
+        ]
+        clean_rows = sum(line_counts[update] for update in clean_selected)
         same_payload_extra = sum(
             line_counts[update] - len(payload_digests[update])
             for update in selected
@@ -373,10 +400,11 @@ def audit(
     statistics_payload = asdict(
         _summarize(
             values,
-            selected,
+            clean_selected,
             field=loss_field,
-            source_rows=selected_rows,
+            source_rows=clean_rows,
             invalid=invalid[0],
+            conflicting_excluded=len(conflicting),
         )
     )
     try:
@@ -427,10 +455,11 @@ def audit(
             "same_payload_extra_rows": same_payload_extra,
             "byte_identical_extra_rows": byte_identical_extra,
             "conflicting_updates": conflicting,
+            "conflicting_update_count": len(conflicting),
         },
         "statistics": statistics_payload,
         "malformed": malformed,
-        "notes": [MISSING_ROW_NOTE, NONFINITE_NOTE],
+        "notes": [MISSING_ROW_NOTE, NONFINITE_NOTE, CONFLICT_NOTE],
     }
 
 
@@ -489,6 +518,14 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_CONTAINER_ERROR
+    conflicting_count = report["window"]["conflicting_update_count"]
+    if conflicting_count:
+        print(
+            f"error: {conflicting_count} update(s) have conflicting rows and "
+            "are excluded from statistics: window.conflicting_updates",
+            file=sys.stderr,
+        )
+        return EXIT_CONFLICTS
     return EXIT_OK
 
 

@@ -28,17 +28,8 @@ Warnings go to stderr through :func:`report_warning`, which cannot raise:
 a failing warning must never mask the primary exception or flip a
 successful publication.
 
-Known shared-sink gaps (documented, NOT fixed here; the baseline
-``DurableJsonlSink`` is intentionally unchanged):
-
-- if its constructor raises after ``os.open`` (e.g. the directory fsync
-  fails for a new file), the half-initialized object is unreachable from
-  the caller (the attribute assignment never completes) and its FD leaks
-  until process exit.  The guard stream treats any such failure as
-  session-disable (poison latched), so the leak is bounded to one FD per
-  failed session, not unbounded.
-- if ``close()`` raises from its fsync, ``os.close`` is not reached and the
-  FD stays open; same session-disable bound applies.
+The caller owns its writer lifecycle inside ``prepare``; this primitive
+owns only its staging file and never depends on a particular sink.
 """
 
 from __future__ import annotations
@@ -111,19 +102,21 @@ def _make_temp(temp_dir: Path, target: Path) -> Path:
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp = temp_dir / f"{target.name}.tmp-{uuid.uuid4().hex[:12]}"
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _optional_flags(), 0o600)
-    closed = False
+    close_attempted = False
     try:
         metadata = os.fstat(fd)
         if not stat.S_ISREG(metadata.st_mode):
             raise OSError(f"temp file {temp} is not a regular file")
+        # Mark before the syscall: a failed close must not retry a possibly
+        # recycled fd from the cleanup path.
+        close_attempted = True
         os.close(fd)
-        closed = True
     except BaseException:
         # Exception path: release the fd we still own (never close twice),
         # then best-effort remove the temp.  A failing close must WARN, not
         # become the new top-level exception: the ORIGINAL exception must
         # propagate unchanged (primary identity preserved).
-        if not closed:
+        if not close_attempted:
             try:
                 os.close(fd)
             except Exception:  # noqa: BLE001 - warning only, never masks

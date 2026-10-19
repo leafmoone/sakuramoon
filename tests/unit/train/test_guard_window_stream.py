@@ -7,8 +7,7 @@ and carries the real public int/map counter surface the stream reads.
 
 Failure semantics under test (root ruling): ANY snapshot/IO/publication
 fault latches the session DISABLED for the whole run — no per-window
-recovery — because the shared DurableJsonlSink can leak one FD per
-incomplete init/close; per-window recovery would leak without bound.  The
+recovery that could falsely imply continuous comparable coverage.  The
 on-disk sequence simply shows the gap (explicit incomplete, never
 backfilled).
 """
@@ -16,9 +15,10 @@ backfilled).
 from __future__ import annotations
 
 import json
+import sys
 import types
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import pytest
 
@@ -170,6 +170,12 @@ def _sealing_recorder(
 
             def close(self) -> None:
                 pass
+
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                self.close()
 
         monkeypatch.setattr(
             "sakuramoon.train.guard_window_stream.DurableJsonlSink", _LocalSink
@@ -543,6 +549,46 @@ class TestFailureDisables:
         recorder.close("clean")
         assert _windows(rank_dir) == []
         assert calls["n"] == 1  # no further publish attempts
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="real POSIX sink")
+    def test_write_fault_releases_fd_preserves_primary_and_latches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import os
+
+        import sakuramoon.train.guard_window_stream as stream
+        from sakuramoon.telemetry.metrics import DurableJsonlSink
+
+        opt = _make_optimizer(PLAIN_SPECS)
+        recorder = _recorder(tmp_path, opt, window_updates=1)
+        original = OSError(5, "injected write failure")
+        descriptors: list[int] = []
+        errors: list[BaseException | None] = []
+        writes: list[int] = []
+
+        def fail_write(sink: DurableJsonlSink, record: object) -> None:
+            descriptors.append(sink._fd)  # pyright: ignore[reportPrivateUsage]
+            writes.append(1)
+            raise original
+
+        def warning(message: str, error: BaseException | None = None) -> None:
+            errors.append(error)
+
+        monkeypatch.setattr(DurableJsonlSink, "write", fail_write)
+        monkeypatch.setattr(stream, "_stderr", warning)
+        recorder.maybe_record(_observation(1))
+        assert recorder.disabled
+        assert errors == [original]
+        assert len(descriptors) == 1
+        with pytest.raises(OSError) as closed:
+            os.fstat(descriptors[0])
+        assert closed.value.errno == 9  # EBADF
+        recorder.maybe_record(_observation(2))
+        recorder.close("raised")
+        assert writes == [1]
+        rank_dir = tmp_path / "guard_window" / "session-sess-1" / "rank-0"
+        assert _windows(rank_dir) == []
+        assert list((rank_dir / ".tmp").iterdir()) == []
 
     def test_duplicate_window_target_disables(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

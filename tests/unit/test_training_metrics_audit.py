@@ -6,6 +6,7 @@ import gzip
 import importlib.util
 import json
 import math
+import random
 import subprocess
 import sys
 from collections.abc import Iterator, Mapping, Sequence
@@ -319,3 +320,152 @@ def test_cli_success_still_returns_zero(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert json.loads(result.stdout)["file"]["container_error"] is None
+
+
+def _bruteforce_missing_ranges(
+    start: int, end: int, present: set[int]
+) -> tuple[list[list[int]], bool, int]:
+    """Per-update reference scan the gap walk must match on small windows."""
+    ranges: list[list[int]] = []
+    count = 0
+    run_start: int | None = None
+    for update in range(start, end + 1):
+        if update in present:
+            if run_start is not None:
+                ranges.append([run_start, update - 1])
+                run_start = None
+        elif run_start is None:
+            run_start = update
+        count += update not in present
+    if run_start is not None:
+        ranges.append([run_start, end])
+    truncated = len(ranges) > 1000
+    if truncated:
+        ranges = ranges[:1000]
+    return ranges, truncated, count
+
+
+def test_missing_ranges_match_bruteforce_on_random_windows() -> None:
+    rng = random.Random(20261019)
+    for _ in range(300):
+        start = rng.randint(0, 50)
+        end = start + rng.randint(0, 80)
+        present = {
+            rng.randint(start - 5, end + 5) for _ in range(rng.randint(0, 40))
+        }
+        in_window = sorted(update for update in present if start <= update <= end)
+        assert audit_module._missing_ranges(start, end, in_window) == (
+            _bruteforce_missing_ranges(start, end, present)
+        )
+
+
+def test_missing_ranges_scan_trillion_wide_window(tmp_path: Path) -> None:
+    upper = 10 ** 12
+    rows = [_row(1, main_loss=0.5), _row(upper, main_loss=0.6)]
+    path = tmp_path / "metrics.jsonl"
+    _write_rows(path, rows)
+
+    report = audit_module.audit(path, start=1, end=upper, loss_field="main_loss")
+    window = report["window"]
+
+    assert window["expected_updates"] == upper
+    assert window["missing_count"] == upper - 2
+    assert window["missing_ranges"] == [[2, upper - 1]]
+    assert window["missing_ranges_truncated"] is False
+    assert report["statistics"]["rows"] == 2
+
+
+@pytest.mark.parametrize("missing", [999, 1000, 1002])
+def test_missing_ranges_truncation_keeps_exact_count(tmp_path: Path, missing: int) -> None:
+    end = 2 * missing - 1
+    rows = [_row(update, main_loss=0.5) for update in range(2, end, 2)]
+    path = tmp_path / "metrics.jsonl"
+    _write_rows(path, rows)
+
+    report = audit_module.audit(path, start=1, end=end, loss_field="main_loss")
+    window = report["window"]
+    ranges = cast(list[list[int]], window["missing_ranges"])
+
+    assert window["missing_count"] == missing
+    assert window["missing_ranges_truncated"] is (missing > 1000)
+    assert len(ranges) == min(missing, 1000)
+    assert ranges[0] == [1, 1]
+    last = 2 * min(missing, 1000) - 1
+    assert ranges[-1] == [last, last]
+    # Truncating the list never truncates the exact missing count.
+    assert sum(stop - start + 1 for start, stop in ranges) == min(missing, 1000)
+
+
+def test_conflicting_updates_excluded_from_statistics_and_window_scoped(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        _row(10, main_loss=0.4),
+        _row(11, main_loss=0.5),
+        _row(12, main_loss=0.6),
+        _row(13, main_loss=0.7),
+        # Identical payload with a fresh timestamp: duplicate, not conflict.
+        _row(10, recorded_at_unix_ns=2, main_loss=0.4),
+        # Genuinely different payload for the same update.
+        _row(11, main_loss=0.9, pre_clip_grad_norm=99.0, clip_fraction=1.0, nonfinite_count=9),
+    ]
+    path = tmp_path / "metrics.jsonl"
+    _write_rows(path, rows)
+
+    report = audit_module.audit(path, start=10, end=13, loss_field="main_loss")
+    window = report["window"]
+    stats = report["statistics"]
+
+    assert window["status"] == "conflicting_updates"
+    assert window["coverage"] == 1.0  # presence, not trustworthy-statistics coverage
+    assert window["missing_count"] == 0
+    assert window["conflicting_updates"] == [11]
+    assert window["conflicting_update_count"] == 1
+    assert stats["conflicting_updates_excluded"] == 1
+    assert stats["rows"] == 3  # 10, 12, 13; 11 is excluded entirely
+    assert stats["source_rows"] == 4  # both rows of 10 remain
+    assert stats["loss_mean"] == round((0.4 + 0.6 + 0.7) / 3, 6)
+    assert stats["pre_clip_max"] is None
+    assert stats["clip_fraction_mean"] is None
+    assert stats["nonfinite_total"] == 0  # conflict is excluded, not proof of finiteness
+    _write_rows(path, list(reversed(rows)))
+    reversed_report = audit_module.audit(path, start=10, end=13, loss_field="main_loss")
+    assert reversed_report["statistics"] == stats
+    assert reversed_report["window"] == window
+    # File-level facts still count the duplicate row.
+    assert window["same_payload_extra_rows"] == 1
+
+    # Window scope: a window without 11 reports no conflict at all.
+    scoped = audit_module.audit(path, start=10, end=10, loss_field="main_loss")
+    assert scoped["window"]["conflicting_update_count"] == 0
+    assert scoped["statistics"]["conflicting_updates_excluded"] == 0
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_cli_conflicting_updates_exit_code(tmp_path: Path, truncated: bool) -> None:
+    data = gzip.compress(
+        (
+            json.dumps(_row(5, main_loss=0.5)) + "\n"
+            + json.dumps(_row(5, main_loss=0.9)) + "\n"
+        ).encode()
+    )
+    if truncated:
+        data += gzip.compress(b'{"successful_update":6}\n')[:10]
+    path = tmp_path / "metrics.jsonl.gz"
+    path.write_bytes(data)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    report = json.loads(result.stdout)
+    assert report["window"]["conflicting_update_count"] == 1
+    assert report["statistics"]["conflicting_updates_excluded"] == 1
+    assert report["statistics"]["rows"] == 0
+    if truncated:
+        # A failed read reports the container error, not the conflict.
+        assert result.returncode == 1
+        assert report["file"]["container_error"]
+    else:
+        assert result.returncode == 4
+        assert "conflicting" in result.stderr
