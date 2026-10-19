@@ -21,16 +21,28 @@ excluded from statistics entirely instead of resolving to whichever row
 happened to be read last; the statistics describe conflict-free updates
 only, and ``window.conflicting_update_count`` identifies them.
 
+Schema 4 adds ``file.status``: ``ok``, ``malformed_rows``, or
+``container_error`` (in that priority order, with container errors highest).
+This file-wide status is independent of the existing ``window.status``:
+malformed JSON syntax and non-object JSON values cannot be assigned to an
+update window.  ``file.malformed_rows`` counts all such nonblank lines read;
+``malformed`` retains only the first 50 line/error details.  Valid surrounding
+rows still contribute to the report.  JSON objects without an integer
+``successful_update`` remain separately counted in ``file.rows_without_update``;
+they are not malformed and do not themselves cause a nonzero exit.
+
 The tool is read-only and standard-library only.  It does not persist hashes
 of the input; the transient digests below exist only to separate the three
 duplicate buckets.
 
-Exit status: 0 when the audit completed without conflicts; 1 when the input
-container failed mid-read (the partial report is still emitted); 2 for
-invalid arguments or inverted window bounds; 3 when the report could not be
-written to ``--out``; 4 when the audited window contains conflicting updates
-(the report is still emitted and those updates are excluded from
-statistics).
+Exit status: 0 when the audit completed without conflicts or malformed rows;
+1 when the input container failed mid-read (the partial report is still
+emitted); 2 for invalid arguments or inverted window bounds; 3 when the report
+could not be written to ``--out``; 4 when the audited window contains conflicting
+updates (those updates are excluded from statistics); 5 when malformed rows
+make the audit incomplete.  Reports are emitted to stdout or ``--out`` before
+returning 1, 4, or 5, with precedence 1 over 4 over 5.  Argument and output-write
+failures retain their existing precedence.
 """
 
 from __future__ import annotations
@@ -51,7 +63,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO, cast
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 VOLATILE_KEYS = frozenset({"recorded_at_unix_ns"})
 MAX_MALFORMED = 50
 MAX_MISSING_RANGES = 1000
@@ -60,6 +72,7 @@ EXIT_CONTAINER_ERROR = 1
 EXIT_USAGE = 2
 EXIT_WRITE_ERROR = 3
 EXIT_CONFLICTS = 4
+EXIT_MALFORMED = 5
 
 
 MISSING_ROW_NOTE = (
@@ -245,13 +258,9 @@ def _summarize(
         loss_missing_rows=missing,
         loss_mean=round(statistics.fmean(losses), 6) if losses else None,
         loss_median=round(statistics.median(losses), 6) if losses else None,
-        pre_clip_median=(
-            round(statistics.median(gradients), 6) if gradients else None
-        ),
+        pre_clip_median=(round(statistics.median(gradients), 6) if gradients else None),
         pre_clip_max=round(max(gradients), 6) if gradients else None,
-        clip_fraction_mean=(
-            round(statistics.fmean(clips), 6) if clips else None
-        ),
+        clip_fraction_mean=(round(statistics.fmean(clips), 6) if clips else None),
         clipped_updates=sum(1 for value in clips if value > 0.0),
         nonfinite_total=nonfinite,
         invalid_numeric_values=invalid,
@@ -270,8 +279,10 @@ def audit(
 
     ``start`` and ``end`` are inclusive update bounds.  When only one bound is
     given, the other is inferred from the updates present in the file.  An
-    empty file with no usable update rows reports ``status=no_update_rows``
-    rather than a zero-length, apparently complete window.
+    empty file with no usable update rows reports ``window.status=no_update_rows``
+    rather than a zero-length, apparently complete window.  Check ``file.status``
+    separately for malformed input or container errors, even for a narrow window;
+    valid rows and all existing counts remain available in an incomplete report.
     """
 
     present: set[int] = set()
@@ -388,12 +399,10 @@ def audit(
         ]
         clean_rows = sum(line_counts[update] for update in clean_selected)
         same_payload_extra = sum(
-            line_counts[update] - len(payload_digests[update])
-            for update in selected
+            line_counts[update] - len(payload_digests[update]) for update in selected
         )
         byte_identical_extra = sum(
-            line_counts[update] - len(line_digests[update])
-            for update in selected
+            line_counts[update] - len(line_digests[update]) for update in selected
         )
         selected_rows = sum(line_counts[update] for update in selected)
 
@@ -421,13 +430,21 @@ def audit(
         "schema_version": SCHEMA_VERSION,
         "audited_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "file": {
+            "status": (
+                "container_error"
+                if container_error is not None
+                else "malformed_rows"
+                if malformed_total
+                else "ok"
+            ),
             "path": str(path),
             "bytes": stat.st_size if stat is not None else None,
             "modified": (
                 datetime.fromtimestamp(stat.st_mtime)
                 .astimezone()
                 .isoformat(timespec="seconds")
-                if stat is not None else None
+                if stat is not None
+                else None
             ),
             "total_lines": total_lines,
             "blank_lines": blank_lines,
@@ -446,9 +463,7 @@ def audit(
             "expected_updates": expected,
             "selected_rows": selected_rows,
             "distinct_updates": len(selected),
-            "coverage": (
-                round(len(selected) / expected, 6) if expected else None
-            ),
+            "coverage": (round(len(selected) / expected, 6) if expected else None),
             "missing_count": missing_count,
             "missing_ranges": missing_ranges,
             "missing_ranges_truncated": missing_truncated,
@@ -472,13 +487,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
     if not args.metrics.is_file():
-        parser.error(
-            f"metrics input does not exist or is not a file: {args.metrics}"
-        )
+        parser.error(f"metrics input does not exist or is not a file: {args.metrics}")
     if args.start is not None and args.end is not None and args.start > args.end:
-        parser.error(
-            f"--start {args.start} must not be greater than --end {args.end}"
-        )
+        parser.error(f"--start {args.start} must not be greater than --end {args.end}")
     if args.out is not None and args.out.resolve() == args.metrics.resolve():
         parser.error("--out must not point at the audited input")
     return args
@@ -505,8 +516,7 @@ def main(argv: list[str] | None = None) -> int:
             args.out.write_text(rendered + "\n", encoding="utf-8")
         except OSError as exc:
             print(
-                f"error: cannot write --out {args.out}: "
-                f"{type(exc).__name__}: {exc}",
+                f"error: cannot write --out {args.out}: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
             return EXIT_WRITE_ERROR
@@ -526,6 +536,14 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_CONFLICTS
+    malformed_count = report["file"]["malformed_rows"]
+    if malformed_count:
+        print(
+            f"error: {malformed_count} malformed row(s); audit incomplete; "
+            "report emitted: file.malformed_rows and malformed",
+            file=sys.stderr,
+        )
+        return EXIT_MALFORMED
     return EXIT_OK
 
 

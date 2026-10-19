@@ -92,7 +92,7 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         growth_alpha_for_update: Callable[[int], float] | None = None,
         backward: Callable[[torch.Tensor], None] | None = None,
         no_sync: Callable[[], AbstractContextManager[None]] | None = None,
-        condition_grad_share: bool = False,
+        condition_grad_share: bool | Callable[[int], bool] = False,
     ) -> None:
         if (
             type(target_successful_updates) is not int
@@ -101,8 +101,8 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
             or checkpoint_every_successful_updates <= 0
         ):
             raise ValueError("loop update targets and checkpoint cadence are invalid")
-        if type(condition_grad_share) is not bool:
-            raise ValueError("condition_grad_share must be a bool")
+        if type(condition_grad_share) is not bool and not callable(condition_grad_share):
+            raise ValueError("condition_grad_share must be a bool or callable")
         self.condition_grad_share = condition_grad_share
         self.module = module
         self.optimizer = optimizer
@@ -241,7 +241,11 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                     inner_module, "irepa_alignment", None
                 )
                 is not None,
-                condition_grad_share=self.condition_grad_share,
+                condition_grad_share=(
+                    self.condition_grad_share(self.state.successful_updates + 1)
+                    if callable(self.condition_grad_share)
+                    else self.condition_grad_share
+                ),
             )
             active_detection_boundary = "data"
             update: SingleGpuUpdateResult

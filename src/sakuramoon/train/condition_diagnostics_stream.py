@@ -136,11 +136,13 @@ def _masked_rms(values: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
     if values.shape != keep.shape:
         raise ValueError("masked RMS tensors must share one shape")
     flat_values = values.float().flatten()
-    flat_keep = keep.flatten().to(flat_values.dtype)
+    flat_keep = keep.flatten()
     count = int(flat_keep.sum().item())
     if count == 0:
         raise ValueError("masked RMS has no selected elements")
-    return torch.sqrt((flat_values.square() * flat_keep).sum()) / math.sqrt(count)
+    # Mask before squaring: multiplication by zero does not exclude NaN/Inf.
+    selected_values = flat_values.masked_fill(~flat_keep, 0.0)
+    return torch.sqrt(selected_values.square().sum()) / math.sqrt(count)
 
 
 def _per_sample_rms_mean(values: torch.Tensor) -> torch.Tensor:
@@ -430,6 +432,15 @@ class ConditionDiagnosticsRecorder:
             path, fsync_every_records=flush_every_records
         )
 
+    def should_record(self, successful_update: int) -> bool:
+        """Live producer/consumer gate, including sink failure and closure."""
+
+        return (
+            not self._disabled
+            and not self._closed
+            and successful_update % self._log_every_n == 0
+        )
+
     def record_update(
         self,
         *,
@@ -439,7 +450,7 @@ class ConditionDiagnosticsRecorder:
     ) -> None:
         """Write one record when the update cadence is due (no-op otherwise)."""
 
-        if self._disabled or successful_update % self._log_every_n != 0:
+        if not self.should_record(successful_update):
             return
         record = build_condition_diagnostic_record(
             successful_update=successful_update,
@@ -469,10 +480,10 @@ class ConditionDiagnosticsRecorder:
         did not carry them the stream fails closed instead of guessing.
         """
 
-        if self._disabled:
+        if self._disabled or self._closed:
             return
         successful_update = observation.loop.update.state.successful_updates
-        if successful_update % self._log_every_n != 0:
+        if not self.should_record(successful_update):
             return
         microbatches = observation.microbatches
         if not microbatches:

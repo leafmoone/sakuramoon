@@ -651,6 +651,7 @@ class SingleGpuBatchRuntime:
         irepa_eps: float = 1e-6,
         irepa_schedule: IRepaLambdaSchedule | None = None,
         condition_diagnostics_every: int | None = None,
+        condition_diagnostics_should_record: Callable[[int], bool] | None = None,
     ) -> None:
         if device.type != "cuda" or not torch.cuda.is_available():
             raise ValueError("single-GPU production runtime requires CUDA")
@@ -682,6 +683,10 @@ class SingleGpuBatchRuntime:
             raise ValueError(
                 "condition_diagnostics_every must be None or a positive int"
             )
+        if condition_diagnostics_should_record is not None and not callable(
+            condition_diagnostics_should_record
+        ):
+            raise ValueError("condition_diagnostics_should_record must be callable")
         if (
             type(torch_compile_enabled) is not bool
             or torch_compile_backend != "inductor"
@@ -757,11 +762,10 @@ class SingleGpuBatchRuntime:
         # set_growth_alpha); 0.0 until the first binding.  A lambda of 0.0
         # still runs the FULL teacher/capture/projector/z-score/cosine path.
         self.irepa_weight = 0.0
-        # Opt-in per-rank condition diagnostics: ``measure()`` computes
-        # detached activation facts (before the optimizer step) when the
-        # in-flight update's number is a multiple of this cadence.  None
-        # = disabled: no compute, no retention — byte-identical path.
+        # Production uses the live sink gate; cadence-only callers retain
+        # their existing API. Both absent = no compute or retention.
         self.condition_diagnostics_every = condition_diagnostics_every
+        self.condition_diagnostics_should_record = condition_diagnostics_should_record
 
     def set_growth_alpha(self, value: float) -> None:
         """Select the canonical alpha before starting one successful update."""
@@ -968,67 +972,74 @@ class SingleGpuBatchRuntime:
         update_number: int | None = None,
         is_final_microbatch: bool = True,
     ) -> RuntimeMeasurement:
+        # Runtime owns capture during measure, even if a direct caller used
+        # the standalone composite/assembly opt-in before entering runtime.
+        # Clear that state before preparation or eligibility can fail.
+        if self.composite.condition_diagnostics_enabled:
+            self.composite.disable_condition_diagnostics()
         prepared = self.prepare(batch, phase_timer=phase_timer)
         dit_flops = self.dit_flop_counter.count(prepared.inputs)
         # The DDP-wrapped module is the composite itself, so the projector
         # runs INSIDE this forward (never on forward_module.module from the
         # outside) and its parameters are part of the distributed graph.
-        forward_output = self.forward_module(
-            prepared.inputs,
-            phase_timer=phase_timer,
-        )
-        if isinstance(forward_output, TrainableCompositeIRepaOutput):
-            predictions = forward_output.predictions
-            projected = forward_output.projected_student_features
-            if prepared.irepa_targets is None:
-                raise RuntimeError(
-                    "iREPA composite output arrived without a teacher target"
-                )
-        else:
-            predictions = forward_output
-            projected = None
-            if self.irepa_teacher is not None:
-                raise RuntimeError(
-                    "iREPA teacher was configured but the composite has no "
-                    "projector"
-                )
-        if len(predictions) != len(prepared.clean_latents):
-            raise ValueError("DiT prediction count differs from latent batch")
-        if phase_timer is None:
-            loss = self._loss(predictions, prepared, projected)
-        else:
-            with phase_timer.record("loss"):
-                loss = self._loss(predictions, prepared, projected)
-        image_tokens = (
-            batch.images.shape[0]
-            * (batch.target_height // 16)
-            * (batch.target_width // 16)
-        )
-        text_tokens = sum(batch.main_token_lengths)
-        sample_ids = tuple(
-            str(cast(int, value.item()))
-            for value in batch.sample_ids.detach().cpu().unbind()
-        )
-        shape_key = f"{batch.target_height}x{batch.target_width}x{batch.dense_length}"
-        # Opt-in condition diagnostics: when the in-flight update's number
-        # is due on the cadence AND this is the update's FINAL microbatch,
-        # compute the detached facts HERE — before any gradient work and
-        # before ``optimizer.step()`` — so they use the same weights and
-        # the same condition tokens this forward feeds to the DiT (never a
-        # mixed pre/post-step state, and never a second forward on stale
-        # data).  Exactly ONE conditioner recompute per due update (the
-        # final microbatch's, which is what lands); non-final and
-        # off-cadence microbatches pay nothing.  Only scalar floats are
-        # kept (no tensor references, no VRAM cost).
-        condition_facts: dict[str, float | int | None] | None = None
-        every = self.condition_diagnostics_every
+        capture_condition = False
+        should_record = self.condition_diagnostics_should_record
+        # A live recorder owns cadence; stride one only activates this gate.
+        every = self.condition_diagnostics_every if should_record is None else 1
         if every is not None and is_final_microbatch:
             if update_number is None:
                 raise RuntimeError(
                     "condition diagnostics are enabled but measure() got no"
                     " update number"
                 )
-            if update_number % every == 0:
+            capture_condition = (
+                should_record(update_number)
+                if should_record is not None
+                else update_number % every == 0
+            )
+        if capture_condition:
+            self.composite.enable_condition_diagnostics()
+        try:
+            forward_output = self.forward_module(
+                prepared.inputs,
+                phase_timer=phase_timer,
+            )
+            if isinstance(forward_output, TrainableCompositeIRepaOutput):
+                predictions = forward_output.predictions
+                projected = forward_output.projected_student_features
+                if prepared.irepa_targets is None:
+                    raise RuntimeError(
+                        "iREPA composite output arrived without a teacher target"
+                    )
+            else:
+                predictions = forward_output
+                projected = None
+                if self.irepa_teacher is not None:
+                    raise RuntimeError(
+                        "iREPA teacher was configured but the composite has no "
+                        "projector"
+                    )
+            if len(predictions) != len(prepared.clean_latents):
+                raise ValueError("DiT prediction count differs from latent batch")
+            if phase_timer is None:
+                loss = self._loss(predictions, prepared, projected)
+            else:
+                with phase_timer.record("loss"):
+                    loss = self._loss(predictions, prepared, projected)
+            image_tokens = (
+                batch.images.shape[0]
+                * (batch.target_height // 16)
+                * (batch.target_width // 16)
+            )
+            text_tokens = sum(batch.main_token_lengths)
+            sample_ids = tuple(
+                str(cast(int, value.item()))
+                for value in batch.sample_ids.detach().cpu().unbind()
+            )
+            shape_key = f"{batch.target_height}x{batch.target_width}x{batch.dense_length}"
+            # Same-forward, pre-step facts from only the eligible final microbatch.
+            condition_facts: dict[str, float | int | None] | None = None
+            if capture_condition:
                 last_conditioning = self.composite.last_conditioning
                 if last_conditioning is None:
                     raise RuntimeError(
@@ -1038,6 +1049,9 @@ class SingleGpuBatchRuntime:
                 condition_facts = compute_condition_activation_facts(
                     self.composite, prepared.inputs, last_conditioning
                 )
+        finally:
+            if capture_condition:
+                self.composite.disable_condition_diagnostics()
         return RuntimeMeasurement(
             per_sample_loss=loss.per_sample,
             image_tokens=image_tokens,
@@ -1332,7 +1346,7 @@ def _run_single_gpu_training(
     backward: Callable[[torch.Tensor], None] | None = None,
     no_sync: Callable[[], AbstractContextManager[None]] | None = None,
     log_updates: bool = True,
-    condition_grad_share: bool = False,
+    condition_grad_share: bool | Callable[[int], bool] = False,
     condition_diagnostic_observer: Callable[[SuccessfulTrainingObservation], None]
     | None = None,
     guard_window_observer: Callable[[SuccessfulTrainingObservation], None]
@@ -1574,7 +1588,7 @@ def run_single_gpu_training(
     backward: Callable[[torch.Tensor], None] | None = None,
     no_sync: Callable[[], AbstractContextManager[None]] | None = None,
     log_updates: bool = True,
-    condition_grad_share: bool = False,
+    condition_grad_share: bool | Callable[[int], bool] = False,
     condition_diagnostic_observer: Callable[[SuccessfulTrainingObservation], None]
     | None = None,
     guard_window_observer: Callable[[SuccessfulTrainingObservation], None]
@@ -1582,8 +1596,8 @@ def run_single_gpu_training(
 ) -> LoopResult:
     """Run production training with the exact publisher accepted by preflight."""
 
-    if type(condition_grad_share) is not bool:
-        raise ValueError("condition_grad_share must be a bool")
+    if type(condition_grad_share) is not bool and not callable(condition_grad_share):
+        raise ValueError("condition_grad_share must be a bool or callable")
     if condition_diagnostic_observer is not None and not callable(
         condition_diagnostic_observer
     ):

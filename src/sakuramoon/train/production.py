@@ -1062,6 +1062,7 @@ def _runtime(
     repository_root: Path,
     resume: Path | None,
     condition_diagnostics_every: int | None = None,
+    condition_diagnostics_should_record: Callable[[int], bool] | None = None,
 ) -> SingleGpuBatchRuntime:
     index = int(device.index or 0)
     irepa_teacher: FrozenPESpatialEncoder | None = None
@@ -1113,6 +1114,7 @@ def _runtime(
         irepa_eps=irepa_eps,
         irepa_schedule=irepa_schedule,
         condition_diagnostics_every=condition_diagnostics_every,
+        condition_diagnostics_should_record=condition_diagnostics_should_record,
     )
 
 
@@ -1397,10 +1399,6 @@ def _run_accepted_lifecycle(
         config,
         device=device,
         new_slot_ids=new_growth_slots,
-        condition_diagnostics=(
-            config.condition_diagnostics is not None
-            and config.condition_diagnostics.enabled
-        ),
     )
     _log("构建优化器")
     optimizer = _build_optimizer(
@@ -1688,16 +1686,20 @@ def _run_accepted_lifecycle(
     batches = factory.batches(client)
     primary: BaseException | None = None
     result: ProductionTrainingResult | None = None
+    condition_diagnostics_recorder: ConditionDiagnosticsRecorder | None = None
+
+    def condition_diagnostics_should_record(update: int) -> bool:
+        return (
+            condition_diagnostics_recorder is not None
+            and condition_diagnostics_recorder.should_record(update)
+        )
+
     try:
-        # The runtime computes the condition diagnostics facts in
-        # measure() (before the optimizer step) when the in-flight
-        # update's number hits the cadence; None = feature off (or
-        # calibration, which bypasses the stream entirely).
+        # The recorder is constructed after preflight. A live closure keeps
+        # preflight/calibration and failed or closed sinks producer-free.
         cd_config = config.condition_diagnostics
-        condition_diagnostics_every = (
-            cd_config.log_every_n
-            if cd_config is not None and cd_config.enabled and not in_calibration
-            else None
+        condition_diagnostics_enabled = (
+            cd_config is not None and cd_config.enabled and not in_calibration
         )
         runtime = _runtime(
             config,
@@ -1709,7 +1711,11 @@ def _run_accepted_lifecycle(
             device=device,
             repository_root=repository_root,
             resume=resume,
-            condition_diagnostics_every=condition_diagnostics_every,
+            condition_diagnostics_should_record=(
+                condition_diagnostics_should_record
+                if condition_diagnostics_enabled
+                else None
+            ),
         )
         if in_calibration:
             publisher: ProductionSingleGpuCheckpointPublisher = (
@@ -1952,7 +1958,6 @@ def _run_accepted_lifecycle(
                 # appends to its own versioned JSONL file (never shared, so
                 # records cannot interleave).  Config section absent = this
                 # whole block stays None and nothing below runs.
-                condition_diagnostics_recorder = None
                 cd_config = config.condition_diagnostics
                 if cd_config is not None and cd_config.enabled and not in_calibration:
                     condition_diagnostics_recorder = _construct_condition_diagnostics(
@@ -2039,7 +2044,9 @@ def _run_accepted_lifecycle(
                             ),
                             log_updates=is_main_process,
                             condition_grad_share=(
-                                condition_diagnostics_recorder is not None
+                                condition_diagnostics_should_record
+                                if condition_diagnostics_enabled
+                                else False
                             ),
                             condition_diagnostic_observer=(
                                 condition_diagnostics_recorder.maybe_record

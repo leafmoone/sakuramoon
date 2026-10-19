@@ -78,6 +78,7 @@ jobs:
           tests/unit/config/test_guard_window_config.py
           tests/unit/train/test_condition_diagnostics_stream.py
           tests/unit/train/test_condition_diagnostics_production_wiring.py
+          tests/unit/train/test_condition_diagnostics_lifecycle.py
           tests/unit/telemetry/test_durable_jsonl_sink.py
           tests/unit/telemetry/test_guard_publish.py
           tests/unit/train/test_guard_window_stream.py

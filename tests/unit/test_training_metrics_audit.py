@@ -53,11 +53,7 @@ def _write_rows(
 def test_separates_byte_identical_same_payload_and_conflicting_rows(
     tmp_path: Path,
 ) -> None:
-    rows = [
-        _row(update, main_loss=0.5)
-        for update in range(10, 21)
-        if update != 15
-    ]
+    rows = [_row(update, main_loss=0.5) for update in range(10, 21) if update != 15]
     # Same payload, different producer timestamp: not a conflict.
     rows.append(_row(12, recorded_at_unix_ns=2, main_loss=0.5))
     # Byte-identical duplicate.
@@ -154,6 +150,7 @@ def test_empty_file_reports_no_update_rows(tmp_path: Path) -> None:
     report = audit_module.audit(path, start=5, end=None, loss_field="main_loss")
 
     assert report["file"]["rows"] == 0
+    assert report["file"]["status"] == "ok"
     assert report["window"]["status"] == "no_update_rows"
     assert report["window"]["expected_updates"] is None
     assert report["window"]["coverage"] is None
@@ -171,10 +168,16 @@ def test_missing_updates_are_compacted_into_ranges(tmp_path: Path) -> None:
     assert report["window"]["missing_ranges"] == [[12, 19]]
 
 
-def test_rows_without_update_are_counted(tmp_path: Path) -> None:
+def test_rows_without_update_are_counted(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     rows = [
         {"step": 1},
         {"successful_update": "11"},
+        {"successful_update": True},
+        {"successful_update": 11.0},
+        {"successful_update": None},
         _row(12, main_loss=0.5),
     ]
     path = tmp_path / "metrics.jsonl"
@@ -182,12 +185,134 @@ def test_rows_without_update_are_counted(tmp_path: Path) -> None:
 
     report = audit_module.audit(path, start=12, end=12, loss_field="main_loss")
 
-    assert report["file"]["rows"] == 3
-    assert report["file"]["rows_without_update"] == 2
+    assert report["file"]["rows"] == 6
+    assert report["file"]["rows_without_update"] == 5
+    assert report["file"]["malformed_rows"] == 0
+    assert report["file"]["status"] == "ok"
+    assert report["malformed"] == []
+    # Valid objects with unusable update keys keep their existing classification.
+    assert audit_module.main([str(path), "--start", "12", "--end", "12"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out)["statistics"]["rows"] == 1
+
+
+@pytest.mark.parametrize("to_file", [False, True])
+@pytest.mark.parametrize(
+    ("bad_line", "error"),
+    [
+        (
+            "{not json}",
+            "JSONDecodeError: Expecting property name enclosed in double quotes",
+        ),
+        ('["not an object"]', "row is not an object"),
+        ("null", "row is not an object"),
+    ],
+)
+def test_cli_malformed_input_keeps_surrounding_rows_and_report(
+    tmp_path: Path,
+    to_file: bool,
+    bad_line: str,
+    error: str,
+) -> None:
+    path = tmp_path / "metrics.jsonl"
+    content = "\n".join(
+        [
+            json.dumps(_row(10, main_loss=0.4)),
+            bad_line,
+            json.dumps(_row(11, main_loss=0.6)),
+            "",
+        ]
+    )
+    path.write_text(content, encoding="utf-8")
+    out = tmp_path / "report.json"
+    args = [sys.executable, str(SCRIPT), str(path), "--start", "10", "--end", "11"]
+    if to_file:
+        args += ["--out", str(out)]
+
+    result = subprocess.run(args, capture_output=True, text=True, check=False)
+
+    assert result.returncode == 5
+    assert "1 malformed row(s); audit incomplete; report emitted" in result.stderr
+    assert "Traceback" not in result.stderr
+    if to_file:
+        assert result.stdout == ""
+    report = json.loads(out.read_text() if to_file else result.stdout)
+    assert report["schema_version"] == 4
+    assert report["file"]["status"] == "malformed_rows"
+    assert report["file"]["container_error"] is None
+    assert report["file"]["rows"] == 2
+    assert report["file"]["malformed_rows"] == 1
+    assert report["file"]["rows_without_update"] == 0
+    assert report["malformed"] == [{"line": 2, "error": error}]
+    assert report["window"]["status"] == "ok"
+    assert report["window"]["coverage"] == 1.0
+    assert report["window"]["missing_count"] == 0
+    assert report["statistics"]["rows"] == 2
+    assert report["statistics"]["loss_mean"] == 0.5
+    # Bad lines have no usable update, so narrowing the window cannot hide them.
+    scoped = audit_module.audit(path, start=11, end=11, loss_field="main_loss")
+    assert scoped["file"]["status"] == "malformed_rows"
+    assert scoped["file"]["malformed_rows"] == 1
+    assert scoped["statistics"]["loss_mean"] == 0.6
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_malformed_detail_cap_keeps_exact_count_and_valid_tail(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "metrics.jsonl"
+    bad_lines = ["{not json}", "null"] * 29
+    content = "\n".join(
+        [
+            json.dumps(_row(10, main_loss=0.4)),
+            *bad_lines,
+            json.dumps(_row(11, main_loss=0.6)),
+            "",
+        ]
+    )
+    path.write_text(content, encoding="utf-8")
+
+    assert audit_module.main([str(path)]) == 5
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+
+    assert report["file"]["status"] == "malformed_rows"
+    assert report["file"]["malformed_rows"] == 58
+    assert report["file"]["total_lines"] == 60
+    assert len(report["malformed"]) == 50
+    assert [detail["line"] for detail in report["malformed"]] == list(range(2, 52))
+    assert report["malformed"][0]["error"].startswith("JSONDecodeError:")
+    assert report["malformed"][1]["error"] == "row is not an object"
+    assert report["statistics"]["rows"] == 2
+    assert report["statistics"]["loss_mean"] == 0.5
+    assert "58 malformed row(s)" in captured.err
+
+
+def test_malformed_only_file_is_incomplete_not_a_successful_empty_audit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "metrics.jsonl"
+    path.write_text(" \n{not json}\nnull\n", encoding="utf-8")
+
+    assert audit_module.main([str(path)]) == 5
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["file"]["status"] == "malformed_rows"
+    assert report["file"]["malformed_rows"] == 2
+    assert report["file"]["blank_lines"] == 1
+    assert report["file"]["rows"] == 0
+    assert [detail["line"] for detail in report["malformed"]] == [2, 3]
+    assert report["window"]["status"] == "no_update_rows"
+    assert report["statistics"]["rows"] == 0
+    assert report["statistics"]["loss_mean"] is None
 
 
 def test_out_must_not_overwrite_the_input(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     path = tmp_path / "metrics.jsonl"
     _write_rows(path, [_row(5, main_loss=0.5)])
@@ -211,8 +336,10 @@ def test_truncated_gzip_is_reported_not_raised(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("to_file", [False, True])
 def test_cli_read_error_returns_nonzero_with_partial_statistics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str], to_file: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    to_file: bool,
 ) -> None:
     path = tmp_path / "metrics.jsonl"
     path.touch()
@@ -235,7 +362,8 @@ def test_cli_read_error_returns_nonzero_with_partial_statistics(
 
 
 def test_cli_read_and_metadata_failure_keeps_partial_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     path = tmp_path / "metrics.jsonl"
@@ -257,13 +385,19 @@ def test_cli_read_and_metadata_failure_keeps_partial_report(
 
 
 @pytest.mark.parametrize("to_file", [False, True])
+@pytest.mark.parametrize("malformed", [False, True])
 def test_cli_truncated_gzip_process_exit_and_partial_report(
-    tmp_path: Path, to_file: bool,
+    tmp_path: Path,
+    to_file: bool,
+    malformed: bool,
 ) -> None:
     path = tmp_path / "metrics.jsonl.gz"
     # A complete first gzip member is emitted before the truncated next
     # member fails.  This deterministically preserves the first statistics.
-    first = gzip.compress((json.dumps(_row(5, main_loss=0.5)) + "\n").encode())
+    text = json.dumps(_row(5, main_loss=0.5)) + "\n"
+    if malformed:
+        text += "{not json}\n"
+    first = gzip.compress(text.encode())
     second = gzip.compress(b'{"successful_update":6}\n')
     path.write_bytes(first + second[:10])
     out = tmp_path / "report.json"
@@ -273,7 +407,10 @@ def test_cli_truncated_gzip_process_exit_and_partial_report(
     result = subprocess.run(args, capture_output=True, text=True, check=False)
     assert result.returncode == 1
     report = json.loads(out.read_text() if to_file else result.stdout)
+    assert report["file"]["status"] == "container_error"
     assert report["file"]["rows"] == 1
+    assert report["file"]["malformed_rows"] == int(malformed)
+    assert len(report["malformed"]) == int(malformed)
     assert report["statistics"]["loss_mean"] == 0.5
     assert "EOFError" in report["file"]["container_error"]
     assert "partial report" in result.stderr
@@ -281,7 +418,8 @@ def test_cli_truncated_gzip_process_exit_and_partial_report(
 
 @pytest.mark.parametrize("kind", ["missing", "window", "inferred_window"])
 def test_cli_invalid_arguments_are_clear_nonzero(
-    tmp_path: Path, kind: str,
+    tmp_path: Path,
+    kind: str,
 ) -> None:
     path = tmp_path / "metrics.jsonl"
     if kind != "missing":
@@ -297,13 +435,16 @@ def test_cli_invalid_arguments_are_clear_nonzero(
     assert "Traceback" not in result.stderr
 
 
-def test_cli_output_write_error_is_clear_nonzero(tmp_path: Path) -> None:
+@pytest.mark.parametrize("extra", ["", "{not json}"])
+def test_cli_output_write_error_is_clear_nonzero(tmp_path: Path, extra: str) -> None:
     path = tmp_path / "metrics.jsonl"
-    _write_rows(path, [_row(5, main_loss=0.5)])
+    _write_rows(path, [_row(5, main_loss=0.5)], extra=extra)
     out = tmp_path / "absent" / "report.json"
     result = subprocess.run(
         [sys.executable, str(SCRIPT), str(path), "--out", str(out)],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 3
     assert "cannot write --out" in result.stderr
@@ -316,10 +457,15 @@ def test_cli_success_still_returns_zero(tmp_path: Path) -> None:
     _write_rows(path, [_row(5, main_loss=0.5)])
     result = subprocess.run(
         [sys.executable, str(SCRIPT), str(path)],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0
-    assert json.loads(result.stdout)["file"]["container_error"] is None
+    report = json.loads(result.stdout)
+    assert report["schema_version"] == 4
+    assert report["file"]["status"] == "ok"
+    assert report["file"]["container_error"] is None
 
 
 def _bruteforce_missing_ranges(
@@ -350,9 +496,7 @@ def test_missing_ranges_match_bruteforce_on_random_windows() -> None:
     for _ in range(300):
         start = rng.randint(0, 50)
         end = start + rng.randint(0, 80)
-        present = {
-            rng.randint(start - 5, end + 5) for _ in range(rng.randint(0, 40))
-        }
+        present = {rng.randint(start - 5, end + 5) for _ in range(rng.randint(0, 40))}
         in_window = sorted(update for update in present if start <= update <= end)
         assert audit_module._missing_ranges(start, end, in_window) == (
             _bruteforce_missing_ranges(start, end, present)
@@ -360,7 +504,7 @@ def test_missing_ranges_match_bruteforce_on_random_windows() -> None:
 
 
 def test_missing_ranges_scan_trillion_wide_window(tmp_path: Path) -> None:
-    upper = 10 ** 12
+    upper = 10**12
     rows = [_row(1, main_loss=0.5), _row(upper, main_loss=0.6)]
     path = tmp_path / "metrics.jsonl"
     _write_rows(path, rows)
@@ -376,7 +520,9 @@ def test_missing_ranges_scan_trillion_wide_window(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("missing", [999, 1000, 1002])
-def test_missing_ranges_truncation_keeps_exact_count(tmp_path: Path, missing: int) -> None:
+def test_missing_ranges_truncation_keeps_exact_count(
+    tmp_path: Path, missing: int
+) -> None:
     end = 2 * missing - 1
     rows = [_row(update, main_loss=0.5) for update in range(2, end, 2)]
     path = tmp_path / "metrics.jsonl"
@@ -407,7 +553,13 @@ def test_conflicting_updates_excluded_from_statistics_and_window_scoped(
         # Identical payload with a fresh timestamp: duplicate, not conflict.
         _row(10, recorded_at_unix_ns=2, main_loss=0.4),
         # Genuinely different payload for the same update.
-        _row(11, main_loss=0.9, pre_clip_grad_norm=99.0, clip_fraction=1.0, nonfinite_count=9),
+        _row(
+            11,
+            main_loss=0.9,
+            pre_clip_grad_norm=99.0,
+            clip_fraction=1.0,
+            nonfinite_count=9,
+        ),
     ]
     path = tmp_path / "metrics.jsonl"
     _write_rows(path, rows)
@@ -427,7 +579,9 @@ def test_conflicting_updates_excluded_from_statistics_and_window_scoped(
     assert stats["loss_mean"] == round((0.4 + 0.6 + 0.7) / 3, 6)
     assert stats["pre_clip_max"] is None
     assert stats["clip_fraction_mean"] is None
-    assert stats["nonfinite_total"] == 0  # conflict is excluded, not proof of finiteness
+    assert (
+        stats["nonfinite_total"] == 0
+    )  # conflict is excluded, not proof of finiteness
     _write_rows(path, list(reversed(rows)))
     reversed_report = audit_module.audit(path, start=10, end=13, loss_field="main_loss")
     assert reversed_report["statistics"] == stats
@@ -442,13 +596,21 @@ def test_conflicting_updates_excluded_from_statistics_and_window_scoped(
 
 
 @pytest.mark.parametrize("truncated", [False, True])
-def test_cli_conflicting_updates_exit_code(tmp_path: Path, truncated: bool) -> None:
-    data = gzip.compress(
-        (
-            json.dumps(_row(5, main_loss=0.5)) + "\n"
-            + json.dumps(_row(5, main_loss=0.9)) + "\n"
-        ).encode()
+@pytest.mark.parametrize("malformed", [False, True])
+def test_cli_conflicting_updates_exit_code(
+    tmp_path: Path,
+    truncated: bool,
+    malformed: bool,
+) -> None:
+    text = (
+        json.dumps(_row(5, main_loss=0.5))
+        + "\n"
+        + json.dumps(_row(5, main_loss=0.9))
+        + "\n"
     )
+    if malformed:
+        text += "{not json}\n"
+    data = gzip.compress(text.encode())
     if truncated:
         data += gzip.compress(b'{"successful_update":6}\n')[:10]
     path = tmp_path / "metrics.jsonl.gz"
@@ -456,16 +618,23 @@ def test_cli_conflicting_updates_exit_code(tmp_path: Path, truncated: bool) -> N
 
     result = subprocess.run(
         [sys.executable, str(SCRIPT), str(path)],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     report = json.loads(result.stdout)
+    assert report["window"]["status"] == "conflicting_updates"
     assert report["window"]["conflicting_update_count"] == 1
     assert report["statistics"]["conflicting_updates_excluded"] == 1
     assert report["statistics"]["rows"] == 0
+    assert report["file"]["malformed_rows"] == int(malformed)
+    assert len(report["malformed"]) == int(malformed)
     if truncated:
-        # A failed read reports the container error, not the conflict.
+        # A failed read reports the container error, not the conflict or malformed rows.
         assert result.returncode == 1
+        assert report["file"]["status"] == "container_error"
         assert report["file"]["container_error"]
     else:
         assert result.returncode == 4
+        assert report["file"]["status"] == ("malformed_rows" if malformed else "ok")
         assert "conflicting" in result.stderr

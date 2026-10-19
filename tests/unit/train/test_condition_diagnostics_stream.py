@@ -110,6 +110,69 @@ def test_masked_rms_excludes_masked_elements() -> None:
         _masked_rms(values, torch.ones(4, dtype=torch.bool))
 
 
+@pytest.mark.parametrize(
+    "masked_value", [float("nan"), float("inf"), -float("inf")],
+    ids=["nan", "posinf", "neginf"],
+)
+def test_masked_rms_excludes_nonfinite_masked_elements(masked_value: float) -> None:
+    values = torch.tensor([[3.0, masked_value], [masked_value, -4.0]], device="cpu")
+    keep = torch.tensor([[True, False], [False, True]], device="cpu")
+    result = _masked_rms(values, keep)
+    assert result.item() == pytest.approx(math.sqrt(25.0 / 2.0))
+
+
+@pytest.mark.parametrize(
+    "dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64, torch.int64]
+)
+def test_masked_rms_matches_selected_float32_formula(dtype: torch.dtype) -> None:
+    # Strided inputs and values whose squares overflow float16 exercise the
+    # same float32 promotion and selected-element denominator as the caller.
+    values = torch.tensor(
+        [[300.0, -400.0, 7.0], [1.0, 2.0, -600.0]], dtype=dtype, device="cpu"
+    ).transpose(0, 1)
+    keep = torch.tensor(
+        [[True, True, False], [False, False, True]], device="cpu"
+    ).transpose(0, 1)
+    assert not values.is_contiguous()
+    assert not keep.is_contiguous()
+    selected = values[keep].float()
+    expected = selected.square().sum().sqrt() / math.sqrt(selected.numel())
+    result = _masked_rms(values, keep)
+    assert result.dtype == torch.float32
+    torch.testing.assert_close(result, expected, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize(
+    "value", [float("nan"), float("inf"), -float("inf")],
+    ids=["nan", "posinf", "neginf"],
+)
+def test_masked_rms_all_false_rejects_nonfinite_values(value: float) -> None:
+    values = torch.full((2, 3), value, device="cpu")
+    keep = torch.zeros_like(values, dtype=torch.bool)
+    with pytest.raises(ValueError, match="no selected elements"):
+        _masked_rms(values, keep)
+
+
+def test_masked_rms_rejects_empty_tensors() -> None:
+    values = torch.empty(0, 3, device="cpu")
+    with pytest.raises(ValueError, match="no selected elements"):
+        _masked_rms(values, torch.empty_like(values, dtype=torch.bool))
+
+
+@pytest.mark.parametrize(
+    "selected_value", [float("nan"), float("inf"), -float("inf")],
+    ids=["nan", "posinf", "neginf"],
+)
+def test_masked_rms_preserves_selected_nonfinite_values(selected_value: float) -> None:
+    values = torch.tensor([3.0, selected_value, float("nan")], device="cpu")
+    keep = torch.tensor([True, True, False], device="cpu")
+    result = _masked_rms(values, keep)
+    if math.isnan(selected_value):
+        assert torch.isnan(result).item()
+    else:
+        assert torch.isposinf(result).item()
+
+
 def test_per_sample_rms_mean() -> None:
     # per-row RMS: sqrt(mean(squares)); rows [3,4] -> sqrt(12.5), [6,8] -> sqrt(50)
     values = torch.tensor([[3.0, 4.0], [6.0, 8.0]])
@@ -575,6 +638,42 @@ def test_compute_condition_activation_facts_matches_manual_math() -> None:
         assert bool(
             (global_output.condition_residual[[1, 3]] == 0).all()
         )
+
+
+@pytest.mark.parametrize(
+    "nonfinite", [float("nan"), float("inf"), -float("inf")],
+    ids=["nan", "posinf", "neginf"],
+)
+@pytest.mark.parametrize("selected_nonfinite", [False, True], ids=["masked", "selected"])
+def test_activation_facts_masked_rms_nonfinite_boundary(
+    nonfinite: float, selected_nonfinite: bool
+) -> None:
+    composite = _mini_composite(_mini_conditioner(), active=True)
+    inputs = _mini_inputs(1)
+    inputs.condition_token_indices[0] = torch.tensor([1, 2, 5], device="cpu")
+    inputs.condition_mask[0, 2] = False
+    # The actual gather maps masked slots to position zero, which may be
+    # nonfinite even though every selected condition element is finite.
+    inputs.qwen_states[0, 0] = nonfinite
+    inputs.qwen_states[0, 1] = 3.0
+    inputs.qwen_states[0, 2] = 4.0
+    if selected_nonfinite:
+        inputs.qwen_states[0, 1, 0, 0] = nonfinite
+    condition = ConditionTokenOutput(
+        tokens=torch.ones(1, 3, 16, device="cpu"),
+        mask=torch.ones(1, 3, dtype=torch.bool, device="cpu"),
+        active_mask=torch.ones(1, dtype=torch.bool, device="cpu"),
+    )
+    facts = compute_condition_activation_facts(
+        cast(TrainableComposite, composite), inputs, condition
+    )
+    if selected_nonfinite:
+        assert facts["condition_token_rms_active_pre_norm"] is None
+    else:
+        assert facts["condition_token_rms_active_pre_norm"] == pytest.approx(
+            math.sqrt((9.0 + 16.0) / 2.0)
+        )
+    assert facts["condition_token_rms_active_post_norm"] == pytest.approx(1.0)
 
 
 def test_compute_condition_activation_facts_all_null_microbatch() -> None:

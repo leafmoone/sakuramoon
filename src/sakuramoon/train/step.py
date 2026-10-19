@@ -157,6 +157,12 @@ class TrainableComposite(nn.Module):
 
         return self._last_conditioning
 
+    @property
+    def condition_diagnostics_enabled(self) -> bool:
+        """Whether a forward would retain its condition output."""
+
+        return self._condition_diagnostics
+
     def enable_condition_diagnostics(self) -> None:
         """Enable the reference capture for the per-rank diagnostics stream.
 
@@ -166,6 +172,12 @@ class TrainableComposite(nn.Module):
         """
 
         self._condition_diagnostics = True
+
+    def disable_condition_diagnostics(self) -> None:
+        """End runtime-only capture and release the last forward graph."""
+
+        self._condition_diagnostics = False
+        self._last_conditioning = None
 
     def bind_irepa_tap_slot(self, slot_id: int) -> None:
         """Bind the config-locked capture slot after artifact construction.
