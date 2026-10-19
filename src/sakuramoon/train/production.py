@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import time
+import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn, Self, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Self, cast
 
 import torch
 from accelerate import Accelerator  # pyright: ignore[reportMissingTypeStubs]
@@ -59,6 +61,7 @@ from sakuramoon.eval.runtime import EvaluationResult, TrainingEvaluator
 from sakuramoon.model.growth import new_slot_ids as growth_new_slot_ids
 from sakuramoon.objective.irepa import IRepaLambdaSchedule
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit, build_adamw8bit
+from sakuramoon.optim.cmuon_forensic import CMuonSafetyError
 from sakuramoon.optim.dtk import configure_tunableop
 from sakuramoon.optim.guard_calibration import (
     GuardCalibration,
@@ -80,6 +83,10 @@ from sakuramoon.train.benchmark import BenchmarkTrace
 from sakuramoon.train.condition_diagnostics_stream import (
     ConditionDiagnosticsRecorder,
     diagnostics_file_name,
+)
+from sakuramoon.train.guard_window_stream import (
+    GuardWindowIdentity,
+    GuardWindowRecorder,
 )
 from sakuramoon.train.preflight import (
     ProductionSingleGpuCheckpointPublisher,
@@ -1959,6 +1966,30 @@ def _run_accepted_lifecycle(
                         flush_every_records=cd_config.flush_every_records,
                         slot_ids=tuple(module.dit.active_slot_ids),
                     )
+                # Opt-in per-rank guard window telemetry (default off): every
+                # rank seals one single-line JSONL window record per
+                # window_updates successful updates into its own session dir.
+                # Construction is fail-closed (CMuonSafetyError); everything
+                # after the session claim is non-raising by contract.
+                guard_window_recorder: GuardWindowRecorder | None = None
+                gw_config = config.guard_window
+                if gw_config is not None and gw_config.enabled and not in_calibration:
+                    guard_window_recorder = _construct_guard_window(
+                        build=_build_guard_window,
+                        artifact_root=artifact_root,
+                        run_id=config.run.run_id,
+                        session_id=gw_config.session_id,
+                        window_updates=gw_config.window_updates,
+                        optimizer=optimizer,
+                        rank=rank,
+                        world_size=world_size,
+                        restored=restored,
+                        verified_checkpoints=verified_checkpoints,
+                        launch_kind="fresh_bootstrap"
+                        if resume is None
+                        else "user_resume",
+                    )
+                guard_window_run_outcome = "unknown"
                 try:
                     with telemetry:
                         _log(
@@ -2014,8 +2045,18 @@ def _run_accepted_lifecycle(
                                 if condition_diagnostics_recorder is not None
                                 else None
                             ),
+                            guard_window_observer=(
+                                guard_window_recorder.maybe_record
+                                if guard_window_recorder is not None
+                                else None
+                            ),
                         )
+                    guard_window_run_outcome = "clean"
+                except BaseException:
+                    guard_window_run_outcome = "raised"
+                    raise
                 finally:
+                    _close_guard_window(guard_window_recorder, guard_window_run_outcome)
                     if condition_diagnostics_recorder is not None:
                         condition_diagnostics_recorder.close()
                 if not verified_checkpoints and not in_calibration:
@@ -2083,6 +2124,116 @@ def _run_accepted_lifecycle(
         raise cleanup
     assert result is not None
     return result
+
+
+def _close_guard_window(
+    recorder: GuardWindowRecorder | None, outcome: str
+) -> None:
+    """End-of-run guard window tail seal, uniformly guarded.
+
+    Regardless of whether an original training exception is in flight, a
+    plain Exception from the close is swallowed (best-effort stderr
+    traceback) so diagnostics never change the training outcome or replace
+    the original exception/ExceptionGroup identity.  A BaseException (e.g.
+    KeyboardInterrupt) is deliberately NOT caught here: it propagates under
+    the existing interpreter/group rules and no new group framework is
+    introduced for the nested case.
+    """
+    if recorder is None:
+        return
+    try:
+        recorder.close(outcome)
+    except Exception as error:  # noqa: BLE001 - diagnostics must not change the outcome
+        try:
+            print(
+                "[guard_window] tail close failed; ignoring (diagnostics only)",
+                file=sys.stderr,
+                flush=True,
+            )
+            traceback.print_exception(error, file=sys.stderr)
+        except Exception:  # noqa: BLE001,S110 - a broken stderr must not mask training
+            pass
+
+
+def _construct_guard_window(
+    *,
+    build: Callable[..., GuardWindowRecorder],
+    **kwargs: Any,
+) -> GuardWindowRecorder | None:
+    """Build one rank's guard window stream with a best-effort failure guard.
+
+    Config-level ``CMuonSafetyError`` propagates (fail closed at launch).
+    Any other exception disables the stream for this rank: the diagnostic
+    print/traceback is itself best-effort, so even a broken stderr can never
+    abort or mask the training launch (never catches BaseException).
+    """
+    try:
+        return build(**kwargs)
+    except CMuonSafetyError:
+        raise
+    except Exception as error:  # noqa: BLE001 - diagnostics must not abort training
+        try:
+            print(
+                "[guard_window] stream construction failed; "
+                "disabling this rank's stream",
+                file=sys.stderr,
+                flush=True,
+            )
+            traceback.print_exception(error, file=sys.stderr)
+        except Exception:  # noqa: BLE001,S110 - a broken stderr must not mask training
+            pass
+        return None
+
+
+def _build_guard_window(
+    *,
+    artifact_root: Path,
+    run_id: str,
+    session_id: str,
+    window_updates: int,
+    optimizer: object,
+    rank: int,
+    world_size: int,
+    restored: RestoredSingleGpuCheckpoint | None,
+    verified_checkpoints: list[Path],
+    launch_kind: str,
+) -> GuardWindowRecorder:
+    """Assemble one rank's guard window stream (fail-closed construction).
+
+    Identity is fixed at build time and never changes during the session:
+    periodic checkpoint saves do NOT reset it; only a real load/rollback
+    (new process launch) starts a new session (new ``session_id``).
+
+    ``launch_kind`` is passed EXPLICITLY: production loads a checkpoint
+    object even on a fresh start (bootstrap save+restore), so the presence
+    of ``restored`` is never used to infer "user resume".  A bootstrap load
+    is still an actual checkpoint read, so ``baseline.source`` is honestly
+    ``restored_rank0`` in both production kinds; the unit-level
+    ``fresh-start`` source only exists on non-production paths.
+    """
+    if restored is not None:
+        resume_source = restored.path.name
+        resume_updates = restored.state.trainer.successful_updates
+    else:
+        resume_source = "fresh-start"
+        resume_updates = 0
+    return GuardWindowRecorder(
+        artifact_dir=artifact_root,
+        identity=GuardWindowIdentity(
+            run_id=run_id,
+            session_id=session_id,
+            rank=rank,
+            world_size=world_size,
+            resume_source_checkpoint=resume_source,
+            resume_successful_updates=resume_updates,
+            launch_kind=launch_kind,
+        ),
+        optimizer=optimizer,
+        window_updates=window_updates,
+        last_published_checkpoint=(
+            lambda: verified_checkpoints[-1].name if verified_checkpoints else None
+        ),
+    )
 
 
 def run_production_single_gpu(

@@ -1317,6 +1317,35 @@ class ConditionDiagnosticsConfig(StrictModel):
     flush_every_records: PositiveInt = 100
 
 
+class GuardWindowConfig(StrictModel):
+    """Opt-in per-rank guard window telemetry stream.
+
+    ``[guard_window]`` absent (or ``enabled = false``) = feature absent: the
+    training path and the schema-12 TrainingMetric output are byte-identical
+    to a run without this section.  When enabled, every rank writes one
+    single-line JSONL record per window (``window_updates`` successful
+    updates) to ``<artifact_dir>/guard_window/session-<session_id>/rank-<n>/``
+    using the atomic no-clobber publish; the stream is versioned
+    independently of ``TRAINING_METRIC_SCHEMA_VERSION``.
+
+    ``session_id`` is required when enabled and must be a legal path
+    component (no separators, no ``..``); it must be unique per launch on
+    the storage that holds ``artifact_dir`` — reuse is refused at the
+    per-rank claim without touching training.  A real load/rollback is a
+    new session.
+    """
+
+    enabled: bool = False
+    session_id: str = ""
+    window_updates: PositiveInt = 100
+
+    @model_validator(mode="after")
+    def validate_session_id(self) -> GuardWindowConfig:
+        if self.enabled and not self.session_id:
+            raise ValueError("[guard_window].session_id is required when enabled")
+        return self
+
+
 class RuntimeConfig(StrictModel):
     schema_version: Literal[1]
     run: RunConfig
@@ -1344,6 +1373,7 @@ class RuntimeConfig(StrictModel):
     evaluation: EvaluationConfig
     irepa: IRepaConfig | None = None
     condition_diagnostics: ConditionDiagnosticsConfig | None = None
+    guard_window: GuardWindowConfig | None = None
 
     @model_validator(mode="after")
     def validate_train_batch(self) -> RuntimeConfig:

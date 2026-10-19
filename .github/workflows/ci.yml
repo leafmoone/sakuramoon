@@ -67,13 +67,21 @@ jobs:
       - run: uv sync --no-install-project --group dev --extra train --extra eval
       # The optimizer suite is intentionally not in this pytest gate: it
       # exercises torch.compile/triton paths that must be verified on the
-      # runner before they can become a required check.
+      # runner before they can become a required check.  The guard window
+      # gloo test is the exception: real CPU optimizer init/step on the
+      # gloo backend only (no triton, no CUDA), verified on this runner.
       - run: >-
           PYTHONPATH=src uv run --no-sync pytest
           tests/unit/test_training_metrics_audit.py
           tests/unit/config/test_config_closure.py
           tests/unit/config/test_condition_diagnostics_config.py
+          tests/unit/config/test_guard_window_config.py
           tests/unit/train/test_condition_diagnostics_stream.py
+          tests/unit/telemetry/test_guard_publish.py
+          tests/unit/train/test_guard_window_stream.py
+          tests/unit/train/test_guard_window_production_wiring.py
+          tests/unit/optim/test_guard_window_gloo.py
+          tests/unit/cli/test_guard_window_merge.py
           -q
 
   contracts:

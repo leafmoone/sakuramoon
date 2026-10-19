@@ -1335,6 +1335,8 @@ def _run_single_gpu_training(
     condition_grad_share: bool = False,
     condition_diagnostic_observer: Callable[[SuccessfulTrainingObservation], None]
     | None = None,
+    guard_window_observer: Callable[[SuccessfulTrainingObservation], None]
+    | None = None,
 ) -> LoopResult:
     """Run the locked loop after all ownership and assembly objects are ready."""
 
@@ -1442,6 +1444,10 @@ def _run_single_gpu_training(
                 # Per-rank condition diagnostics stream: local-first, outside
                 # the rank-0-funneled main observer.
                 condition_diagnostic_observer(emitted)
+            if guard_window_observer is not None:
+                # Per-rank guard window telemetry stream: local-first, same
+                # only-successful-update position as the condition observer.
+                guard_window_observer(emitted)
             successful_update_observer(emitted)
             if log_updates:
                 print(
@@ -1571,6 +1577,8 @@ def run_single_gpu_training(
     condition_grad_share: bool = False,
     condition_diagnostic_observer: Callable[[SuccessfulTrainingObservation], None]
     | None = None,
+    guard_window_observer: Callable[[SuccessfulTrainingObservation], None]
+    | None = None,
 ) -> LoopResult:
     """Run production training with the exact publisher accepted by preflight."""
 
@@ -1580,6 +1588,8 @@ def run_single_gpu_training(
         condition_diagnostic_observer
     ):
         raise ValueError("condition_diagnostic_observer must be callable")
+    if guard_window_observer is not None and not callable(guard_window_observer):
+        raise ValueError("guard_window_observer must be callable")
 
     from sakuramoon.train.preflight import ProductionSingleGpuCheckpointPublisher
 
@@ -1623,6 +1633,7 @@ def run_single_gpu_training(
         log_updates=log_updates,
         condition_grad_share=condition_grad_share,
         condition_diagnostic_observer=condition_diagnostic_observer,
+        guard_window_observer=guard_window_observer,
     )
 
 
