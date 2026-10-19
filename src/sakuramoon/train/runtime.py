@@ -466,6 +466,7 @@ class SuccessfulTrainingObservation:
     gpu_memory_reserved_bytes: int
     learning_rate_cmuon: float = 0.0
     learning_rate_adamw: float | None = None
+    learning_rate_condition: float | None = None
 
     def __post_init__(self) -> None:
         if len(self.microbatches) != self.loop.update.microbatches:
@@ -497,6 +498,11 @@ class SuccessfulTrainingObservation:
         for rate in (self.learning_rate, self.learning_rate_cmuon, self.learning_rate_adamw):
             if type(rate) is not float or not math.isfinite(rate) or rate < 0.0:
                 raise ValueError("observation learning rates must be finite and nonnegative")
+        rate = self.learning_rate_condition
+        if rate is not None and (
+            type(rate) is not float or not math.isfinite(rate) or rate < 0.0
+        ):
+            raise ValueError("condition learning rate must be finite and nonnegative")
         if (
             type(self.gpu_memory_allocated_bytes) is not int
             or self.gpu_memory_allocated_bytes < 0
@@ -1199,6 +1205,8 @@ def _optimizer_adamw_learning_rate(optimizer: StepOptimizer) -> float:
         raise TypeError("production optimizer must expose parameter groups")
     rates: set[float] = set()
     for group in cast(list[dict[str, object]], groups):
+        if group.get("condition_lr_group") is True:
+            continue
         raw_rate = group.get("lr")
         if type(raw_rate) is float:
             rate = raw_rate
@@ -1295,12 +1303,17 @@ def _run_single_gpu_training(
         pending_measurements: list[RuntimeMeasurement] = []
         active_phase_timer: AnyPhaseTimer | None = None
         active_learning_rates: tuple[float, float, float] | None = None
+        active_learning_rate_condition: float | None = None
         next_growth_update = state.successful_updates + 1
 
         def update_started(timer: AnyPhaseTimer | None) -> None:
             nonlocal active_learning_rates, active_phase_timer
+            nonlocal active_learning_rate_condition
+            from sakuramoon.optim.condition import condition_learning_rate
+
             active_phase_timer = timer
             active_learning_rates = _optimizer_learning_rates(optimizer)
+            active_learning_rate_condition = condition_learning_rate(optimizer)
             runtime.set_growth_alpha(
                 canonical_growth_alpha(
                     raw_state.growth,
@@ -1327,6 +1340,7 @@ def _run_single_gpu_training(
 
         def observe_update(observation: SuccessfulLoopObservation) -> None:
             nonlocal active_learning_rates, active_phase_timer, next_growth_update
+            nonlocal active_learning_rate_condition
             microbatches = tuple(pending_measurements)
             update_timer = observation.phase_timer
             if update_timer is None or update_timer is not active_phase_timer:
@@ -1348,6 +1362,7 @@ def _run_single_gpu_training(
                 learning_rate=active_learning_rates[0],
                 learning_rate_cmuon=active_learning_rates[1],
                 learning_rate_adamw=active_learning_rates[2],
+                learning_rate_condition=active_learning_rate_condition,
                 gpu_memory_allocated_bytes=allocated,
                 gpu_memory_reserved_bytes=reserved,
             )
@@ -1361,6 +1376,7 @@ def _run_single_gpu_training(
                 )
             pending_measurements.clear()
             active_learning_rates = None
+            active_learning_rate_condition = None
             active_phase_timer = None
             next_growth_update += 1
 
@@ -1433,6 +1449,8 @@ def _run_single_gpu_training(
             ),
             backward=backward,
             no_sync=no_sync,
+            global_clip_norm=config.gradient.clip_norm,
+            condition_optimizer=config.optimizer.condition,
         )
         result = loop.run(stream)
     except BaseException as error:  # noqa: BLE001

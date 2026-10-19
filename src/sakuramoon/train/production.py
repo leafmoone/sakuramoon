@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn, Self, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Self, cast
 
 import torch
 from accelerate import Accelerator
@@ -429,6 +429,9 @@ def _build_optimizer(
         config, module, telemetry_logger=telemetry_logger, rank=rank,
         world_size=world_size, checkpoint_source=checkpoint_source,
     )
+    from sakuramoon.optim.condition import split_condition_lr_groups
+
+    split_condition_lr_groups(optimizer, config.optimizer.condition)
     _set_optimizer_learning_rate(optimizer, config.scaled_learning_rate(), config)
     return optimizer
 
@@ -625,8 +628,9 @@ def _optimizer_learning_rate_matches(
         cmuon_expected = expected * (config.optimizer.cmuon_lr_multiplier if config else 1.0)
         if optimizer.cfg.lr != cmuon_expected or optimizer.learning_rate != expected:
             return False
-    expected *= config.optimizer.adamw_lr_multiplier if config else 1.0
-    for actual in _optimizer_learning_rate_scalars(optimizer):
+    adamw_expected = expected * (config.optimizer.adamw_lr_multiplier if config else 1.0)
+    for group, actual in zip(optimizer.optimizer.param_groups, _optimizer_learning_rate_scalars(optimizer), strict=True):
+        expected = adamw_expected * _condition_lr_multiplier(group, config)
         if isinstance(actual, float):
             if actual != expected:
                 return False
@@ -661,16 +665,28 @@ def _set_optimizer_learning_rate(
     adamw_rate = learning_rate * (config.optimizer.adamw_lr_multiplier if config else 1.0)
     if not math.isfinite(cmuon_rate) or not math.isfinite(adamw_rate):
         raise ValueError("effective optimizer learning rates must be finite")
+    targets = [adamw_rate * _condition_lr_multiplier(group, config) for group in groups]
+    if not all(math.isfinite(rate) for rate in targets):
+        raise ValueError("effective condition learning rate must be finite")
     if not isinstance(optimizer, IsolatedAdamW8bit):
         optimizer.cfg = replace(optimizer.cfg, lr=cmuon_rate)
         optimizer.learning_rate = learning_rate
-    for group, current in zip(groups, current_rates, strict=True):
+    for group, current, target in zip(groups, current_rates, targets, strict=True):
         if isinstance(current, float):
-            group["lr"] = adamw_rate
+            group["lr"] = target
         else:
             assert isinstance(current, torch.Tensor)
             with torch.no_grad():
-                current.fill_(adamw_rate)
+                current.fill_(target)
+
+
+def _condition_lr_multiplier(group: dict[str, Any], config: RuntimeConfig | None) -> float:
+    if group.get("condition_lr_group") is not True:
+        return 1.0
+    policy = config.optimizer.condition if config is not None else None
+    if policy is None or not policy.independent_lr:
+        raise ValueError("condition LR group requires enabled current config policy")
+    return policy.lr_multiplier
 
 
 def _config_learning_rate(config: RuntimeConfig, update: int) -> float:

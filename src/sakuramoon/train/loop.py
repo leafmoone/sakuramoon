@@ -18,6 +18,7 @@ from sakuramoon.checkpoint.policy import (
     CheckpointCadence,
     CheckpointReason,
 )
+from sakuramoon.config.schema import ConditionOptimizerConfig
 from sakuramoon.optim.guard_calibration import GuardCalibrationComplete
 from sakuramoon.optim.structural_calibration import StructuralCalibrationComplete
 from sakuramoon.telemetry.timers import AnyPhaseTimer, NoopPhaseTimer, PhaseTimer
@@ -92,6 +93,8 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         growth_alpha_for_update: Callable[[int], float] | None = None,
         backward: Callable[[torch.Tensor], None] | None = None,
         no_sync: Callable[[], AbstractContextManager[None]] | None = None,
+        global_clip_norm: float = 1.0,
+        condition_optimizer: ConditionOptimizerConfig | None = None,
     ) -> None:
         if (
             type(target_successful_updates) is not int
@@ -104,6 +107,8 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.accumulation_steps = accumulation_steps
+        self.global_clip_norm = global_clip_norm
+        self.condition_optimizer = condition_optimizer
         self.effective_sample_multiplier = effective_sample_multiplier
         if growth_alpha_for_update is not None and not callable(
             growth_alpha_for_update
@@ -233,6 +238,8 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                     )
                 ),
                 backward=self.backward,
+                global_clip_norm=self.global_clip_norm,
+                condition_optimizer=self.condition_optimizer,
                 irepa_projector=getattr(
                     inner_module, "irepa_alignment", None
                 )

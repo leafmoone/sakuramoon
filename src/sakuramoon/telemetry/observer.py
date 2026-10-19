@@ -534,6 +534,24 @@ def build_training_metric(
         _transparent_white_metrics(observation)
     )
 
+    partition_metrics: dict[str, float] = {}
+    if (update.condition_clip is None) != (update.rest_clip is None):
+        raise ValueError("condition and rest clip diagnostics must be supplied together")
+    for partition, result in (("condition", update.condition_clip), ("rest", update.rest_clip)):
+        if result is not None:
+            partition_metrics[f"{partition}_pre_clip_grad_norm"] = _scalar_float(
+                f"{partition}.pre_clip_norm", result.pre_clip_norm,
+            )
+            partition_metrics[f"{partition}_post_clip_grad_norm"] = _scalar_float(
+                f"{partition}.post_clip_norm", result.post_clip_norm,
+            )
+            partition_metrics[f"{partition}_clip_coefficient"] = _scalar_float(
+                f"{partition}.coefficient", result.coefficient,
+            )
+            partition_metrics[f"{partition}_clip_fraction"] = float(
+                partition_metrics[f"{partition}_clip_coefficient"] < 1.0
+            )
+
     return TrainingMetric(
         successful_update=update.state.successful_updates,
         recorded_at_unix_ns=recorded_at_unix_ns,
@@ -580,10 +598,22 @@ def build_training_metric(
                 update.growth_new_conditioner_grad_norm,
             )
         ),
-        clip_fraction=float(coefficient < 1.0),
+        clip_fraction=(
+            max(partition_metrics["condition_clip_fraction"], partition_metrics["rest_clip_fraction"])
+            if partition_metrics else float(coefficient < 1.0)
+        ),
         learning_rate=observation.learning_rate,
         learning_rate_cmuon=observation.learning_rate_cmuon,
         learning_rate_adamw=observation.learning_rate_adamw,
+        learning_rate_condition=observation.learning_rate_condition,
+        condition_pre_clip_grad_norm=partition_metrics.get("condition_pre_clip_grad_norm"),
+        condition_post_clip_grad_norm=partition_metrics.get("condition_post_clip_grad_norm"),
+        rest_pre_clip_grad_norm=partition_metrics.get("rest_pre_clip_grad_norm"),
+        rest_post_clip_grad_norm=partition_metrics.get("rest_post_clip_grad_norm"),
+        condition_clip_fraction=partition_metrics.get("condition_clip_fraction"),
+        rest_clip_fraction=partition_metrics.get("rest_clip_fraction"),
+        condition_clip_coefficient=partition_metrics.get("condition_clip_coefficient"),
+        rest_clip_coefficient=partition_metrics.get("rest_clip_coefficient"),
         timestep_min=timestep_min,
         timestep_max=timestep_max,
         timestep_mean=timestep_mean,

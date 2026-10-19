@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Protocol, cast
 
 import torch
 from torch import nn
@@ -15,10 +16,16 @@ from sakuramoon.conditioning.condition_tokens import (
     ConditionTokenOutput,
 )
 from sakuramoon.conditioning.text_mixer import TextConditioner, TextConditioningOutput
+from sakuramoon.config.schema import ConditionOptimizerConfig
 from sakuramoon.model.dit import DenseDiT, PackedDiT
 from sakuramoon.model.growth import new_slot_fqn_prefixes
 from sakuramoon.model.irepa import IRepaAlignment
-from sakuramoon.optim.clip import ClipResult, clip_grad_norm_fp32
+from sakuramoon.optim.clip import (
+    ClipResult,
+    clip_grad_norm_fp32,
+    clip_grad_norm_groups_fp32,
+)
+from sakuramoon.optim.condition import parameter_matches_prefix
 from sakuramoon.telemetry.timers import AnyPhaseTimer
 
 
@@ -360,6 +367,8 @@ class SingleGpuUpdateResult:
     # projector is absent, disabled, or produced no gradient — at lambda=0
     # the projector grad is an exact zero tensor).
     irepa_projector_grad_norm: float = 0.0
+    condition_clip: ClipResult | None = None
+    rest_clip: ClipResult | None = None
 
 
 class StepOptimizer(Protocol):
@@ -400,6 +409,8 @@ class SingleGpuStep:
         growth_alpha: float = 1.0,
         backward: Callable[[torch.Tensor], None] | None = None,
         irepa_projector: bool = False,
+        global_clip_norm: float = 1.0,
+        condition_optimizer: ConditionOptimizerConfig | None = None,
     ) -> None:
         if type(accumulation_steps) is not int or accumulation_steps <= 0:
             raise ValueError("accumulation_steps must be a positive integer")
@@ -415,6 +426,41 @@ class SingleGpuStep:
             raise ValueError("growth_alpha must be a float in [0,1]")
         if type(irepa_projector) is not bool:
             raise ValueError("irepa_projector must be a bool")
+        if (
+            type(global_clip_norm) not in (int, float)
+            or not math.isfinite(global_clip_norm)
+            or global_clip_norm < 0.0
+        ):
+            raise ValueError("global_clip_norm must be finite and nonnegative")
+        self.global_clip_norm = global_clip_norm
+        self.condition_optimizer = condition_optimizer
+        self._condition_parameters: tuple[nn.Parameter, ...] = ()
+        self._rest_parameters: tuple[nn.Parameter, ...] = ()
+        if condition_optimizer is not None and condition_optimizer.independent_clipping:
+            canonical_module = module
+            if isinstance(module, nn.parallel.DistributedDataParallel):
+                canonical_module = cast(
+                    nn.Module, module.module,  # pyright: ignore[reportUnknownMemberType]
+                )
+            named = tuple(
+                (name, parameter)
+                for name, parameter in canonical_module.named_parameters()
+                if parameter.requires_grad
+            )
+            prefixes = condition_optimizer.parameter_prefixes
+            for prefix in prefixes:
+                if not any(parameter_matches_prefix(name, (prefix,)) for name, _ in named):
+                    raise ValueError(f"condition prefix matches no trainable parameters: {prefix}")
+            self._condition_parameters = tuple(
+                parameter for name, parameter in named
+                if parameter_matches_prefix(name, prefixes)
+            )
+            self._rest_parameters = tuple(
+                parameter for name, parameter in named
+                if not parameter_matches_prefix(name, prefixes)
+            )
+            if not self._condition_parameters:
+                raise ValueError("condition partition has no trainable parameters")
         self.module = module
         self.optimizer = optimizer
         self.accumulation_steps = accumulation_steps
@@ -548,6 +594,8 @@ class SingleGpuStep:
         parameters = tuple(
             parameter for parameter in self.module.parameters() if parameter.requires_grad
         )
+        condition_clip: ClipResult | None = None
+        rest_clip: ClipResult | None = None
         try:
             with _record_phase(phase_timer, "clip"):
                 gradient_scale = 1.0 / self._samples
@@ -556,6 +604,19 @@ class SingleGpuStep:
                     for parameter in parameters
                     if parameter.grad is not None
                 ]
+                # Reject either partition before even normalizing gradients.
+                # The group clipper rechecks normalized norms before clipping.
+                if (
+                    self.condition_optimizer is not None
+                    and self.condition_optimizer.independent_clipping
+                    and gradients
+                    and not bool(
+                        torch.stack([
+                            torch.isfinite(gradient).all() for gradient in gradients
+                        ]).all().item()
+                    )
+                ):
+                    raise FloatingPointError("condition/rest gradients are nonfinite")
                 if gradients:
                     torch._foreach_mul_(gradients, gradient_scale)
                 condition_encoder_grad_norm = _parameter_grad_norm(
@@ -623,7 +684,28 @@ class SingleGpuStep:
                     if self.irepa_projector
                     else 0.0
                 )
-                clip = clip_grad_norm_fp32(parameters, max_norm=1.0)
+                condition_policy = self.condition_optimizer
+                if condition_policy is not None and condition_policy.independent_clipping:
+                    assert condition_policy.clip_norm is not None
+                    assert condition_policy.rest_clip_norm is not None
+                    condition_clip, rest_clip = clip_grad_norm_groups_fp32(
+                        self._condition_parameters,
+                        self._rest_parameters,
+                        condition_max_norm=condition_policy.clip_norm,
+                        rest_max_norm=condition_policy.rest_clip_norm,
+                    )
+                    # Summary ratio only: no common scale is applied to both
+                    # groups. The observer derives any-clipping from group
+                    # coefficients, not this rounded summary ratio.
+                    pre = torch.hypot(condition_clip.pre_clip_norm, rest_clip.pre_clip_norm)
+                    post = torch.hypot(condition_clip.post_clip_norm, rest_clip.post_clip_norm)
+                    clip = ClipResult(
+                        pre_clip_norm=pre,
+                        post_clip_norm=post,
+                        coefficient=torch.where(pre > 0, post / pre, torch.ones_like(pre)),
+                    )
+                else:
+                    clip = clip_grad_norm_fp32(parameters, max_norm=self.global_clip_norm)
         except BaseException as error:
             self._detection_phase = "clip"
             self._failed = True
@@ -702,6 +784,8 @@ class SingleGpuStep:
             growth_new_conditioner_grad_norm=growth_new_conditioner_grad_norm,
             growth_new_slot_grad_norm=growth_new_slot_grad_norm,
             irepa_projector_grad_norm=irepa_projector_grad_norm,
+            condition_clip=condition_clip,
+            rest_clip=rest_clip,
         )
         self._state = result.state
         self._microbatches = 0

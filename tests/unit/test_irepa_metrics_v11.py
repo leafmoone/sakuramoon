@@ -193,6 +193,89 @@ def _observation(
     return observation, context
 
 
+def test_condition_clipping_and_lr_telemetry_is_opt_in() -> None:
+    observation, context = _observation(
+        lambda_weight=0.0, irepa=None, projector_grad_norm=0.0, total_loss=1.5,
+    )
+    legacy = build_training_metric(observation, context=context, recorded_at_unix_ns=1)
+    condition = ClipResult(torch.tensor(3.0), torch.tensor(1.5), torch.tensor(0.5))
+    rest = ClipResult(torch.tensor(0.0), torch.tensor(0.0), torch.tensor(1.0))
+    update = replace(observation.loop.update, condition_clip=condition, rest_clip=rest)
+    enabled = replace(
+        observation, loop=replace(observation.loop, update=update),
+        learning_rate_condition=0.000025,
+    )
+    metric = build_training_metric(enabled, context=context, recorded_at_unix_ns=1)
+    expected = {
+        "condition_pre_clip_grad_norm": 3.0,
+        "condition_post_clip_grad_norm": 1.5,
+        "rest_pre_clip_grad_norm": 0.0,
+        "rest_post_clip_grad_norm": 0.0,
+        "condition_clip_fraction": 1.0,
+        "rest_clip_fraction": 0.0,
+        "condition_clip_coefficient": 0.5,
+        "rest_clip_coefficient": 1.0,
+        "learning_rate_condition": 0.000025,
+    }
+    for key, value in expected.items():
+        assert key not in legacy.as_json_mapping()
+        assert key not in legacy.as_wandb_mapping()
+        assert metric.as_json_mapping()[key] == value
+        assert metric.as_wandb_mapping()[key] == value
+    assert metric.clip_fraction == 1.0 and legacy.clip_fraction == 0.0
+    assert {key: value for key, value in metric.as_json_mapping().items() if key not in expected and key != "clip_fraction"} == {key: value for key, value in legacy.as_json_mapping().items() if key != "clip_fraction"}
+    b_only = build_training_metric(
+        replace(observation, learning_rate_condition=0.000025),
+        context=context, recorded_at_unix_ns=1,
+    ).as_json_mapping()
+    assert b_only["learning_rate_condition"] == 0.000025
+    assert "condition_pre_clip_grad_norm" not in b_only
+    # Any-clipped is derived from true group coefficients even when a rounded
+    # aggregate ratio equals one (a tiny group can be clipped below FP32 sum resolution).
+    summary = ClipResult(torch.tensor(10.0), torch.tensor(10.0), torch.tensor(1.0))
+    clipped_update = replace(update, clip=summary)
+    assert build_training_metric(
+        replace(enabled, loop=replace(enabled.loop, update=clipped_update)),
+        context=context, recorded_at_unix_ns=1,
+    ).clip_fraction == 1.0
+    with pytest.raises((ValueError, TypeError)):
+        replace(metric, condition_post_clip_grad_norm=4.0)
+    with pytest.raises((ValueError, TypeError)):
+        replace(metric, rest_clip_fraction=0.5)
+    with pytest.raises((ValueError, TypeError)):
+        replace(metric, rest_post_clip_grad_norm=None)
+    for bad in (-1.0, float("inf"), float("nan")):
+        with pytest.raises(ValueError):
+            replace(observation, learning_rate_condition=bad)
+        with pytest.raises((TypeError, ValueError)):
+            replace(metric, learning_rate_condition=bad)
+
+
+def test_optimizer_learning_rates_ignore_only_tagged_condition_groups() -> None:
+    from types import SimpleNamespace
+    from typing import cast
+
+    from sakuramoon.optim.condition import condition_learning_rate
+    from sakuramoon.train.runtime import (
+        _optimizer_learning_rates,  # pyright: ignore[reportPrivateUsage]
+    )
+    from sakuramoon.train.step import StepOptimizer
+
+    optimizer = cast(StepOptimizer, SimpleNamespace(optimizer=SimpleNamespace(param_groups=[
+        {"lr": 0.001, "condition_lr_group": False},
+        {"lr": torch.tensor(0.00025), "condition_lr_group": True},
+        {"lr": 0.001, "condition_lr_group": False},
+    ])))
+    assert _optimizer_learning_rates(optimizer) == (0.001, 0.0, 0.001)
+    assert condition_learning_rate(optimizer) == pytest.approx(0.00025)
+    untagged = cast(StepOptimizer, SimpleNamespace(optimizer=SimpleNamespace(param_groups=[
+        {"lr": 0.001}, {"lr": 0.00025},
+    ])))
+    with pytest.raises(ValueError, match="differ across groups"):
+        _optimizer_learning_rates(untagged)
+    assert condition_learning_rate(untagged) is None
+
+
 def test_schema_version_is_12_and_irepa_phases_are_core() -> None:
     assert TRAINING_METRIC_SCHEMA_VERSION == 12
     assert "irepa_teacher" in CORE_TIMING_PHASES

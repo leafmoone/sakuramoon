@@ -63,6 +63,13 @@ CMuon 的 Moonlight、weight decay 和 LR 相关安全阈值使用自己的有�
 恢复保留原 AdamW moments / quantization / step、CMuon momentum 和 SR RNG，
 以当前配置和已恢复成功更新坐标重设两个 LR，不重启 warmup、不改变路由或状态格式。
 
+可选 `[optimizer.condition]` 为同一显式 FQN 前缀列表提供独立裁剪和 AdamW LR 子组；
+启用 B 时上文 AdamW LR 表示 rest，条件 LR 再乘 `condition.lr_multiplier`，另记
+`learning_rate_condition`。不启用时保持原路径。阈值 0 禁裁但不禁非有限检查；生产路径
+现在将 `[gradient].clip_norm` 传入更新器，而不是忽略该值固定裁剪到1。
+完整开关、状态恢复限制（含 tagged→legacy fail-fast 与中性倍率1）见
+[Condition 优化 A/B](condition-optimizer-ab.md)。
+
 ## 2. 拓扑与扩容
 
 - 历史拓扑不连续：`depth=16` → 16 个非连续槽；`depth=20` = 16 槽 ∪ {2,8,14,20}；

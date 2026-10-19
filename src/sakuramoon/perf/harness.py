@@ -517,6 +517,8 @@ def run_benchmark_stage(
         growth_alpha_for_update=lambda _update: BENCHMARK_GROWTH_ALPHA,
         backward=assembly.backward,
         no_sync=assembly.no_sync,
+        global_clip_norm=config.gradient.clip_norm,
+        condition_optimizer=config.optimizer.condition,
     )
 
     final_state: list[SingleGpuUpdateState] = []

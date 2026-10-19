@@ -924,6 +924,52 @@ class CMuonGuardConfig(StrictModel):
     references: dict[str, float] = {}
 
 
+class ConditionOptimizerConfig(StrictModel):
+    """Opt-in canonical condition partition for independent clipping and LR."""
+
+    parameter_prefixes: StringTuple = ()
+    independent_clipping: bool = False
+    clip_norm: NonNegativeFloat | None = None
+    rest_clip_norm: NonNegativeFloat | None = None
+    independent_lr: bool = False
+    lr_multiplier: PositiveFloat = 1.0
+
+    @model_validator(mode="after")
+    def validate_condition_controls(self) -> ConditionOptimizerConfig:
+        enabled = self.independent_clipping or self.independent_lr
+        if enabled and not self.parameter_prefixes:
+            raise ValueError("condition parameter_prefixes must be nonempty when enabled")
+        if not enabled and self.parameter_prefixes:
+            raise ValueError("condition parameter_prefixes require an enabled condition policy")
+        if len(set(self.parameter_prefixes)) != len(self.parameter_prefixes):
+            raise ValueError("condition parameter_prefixes must be unique")
+        component = r"(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)"
+        for prefix in self.parameter_prefixes:
+            if (
+                re.fullmatch(rf"{component}(?:\.{component})*", prefix) is None
+                or {"module", "_orig_mod", "_fsdp_wrapped_module"}
+                & set(prefix.split("."))
+            ):
+                raise ValueError(
+                    "condition parameter_prefixes must be canonical dotted FQN prefixes "
+                    "without glob or wrapper components"
+                )
+        for index, prefix in enumerate(self.parameter_prefixes):
+            if any(
+                other.startswith(prefix + ".") or prefix.startswith(other + ".")
+                for other in self.parameter_prefixes[index + 1 :]
+            ):
+                raise ValueError("condition parameter_prefixes must not overlap")
+        if self.independent_clipping:
+            if self.clip_norm is None or self.rest_clip_norm is None:
+                raise ValueError("independent_clipping requires clip_norm and rest_clip_norm")
+        elif self.clip_norm is not None or self.rest_clip_norm is not None:
+            raise ValueError("condition clip norms require independent_clipping")
+        if not self.independent_lr and self.lr_multiplier != 1.0:
+            raise ValueError("condition lr_multiplier requires independent_lr")
+        return self
+
+
 class OptimizerConfig(StrictModel):
     name: Literal[
         "torchao_adamw8bit",
@@ -952,6 +998,7 @@ class OptimizerConfig(StrictModel):
     cmuon_forensic: CMuonForensicConfig | None = None
     cmuon_routing_exclude: StringTuple = ()
     cmuon_guard: CMuonGuardConfig | None = None
+    condition: ConditionOptimizerConfig | None = None
 
     @model_validator(mode="after")
     def validate_betas(self) -> OptimizerConfig:

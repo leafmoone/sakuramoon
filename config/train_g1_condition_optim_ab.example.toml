@@ -1,0 +1,22 @@
+# Opt-in CODE/CPU-test example, NOT a deployment change or tuned recommendation.
+# Read docs/condition-optimizer-ab.md before using with a full checkpoint resume.
+extends = ["train_g1_cmuon_production.toml"]
+
+[gradient]
+# Global-mode threshold when independent_clipping=false. Zero disables clipping,
+# never nonfinite validation. Separate mode below REPLACES this global clip.
+clip_norm = 1.0
+clip_dtype = "float32"
+
+[optimizer.condition]
+# Canonical composite FQN prefix(es); no glob, no DDP/compile wrapper names.
+# A and B use this SAME list. Does not implicitly include the global projection.
+parameter_prefixes = ["condition_tokens"]
+independent_clipping = true
+# Illustrative arbitrary finite thresholds, not training recommendations.
+clip_norm = 0.37
+rest_clip_norm = 1.4
+independent_lr = true
+# Relative to AdamW effective LR, NOT relative to CMuon and NOT an absolute LR:
+# condition = successful-update-scheduled-base * adamw_lr_multiplier * this.
+lr_multiplier = 0.23

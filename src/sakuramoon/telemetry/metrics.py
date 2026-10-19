@@ -175,8 +175,39 @@ class TrainingMetric:
     irepa_cosine_mean: float = 0.0
     irepa_lambda: float = 0.0
     irepa_projector_grad_norm: float = 0.0
+    learning_rate_condition: float | None = None
+    condition_pre_clip_grad_norm: float | None = None
+    condition_post_clip_grad_norm: float | None = None
+    rest_pre_clip_grad_norm: float | None = None
+    rest_post_clip_grad_norm: float | None = None
+    condition_clip_fraction: float | None = None
+    rest_clip_fraction: float | None = None
+    condition_clip_coefficient: float | None = None
+    rest_clip_coefficient: float | None = None
 
     def __post_init__(self) -> None:
+        if self.learning_rate_condition is not None:
+            _finite_float("learning_rate_condition", self.learning_rate_condition, minimum=0.0)
+        group_fields = (
+            "condition_pre_clip_grad_norm", "condition_post_clip_grad_norm",
+            "rest_pre_clip_grad_norm", "rest_post_clip_grad_norm",
+            "condition_clip_fraction", "rest_clip_fraction",
+            "condition_clip_coefficient", "rest_clip_coefficient",
+        )
+        if any(getattr(self, name) is not None for name in group_fields):
+            for name in group_fields:
+                _finite_float(name, getattr(self, name), minimum=0.0)
+            for partition in ("condition", "rest"):
+                pre = getattr(self, f"{partition}_pre_clip_grad_norm")
+                post = getattr(self, f"{partition}_post_clip_grad_norm")
+                flag = getattr(self, f"{partition}_clip_fraction")
+                if post > pre:
+                    raise ValueError("partition post-clip norm must not exceed pre-clip norm")
+                if flag not in (0.0, 1.0):
+                    raise ValueError("partition clip fraction must be zero or one")
+                coefficient = getattr(self, f"{partition}_clip_coefficient")
+                if coefficient > 1.0 or flag != float(coefficient < 1.0):
+                    raise ValueError("partition coefficient and clip fraction disagree")
         if self.learning_rate_adamw is None:
             object.__setattr__(self, "learning_rate_adamw", self.learning_rate)
         adamw_rate = self.learning_rate_adamw
@@ -428,7 +459,7 @@ class TrainingMetric:
         )
 
     def as_json_mapping(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": TRAINING_METRIC_SCHEMA_VERSION,
             "successful_update": self.successful_update,
             "recorded_at_unix_ns": self.recorded_at_unix_ns,
@@ -500,6 +531,17 @@ class TrainingMetric:
             "irepa_lambda": self.irepa_lambda,
             "irepa_projector_grad_norm": self.irepa_projector_grad_norm,
         }
+        for name in (
+            "learning_rate_condition",
+            "condition_pre_clip_grad_norm", "condition_post_clip_grad_norm",
+            "rest_pre_clip_grad_norm", "rest_post_clip_grad_norm",
+            "condition_clip_fraction", "rest_clip_fraction",
+            "condition_clip_coefficient", "rest_clip_coefficient",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                payload[name] = value
+        return payload
 
     def as_wandb_mapping(self) -> dict[str, int | float]:
         payload: dict[str, int | float] = {}

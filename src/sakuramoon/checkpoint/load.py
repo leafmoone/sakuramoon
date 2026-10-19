@@ -335,10 +335,10 @@ def _declared_dropped_auxiliary_fqns(
     auxiliary = document.get("training_auxiliaries")
     if auxiliary is None:
         return frozenset()
-    if not isinstance(auxiliary, dict) or set(auxiliary) != {"irepa"}:
+    if not isinstance(auxiliary, dict) or set(cast(dict[str, object], auxiliary)) != {"irepa"}:
         raise CheckpointError("artifact declares non-iREPA training auxiliaries")
     try:
-        dropped = irepa_auxiliary_fqns(auxiliary["irepa"])
+        dropped = irepa_auxiliary_fqns(cast(dict[str, object], auxiliary)["irepa"])
     except ValueError:
         raise CheckpointError(
             "artifact iREPA auxiliary metadata is not the locked v1 document"
@@ -522,6 +522,9 @@ def _validate_optimizer_schema(
         if not isinstance(group_name, str) or not isinstance(names, list):
             raise CheckpointError("current optimizer lacks canonical parameter names")
         current.append((group_name, tuple(cast(list[str], names))))
+    if _has_condition_lr_groups(optimizer):
+        saved = _coalesce_condition_groups(saved)
+        current = _coalesce_condition_groups(current)
     _verify_group_diff(saved, current, new_fqns)
 
 
@@ -653,6 +656,148 @@ def _remap_state_to_current_ids(
             )
         remapped_state[current_id] = entry
     return {"state": remapped_state, "param_groups": current_groups}
+
+
+def _has_condition_lr_groups(optimizer: IsolatedAdamW8bit) -> bool:
+    groups = optimizer.optimizer.param_groups
+    if not any("condition_lr_group" in group for group in groups):
+        return False
+    if not all(
+        type(group.get("condition_lr_group")) is bool for group in groups
+    ) or not any(group["condition_lr_group"] is True for group in groups):
+        raise CheckpointError(
+            "current condition LR groups require boolean tags and a selected group"
+        )
+    return True
+
+
+def _coalesce_condition_groups(
+    groups: list[tuple[str, tuple[str, ...]]],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Erase only contiguous run boundaries, never reorder parameters or base groups."""
+    result: list[tuple[str, tuple[str, ...]]] = []
+    seen: set[str] = set()
+    for group_name, names in groups:
+        if group_name not in {"matrix_decay", "sensitive_no_decay"}:
+            raise CheckpointError("condition optimizer base group name is invalid")
+        if len(set(names)) != len(names) or seen.intersection(names):
+            raise CheckpointError(
+                "condition optimizer contains duplicate parameter names"
+            )
+        seen.update(names)
+        if result and result[-1][0] == group_name:
+            result[-1] = (group_name, result[-1][1] + names)
+        else:
+            result.append((group_name, names))
+    if [name for name, _ in result] != ["matrix_decay", "sensitive_no_decay"]:
+        raise CheckpointError("condition optimizer base group order differs")
+    return result
+
+
+def _prepare_condition_optimizer_state(
+    schema: object,
+    document: dict[str, object],
+    optimizer: IsolatedAdamW8bit,
+    *,
+    new_fqns: frozenset[str] = frozenset(),
+    dropped_fqns: frozenset[str] = frozenset(),
+) -> dict[str, object] | None:
+    """Validate saved identities/locked metadata before replacing groups by FQN.
+
+    Only the live, audited condition opt-in permits changed run boundaries/tags.
+    Metadata on empty groups and declared dropped auxiliaries remains locked.
+    """
+    raw_groups = document.get("param_groups")
+    if not _has_condition_lr_groups(optimizer):
+        if isinstance(raw_groups, list) and any(
+            isinstance(group, dict) and "condition_lr_group" in group
+            for group in cast(list[object], raw_groups)
+        ):
+            raise CheckpointError(
+                "condition LR checkpoint cannot resume into legacy optimizer groups"
+            )
+        return None
+    _exact_keys(document, {"state", "param_groups"}, "optimizer state")
+    if not isinstance(raw_groups, list) or not isinstance(document["state"], dict):
+        raise CheckpointError("optimizer state groups or state mapping is invalid")
+    saved_groups = [
+        _mapping(group, "saved optimizer group")
+        for group in cast(list[object], raw_groups)
+    ]
+    current_document = cast(dict[str, object], optimizer.optimizer.state_dict())
+    current_groups = cast(list[dict[str, object]], current_document["param_groups"])
+
+    def identities(
+        groups: list[dict[str, Any]],
+    ) -> tuple[list[tuple[str, tuple[str, ...]]], dict[str, dict[str, Any]], set[int]]:
+        canonical: list[tuple[str, tuple[str, ...]]] = []
+        by_name: dict[str, dict[str, Any]] = {}
+        ids: list[int] = []
+        for group in groups:
+            names, params = group.get("param_names"), group.get("params")
+            if (
+                not isinstance(group.get("group_name"), str)
+                or not isinstance(names, list)
+                or not isinstance(params, list)
+                or len(cast(list[object], names)) != len(cast(list[object], params))
+                or not all(isinstance(name, str) for name in cast(list[object], names))
+                or not all(type(pid) is int for pid in cast(list[object], params))
+            ):
+                raise CheckpointError("condition optimizer group identity is invalid")
+            names = cast(list[str], names)
+            canonical.append((group["group_name"], tuple(names)))
+            by_name.update((name, group) for name in names)
+            ids.extend(cast(list[int], params))
+        _coalesce_condition_groups(canonical)
+        if ids != list(range(len(ids))):
+            raise CheckpointError(
+                "condition optimizer parameter IDs are duplicate or out of order"
+            )
+        return canonical, by_name, set(ids)
+
+    saved, _, saved_ids = identities(saved_groups)
+    current, current_by_name, _ = identities(current_groups)
+    schema_groups = _mapping(schema, "optimizer schema").get("groups")
+    if not isinstance(schema_groups, list) or not _locked_value_equal(
+        cast(list[object], schema_groups),
+        [{"group_name": name, "param_names": list(names)} for name, names in saved],
+    ):
+        raise CheckpointError("saved optimizer schema and payload groups differ")
+    _verify_group_diff(
+        _coalesce_condition_groups(saved),
+        _coalesce_condition_groups(current),
+        new_fqns,
+        dropped_fqns,
+    )
+    if any("condition_lr_group" in group for group in saved_groups) and (
+        not all(type(group.get("condition_lr_group")) is bool for group in saved_groups)
+        or not any(group["condition_lr_group"] is True for group in saved_groups)
+    ):
+        raise CheckpointError("saved condition LR group tags are invalid")
+    identity_keys = {"params", "param_names", "condition_lr_group"}
+    runtime_keys = {"lr", "weight_decay"}
+    for saved_group in saved_groups:
+        references = [
+            current_by_name[name]
+            for name in cast(list[str], saved_group["param_names"])
+            if name in current_by_name
+        ]
+        if not references:
+            references = [
+                group
+                for group in current_groups
+                if group["group_name"] == saved_group["group_name"]
+            ]
+        for current_group in references:
+            if set(saved_group) - identity_keys != set(current_group) - identity_keys:
+                raise CheckpointError("optimizer parameter group fields do not match")
+            for key in set(saved_group) - identity_keys - runtime_keys:
+                if not _locked_value_equal(saved_group[key], current_group[key]):
+                    raise CheckpointError(f"optimizer parameter group differs: {key}")
+    state = cast(dict[object, object], document["state"])
+    if any(type(pid) is not int or pid not in saved_ids for pid in state):
+        raise CheckpointError("saved optimizer state references an unknown id")
+    return _remap_state_to_current_ids(document, current_groups, dropped_fqns)
 
 
 def _verify_group_diff(
@@ -848,7 +993,7 @@ def _hybrid_ns_map(value: object) -> dict[str, int] | None:
             )
         }
     if isinstance(value, dict):
-        return {str(key): int(item) for key, item in value.items()}
+        return {str(key): int(item) for key, item in cast(dict[str, Any], value).items()}
     return None
 
 
@@ -947,6 +1092,9 @@ def _validate_hybrid_optimizer_schema(
         if not isinstance(group_name, str) or not isinstance(names, list):
             raise CheckpointError("current optimizer lacks canonical parameter names")
         current.append((group_name, tuple(cast(list[str], names))))
+    if _has_condition_lr_groups(optimizer.adamw):
+        saved = _coalesce_condition_groups(saved)
+        current = _coalesce_condition_groups(current)
     _verify_group_diff(saved, current, new_fqns, dropped_fqns)
     block = _mapping(document["hybrid_cmuon"], "hybrid_cmuon schema block")
     _exact_keys(
@@ -1564,7 +1712,15 @@ def load_raw_checkpoint(
             list[object],
             cast(dict[str, object], optimizer.optimizer.state_dict())["param_groups"],
         )
-        if cutover_new_fqns:
+        condition_state = _prepare_condition_optimizer_state(
+            schema,
+            optimizer_state,
+            optimizer,
+            new_fqns=cutover_new_fqns,
+        )
+        if condition_state is not None:
+            optimizer_state = condition_state
+        elif cutover_new_fqns:
             # Re-key the saved state into the current id space by FQN name
             # (torch's positional remap is unsafe across a growth cutover);
             # the remapped document is then validated state-exact.
@@ -1635,14 +1791,24 @@ def _load_hybrid_state_exact(
         new_fqns,
         dropped_fqns,
     )
-    inner = cast(dict[str, object], outer["optimizer"])
-    if not isinstance(inner, dict):
+    inner_raw = outer["optimizer"]
+    if not isinstance(inner_raw, dict):
         raise CheckpointError("hybrid inner optimizer state is invalid")
+    inner = cast(dict[str, object], inner_raw)
     inner_groups = cast(
         list[object],
         cast(dict[str, object], optimizer.adamw.optimizer.state_dict())["param_groups"],
     )
-    if new_fqns or dropped_fqns:
+    condition_state = _prepare_condition_optimizer_state(
+        schema,
+        inner,
+        optimizer.adamw,
+        new_fqns=new_fqns,
+        dropped_fqns=dropped_fqns,
+    )
+    if condition_state is not None:
+        inner = condition_state
+    elif new_fqns or dropped_fqns:
         inner = _remap_state_to_current_ids(
             inner,
             [cast(dict[str, object], g) for g in inner_groups],
@@ -1652,9 +1818,10 @@ def _load_hybrid_state_exact(
     # Learning rate and weight decay are runtime-controlled: replace the
     # saved per-group values with the current configuration values (same
     # contract as the v1 path).
-    inner_groups = cast(list[object], inner.get("param_groups"))
-    if not isinstance(inner_groups, list):
+    inner_groups_raw = inner.get("param_groups")
+    if not isinstance(inner_groups_raw, list):
         raise CheckpointError("hybrid inner optimizer groups are invalid")
+    inner_groups = cast(list[object], inner_groups_raw)
     current_groups = cast(
         list[object],
         cast(dict[str, object], optimizer.adamw.optimizer.state_dict())["param_groups"],
@@ -1689,8 +1856,21 @@ def _load_adamw_transition_state(
     """AdamW8bit -> Hybrid fork: preserve the AdamW state per-FQN for the
     fallback params, keep the CMuon momentum fresh zero, record the
     transition. The source state covers the full parameter audit."""
+    if _has_condition_lr_groups(optimizer.adamw):
+        raise CheckpointError(
+            "AdamW-to-hybrid transition with condition LR groups is unsupported; "
+            "resume with the source optimizer family"
+        )
     _validate_transition_optimizer_schema(schema, optimizer.audit)
     optimizer_state = _load_optimizer_state(train_state / "optimizer.pt")
+    saved_groups = optimizer_state.get("param_groups")
+    if isinstance(saved_groups, list) and any(
+        isinstance(group, dict) and "condition_lr_group" in group
+        for group in cast(list[object], saved_groups)
+    ):
+        raise CheckpointError(
+            "condition LR AdamW-to-hybrid transition is unsupported"
+        )
     _validate_transition_optimizer_state(
         optimizer_state, optimizer.audit, successful_updates
     )
