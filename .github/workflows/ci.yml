@@ -180,6 +180,7 @@ jobs:
           tests/unit/optim/test_guard_window_gloo.py
           tests/unit/optim/test_missing_gradient_index.py
           tests/unit/optim/test_missing_gradient_gloo.py
+          tests/unit/optim/test_optimizer_builder_consolidation.py
           tests/unit/cli/test_guard_window_merge.py
           tests/unit/train/test_condition_optimizer_observability.py
           tests/unit/checkpoint/test_condition_observability_integration.py

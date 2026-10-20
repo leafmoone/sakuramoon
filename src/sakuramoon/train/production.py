@@ -440,42 +440,22 @@ def _build_optimizer(
     world_size: int = 1,
     checkpoint_source: str | None = None,
 ) -> IsolatedAdamW8bit | HybridCMuon:
-    optimizer = _build_optimizer_unscaled(
-        config, module, telemetry_logger=telemetry_logger, rank=rank,
-        world_size=world_size, checkpoint_source=checkpoint_source,
-    )
-    from sakuramoon.optim.condition import split_condition_lr_groups
-
-    split_condition_lr_groups(optimizer, config.optimizer.condition)
-    _set_optimizer_learning_rate(optimizer, config.scaled_learning_rate(), config)
-    return optimizer
-
-
-def _build_optimizer_unscaled(
-    config: RuntimeConfig,
-    module: TrainableComposite,
-    *,
-    telemetry_logger: Callable[[str], None] | None = None,
-    rank: int = 0,
-    world_size: int = 1,
-    checkpoint_source: str | None = None,
-) -> IsolatedAdamW8bit | HybridCMuon:
-    optimizer = config.optimizer
+    spec = config.optimizer
     # Locked-policy scalars, named explicitly (not spread through a dict):
     # the builder signatures are typed per-parameter, and a dict spread loses
     # that precision for the type checker.
     common_lr = config.scaled_learning_rate()
-    common_betas = optimizer.betas
-    common_eps = optimizer.eps
-    common_block_size = optimizer.block_size
-    common_bf16_stochastic_round = optimizer.bf16_stochastic_round
-    common_matrix_weight_decay = optimizer.matrix_weight_decay
-    common_sensitive_weight_decay = optimizer.sensitive_weight_decay
+    common_betas = spec.betas
+    common_eps = spec.eps
+    common_block_size = spec.block_size
+    common_bf16_stochastic_round = spec.bf16_stochastic_round
+    common_matrix_weight_decay = spec.matrix_weight_decay
+    common_sensitive_weight_decay = spec.sensitive_weight_decay
     common_sr_seed = config.run.seed
-    if optimizer.name == "hybrid_cmuon":
-        from sakuramoon.optim.cmuon import build_hybrid_cmuon
+    if spec.name == "hybrid_cmuon":
+        from sakuramoon.optim.cmuon import DEFAULT_NS_STEPS, build_hybrid_cmuon
 
-        telemetry = optimizer.cmuon_ns_telemetry
+        telemetry = spec.cmuon_ns_telemetry
         ns_telemetry_enabled = bool(telemetry.enabled) if telemetry else False
         ns_telemetry_log_every_n = telemetry.log_every_n if telemetry else 100
         ns_telemetry_roles: tuple[str, ...] | None = (
@@ -483,46 +463,35 @@ def _build_optimizer_unscaled(
         )
         # Forensic routing ablation (empty for the candidate under test): the
         # excluded roles route to the AdamW8bit fallback, split stays complete.
-        exclude_roles = tuple(optimizer.cmuon_routing_exclude)
+        exclude_roles = tuple(spec.cmuon_routing_exclude)
         forensic: ForensicConfig | None = None
-        if optimizer.cmuon_forensic is not None and optimizer.cmuon_forensic.enabled:
+        if spec.cmuon_forensic is not None and spec.cmuon_forensic.enabled:
             from sakuramoon.optim.cmuon_forensic import ForensicConfig
 
             # Built on EVERY rank (the rank comparison needs all ranks); the
             # logger is main-rank only so the log lines are not duplicated.
             forensic = ForensicConfig(
                 enabled=True,
-                ring_size=optimizer.cmuon_forensic.ring_size,
-                ceiling_multiplier=optimizer.cmuon_forensic.ceiling_multiplier,
-                max_abs_learn_steps=optimizer.cmuon_forensic.max_abs_learn_steps,
-                max_abs_alarm_mult=optimizer.cmuon_forensic.max_abs_alarm_mult,
-                dump_dir=optimizer.cmuon_forensic.dump_dir,
-                divergence_rel_tol=optimizer.cmuon_forensic.divergence_rel_tol,
+                ring_size=spec.cmuon_forensic.ring_size,
+                ceiling_multiplier=spec.cmuon_forensic.ceiling_multiplier,
+                max_abs_learn_steps=spec.cmuon_forensic.max_abs_learn_steps,
+                max_abs_alarm_mult=spec.cmuon_forensic.max_abs_alarm_mult,
+                dump_dir=spec.cmuon_forensic.dump_dir,
+                divergence_rel_tol=spec.cmuon_forensic.divergence_rel_tol,
             )
-        if optimizer.cmuon_ns is not None:
-            # Per-role (per-spec) NS depth: canonical role->depth map.
-            return build_hybrid_cmuon(
-                module,
-                lr=common_lr,
-                betas=common_betas,
-                eps=common_eps,
-                block_size=common_block_size,
-                bf16_stochastic_round=common_bf16_stochastic_round,
-                matrix_weight_decay=common_matrix_weight_decay,
-                sensitive_weight_decay=common_sensitive_weight_decay,
-                sr_seed=common_sr_seed,
-                ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
-                momentum_dtype=optimizer.cmuon_momentum_dtype,
-                chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
-                ns_telemetry_enabled=ns_telemetry_enabled,
-                ns_telemetry_log_every_n=ns_telemetry_log_every_n,
-                ns_telemetry_logger=telemetry_logger,
-                ns_telemetry_roles=ns_telemetry_roles,
-                exclude_roles=exclude_roles,
-                forensic=forensic,
-            )
-        # Legacy scalar NS depth (every role identical).
-        return build_hybrid_cmuon(
+        if spec.cmuon_ns is not None:
+            # Per-role (per-spec) NS depth: canonical role->depth map.  The
+            # legacy scalar is NOT read on this path; the builder default is
+            # passed explicitly (== omitted default) so both variants share
+            # one call.
+            ns_steps = DEFAULT_NS_STEPS
+            ns_steps_by_role = spec.cmuon_ns.canonical_map()
+        else:
+            # Legacy scalar NS depth (every role identical).  An explicit
+            # None matches the builder's omitted default.
+            ns_steps = spec.cmuon_ns_steps
+            ns_steps_by_role = None
+        optimizer = build_hybrid_cmuon(
             module,
             lr=common_lr,
             betas=common_betas,
@@ -532,9 +501,10 @@ def _build_optimizer_unscaled(
             matrix_weight_decay=common_matrix_weight_decay,
             sensitive_weight_decay=common_sensitive_weight_decay,
             sr_seed=common_sr_seed,
-            ns_steps=optimizer.cmuon_ns_steps,
-            momentum_dtype=optimizer.cmuon_momentum_dtype,
-            chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
+            ns_steps=ns_steps,
+            ns_steps_by_role=ns_steps_by_role,
+            momentum_dtype=spec.cmuon_momentum_dtype,
+            chunk_rescale_sqrt_n=spec.cmuon_chunk_rescale_sqrt_n,
             ns_telemetry_enabled=ns_telemetry_enabled,
             ns_telemetry_log_every_n=ns_telemetry_log_every_n,
             ns_telemetry_logger=telemetry_logger,
@@ -542,7 +512,7 @@ def _build_optimizer_unscaled(
             exclude_roles=exclude_roles,
             forensic=forensic,
         )
-    if optimizer.name in (
+    elif spec.name in (
         "hybrid_cmuon_guarded_canonical",
         "hybrid_cmuon_canonical_ns4_fp32_rescue",
     ):
@@ -551,32 +521,51 @@ def _build_optimizer_unscaled(
             build_guarded_canonical,
         )
 
-        guard = optimizer.cmuon_guard
+        guard = spec.cmuon_guard
         assert guard is not None and guard.enabled  # enforced by the schema
-        if optimizer.cmuon_forensic is not None and optimizer.cmuon_forensic.enabled:
+        if spec.cmuon_forensic is not None and spec.cmuon_forensic.enabled:
             raise ValueError(
                 "the guarded canonical candidate is two-phase fail-closed by "
                 "construction; [optimizer.cmuon_forensic] is for the retired "
                 "original candidate and must stay disabled"
             )
         if (
-            optimizer.cmuon_ns_telemetry is not None
-            and optimizer.cmuon_ns_telemetry.enabled
+            spec.cmuon_ns_telemetry is not None
+            and spec.cmuon_ns_telemetry.enabled
         ):
             raise ValueError(
                 "the guarded canonical candidate has its own per-step safety "
                 "checks; [optimizer.cmuon_ns_telemetry] must stay disabled"
             )
-        if optimizer.cmuon_ns is None:
+        if spec.cmuon_ns is None:
             raise ValueError(
-                f"{optimizer.name} requires an explicit [optimizer.cmuon_ns] "
+                f"{spec.name} requires an explicit [optimizer.cmuon_ns] "
                 "per-role NS map (no legacy scalar fallback)"
             )
+        # The rescue variant's lazy import runs before the shared extraction,
+        # preserving the original construction exception order: import, then
+        # canonical map, then guard config, then the builder call.
         stats_logger = telemetry_logger if rank == 0 else None
-        if optimizer.name == "hybrid_cmuon_canonical_ns4_fp32_rescue":
+        # Unannotated on purpose: pyright infers the None | build_fp32_rescue
+        # union, keeping the builder's exact per-kwarg static signature.
+        rescue_builder = None
+        if spec.name == "hybrid_cmuon_canonical_ns4_fp32_rescue":
             from sakuramoon.optim.fp32_rescue import build_fp32_rescue
 
-            return build_fp32_rescue(
+            rescue_builder = build_fp32_rescue
+        # Extracted once after the fail-closed checks; both guarded builders
+        # receive the same immutable map and guard config.
+        ns_map = spec.cmuon_ns.canonical_map()
+        guard_cfg = GuardedCanonicalGuardConfig(
+            guard_ratio=guard.guard_ratio,
+            reference_decay=guard.reference_decay,
+            min_reference=guard.min_reference,
+            numerical_floor=guard.numerical_floor,
+            warmup_observations=guard.warmup_observations,
+            invariant_check=guard.invariant_check,
+        )
+        if rescue_builder is not None:
+            optimizer = rescue_builder(
                 module,
                 lr=common_lr,
                 betas=common_betas,
@@ -586,25 +575,39 @@ def _build_optimizer_unscaled(
                 matrix_weight_decay=common_matrix_weight_decay,
                 sensitive_weight_decay=common_sensitive_weight_decay,
                 sr_seed=common_sr_seed,
-                ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
-                guard_cfg=GuardedCanonicalGuardConfig(
-                    guard_ratio=guard.guard_ratio,
-                    reference_decay=guard.reference_decay,
-                    min_reference=guard.min_reference,
-                    numerical_floor=guard.numerical_floor,
-                    warmup_observations=guard.warmup_observations,
-                    invariant_check=guard.invariant_check,
-                ),
+                ns_steps_by_role=ns_map,
+                guard_cfg=guard_cfg,
                 guard_bootstrap_refs=dict(guard.references),
                 rank=rank,
                 world_size=world_size,
-                momentum_dtype=optimizer.cmuon_momentum_dtype,
-                chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
+                momentum_dtype=spec.cmuon_momentum_dtype,
+                chunk_rescale_sqrt_n=spec.cmuon_chunk_rescale_sqrt_n,
                 stats_logger=stats_logger,
                 checkpoint_source=checkpoint_source,
                 run_id=config.run.run_id,
             )
-        return build_guarded_canonical(
+        else:
+            optimizer = build_guarded_canonical(
+                module,
+                lr=common_lr,
+                betas=common_betas,
+                eps=common_eps,
+                block_size=common_block_size,
+                bf16_stochastic_round=common_bf16_stochastic_round,
+                matrix_weight_decay=common_matrix_weight_decay,
+                sensitive_weight_decay=common_sensitive_weight_decay,
+                sr_seed=common_sr_seed,
+                ns_steps_by_role=ns_map,
+                guard_cfg=guard_cfg,
+                guard_bootstrap_refs=dict(guard.references),
+                rank=rank,
+                world_size=world_size,
+                momentum_dtype=spec.cmuon_momentum_dtype,
+                chunk_rescale_sqrt_n=spec.cmuon_chunk_rescale_sqrt_n,
+                stats_logger=stats_logger,
+            )
+    else:
+        optimizer = build_adamw8bit(
             module,
             lr=common_lr,
             betas=common_betas,
@@ -614,33 +617,12 @@ def _build_optimizer_unscaled(
             matrix_weight_decay=common_matrix_weight_decay,
             sensitive_weight_decay=common_sensitive_weight_decay,
             sr_seed=common_sr_seed,
-            ns_steps_by_role=optimizer.cmuon_ns.canonical_map(),
-            guard_cfg=GuardedCanonicalGuardConfig(
-                guard_ratio=guard.guard_ratio,
-                reference_decay=guard.reference_decay,
-                min_reference=guard.min_reference,
-                numerical_floor=guard.numerical_floor,
-                warmup_observations=guard.warmup_observations,
-                invariant_check=guard.invariant_check,
-            ),
-            guard_bootstrap_refs=dict(guard.references),
-            rank=rank,
-            world_size=world_size,
-            momentum_dtype=optimizer.cmuon_momentum_dtype,
-            chunk_rescale_sqrt_n=optimizer.cmuon_chunk_rescale_sqrt_n,
-            stats_logger=stats_logger,
         )
-    return build_adamw8bit(
-        module,
-        lr=common_lr,
-        betas=common_betas,
-        eps=common_eps,
-        block_size=common_block_size,
-        bf16_stochastic_round=common_bf16_stochastic_round,
-        matrix_weight_decay=common_matrix_weight_decay,
-        sensitive_weight_decay=common_sensitive_weight_decay,
-        sr_seed=common_sr_seed,
-    )
+    from sakuramoon.optim.condition import split_condition_lr_groups
+
+    split_condition_lr_groups(optimizer, spec.condition)
+    _set_optimizer_learning_rate(optimizer, config.scaled_learning_rate(), config)
+    return optimizer
 
 
 def _optimizer_learning_rate_scalars(
