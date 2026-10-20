@@ -13,6 +13,7 @@ import torch
 
 from sakuramoon.conditioning.rope import image_coordinates
 from sakuramoon.data.caption import CaptionPlan, empty_caption_dropout_hits
+from sakuramoon.data.conditioning_batch import condition_flags, index_rows, token_rows
 from sakuramoon.data.serialize import (
     EXPECTED_PREFIX_TOKENS,
     EXPECTED_SUFFIX_TOKENS,
@@ -81,19 +82,6 @@ def load_inference_settings(
     )
 
 
-def _indices(
-    rows: tuple[tuple[int, ...], ...], device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor]:
-    width = max(map(len, rows), default=0)
-    indices = torch.full((len(rows), width), -1, dtype=torch.long, device=device)
-    mask = torch.zeros((len(rows), width), dtype=torch.bool, device=device)
-    for i, row in enumerate(rows):
-        if row:
-            indices[i, : len(row)] = torch.tensor(row, device=device)
-            mask[i, : len(row)] = True
-    return indices, mask
-
-
 @torch.inference_mode()
 def generate_image(
     plan: CaptionPlan,
@@ -135,23 +123,20 @@ def generate_image(
     )
     if captions[0].truncated:
         raise ValueError("prompt exceeds the model's caption budget; shorten it")
-    length = max(c.dense_length for c in captions)
-    input_ids = torch.full((2, length), pad, dtype=torch.long, device=device)
-    attention_mask = torch.zeros((2, length), dtype=torch.bool, device=device)
-    for i, caption in enumerate(captions):
-        count = len(caption.input_ids)
-        input_ids[i, :count] = torch.tensor(caption.input_ids, device=device)
-        attention_mask[i, :count] = True
+    # Staged calls preserve the original fault order: token padding, then
+    # the Qwen encoder, then index/coordinate/flag materialization.
+    input_ids, attention_mask = token_rows(captions, pad_token_id=pad, device=device)
     states = qwen.encoder(input_ids, attention_mask).hidden_states
-    main_indices, main_mask = _indices(
-        tuple(c.main_token_indices for c in captions), device
+    main_indices, main_mask = index_rows(
+        tuple(c.main_token_indices for c in captions), device=device
     )
-    condition_indices, condition_mask = _indices(
-        tuple(c.condition_token_indices for c in captions), device
+    condition_indices, condition_mask = index_rows(
+        tuple(c.condition_token_indices for c in captions), device=device
     )
     coordinates = image_coordinates(height // 16, width // 16, device=device)
     channels = composite.dit.input_projection.in_features
     shape = (channels, height // 16, width // 16)
+    use_null, active = condition_flags(captions, device=device)
     inputs = TrainableCompositeInputs(
         qwen_states=states,
         main_token_indices=main_indices,
@@ -159,14 +144,8 @@ def generate_image(
         main_token_lengths=tuple(len(c.main_token_indices) for c in captions),
         condition_token_indices=condition_indices,
         condition_mask=condition_mask,
-        use_null_condition=torch.tensor(
-            [c.use_null_condition for c in captions], dtype=torch.bool, device=device
-        ),
-        active_condition_sample_indices=torch.tensor(
-            [i for i, c in enumerate(captions) if not c.use_null_condition],
-            dtype=torch.long,
-            device=device,
-        ),
+        use_null_condition=use_null,
+        active_condition_sample_indices=active,
         latents=tuple(
             torch.empty(shape, dtype=torch.bfloat16, device=device) for _ in captions
         ),

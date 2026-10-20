@@ -25,6 +25,7 @@ from sakuramoon.data.caption import (
     Tag,
     empty_caption_dropout_hits,
 )
+from sakuramoon.data.conditioning_batch import conditioning_batch
 from sakuramoon.data.serialize import (
     EXPECTED_PREFIX_TOKENS,
     EXPECTED_SUFFIX_TOKENS,
@@ -277,67 +278,15 @@ def _conditioning_inputs(
         raise TrainingSamplingError("Qwen padding token ID is unavailable")
     if not captions:
         raise TrainingSamplingError("training sample caption group is empty")
-    dense_length = max(item.dense_length for item in captions)
-    input_ids = torch.full(
-        (len(captions), dense_length),
-        padding_token_id,
-        dtype=torch.long,
+    return conditioning_batch(
+        captions,
+        pad_token_id=padding_token_id,
         device=device,
-    )
-    attention_mask = torch.zeros(
-        (len(captions), dense_length), dtype=torch.bool, device=device
-    )
-    for row, caption in enumerate(captions):
-        length = len(caption.input_ids)
-        if length > dense_length:
-            raise TrainingSamplingError("serialized sample caption exceeds its bucket")
-        input_ids[row, :length] = torch.tensor(
-            caption.input_ids, dtype=torch.long, device=device
-        )
-        attention_mask[row, :length] = True
-
-    def index_tensor(
-        values: tuple[tuple[int, ...], ...],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        width = max((len(item) for item in values), default=0)
-        indices = torch.full((len(values), width), -1, dtype=torch.long, device=device)
-        mask = torch.zeros((len(values), width), dtype=torch.bool, device=device)
-        for row, item in enumerate(values):
-            if item:
-                indices[row, : len(item)] = torch.tensor(
-                    item, dtype=torch.long, device=device
-                )
-                mask[row, : len(item)] = True
-        return indices, mask
-
-    main_indices, main_mask = index_tensor(
-        tuple(item.main_token_indices for item in captions)
-    )
-    condition_indices, condition_mask = index_tensor(
-        tuple(item.condition_token_indices for item in captions)
-    )
-    use_null = torch.tensor(
-        tuple(item.use_null_condition for item in captions),
-        dtype=torch.bool,
-        device=device,
-    )
-    active_condition = torch.tensor(
-        tuple(
-            index for index, item in enumerate(captions) if not item.use_null_condition
+        on_overflow=(
+            TrainingSamplingError,
+            "serialized sample caption exceeds its bucket",
         ),
-        dtype=torch.long,
-        device=device,
-    )
-    return (
-        input_ids,
-        attention_mask,
-        main_indices,
-        main_mask,
-        tuple(len(item.main_token_indices) for item in captions),
-        condition_indices,
-        condition_mask,
-        use_null,
-        active_condition,
+        copy_dtype=torch.long,
     )
 
 

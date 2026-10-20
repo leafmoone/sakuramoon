@@ -20,6 +20,7 @@ from torch.nn import functional
 from sakuramoon.conditioning.rope import image_coordinates
 from sakuramoon.config.schema import EvaluationEnabledConfig, RuntimeConfig
 from sakuramoon.data.caption import CaptionPlan, empty_caption_dropout_hits
+from sakuramoon.data.conditioning_batch import conditioning_batch
 from sakuramoon.data.serialize import (
     EXPECTED_PREFIX_TOKENS,
     EXPECTED_SUFFIX_TOKENS,
@@ -151,19 +152,6 @@ def _unconditional_plan() -> CaptionPlan:
     )
 
 
-def _index_tensor(
-    values: tuple[tuple[int, ...], ...], device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor]:
-    width = max((len(item) for item in values), default=0)
-    indices = torch.full((len(values), width), -1, dtype=torch.long, device=device)
-    mask = torch.zeros((len(values), width), dtype=torch.bool, device=device)
-    for row, item in enumerate(values):
-        if item:
-            indices[row, : len(item)] = torch.tensor(item, device=device)
-            mask[row, : len(item)] = True
-    return indices, mask
-
-
 def _conditioning_inputs(
     cases: tuple[PromptCase, ...],
     tokenizer: object,
@@ -211,51 +199,7 @@ def _conditioning_inputs(
     unconditional = serialize_caption(_unconditional_plan(), encoder, framing)
     serialized.extend(unconditional for _ in cases)
     captions = tuple(serialized)
-    dense_length = max(item.dense_length for item in captions)
-    input_ids = torch.full(
-        (len(captions), dense_length),
-        padding_token_id,
-        dtype=torch.long,
-        device=device,
-    )
-    attention_mask = torch.zeros(
-        (len(captions), dense_length), dtype=torch.bool, device=device
-    )
-    for row, item in enumerate(captions):
-        length = len(item.input_ids)
-        input_ids[row, :length] = torch.tensor(item.input_ids, device=device)
-        attention_mask[row, :length] = True
-    main_indices, main_mask = _index_tensor(
-        tuple(item.main_token_indices for item in captions), device
-    )
-    condition_indices, condition_mask = _index_tensor(
-        tuple(item.condition_token_indices for item in captions), device
-    )
-    use_null = torch.tensor(
-        tuple(item.use_null_condition for item in captions),
-        dtype=torch.bool,
-        device=device,
-    )
-    active_condition = torch.tensor(
-        tuple(
-            index
-            for index, item in enumerate(captions)
-            if not item.use_null_condition
-        ),
-        dtype=torch.long,
-        device=device,
-    )
-    return (
-        input_ids,
-        attention_mask,
-        main_indices,
-        main_mask,
-        tuple(len(item.main_token_indices) for item in captions),
-        condition_indices,
-        condition_mask,
-        use_null,
-        active_condition,
-    )
+    return conditioning_batch(captions, pad_token_id=padding_token_id, device=device)
 
 
 def _initial_noise(cases: tuple[PromptCase, ...], device: torch.device) -> torch.Tensor:

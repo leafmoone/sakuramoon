@@ -170,6 +170,7 @@ jobs:
           tests/unit/config/test_config_closure.py
           tests/unit/config/test_condition_diagnostics_config.py
           tests/unit/config/test_guard_window_config.py
+          tests/unit/data/test_conditioning_batch.py
           tests/unit/train/test_condition_diagnostics_stream.py
           tests/unit/train/test_condition_diagnostics_production_wiring.py
           tests/unit/train/test_condition_diagnostics_lifecycle.py
