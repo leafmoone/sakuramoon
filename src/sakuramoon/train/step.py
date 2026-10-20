@@ -43,6 +43,15 @@ def _complete_device_work(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def _is_condition_side(name: str) -> bool:
+    """Condition-side parameter FQN: ``condition_tokens.*`` (token encoder)
+    or ``dit.conditioner.*`` (global conditioner).  Component matching is
+    DDP-safe (an enclosing ``module.`` prefix does not matter)."""
+
+    parts = name.split(".")
+    return "condition_tokens" in parts or "conditioner" in parts
+
+
 def _parameter_grad_norm(
     module: nn.Module,
     *,
@@ -107,6 +116,7 @@ class TrainableComposite(nn.Module):
         condition_tokens: ConditionTokenEncoder,
         irepa_alignment: IRepaAlignment | None = None,
         irepa_tap_slot_id: int | None = None,
+        condition_diagnostics: bool = False,
     ) -> None:
         super().__init__()
         self.dit = dit
@@ -137,6 +147,44 @@ class TrainableComposite(nn.Module):
                     f"{dit.active_slot_ids})"
                 )
         self.irepa_tap_slot_id = irepa_tap_slot_id
+        # Opt-in condition-side diagnostics (per-rank JSONL stream, v1):
+        # when enabled, forward_conditioning keeps a reference (no copy) to
+        # the latest condition output for the detached recompute.  A plain
+        # attribute — never a module or parameter — so the state_dict
+        # contract is untouched; when disabled it stays None forever.
+        if type(condition_diagnostics) is not bool:
+            raise ValueError("condition_diagnostics must be a bool")
+        self._condition_diagnostics = condition_diagnostics
+        self._last_conditioning: ConditionTokenOutput | None = None
+
+    @property
+    def last_conditioning(self) -> ConditionTokenOutput | None:
+        """Condition output of the most recent forward (None when the
+        condition-diagnostics capture is disabled or no forward ran)."""
+
+        return self._last_conditioning
+
+    @property
+    def condition_diagnostics_enabled(self) -> bool:
+        """Whether a forward would retain its condition output."""
+
+        return self._condition_diagnostics
+
+    def enable_condition_diagnostics(self) -> None:
+        """Enable the reference capture for the per-rank diagnostics stream.
+
+        Runtime-only: no parameters, no state_dict impact, no math change.
+        Applied after the artifact document round-trip check (it is not —
+        and must not become — document content).
+        """
+
+        self._condition_diagnostics = True
+
+    def disable_condition_diagnostics(self) -> None:
+        """End runtime-only capture and release the last forward graph."""
+
+        self._condition_diagnostics = False
+        self._last_conditioning = None
 
     def bind_irepa_tap_slot(self, slot_id: int) -> None:
         """Bind the config-locked capture slot after artifact construction.
@@ -175,6 +223,11 @@ class TrainableComposite(nn.Module):
             inputs.use_null_condition,
             inputs.active_condition_sample_indices,
         )
+        if self._condition_diagnostics:
+            # Keep a reference (no copy, no detach needed — the consumer
+            # recomputes under ``no_grad``); the disabled path never
+            # assigns, so the default behavior is byte-identical.
+            self._last_conditioning = condition
         return text, condition
 
     def forward_dit(
@@ -369,6 +422,12 @@ class SingleGpuUpdateResult:
     irepa_projector_grad_norm: float = 0.0
     condition_clip: ClipResult | None = None
     rest_clip: ClipResult | None = None
+    # Union (condition_tokens.* + dit.conditioner.*) L2 gradient norm, sample-
+    # mean scaled: measured BEFORE the selected clip and AGAIN after it.
+    # Both None unless the step runs with condition_grad_share enabled, so
+    # the default path performs no extra parameter scans.
+    condition_grad_norm_pre_clip: torch.Tensor | None = None
+    condition_grad_norm_post_clip: torch.Tensor | None = None
 
 
 class StepOptimizer(Protocol):
@@ -411,6 +470,7 @@ class SingleGpuStep:
         irepa_projector: bool = False,
         global_clip_norm: float = 1.0,
         condition_optimizer: ConditionOptimizerConfig | None = None,
+        condition_grad_share: bool = False,
     ) -> None:
         if type(accumulation_steps) is not int or accumulation_steps <= 0:
             raise ValueError("accumulation_steps must be a positive integer")
@@ -432,6 +492,8 @@ class SingleGpuStep:
             or global_clip_norm < 0.0
         ):
             raise ValueError("global_clip_norm must be finite and nonnegative")
+        if type(condition_grad_share) is not bool:
+            raise ValueError("condition_grad_share must be a bool")
         self.global_clip_norm = global_clip_norm
         self.condition_optimizer = condition_optimizer
         self._condition_parameters: tuple[nn.Parameter, ...] = ()
@@ -467,6 +529,9 @@ class SingleGpuStep:
         self.effective_sample_multiplier = effective_sample_multiplier
         self.growth_alpha = growth_alpha
         self.irepa_projector = irepa_projector
+        # Opt-in: also measure the union condition-side grad norm pre/post
+        # clip for the per-rank diagnostics stream (extra parameter scans).
+        self.condition_grad_share = condition_grad_share
         self._backward = backward
         self._state: SingleGpuUpdateState = state
         self._microbatches = 0
@@ -618,20 +683,46 @@ class SingleGpuStep:
                 ):
                     raise FloatingPointError("condition/rest gradients are nonfinite")
                 if gradients:
-                    torch._foreach_mul_(gradients, gradient_scale)
+                    # Fused in-place sample-mean scale over every gradient in
+                    # one kernel; the only efficient path.  ``_foreach_mul_``
+                    # is torch's semi-private batched API (not in the stubs).
+                    torch._foreach_mul_(  # pyright: ignore[reportPrivateUsage, reportPrivateImportUsage]
+                        gradients, gradient_scale
+                    )
+                # At this point at least one microbatch backward has run, so
+                # the device bound during backward is non-None.  Narrow once
+                # so the parameter-norm diagnostics below do not widen the
+                # error surface.
+                clip_device = self._device
+                if clip_device is None:
+                    raise RuntimeError("update grad norms require a bound device")
                 condition_encoder_grad_norm = _parameter_grad_norm(
                     self.module,
                     predicate=lambda name, _parameter: (
                         "condition_tokens" in name.split(".")
                     ),
-                    device=self._device,
+                    device=clip_device,
                 )
                 condition_global_projection_grad_norm = _parameter_grad_norm(
                     self.module,
                     predicate=lambda name, _parameter: name.endswith(
                         "dit.conditioner.condition_global_projection.weight"
                     ),
-                    device=self._device,
+                    device=clip_device,
+                )
+                # Union condition-side norm (condition_tokens.* +
+                # dit.conditioner.*), sample-mean scaled, before the clip.
+                # Measured only for the opt-in per-rank diagnostics stream.
+                condition_grad_norm_pre_clip = (
+                    _parameter_grad_norm(
+                        self.module,
+                        predicate=lambda name, _parameter: _is_condition_side(
+                            name
+                        ),
+                        device=clip_device,
+                    )
+                    if self.condition_grad_share
+                    else None
                 )
                 try:
                     # Duck-typed access: the module may be a DDP wrapper or a
@@ -652,25 +743,19 @@ class SingleGpuStep:
                 growth_new_block_grad_norm = _parameter_grad_norm(
                     self.module,
                     predicate=lambda name, _parameter: name.startswith(block_prefixes),
-                    device=self._device,
+                    device=clip_device,
                 )
                 growth_new_conditioner_grad_norm = _parameter_grad_norm(
                     self.module,
                     predicate=lambda name, _parameter: name in conditioner_names,
-                    device=self._device,
+                    device=clip_device,
                 )
                 growth_new_slot_grad_norm = torch.sqrt(
                     growth_new_block_grad_norm.square()
                     + growth_new_conditioner_grad_norm.square()
                 )
-                # At this point at least one microbatch backward has run, so
-                # the device bound during backward is non-None.  Narrow once
-                # so the iREPA diagnostic does not widen the error surface.
-                irepa_device = self._device
-                if irepa_device is None:
-                    raise RuntimeError(
-                        "iREPA projector grad norm requires a bound device"
-                    )
+                # The device narrowing above already guards this block.
+                irepa_device = clip_device
                 irepa_projector_grad_norm = (
                     float(
                         _parameter_grad_norm(
@@ -705,7 +790,22 @@ class SingleGpuStep:
                         coefficient=torch.where(pre > 0, post / pre, torch.ones_like(pre)),
                     )
                 else:
-                    clip = clip_grad_norm_fp32(parameters, max_norm=self.global_clip_norm)
+                    clip = clip_grad_norm_fp32(
+                        parameters, max_norm=self.global_clip_norm
+                    )
+                # Same union, measured after the selected clip rescaled the
+                # gradients (post-clip coefficient already applied).
+                condition_grad_norm_post_clip = (
+                    _parameter_grad_norm(
+                        self.module,
+                        predicate=lambda name, _parameter: _is_condition_side(
+                            name
+                        ),
+                        device=clip_device,
+                    )
+                    if self.condition_grad_share
+                    else None
+                )
         except BaseException as error:
             self._detection_phase = "clip"
             self._failed = True
@@ -786,6 +886,8 @@ class SingleGpuStep:
             irepa_projector_grad_norm=irepa_projector_grad_norm,
             condition_clip=condition_clip,
             rest_clip=rest_clip,
+            condition_grad_norm_pre_clip=condition_grad_norm_pre_clip,
+            condition_grad_norm_post_clip=condition_grad_norm_post_clip,
         )
         self._state = result.state
         self._microbatches = 0

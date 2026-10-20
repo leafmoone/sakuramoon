@@ -504,6 +504,7 @@ def build_trainable_composite_from_config(
     *,
     device: torch.device | str,
     new_slot_ids: tuple[int, ...] = (),
+    condition_diagnostics: bool = False,
 ) -> TrainableComposite:
     """Construct and round-trip-check the exact config-bound trainable module."""
 
@@ -525,6 +526,10 @@ def build_trainable_composite_from_config(
     elif module.irepa_tap_slot_id is not None:
         raise ValueError("tap is bound while iREPA is absent or disabled")
     module.dit.set_activation_checkpoint_mode(config.train.activation_checkpoint_mode)
+    if condition_diagnostics:
+        # Runtime-only capture flag: applied after the document round-trip
+        # check because it is not (and must not become) document content.
+        module.enable_condition_diagnostics()
     return module
 
 

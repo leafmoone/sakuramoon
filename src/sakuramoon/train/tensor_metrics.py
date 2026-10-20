@@ -1,0 +1,89 @@
+"""Shared tensor metric primitives for condition diagnostics.
+
+Pure, torch-only helpers shared by the sampling-time diagnostics
+(``condition_diagnostics``) and the per-update condition diagnostics
+stream (``condition_diagnostics_stream``).  No heavy imports: this module
+must stay importable on CPU-only test environments.
+"""
+
+from __future__ import annotations
+
+import math
+
+import torch
+
+
+class TrainingSamplingError(RuntimeError):
+    """A periodic training sample or condition diagnostic is invalid."""
+
+
+def tensor_rms(tensor: torch.Tensor) -> torch.Tensor:
+    if not tensor.is_floating_point() or tensor.numel() == 0:
+        raise TrainingSamplingError(
+            "diagnostic tensor must be nonempty floating point"
+        )
+    return tensor.float().square().mean().sqrt()
+
+
+def tensor_cosine(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+    if first.shape != second.shape or first.numel() == 0:
+        raise TrainingSamplingError("diagnostic cosine tensors must match")
+    left = first.float().flatten()
+    right = second.float().flatten()
+    # Verbatim from 9826ffe (``Tensor.norm()``): bit-exact equivalence with
+    # the historical sampling diagnostics outranks stub cleanliness.  The
+    # ignores are type-checker directives; they do not change the math.
+    denominator = left.norm() * right.norm()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if denominator <= 1e-12:  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        raise TrainingSamplingError("diagnostic cosine is undefined at zero norm")
+    return torch.dot(left, right) / denominator  # pyright: ignore[reportUnknownVariableType]
+
+
+def tensor_cosine_rows(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+    """Row-wise cosine, BATCHED, with the same definition as ``tensor_cosine``.
+
+    ``first``/``second`` must be 2-D tensors of the same non-empty shape
+    ``[N, D]``; returns the per-row cosines ``[N]`` **on the inputs'
+    device** — a handful of whole-tensor kernels, no per-row kernel
+    launches, no per-row device-to-host copy.  The definition is the
+    scalar primitive's: float32, the per-row ``x.norm() * y.norm()``
+    denominator with the 1e-12 threshold, dot / denominator quotient.
+
+    Raises ``TrainingSamplingError`` when any row is undefined (its
+    denominator is at/below the threshold) or the inputs are not a valid
+    pair, so callers keep the scalar path's error contract.
+
+    Per-row values are NOT guaranteed bitwise-identical to applying
+    ``tensor_cosine`` row by row: the batched reduction kernels order
+    float32 additions differently.  The measured bound is recorded in the
+    equivalence test; the definition, threshold and error contract are
+    unchanged.
+    """
+
+    if first.shape != second.shape or first.ndim != 2 or first.numel() == 0:
+        raise TrainingSamplingError(
+            "diagnostic cosine rows must be a non-empty [N, D] pair"
+        )
+    left = first.float()
+    right = second.float()
+    # The same math tensor_cosine makes, batched per row.
+    denominator = left.norm(dim=1) * right.norm(dim=1)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if bool((denominator <= 1e-12).any()):  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
+        raise TrainingSamplingError("diagnostic cosine is undefined at zero norm")
+    return torch.einsum("nd,nd->n", left, right) / denominator  # pyright: ignore[reportUnknownVariableType]
+
+
+def metric_float(name: str, value: torch.Tensor) -> float:
+    result = float(value.detach().cpu().item())
+    if not math.isfinite(result):
+        raise TrainingSamplingError(f"condition diagnostic is nonfinite: {name}")
+    return result
+
+
+__all__ = [
+    "TrainingSamplingError",
+    "metric_float",
+    "tensor_cosine",
+    "tensor_cosine_rows",
+    "tensor_rms",
+]

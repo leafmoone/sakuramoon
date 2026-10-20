@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import cast
+
 import pytest
 import torch
 from torch import nn
 
 from sakuramoon.checkpoint.schema import GrowthCheckpointState
 from sakuramoon.model.growth import active_slot_ids
-from sakuramoon.train.loop import SingleGpuTrainingLoop
+from sakuramoon.train.loop import SingleGpuTrainingLoop, SuccessfulLoopObservation
 from sakuramoon.train.stage import canonical_growth_alpha
 from sakuramoon.train.step import SingleGpuUpdateState
 
@@ -27,20 +30,20 @@ def test_canonical_alpha_is_resume_stable() -> None:
     assert canonical_growth_alpha(growth, 47_500) == 1.0
 
 
-def test_training_loop_passes_one_canonical_alpha_to_each_update(tmp_path) -> None:
-    torch.manual_seed(12)
+def test_training_loop_passes_one_canonical_alpha_to_each_update(tmp_path: Path) -> None:
+    torch.manual_seed(12)  # pyright: ignore[reportUnknownMemberType]
     model = nn.Linear(2, 1)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     observed: list[float] = []
     state = SingleGpuUpdateState.initial()
 
-    def record(observation) -> None:
+    def record(observation: SuccessfulLoopObservation) -> None:
         observed.append(observation.update.growth_alpha)
 
-    loop = SingleGpuTrainingLoop(
+    loop = SingleGpuTrainingLoop[tuple[torch.Tensor, torch.Tensor]](
         module=model,
         optimizer=optimizer,
-        loss_fn=lambda batch: (model(batch[0]) - batch[1]).square().flatten(),
+        loss_fn=lambda batch, _microbatch: (cast(torch.Tensor, model(batch[0])) - batch[1]).square().flatten(),
         accumulation_steps=1,
         target_successful_updates=3,
         checkpoint_every_successful_updates=100,
