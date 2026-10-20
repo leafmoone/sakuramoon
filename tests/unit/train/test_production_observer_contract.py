@@ -36,6 +36,9 @@ from sakuramoon.distributed import (
     DistributedProgressError,
 )
 from sakuramoon.train.benchmark import BenchmarkTrace
+from sakuramoon.train.production_observer import (
+    observe_production_successful_update,
+)
 from sakuramoon.train.runtime import SuccessfulTrainingObservation
 from sakuramoon.train.sampling import TrainingSampleResult
 from sakuramoon.train.stage import canonical_growth_alpha
@@ -546,6 +549,7 @@ def build_observer_namespace(
 ) -> dict[str, object]:
     """Assemble the closure namespace for the real nested observer."""
     namespace: dict[str, object] = {
+        "observe_production_successful_update": observe_production_successful_update,
         "benchmark_trace": benchmark,
         "config": SimpleNamespace(
             sampling=SimpleNamespace(

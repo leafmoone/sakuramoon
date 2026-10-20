@@ -99,6 +99,9 @@ from sakuramoon.train.preflight import (
     run_single_gpu_preflight,
     write_zero_update_preflight_report,
 )
+from sakuramoon.train.production_observer import (
+    observe_production_successful_update,
+)
 from sakuramoon.train.runtime import (
     SingleGpuBatchRuntime,
     SuccessfulTrainingObservation,
@@ -1842,105 +1845,20 @@ def _run_accepted_lifecycle(
                 def observe_successful_update(
                     observation: SuccessfulTrainingObservation,
                 ) -> None:
-                    update = observation.loop.update.state.successful_updates
-                    if benchmark_trace is not None:
-                        benchmark_trace.append(observation)
-                    sampling_due = (
-                        config.sampling.training.enabled
-                        and update > 0
-                        and update % config.sampling.training.every_updates == 0
+                    observe_production_successful_update(
+                        observation,
+                        config=config,
+                        benchmark_trace=benchmark_trace,
+                        training_sampler=training_sampler,
+                        telemetry=telemetry,
+                        progress=progress,
+                        evaluator=evaluator,
+                        evaluation_is_splits=evaluation_is_splits,
+                        is_main_process=is_main_process,
+                        get_growth_alpha=lambda update: canonical_growth_alpha(
+                            restored.state.growth, update
+                        ),
                     )
-
-                    def sample_and_publish() -> None:
-                        if training_sampler is None:
-                            raise RuntimeError(
-                                "rank zero training sampler is unavailable"
-                            )
-                        with observation.phase_timer.record("sample"):
-                            training_sampler.set_growth_alpha(
-                                canonical_growth_alpha(restored.state.growth, update)
-                            )
-                            samples = training_sampler.sample(
-                                update, observation.microbatches
-                            )
-                        telemetry.submit_wandb_images(
-                            samples.paths,
-                            samples.captions,
-                            successful_update=update,
-                        )
-                        telemetry.submit_wandb_metrics(
-                            {
-                                "training_samples/count": len(samples.paths),
-                                **{
-                                    f"condition_diagnostics/{key}": value
-                                    for key, value in samples.diagnostics.items()
-                                },
-                            },
-                            successful_update=update,
-                        )
-
-                    if sampling_due:
-                        progress.run_on_rank(
-                            f"observer/update-{update}/training-samples",
-                            0,
-                            sample_and_publish,
-                        )
-                    progress.run_on_rank(
-                        f"observer/update-{update}/telemetry",
-                        0,
-                        lambda: telemetry.observer(observation),
-                    )
-                    if evaluator is not None and evaluator.due(update):
-                        if evaluation_is_splits is None:
-                            raise RuntimeError("evaluation config is unavailable")
-                        evaluator.set_growth_alpha(
-                            canonical_growth_alpha(restored.state.growth, update)
-                        )
-                        evaluation = evaluator.evaluate(update)
-                        # Every rank participates in the same named stage.
-                        # Long rank-zero-only generation must keep a heartbeat
-                        # alive while the other ranks wait.
-                        current_evaluator = evaluator
-                        suite_metrics = progress.run_on_rank(
-                            f"observer/update-{update}/concept-suite",
-                            0,
-                            lambda: current_evaluator.run_concept_suite(update),
-                        )
-                        if is_main_process:
-                            if evaluation is None:
-                                raise RuntimeError(
-                                    "rank zero evaluation is unavailable"
-                                )
-                            telemetry.submit_wandb_metrics(
-                                {
-                                    "evaluation/fid": evaluation.fid,
-                                    "evaluation/inception_score_mean": (
-                                        evaluation.inception_score_mean
-                                    ),
-                                    "evaluation/inception_score_std": (
-                                        evaluation.inception_score_std
-                                    ),
-                                    "evaluation/kid_mean": evaluation.kid_mean,
-                                    "evaluation/kid_std": evaluation.kid_std,
-                                    "evaluation/cmmd": evaluation.cmmd,
-                                    "evaluation/sample_count": evaluation.sample_count,
-                                    "evaluation/real_sample_count": (
-                                        evaluation.real_sample_count
-                                    ),
-                                    "evaluation/is_splits": evaluation_is_splits,
-                                },
-                                successful_update=update,
-                            )
-
-                            if suite_metrics:
-                                telemetry.submit_wandb_metrics(
-                                    {
-                                        f"evaluation/concept/{key}": value
-                                        for key, value in suite_metrics.items()
-                                    },
-                                    successful_update=update,
-                                )
-                    progress.synchronize(f"observer/update-{update}/complete")
 
                 # Calibration: the per-update observer (sampling / W&B /
                 # evaluation / named barrier) is fully bypassed; both ranks
