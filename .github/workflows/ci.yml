@@ -175,6 +175,7 @@ jobs:
           tests/unit/train/test_sampling_raw.py
           tests/unit/train/test_sampling_longitudinal.py
           tests/unit/train/test_sampling_cfg_execution.py
+          tests/unit/train/test_production_observer_contract.py
           tests/unit/eval/test_prompt_construction.py
           tests/unit/eval/test_concepts.py
           tests/unit/sampling/test_heun.py
