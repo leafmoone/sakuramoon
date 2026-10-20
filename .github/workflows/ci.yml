@@ -171,6 +171,13 @@ jobs:
           tests/unit/config/test_condition_diagnostics_config.py
           tests/unit/config/test_guard_window_config.py
           tests/unit/data/test_conditioning_batch.py
+          tests/unit/train/test_sampling_geometry.py
+          tests/unit/train/test_sampling_raw.py
+          tests/unit/train/test_sampling_longitudinal.py
+          tests/unit/train/test_sampling_cfg_execution.py
+          tests/unit/eval/test_prompt_construction.py
+          tests/unit/eval/test_concepts.py
+          tests/unit/sampling/test_heun.py
           tests/unit/train/test_condition_diagnostics_stream.py
           tests/unit/train/test_condition_diagnostics_production_wiring.py
           tests/unit/train/test_condition_diagnostics_lifecycle.py

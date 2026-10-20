@@ -1151,153 +1151,21 @@ class TrainingSampler:
                 ) / len(selected)
         return diagnostics
 
-    def _generate_batch(
+    def _prepare_cfg(
         self,
         items: tuple[TrainingSampleItem, ...],
         *,
-        shared_seed: int,
+        count: int,
+        branch_count: int,
+        height: int,
+        width: int,
         framing: FramingContract,
-        include_fixed_diagnostics: bool = True,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        height, width = _require_variant_batch(items)
-        conditional = tuple(item.caption for item in items)
-        unconditional = serialize_caption(
-            _unconditional_plan(), self.qwen.tokenizer, framing
-        )
-        captions = conditional + (unconditional,) * _VARIANT_COUNT
-        (
-            input_ids,
-            attention_mask,
-            main_indices,
-            main_mask,
-            main_lengths,
-            condition_indices,
-            condition_mask,
-            use_null,
-            active_condition,
-        ) = _conditioning_inputs(
-            captions, tokenizer=self.qwen.tokenizer, device=self.device
-        )
-        qwen_output = self.qwen.encoder(input_ids, attention_mask)
-        qwen_states = getattr(qwen_output, "hidden_states", None)
-        if not isinstance(qwen_states, torch.Tensor):
-            raise TrainingSamplingError("Qwen output lacks hidden states")
-        size_scale_value = 0.5 * math.log2((height * width) / float(512 * 512))
-        aspect_value = math.log2(width / float(height))
-        size_scale = torch.full(
-            (_CFG_BRANCH_COUNT,),
-            size_scale_value,
-            dtype=torch.float32,
-            device=self.device,
-        )
-        aspect = torch.full(
-            (_CFG_BRANCH_COUNT,),
-            aspect_value,
-            dtype=torch.float32,
-            device=self.device,
-        )
-        placeholders = tuple(
-            torch.empty(
-                128,
-                height // 16,
-                width // 16,
-                dtype=torch.bfloat16,
-                device=self.device,
-            )
-            for _ in range(_CFG_BRANCH_COUNT)
-        )
-        conditional_coordinates = _coordinate_maps(items, device=self.device)
-        branch_coordinates = conditional_coordinates + conditional_coordinates
-        inputs = TrainableCompositeInputs(
-            qwen_states=qwen_states,
-            main_token_indices=main_indices,
-            main_mask=main_mask,
-            main_token_lengths=main_lengths,
-            condition_token_indices=condition_indices,
-            condition_mask=condition_mask,
-            use_null_condition=use_null,
-            active_condition_sample_indices=active_condition,
-            latents=placeholders,
-            image_coordinates=branch_coordinates,
-            timestep=torch.zeros(
-                _CFG_BRANCH_COUNT, dtype=torch.float32, device=self.device
-            ),
-            size_scale=size_scale,
-            aspect=aspect,
-            growth_alpha=self.growth_alpha,
-        )
-        conditioning = self.composite.forward_conditioning(inputs)
-        noise = _shared_initial_noise(
-            height=height,
-            width=width,
-            shared_seed=shared_seed,
-            device=self.device,
-        )
-        diagnostics = self._condition_diagnostics(inputs, conditioning, noise)
-        if include_fixed_diagnostics:
-            diagnostics.update(self._fixed_condition_diagnostics(framing=framing))
-
-        def velocity(state: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
-            if state.shape != noise.shape or timestep.shape != (_VARIANT_COUNT,):
-                raise TrainingSamplingError(
-                    "sampler state or timestep batch is invalid"
-                )
-            branches = torch.cat((state, state), dim=0).to(torch.bfloat16)
-            step_inputs = dataclasses.replace(
-                inputs,
-                latents=tuple(branches.unbind(0)),
-                timestep=torch.cat((timestep, timestep), dim=0),
-            )
-            predicted = self.composite.forward_dit(step_inputs, conditioning)
-            if len(predicted) != _CFG_BRANCH_COUNT:
-                raise TrainingSamplingError("DiT did not return 24 CFG predictions")
-            conditional_pred = torch.stack(predicted[:_VARIANT_COUNT])
-            unconditional_pred = torch.stack(predicted[_VARIANT_COUNT:])
-            return guided_velocity(
-                conditional_pred,
-                unconditional_pred,
-                state,
-                timestep,
-                t_eps=self.config.timestep.t_eps,
-                guidance_scale=self.config.cfg.scale,
-            )
-
-        sampled = sample_profile(
-            velocity,
-            noise,
-            profile=self.config.sampling.selected,
-        )
-        if sampled.state.shape != noise.shape or sampled.state.dtype != torch.float32:
-            raise TrainingSamplingError(
-                "sample profile returned an invalid state batch"
-            )
-        decoded = self.vae.decode(sampled.state.to(torch.bfloat16))
-        if decoded.shape != (_VARIANT_COUNT, 3, height, width):
-            raise TrainingSamplingError("VAE returned an invalid 12-image batch")
-        if not bool(torch.isfinite(decoded).all().item()):
-            raise TrainingSamplingError("VAE produced nonfinite training samples")
-        images = (
-            decoded.float()
-            .add(1.0)
-            .mul(127.5)
-            .round()
-            .clamp(0.0, 255.0)
-            .to(device="cpu", dtype=torch.uint8)
-        )
-        return images, diagnostics
-
-    def _generate_raw_batch(
-        self,
-        items: tuple[TrainingSampleItem, ...],
-        *,
-        shared_seed: int,
-        framing: FramingContract,
-    ) -> torch.Tensor:
-        """Generate one same-shape group of raw (real prompt, real shape)
-        samples with a plain N-branch CFG: no A/B pair layout, no variant
-        diagnostics, no camera geometry."""
-        height, width = _require_image_batch(items)
-        count = len(items)
+    ) -> tuple[
+        TrainableCompositeInputs,
+        tuple[TextConditioningOutput, ConditionTokenOutput],
+    ]:
+        """Shared CFG preparation for one same-shape group: serialized
+        captions, Qwen states, composite inputs, and conditioning."""
         conditional = tuple(item.caption for item in items)
         unconditional = serialize_caption(
             _unconditional_plan(), self.qwen.tokenizer, framing
@@ -1323,13 +1191,13 @@ class TrainingSampler:
         size_scale_value = 0.5 * math.log2((height * width) / float(512 * 512))
         aspect_value = math.log2(width / float(height))
         size_scale = torch.full(
-            (2 * count,),
+            (branch_count,),
             size_scale_value,
             dtype=torch.float32,
             device=self.device,
         )
         aspect = torch.full(
-            (2 * count,),
+            (branch_count,),
             aspect_value,
             dtype=torch.float32,
             device=self.device,
@@ -1342,7 +1210,7 @@ class TrainingSampler:
                 dtype=torch.bfloat16,
                 device=self.device,
             )
-            for _ in range(2 * count)
+            for _ in range(branch_count)
         )
         conditional_coordinates = _coordinate_maps(items, device=self.device)
         branch_coordinates = conditional_coordinates + conditional_coordinates
@@ -1358,26 +1226,36 @@ class TrainingSampler:
             latents=placeholders,
             image_coordinates=branch_coordinates,
             timestep=torch.zeros(
-                2 * count, dtype=torch.float32, device=self.device
+                branch_count, dtype=torch.float32, device=self.device
             ),
             size_scale=size_scale,
             aspect=aspect,
             growth_alpha=self.growth_alpha,
         )
         conditioning = self.composite.forward_conditioning(inputs)
-        noise = _shared_initial_noise(
-            height=height,
-            width=width,
-            shared_seed=shared_seed,
-            count=count,
-            device=self.device,
-        )
+        return inputs, conditioning
+
+    def _run_cfg(
+        self,
+        inputs: TrainableCompositeInputs,
+        conditioning: tuple[TextConditioningOutput, ConditionTokenOutput],
+        *,
+        noise: torch.Tensor,
+        count: int,
+        height: int,
+        width: int,
+        state_error: str,
+        predicted_error: str,
+        profile_error: str,
+        shape_error: str,
+        nonfinite_error: str,
+    ) -> torch.Tensor:
+        """Shared CFG execution, profile sampling, VAE decode, and uint8
+        tail; caller-specific guard messages are passed explicitly."""
 
         def velocity(state: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
             if state.shape != noise.shape or timestep.shape != (count,):
-                raise TrainingSamplingError(
-                    "raw sampler state or timestep batch is invalid"
-                )
+                raise TrainingSamplingError(state_error)
             branches = torch.cat((state, state), dim=0).to(torch.bfloat16)
             step_inputs = dataclasses.replace(
                 inputs,
@@ -1386,9 +1264,7 @@ class TrainingSampler:
             )
             predicted = self.composite.forward_dit(step_inputs, conditioning)
             if len(predicted) != 2 * count:
-                raise TrainingSamplingError(
-                    "DiT did not return the raw CFG prediction count"
-                )
+                raise TrainingSamplingError(predicted_error)
             return guided_velocity(
                 torch.stack(predicted[:count]),
                 torch.stack(predicted[count:]),
@@ -1404,14 +1280,12 @@ class TrainingSampler:
             profile=self.config.sampling.selected,
         )
         if sampled.state.shape != noise.shape or sampled.state.dtype != torch.float32:
-            raise TrainingSamplingError(
-                "raw sample profile returned an invalid state batch"
-            )
+            raise TrainingSamplingError(profile_error)
         decoded = self.vae.decode(sampled.state.to(torch.bfloat16))
         if decoded.shape != (count, 3, height, width):
-            raise TrainingSamplingError("VAE returned an invalid raw sample batch")
+            raise TrainingSamplingError(shape_error)
         if not bool(torch.isfinite(decoded).all().item()):
-            raise TrainingSamplingError("VAE produced nonfinite raw samples")
+            raise TrainingSamplingError(nonfinite_error)
         return (
             decoded.float()
             .add(1.0)
@@ -1419,6 +1293,88 @@ class TrainingSampler:
             .round()
             .clamp(0.0, 255.0)
             .to(device="cpu", dtype=torch.uint8)
+        )
+
+    def _generate_batch(
+        self,
+        items: tuple[TrainingSampleItem, ...],
+        *,
+        shared_seed: int,
+        framing: FramingContract,
+        include_fixed_diagnostics: bool = True,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        height, width = _require_variant_batch(items)
+        inputs, conditioning = self._prepare_cfg(
+            items,
+            count=_VARIANT_COUNT,
+            branch_count=_CFG_BRANCH_COUNT,
+            height=height,
+            width=width,
+            framing=framing,
+        )
+        noise = _shared_initial_noise(
+            height=height,
+            width=width,
+            shared_seed=shared_seed,
+            device=self.device,
+        )
+        diagnostics = self._condition_diagnostics(inputs, conditioning, noise)
+        if include_fixed_diagnostics:
+            diagnostics.update(self._fixed_condition_diagnostics(framing=framing))
+        images = self._run_cfg(
+            inputs,
+            conditioning,
+            noise=noise,
+            count=_VARIANT_COUNT,
+            height=height,
+            width=width,
+            state_error="sampler state or timestep batch is invalid",
+            predicted_error="DiT did not return 24 CFG predictions",
+            profile_error="sample profile returned an invalid state batch",
+            shape_error="VAE returned an invalid 12-image batch",
+            nonfinite_error="VAE produced nonfinite training samples",
+        )
+        return images, diagnostics
+
+    def _generate_raw_batch(
+        self,
+        items: tuple[TrainingSampleItem, ...],
+        *,
+        shared_seed: int,
+        framing: FramingContract,
+    ) -> torch.Tensor:
+        """Generate one same-shape group of raw (real prompt, real shape)
+        samples with a plain N-branch CFG: no A/B pair layout, no variant
+        diagnostics, no camera geometry."""
+        height, width = _require_image_batch(items)
+        count = len(items)
+        inputs, conditioning = self._prepare_cfg(
+            items,
+            count=count,
+            branch_count=2 * count,
+            height=height,
+            width=width,
+            framing=framing,
+        )
+        noise = _shared_initial_noise(
+            height=height,
+            width=width,
+            shared_seed=shared_seed,
+            count=count,
+            device=self.device,
+        )
+        return self._run_cfg(
+            inputs,
+            conditioning,
+            noise=noise,
+            count=count,
+            height=height,
+            width=width,
+            state_error="raw sampler state or timestep batch is invalid",
+            predicted_error="DiT did not return the raw CFG prediction count",
+            profile_error="raw sample profile returned an invalid state batch",
+            shape_error="VAE returned an invalid raw sample batch",
+            nonfinite_error="VAE produced nonfinite raw samples",
         )
 
     @staticmethod
