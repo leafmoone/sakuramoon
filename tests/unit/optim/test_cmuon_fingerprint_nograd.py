@@ -14,8 +14,8 @@ tensors for backward. The fix wraps the existing fingerprint block in
 collectives, and error message).
 
 The tests drive the REAL F3 ``step()`` with ``world_size=2`` on one process
-(collectives mocked: identity reduce == identical ranks; a controlled mismatch
-is injected only where asserted). ``torch.enable_grad()`` is asserted at entry
+(collectives mocked: identical-rank MIN/MAX and doubled SUM; a controlled
+mismatch is injected only where asserted). ``torch.enable_grad()`` is asserted at entry
 and after every step. BASE (a88c20c) is loaded from the sibling main clone
 when present, so the parity/semantics tests compare both versions in the same
 environment.
@@ -101,15 +101,17 @@ def _const_ns_bf16(target: float):
 
 class _SpyCollectives:
     """Mock ``dist.all_reduce``/``dist.broadcast`` for a single-process
-    world_size=2. Identity reduce semantics (both ranks hold identical
-    values). With ``perturb_param_lo > 0`` the parameter-fingerprint lo (MIN)
+    world_size=2. Both ranks hold identical values: MIN/MAX are identity,
+    SUM doubles them. With ``perturb_param_lo > 0`` the parameter-fingerprint lo (MIN)
     reduce emulates the other rank holding a strictly smaller value."""
 
     def __init__(self, perturb_param_lo: float = 0.0):
         self.calls: list[dict] = []
         self.perturb = perturb_param_lo
 
-    def all_reduce(self, tensor, op=None, group=None, async_op=False):
+    def all_reduce(
+        self, tensor: torch.Tensor, op: object = None, group: object = None, async_op: bool = False,
+    ) -> None:
         op_name = getattr(op, "name", str(op))
         fp32_before = sum(
             1
@@ -144,6 +146,8 @@ class _SpyCollectives:
             "value": tensor.detach().clone(),
         }
         self.calls.append(rec)
+        if op_name == "SUM":
+            tensor.mul_(2)
         if self.perturb > 0.0 and role == "param_lo":
             tensor.sub_(self.perturb)
 
@@ -159,6 +163,17 @@ class _SpyCollectives:
 
     def param_fp(self) -> list[dict]:
         return [c for c in self.calls if c.get("role") in ("param_lo", "param_hi")]
+
+
+def test_spy_collectives_identical_rank_reductions() -> None:
+    spy = _SpyCollectives()
+    presence = torch.tensor([0, 1, 1], dtype=torch.int32)
+    spy.all_reduce(presence, op=torch.distributed.ReduceOp.SUM)
+    assert torch.equal(presence, torch.tensor([0, 2, 2], dtype=torch.int32))
+    for op in (torch.distributed.ReduceOp.MIN, torch.distributed.ReduceOp.MAX):
+        values = torch.tensor([0.25, 0.5], dtype=torch.float32)
+        spy.all_reduce(values, op=op)
+        assert torch.equal(values, torch.tensor([0.25, 0.5]))
 
 
 def _patch_module(module, spy: _SpyCollectives, ns) -> list:
