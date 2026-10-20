@@ -253,13 +253,16 @@ def test_fail_closed(
 
 
 def _cli_run(graph: _Graph, extra: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    # The five clears must come AFTER **graph.env (which mirrors the host
+    # runner's os.environ, carrying real GITHUB_* keys in CI) so the child
+    # never inherits host event metadata; only explicit extras re-enable a key.
     env = {
+        **graph.env,
         "GITHUB_EVENT_NAME": "",
         "GITHUB_REF_NAME": "",
         "GITHUB_BASE_REF": "",
         "GITHUB_BEFORE": "",
         "GITHUB_EVENT_PATH": "",
-        **graph.env,
         **extra,
     }
     return subprocess.run(
@@ -325,3 +328,43 @@ def test_cli_dev_push_without_before_fails_closed(graph: _Graph) -> None:
     assert result.returncode == 1
     assert result.stdout.strip() == ""
     assert "without GITHUB_BEFORE" in result.stderr
+
+
+def test_cli_run_clears_host_github_metadata(graph: _Graph, tmp_path: Path) -> None:
+    # Hostile runner environment: graph.env (host os.environ) carries real-
+    # host GH metadata, a new-branch push with an all-zero before, and a host
+    # event payload.  _cli_run must clear every one of them.
+    graph.branch("dev", None)
+    before = graph.commit("one.py", "a = 1\n")
+    graph.commit("two.py", "b = 2\n")
+    graph.push("dev")
+    host_event = tmp_path / "host-push.json"
+    host_event.write_text(json.dumps({"before": "0" * 40}), encoding="utf-8")
+    graph.env.update(
+        {
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_REF_NAME": "dev",
+            "GITHUB_BASE_REF": "main",
+            "GITHUB_BEFORE": "0" * 40,
+            "GITHUB_EVENT_PATH": str(host_event),
+        }
+    )
+    # Without explicit overrides, host keys are cleared: fail-closed.
+    result = _cli_run(
+        graph,
+        {"GITHUB_EVENT_NAME": "push", "GITHUB_REF_NAME": "dev"},
+    )
+    assert result.returncode == 1
+    assert result.stdout.strip() == ""
+    assert "without GITHUB_BEFORE" in result.stderr
+    # An explicit extra still wins over the cleared host keys.
+    result = _cli_run(
+        graph,
+        {
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_REF_NAME": "dev",
+            "GITHUB_BEFORE": before,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == before
