@@ -59,7 +59,7 @@ import json
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.distributed as dist
@@ -157,6 +157,20 @@ class GuardedCanonicalGuardConfig:
             raise ValueError("numerical_floor must be a positive finite float")
         if not isinstance(self.warmup_observations, int) or self.warmup_observations < 0:
             raise ValueError("warmup_observations must be a non-negative int")
+
+
+@dataclass(frozen=True)
+class _ActiveInput:
+    """Ephemeral step index: gradient-bearing chunks in unchanged routing order."""
+
+    spec: CMuonChunkSpec
+    chunk_idx: int
+    shape: tuple[int, ...]
+    owner: int
+
+    @property
+    def key(self) -> tuple[str, int]:
+        return (self.spec.name, self.chunk_idx)
 
 
 @dataclass
@@ -272,7 +286,9 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
     # -- step: two-phase atomic --------------------------------------------
 
     def step(self) -> None:
+        self._validate_gradient_presence()
         self._validate_finite_gradients()  # pyright: ignore[reportPrivateUsage]
+        active_inputs = self._active_inputs()
         mu = self.cfg.momentum
         lr = self.cfg.lr
         target_delta_rms = 0.2 * lr
@@ -316,7 +332,7 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                 )
             )
 
-        n_inputs = sum(p.spec.chunk_count for p in prepared if p is not None)
+        n_inputs = len(active_inputs)
         # Single batched sync: all per-chunk signal magnitudes.
         sig_flat = [s for p in prepared if p is not None for s in p.sig]
         sigf_flat = [s for p in prepared if p is not None for s in p.sigf]
@@ -338,11 +354,12 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                 continue
             spec = prep.spec
             for ci in range(spec.chunk_count):
-                owner = self.owner_of(spec.name, ci)
+                entry = active_inputs[fi]
+                owner = entry.owner
                 sig = sig_vals[fi]
                 sigf = sigf_vals[fi]
                 fi += 1
-                key = (spec.name, ci)
+                key = entry.key
                 sig_by_input.append(sig)
                 owners.append(owner)
                 if self._is_low_signal(sig, sigf, key):
@@ -383,12 +400,12 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                     fail_flags[idx] = _CEILING
 
         # Rank-consistent failure verdict (every rank learns every failure).
-        if self.world_size > 1:
+        if self.world_size > 1 and n_inputs:
             dist.all_reduce(fail_flags, op=dist.ReduceOp.MAX)
         failure_msgs = []
         for idx, flag in enumerate(fail_flags.tolist()):
             if flag > 0:
-                fqn, chunk_idx = self._input_key(idx)
+                fqn, chunk_idx = self._input_key(idx, active_inputs)
                 failure_msgs.append(
                     f"{_FAILURE_NAMES[flag]}: {fqn}#chunk{chunk_idx}"
                 )
@@ -402,7 +419,7 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                 if not a or idx in failed:
                     staged[idx] = None  # zero delta on every rank (consensus)
                     continue
-                shape = self._chunk_shape(idx)
+                shape = self._chunk_shape(idx, active_inputs)
                 if owner == self.rank:
                     tensor = staged[idx]
                     assert tensor is not None
@@ -458,7 +475,7 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                 for idx, flag in enumerate(fail_flags.tolist()):
                     if flag <= 0:
                         continue
-                    fqn, cix = self._input_key(idx)
+                    fqn, cix = self._input_key(idx, active_inputs)
                     key = (fqn, cix)
                     sig = sig_by_input[idx]
                     sigf = sigf_vals[idx] if idx < len(sigf_vals) else None
@@ -470,15 +487,15 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
                         (sig is not None and sig < ratio_line)
                         or (sigf is not None and sigf < floor)
                     )
-                    shape = self._chunk_shape(idx) if hasattr(self, "_chunk_shape") else None
+                    shape = self._chunk_shape(idx, active_inputs)
                     recs.append({
                         "failure": _FAILURE_NAMES.get(int(flag), str(flag)),
                         "fqn": fqn,
                         "chunk": cix,
                         "owner": owners[idx] if idx < len(owners) else None,
                         "this_rank": self.rank,
-                        "shape": list(shape) if shape is not None else None,
-                        "numel": int(__import__("math").prod(shape)) if shape is not None else None,
+                        "shape": list(shape),
+                        "numel": math.prod(shape),
                         "u_t_rms": sig,
                         "u_t_fro": sigf,
                         "ref": ref,
@@ -561,30 +578,23 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
 
         # Reference updates (active inputs only; inactive refs are frozen —
         # they never decay to zero).
-        fi = 0
-        for prep in prepared:
-            if prep is None:
+        for fi, entry in enumerate(active_inputs):
+            if not is_active[fi]:
                 continue
-            spec = prep.spec
-            for ci in range(spec.chunk_count):
-                if not is_active[fi]:
-                    fi += 1
-                    continue
-                key = (spec.name, ci)
-                sig = sig_by_input[fi]
-                assert sig is not None
-                ref = self._refs[key]
-                self._refs[key] = max(
-                    _f32(sig), _f32(ref * self.guard_cfg.reference_decay)
-                )
-                fi += 1
+            key = entry.key
+            sig = sig_by_input[fi]
+            assert sig is not None
+            ref = self._refs[key]
+            self._refs[key] = max(
+                _f32(sig), _f32(ref * self.guard_cfg.reference_decay)
+            )
 
         self.observations += 1
 
         # Optional per-step rank invariant (S1/S2): post-commit parameter
         # fingerprints must be identical on every rank (canonical deltas
         # guarantee this; any spread is a defect => fail closed).
-        if self.guard_cfg.invariant_check and self.world_size > 1:
+        if self.guard_cfg.invariant_check and self.world_size > 1 and specs:
             fp = []
             for spec in specs:
                 pf = spec.parameter.float()
@@ -624,29 +634,63 @@ class HybridCMuonGuardedCanonical(HybridCMuon):
 
     # -- helpers -------------------------------------------------------------
 
+    def _validate_gradient_presence(self) -> None:
+        """One fixed-shape consensus before any step state or SR can change."""
+        if self.world_size <= 1:
+            return
+        specs = (*self.routing.cmuon_specs, *self.routing.adamw_specs)
+        if not specs:
+            return
+        presence = torch.tensor(
+            [int(spec.parameter.grad is not None) for spec in specs],
+            dtype=torch.int32,
+            device=specs[0].parameter.device,
+        )
+        dist.all_reduce(presence, op=dist.ReduceOp.SUM)  # pyright: ignore[reportUnknownMemberType]
+        counts = cast("list[int]", presence.tolist())  # pyright: ignore[reportUnknownMemberType]
+        mismatched = [
+            spec.name
+            for spec, count in zip(specs, counts)
+            if count not in (0, self.world_size)
+        ]
+        if mismatched:
+            raise RuntimeError(
+                "hybrid optimizer gradient presence differs across ranks: "
+                + ", ".join(mismatched)
+            )
+
+    def _active_inputs(self) -> list[_ActiveInput]:
+        """Build the step-local index; never filter or retain the full routing."""
+        inputs: list[_ActiveInput] = []
+        for spec in self.routing.cmuon_specs:
+            if spec.parameter.grad is None:
+                continue
+            shape = list(spec.parameter.shape)
+            shape[spec.chunk_dim] = spec.chunk_size()
+            for ci in range(spec.chunk_count):
+                inputs.append(
+                    _ActiveInput(spec, ci, tuple(shape), self.owner_of(spec.name, ci))
+                )
+        return inputs
+
     def _first_device(self) -> torch.device:
         for spec in self.routing.cmuon_specs:
             if spec.parameter.grad is not None:
                 return spec.parameter.device
-        return self.routing.cmuon_specs[0].parameter.device
+        specs = self.routing.cmuon_specs or self.routing.adamw_specs
+        return specs[0].parameter.device
 
-    def _input_key(self, flat_idx: int) -> tuple[str, int]:
-        idx = flat_idx
-        for spec in self.routing.cmuon_specs:
-            if idx < spec.chunk_count:
-                return (spec.name, idx)
-            idx -= spec.chunk_count
-        raise IndexError(flat_idx)
+    def _input_key(
+        self, flat_idx: int, active_inputs: list[_ActiveInput] | None = None
+    ) -> tuple[str, int]:
+        inputs = self._active_inputs() if active_inputs is None else active_inputs
+        return inputs[flat_idx].key
 
-    def _chunk_shape(self, flat_idx: int) -> tuple[int, ...]:
-        idx = flat_idx
-        for spec in self.routing.cmuon_specs:
-            if idx < spec.chunk_count:
-                shape = list(spec.parameter.shape)
-                shape[spec.chunk_dim] = spec.chunk_size()
-                return tuple(shape)
-            idx -= spec.chunk_count
-        raise IndexError(flat_idx)
+    def _chunk_shape(
+        self, flat_idx: int, active_inputs: list[_ActiveInput] | None = None
+    ) -> tuple[int, ...]:
+        inputs = self._active_inputs() if active_inputs is None else active_inputs
+        return inputs[flat_idx].shape
 
     # -- state ---------------------------------------------------------------
 

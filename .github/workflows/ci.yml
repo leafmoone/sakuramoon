@@ -20,8 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # Full history so `origin/dev...HEAD` can compute a merge-base;
-          # a shallow clone makes the diff below fail or silently empty.
+          # Full history is required to pin the origin/dev merge-base.
+          # A shallow clone must not silently pass as "no changed files".
           fetch-depth: 0
       # astral-sh/setup-uv has no floating `v10` major tag (only v1-v7
       # float), so the action must be pinned to a concrete version.
@@ -34,19 +34,90 @@ jobs:
       # evaluation stack that the training/production import graph imports.
       - run: uv sync --no-install-project --group dev --extra train --extra eval
       - run: uv run --no-sync ruff check .
-      - name: pyright (changed python files)
+      - name: pyright (no new diagnostics in changed python files)
         run: |
-          # :(glob) is required: without it `*` does not cross `/` and
-          # `scripts/**/*.py` matches nothing in scripts/ itself.
-          # --diff-filter=d skips removed files; the diff must fail the
-          # job if it cannot be computed, never pass as "no changed files".
-          files=$(git diff --name-only --diff-filter=d origin/dev...HEAD -- \
-            ':(glob)src/**/*.py' ':(glob)tests/**/*.py' ':(glob)scripts/**/*.py')
-          if [ -n "$files" ]; then
-            uv run --no-sync pyright $files
-          else
-            echo "no changed python files"
-          fi
+          mkdir -p artifacts/pyright
+          base=$(git merge-base origin/dev HEAD)
+          test -n "$base"
+          # NUL-delimited paths preserve spaces and unusual filenames. Include
+          # every changed Python file, including new files; skip deletions only.
+          git diff --name-only -z --diff-filter=d "$base" HEAD -- \
+            ':(glob)**/*.py' > artifacts/pyright/changed-files
+          PYRIGHT_FILES=artifacts/pyright/changed-files uv run --no-sync python - "$base" <<'PY'
+          import collections
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tarfile
+          import tempfile
+
+          candidate_root = Path.cwd().resolve()
+          output = candidate_root / "artifacts/pyright"
+          files = [os.fsdecode(p) for p in Path(os.environ["PYRIGHT_FILES"]).read_bytes().split(b"\0") if p]
+          report = {"base": sys.argv[1], "files": files, "python": sys.executable}
+          (output / "comparison.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+          def check(root, paths, label):
+              if paths:
+                  # Reuse the installed interpreter/dependencies, never candidate
+                  # source imports in the baseline. Do not sync/install old code.
+                  result = subprocess.run(
+                      [sys.executable, "-m", "pyright", "--outputjson", "--pythonpath", sys.executable, *paths],
+                      cwd=root, env=dict(os.environ, PYTHONPATH=str(root / "src")),
+                      capture_output=True, text=True,
+                  )
+                  (output / f"{label}.json").write_text(result.stdout, encoding="utf-8")
+                  (output / f"{label}.stderr.txt").write_text(result.stderr, encoding="utf-8")
+                  if result.returncode not in (0, 1):
+                      raise RuntimeError(f"{label} pyright exited {result.returncode}: {result.stderr}")
+                  data = json.loads(result.stdout)
+              else:
+                  data = {"generalDiagnostics": [], "summary": {"filesAnalyzed": 0, "errorCount": 0}}
+                  (output / f"{label}.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+              # Deliberately ignore line/column shifts, NOT message text or
+              # multiplicity. Normalize only the checkout location in messages.
+              return collections.Counter(
+                  (Path(d["file"]).resolve().relative_to(root).as_posix(), d.get("rule", ""),
+                   d["message"].replace(str(root), "<repo>"), d["severity"])
+                  for d in data["generalDiagnostics"]
+              )
+
+          candidate = check(candidate_root, files, "candidate")
+          baseline = collections.Counter()
+          if files:
+              # Full tracked tree, no .git credentials or untracked secrets, and
+              # no checkout/reset/stash in the production worktree. Reject unsafe
+              # archive paths/links using Python 3.12's data extraction filter.
+              with tempfile.TemporaryDirectory(prefix="pyright-base-") as directory:
+                  root = Path(directory).resolve()
+                  archive = subprocess.run(["git", "archive", sys.argv[1]], check=True, capture_output=True)
+                  with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tree:
+                      tree.extractall(root, filter="data")
+                  baseline = check(root, [p for p in files if (root / p).is_file()], "baseline")
+          else:
+              check(candidate_root, [], "baseline")
+          added, removed = candidate - baseline, baseline - candidate
+          report.update(old=sum(baseline.values()), candidate=sum(candidate.values()),
+                        new=sum(added.values()), removed=sum(removed.values()))
+          report["newDiagnostics"] = [
+              dict(zip(("path", "rule", "message", "severity"), key), count=count)
+              for key, count in sorted(added.items())
+          ]
+          report["status"] = "failed" if added else "no new diagnostics"
+          (output / "comparison.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+          print(json.dumps(report, indent=2))
+          print("Baseline-aware gate: retained legacy diagnostics are NOT a zero-error result.")
+          sys.exit(1 if added else 0)
+          PY
+      - name: retain pyright baseline and candidate diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyright-diagnostics
+          path: artifacts/pyright/
 
   unit:
     runs-on: ubuntu-latest
@@ -54,6 +125,12 @@ jobs:
       # Select CPU wheels explicitly; the default PyPI torch build is large
       # and the hosted runner has no accelerator.
       UV_TORCH_BACKEND: cpu
+      CUDA_VISIBLE_DEVICES: ""
+      HIP_VISIBLE_DEVICES: ""
+      ROCR_VISIBLE_DEVICES: ""
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
     steps:
       - uses: actions/checkout@v6
       # Pinned to a concrete version: see the note in the static job.
@@ -67,9 +144,10 @@ jobs:
       - run: uv sync --no-install-project --group dev --extra train --extra eval
       # The optimizer suite is intentionally not in this pytest gate: it
       # exercises torch.compile/triton paths that must be verified on the
-      # runner before they can become a required check.  The guard window
-      # gloo test is the exception: real CPU optimizer init/step on the
-      # gloo backend only (no triton, no CUDA), verified on this runner.
+      # runner before they can become a required check. The explicit CPU
+      # guard-window and missing-gradient regressions are exceptions: real
+      # optimizer steps on CPU/Gloo with test-only AdamW/SR adapters. Only the
+      # missing-gradient index unit tests substitute the NS kernel boundary.
       # Integration cases below also use explicit CPU boundaries: real clipping,
       # grouping and quantized-state restore, but no native CUDA/SR step claim.
       - run: >-
@@ -86,6 +164,8 @@ jobs:
           tests/unit/train/test_guard_window_stream.py
           tests/unit/train/test_guard_window_production_wiring.py
           tests/unit/optim/test_guard_window_gloo.py
+          tests/unit/optim/test_missing_gradient_index.py
+          tests/unit/optim/test_missing_gradient_gloo.py
           tests/unit/cli/test_guard_window_merge.py
           tests/unit/train/test_condition_optimizer_observability.py
           tests/unit/checkpoint/test_condition_observability_integration.py

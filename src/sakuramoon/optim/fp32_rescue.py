@@ -217,10 +217,12 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
     # -- step: BF16 first, FP32 rescue, two-phase atomic ---------------------
 
     def step(self) -> None:
+        self._validate_gradient_presence()
+        self._validate_finite_gradients()  # pyright: ignore[reportPrivateUsage]
+        active_inputs = self._active_inputs()
         # F2 process-local counter (telemetry only; not persisted — the
         # persisted event identity is ``observations``).
         self._steps_this_process += 1
-        self._validate_finite_gradients()  # pyright: ignore[reportPrivateUsage]
         mu = self.cfg.momentum
         lr = self.cfg.lr
         target_delta_rms = 0.2 * lr
@@ -273,7 +275,7 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                 )
             )
 
-        n_inputs = sum(p.spec.chunk_count for p in prepared if p is not None)
+        n_inputs = len(active_inputs)
         sig_flat = [s for p in prepared if p is not None for s in p.sig]
         sig_vals = torch.stack(sig_flat).tolist() if sig_flat else []
 
@@ -292,7 +294,8 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                 continue
             spec = prep.spec
             for ci in range(spec.chunk_count):
-                owner = self.owner_of(spec.name, ci)
+                entry = active_inputs[fi]
+                owner = entry.owner
                 sig = sig_vals[fi]
                 fi += 1
                 sig_by_input.append(sig)
@@ -335,9 +338,9 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                         chunk=chunk,
                         alpha=prep.alphas[ci],
                         ns_steps=prep.ns_steps,
-                        role=spec.role,
-                        spec_name=spec.name,
-                        chunk_idx=ci,
+                        role=entry.spec.role,
+                        spec_name=entry.spec.name,
+                        chunk_idx=entry.chunk_idx,
                     )
 
         # ---- FP32 RESCUE (owner rank only) ---------------------------------
@@ -427,7 +430,7 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                         self.fp32_low_delta_by_role.get(meta.role, 0) + 1
                     )
                     if self.stats_logger is not None:
-                        fqn, cix = self._input_key(idx)
+                        fqn, cix = self._input_key(idx, active_inputs)
                         self.stats_logger(
                             f"[fp32-soft-rescue] reason={reason} "
                             f"fqn={fqn}#chunk{cix} role={meta.role} "
@@ -462,7 +465,7 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
             )
 
         # Rank-consistent failure verdict (every rank learns every failure).
-        if self.world_size > 1:
+        if self.world_size > 1 and n_inputs:
             dist.all_reduce(fail_flags, op=dist.ReduceOp.MAX)
         # Single host verdict read (the pre-cleanup path read the same tensor
         # back twice, once for the messages and once for the `failed` set).
@@ -470,7 +473,7 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
         failure_msgs = []
         for idx, flag in enumerate(final_flags):
             if flag > 0:
-                fqn, chunk_idx = self._input_key(idx)
+                fqn, chunk_idx = self._input_key(idx, active_inputs)
                 failure_msgs.append(
                     f"{_FAILURE_NAMES[flag]}: {fqn}#chunk{chunk_idx}"
                 )
@@ -483,7 +486,7 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                 if not a or idx in failed:
                     staged[idx] = None  # zero delta on every rank (consensus)
                     continue
-                shape = self._chunk_shape(idx)
+                shape = self._chunk_shape(idx, active_inputs)
                 if owner == self.rank:
                     tensor = staged[idx]
                     assert tensor is not None
@@ -534,8 +537,8 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
                 for idx, flag in enumerate(fail_flags.tolist()):
                     if flag <= 0:
                         continue
-                    fqn, cix = self._input_key(idx)
-                    shape = self._chunk_shape(idx)
+                    fqn, cix = self._input_key(idx, active_inputs)
+                    shape = self._chunk_shape(idx, active_inputs)
                     verdict = fp32_verdicts.get(idx)
                     recs.append(
                         {
@@ -679,26 +682,20 @@ class HybridCMuonCanonicalNS4FP32Rescue(HybridCMuonGuardedCanonical):
 
         # Reference updates (all inputs are active in this candidate; the
         # reference table stays in the checkpoint contract).
-        fi = 0
-        for prep in prepared:
-            if prep is None:
-                continue
-            spec = prep.spec
-            for ci in range(spec.chunk_count):
-                key = (spec.name, ci)
-                sig = sig_by_input[fi]
-                assert sig is not None
-                ref = self._refs[key]
-                self._refs[key] = max(
-                    _f32(sig), _f32(ref * self.guard_cfg.reference_decay)
-                )
-                fi += 1
+        for fi, entry in enumerate(active_inputs):
+            key = entry.key
+            sig = sig_by_input[fi]
+            assert sig is not None
+            ref = self._refs[key]
+            self._refs[key] = max(
+                _f32(sig), _f32(ref * self.guard_cfg.reference_decay)
+            )
 
         self.observations += 1
 
         # Optional per-step rank invariant: post-commit parameter fingerprints
         # must be identical on every rank (rescued deltas included).
-        if self.guard_cfg.invariant_check and self.world_size > 1:
+        if self.guard_cfg.invariant_check and self.world_size > 1 and specs:
             # Graph-free diagnostic: step() runs with grad mode enabled (the
             # trainer does not wrap optimizer steps) and the specs' parameters
             # carry requires_grad=True; without this context the fingerprint

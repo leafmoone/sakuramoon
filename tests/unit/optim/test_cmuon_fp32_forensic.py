@@ -22,7 +22,7 @@ Verifies the telemetry-only hard-failure patch against the spec:
   L. legacy forensic JSON              -> new fp32 fields + bf16 rename with
                                           deprecated delta_rms alias
 
-All tests require HCU/CUDA (the production optimizer builds torchao
+Optimizer-step tests require HCU/CUDA (the production optimizer builds torchao
 AdamW8bit on a CUDA device; CPU builds are rejected by design). The NS
 functions are stubbed at the ``fp32_rescue`` module level per test so the
 verdict/telemetry logic is exercised deterministically; the production NS
@@ -636,6 +636,7 @@ def test_h_hard_fail_commits_nothing(tmp_path: Path, monkeypatch) -> None:
 
 
 class _FakeReduceOp:
+    SUM = "sum"
     MAX = "max"
     MIN = "min"
 
@@ -650,6 +651,8 @@ class _FakeDist:
     process "steps" (owner, then non-owner): that models the fact that in a
     real simultaneous all_reduce the non-owner merges with the owner's
     contribution, so the non-owner sees the owner's failure flag.
+    SUM models identical-rank gradient presence by doubling each local input;
+    it must not persist across the sequential simulated steps.
     ``broadcast`` fills receivers with zeros (the J assertions never depend
     on broadcast values). The real 2-process DDP contract is covered by
     the salt10 HCU test (tests/gpu/optim/cmuon_fp32_forensic_2rank.py).
@@ -660,6 +663,9 @@ class _FakeDist:
 
     @classmethod
     def all_reduce(cls, t: torch.Tensor, op: object = None) -> None:
+        if op == _FakeReduceOp.SUM:
+            t.mul_(2)
+            return
         key = (str(op), tuple(t.shape))
         if op == _FakeReduceOp.MAX:
             cur = cls.wire.get(key)
@@ -677,13 +683,32 @@ class _FakeDist:
         t.zero_()
 
 
+def test_fake_dist_presence_sum_is_step_local() -> None:
+    _FakeDist.wire = {}
+    for _ in range(2):
+        presence = torch.tensor([0, 1, 1], dtype=torch.int32)
+        _FakeDist.all_reduce(presence, op=_FakeReduceOp.SUM)
+        assert torch.equal(presence, torch.tensor([0, 2, 2], dtype=torch.int32))
+    assert _FakeDist.wire == {}
+    owner = torch.tensor([0, 1], dtype=torch.int64)
+    _FakeDist.all_reduce(owner, op=_FakeReduceOp.MAX)
+    nonowner = torch.zeros_like(owner)
+    _FakeDist.all_reduce(nonowner, op=_FakeReduceOp.MAX)
+    assert torch.equal(nonowner, owner)  # failure verdict still persists
+    _FakeDist.wire = {}
+
+
 @REQUIRES_CUDA
-def test_j_nonowner_writes_no_input_artifact(tmp_path: Path, monkeypatch) -> None:
+def test_j_nonowner_writes_no_input_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import sakuramoon.optim.fp32_rescue as fr
+    import sakuramoon.optim.guarded_canonical as guarded
     from sakuramoon.optim.cmuon_forensic import CMuonSafetyError
     from sakuramoon.optim.guarded_canonical import stable_owner
 
     monkeypatch.setattr(fr, "dist", _FakeDist)
+    monkeypatch.setattr(guarded, "dist", _FakeDist)
     device = torch.device("cuda", 0)
     lr = 1.5625e-4
     fqn = "dit.blocks.slot_00.attention.content_gate.weight"
