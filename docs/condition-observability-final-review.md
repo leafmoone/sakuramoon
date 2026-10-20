@@ -1,5 +1,7 @@
 # 条件观测最终定向收尾审查
 
+> **历史快照（已合并）**：本收尾审查对应的工作已随 PR #2 合并入 `dev`（`31d51cc`）。仅作为证据保留；旧 `src/sakuramoon/tests/**` 路径仅为历史记录，非运行入口。当前正式合同：[配置与恢复](config-and-resume.md)、[条件优化器](condition-optimizer-ab.md)、[Guard遥测](guard-window-telemetry.md)、[Owner契约](guard-window-owner-contract.md)。
+
 ## 基线、权限与范围
 
 - 指定/实测远端 `feat/condition-observability` HEAD：`069b360da6f357210d3a106870851bf48764e3f6`，基线工作树干净；GitHub run `39225030862` 已通过。

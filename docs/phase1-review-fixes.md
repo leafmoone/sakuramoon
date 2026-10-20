@@ -1,5 +1,7 @@
 # Phase 1 审查后定向修复报告（feat/condition-observability）
 
+> **历史快照（已合并）**：本报告工作已随 PR #2 合并入 `dev`（`31d51cc`）。仅作为证据保留；旧 `src/sakuramoon/tests/**` 路径仅为历史记录，非运行入口。当前正式合同：[配置与恢复](config-and-resume.md)、[条件优化器](condition-optimizer-ab.md)、[Guard遥测](guard-window-telemetry.md)、[Owner契约](guard-window-owner-contract.md)。
+
 对应 root 2026-10-17 执行单。工作区：隔离 worktree `D:/WORK/.sakuramoon-p1fix`
 （detached HEAD @ 6a85df8）。基线：origin/dev + 本分支既有提交。
 **修订记录**：2026-10-18 复审（85cbbf3）两条 P1 后重做 2a——

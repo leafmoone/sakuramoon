@@ -1,5 +1,7 @@
 # 最新 dev × Condition Observability 集成兼容性审核
 
+> **历史快照（已合并）**：本集成工作已随 PR #2 合并入 `dev`（`31d51cc`）。仅作为证据保留；旧 `src/sakuramoon/tests/**` 路径仅为历史记录，非运行入口。当前正式合同：[配置与恢复](config-and-resume.md)、[条件优化器](condition-optimizer-ab.md)、[Guard遥测](guard-window-telemetry.md)、[Owner契约](guard-window-owner-contract.md)。
+
 ## 首轮审查判定与授权边界（历史快照）
 
 **GO — 源码合并及本轮可执行 CPU 兼容性审查范围。** 未发现新的 P1/P2 生产语义阻塞。此结论不是 GPU/生产部署批准，也不是声称所有历史测试或扩展 Pyright 为零错误。

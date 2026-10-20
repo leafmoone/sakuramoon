@@ -1,5 +1,7 @@
 # Condition observability reliability repair
 
+> **历史快照（已合并）**：本可靠性修复已随 PR #2 合并入 `dev`（`31d51cc`）。仅作为证据保留（含 fd 异常注入 receipt）；旧 `src/sakuramoon/tests/**` 路径仅为历史记录，非运行入口。当前正式合同：[配置与恢复](config-and-resume.md)、[条件优化器](condition-optimizer-ab.md)、[Guard遥测](guard-window-telemetry.md)、[Owner契约](guard-window-owner-contract.md)。
+
 ## 范围与基线
 
 - 目标分支：`feat/condition-observability`。
