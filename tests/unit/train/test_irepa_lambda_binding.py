@@ -9,12 +9,14 @@ projector child.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 from torch import nn
 
 from sakuramoon.objective.irepa import IRepaLambdaSchedule, irepa_weight_for_update
-from sakuramoon.train.loop import SingleGpuTrainingLoop
+from sakuramoon.train.loop import SingleGpuTrainingLoop, SuccessfulLoopObservation
 from sakuramoon.train.runtime import SingleGpuBatchRuntime
 from sakuramoon.train.step import SingleGpuUpdateState
 
@@ -23,8 +25,8 @@ def _bare_runtime(teacher: object | None) -> SingleGpuBatchRuntime:
     """A runtime instance without the CUDA-only __init__ (setter tests only)."""
 
     runtime = SingleGpuBatchRuntime.__new__(SingleGpuBatchRuntime)
-    runtime.irepa_teacher = teacher
-    runtime.irepa_weight = 0.0
+    runtime.irepa_teacher = teacher  # pyright: ignore[reportAttributeAccessIssue]
+    runtime.irepa_weight = 0.0  # pyright: ignore[reportAttributeAccessIssue]
     return runtime
 
 
@@ -117,17 +119,19 @@ class _PlainModel(nn.Module):
 
 
 def _run_loop(
-    module: nn.Module, tmp_path, observed: list[float]
+    module: _ProjectorCarryingModel | _PlainModel, tmp_path: Path, observed: list[float]
 ) -> list[float]:
     optimizer = torch.optim.SGD(module.parameters(), lr=0.1)
 
-    def record(observation) -> None:
+    def record(observation: SuccessfulLoopObservation) -> None:
         observed.append(observation.update.irepa_projector_grad_norm)
 
-    def loss_fn(batch) -> torch.Tensor:
+    def loss_fn(
+        batch: tuple[torch.Tensor, torch.Tensor], _microbatch_index: int
+    ) -> torch.Tensor:
         x, y = batch
         main = (module(x) - y).square().mean(dim=1)
-        if hasattr(module, "irepa_alignment"):
+        if isinstance(module, _ProjectorCarryingModel):
             # the projector is trained through the alignment term, exactly
             # as the composite trains irepa_alignment.*
             return main + 0.5 * module.irepa_alignment(x).square().mean(dim=1)
@@ -157,9 +161,9 @@ def _run_loop(
 
 
 def test_training_loop_computes_projector_grad_norm_when_child_present(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
-    torch.manual_seed(11)
+    torch.manual_seed(11)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
     observed: list[float] = []
     _run_loop(_ProjectorCarryingModel(), tmp_path, observed)
     assert len(observed) == 2
@@ -168,8 +172,8 @@ def test_training_loop_computes_projector_grad_norm_when_child_present(
     assert all(norm > 0.0 for norm in observed)
 
 
-def test_training_loop_keeps_zero_norm_without_the_projector_child(tmp_path) -> None:
-    torch.manual_seed(11)
+def test_training_loop_keeps_zero_norm_without_the_projector_child(tmp_path: Path) -> None:
+    torch.manual_seed(11)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
     observed: list[float] = []
     _run_loop(_PlainModel(), tmp_path, observed)
     assert observed == [0.0, 0.0]

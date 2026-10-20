@@ -68,7 +68,7 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         *,
         module: nn.Module,
         optimizer: StepOptimizer,
-        loss_fn: Callable[[BatchT], torch.Tensor],
+        loss_fn: Callable[[BatchT, int], torch.Tensor],
         accumulation_steps: int,
         target_successful_updates: int,
         checkpoint_every_successful_updates: int,
@@ -95,6 +95,7 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
         no_sync: Callable[[], AbstractContextManager[None]] | None = None,
         global_clip_norm: float = 1.0,
         condition_optimizer: ConditionOptimizerConfig | None = None,
+        condition_grad_share: bool | Callable[[int], bool] = False,
     ) -> None:
         if (
             type(target_successful_updates) is not int
@@ -103,6 +104,9 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
             or checkpoint_every_successful_updates <= 0
         ):
             raise ValueError("loop update targets and checkpoint cadence are invalid")
+        if type(condition_grad_share) is not bool and not callable(condition_grad_share):
+            raise ValueError("condition_grad_share must be a bool or callable")
+        self.condition_grad_share = condition_grad_share
         self.module = module
         self.optimizer = optimizer
         self.loss_fn = loss_fn
@@ -244,8 +248,14 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                     inner_module, "irepa_alignment", None
                 )
                 is not None,
+                condition_grad_share=(
+                    self.condition_grad_share(self.state.successful_updates + 1)
+                    if callable(self.condition_grad_share)
+                    else self.condition_grad_share
+                ),
             )
             active_detection_boundary = "data"
+            update: SingleGpuUpdateResult
             try:
                 for microbatch_index in range(self.accumulation_steps):
                     active_detection_boundary = "data"
@@ -262,7 +272,7 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                     )
                     with sync_context:
                         active_detection_boundary = "runtime"
-                        per_sample_loss = self.loss_fn(batch)
+                        per_sample_loss = self.loss_fn(batch, microbatch_index)
                         active_detection_boundary = "backward"
                         with self._record(phase_timer, "backward"):
                             step.backward(per_sample_loss)
@@ -285,7 +295,12 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                     self._raise_with_diagnostics(detected_at, exc)
                 assert cleanup_error is not None
                 self._raise_with_diagnostics(detected_at, exc, cleanup_error)
-            self.state = update.state
+            # Pyright limitation: a nested try/except inside the handler
+            # above defeats its NoReturn fall-through analysis, so it cannot
+            # prove ``update`` was bound.  It was: every handler path
+            # re-raises or exits via the NoReturn diagnostic helper, and the
+            # only fall-through is the try completing, which assigns update.
+            self.state = update.state  # pyright: ignore[reportPossiblyUnboundVariable]
             update_wall_seconds = (
                 time.perf_counter_ns() - update_wall_started
             ) / 1_000_000_000.0
@@ -398,7 +413,7 @@ class SingleGpuTrainingLoop(Generic[BatchT]):
                 if self._successful_update_observer is not None:
                     self._successful_update_observer(
                         SuccessfulLoopObservation(
-                            update=update,
+                            update=update,  # pyright: ignore[reportPossiblyUnboundVariable]
                             checkpoint_reason=completed_checkpoint_reason,
                             data_wait_seconds=data_wait_seconds,
                             checkpoint_seconds=checkpoint_seconds,

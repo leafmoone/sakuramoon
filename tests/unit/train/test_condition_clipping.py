@@ -357,7 +357,7 @@ def test_loop_forwards_clipping_controls(tmp_path: Path, threshold: float, polic
     observations: list[SuccessfulLoopObservation] = []
     loop = SingleGpuTrainingLoop[None](
         module=model, optimizer=optimizer,
-        loss_fn=lambda _batch: model.loss(3.0, 4.0, 3), accumulation_steps=1,
+        loss_fn=lambda _batch, _microbatch: model.loss(3.0, 4.0, 3), accumulation_steps=1,
         target_successful_updates=1, checkpoint_every_successful_updates=100,
         scheduler_step=lambda _update: None, checkpoint=lambda _update: None,
         diagnostic_root=tmp_path, failure_id=lambda _phase, _state: "cpu-test",

@@ -232,10 +232,10 @@ def assemble_benchmark(
         # accelerate ships no py.typed in this venv: the unresolved import is
         # the established production noise class (production.py carries it),
         # silenced here so the harness adds no new pyright findings.
-        from accelerate import (  # pyright: ignore[reportMissingImports]
+        from accelerate import (  # pyright: ignore[reportMissingImports, reportMissingTypeStubs]
             Accelerator,  # pyright: ignore[reportUnknownVariableType]
         )
-        from accelerate.utils import (  # pyright: ignore[reportMissingImports]
+        from accelerate.utils import (  # pyright: ignore[reportMissingImports, reportMissingTypeStubs]
             DistributedDataParallelKwargs,  # pyright: ignore[reportUnknownVariableType]
             InitProcessGroupKwargs,  # pyright: ignore[reportUnknownVariableType]
         )
@@ -445,7 +445,7 @@ def run_benchmark_stage(
             torch.cuda.reset_peak_memory_stats(device)
         runtime.set_growth_alpha(BENCHMARK_GROWTH_ALPHA)
 
-    def measure_batch(batch: Any) -> torch.Tensor:
+    def measure_batch(batch: Any, microbatch_index: int) -> torch.Tensor:
         timer = active_timer
         if timer is None:
             raise RuntimeError("benchmark update phase timer was not initialized")

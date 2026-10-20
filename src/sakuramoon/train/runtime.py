@@ -64,6 +64,9 @@ from sakuramoon.objective.irepa import (
     spatial_zscore_target,
 )
 from sakuramoon.telemetry.timers import AnyPhaseTimer
+from sakuramoon.train.condition_diagnostics_stream import (
+    compute_condition_activation_facts,
+)
 from sakuramoon.train.loop import (
     LoopResult,
     SingleGpuTrainingLoop,
@@ -113,7 +116,9 @@ def require_distributed_forward_module(
         raise TypeError(
             "distributed forward must remain an uncompiled DistributedDataParallel"
         )
-    if forward_module.module is not composite:
+    # ``DistributedDataParallel.module`` has no stable stub type in the
+    # torch type stubs; the isinstance above pins the runtime type.
+    if forward_module.module is not composite:  # pyright: ignore[reportUnknownMemberType]
         raise ValueError(
             "DistributedDataParallel must wrap the original trainable composite"
         )
@@ -151,8 +156,9 @@ def compile_packed_dit_blocks(
         not isinstance(block, PackedDiTBlock) for block in blocks
     ):
         raise TypeError("PackedDiT block registry is inconsistent")
-    if any(
-        child._forward_pre_hooks or child._forward_hooks
+    if any(  # pyright: ignore[reportUnknownArgumentType]
+        # Private hook registries: nn.Module stubs type these only partially.
+        child._forward_pre_hooks or child._forward_hooks  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType, reportPrivateUsage]
         for block in blocks
         for child in block.modules()
     ):
@@ -163,7 +169,7 @@ def compile_packed_dit_blocks(
     parameter_ids = tuple(id(parameter) for parameter in composite.parameters())
     state_keys = tuple(composite.state_dict())
     for block in blocks:
-        block.compile(
+        block.compile(  # pyright: ignore[reportUnknownMemberType]
             backend=backend,
             mode=mode,
             fullgraph=False,
@@ -297,8 +303,17 @@ class ActualDitFlopCounter:
         self._block_linear_flops = sum(
             self._linear_flops(item) for item in block_linears
         )
+        # ``blocks`` come from an nn.ModuleDict (values() -> nn.Module);
+        # the isinstance checks above pin the concrete registry, so cast
+        # for typed FLOP arithmetic.
         self._attention_flops = sum(
-            4 * item.q_heads * item.head_dim for item in attentions
+            4
+            * item.q_heads
+            * item.head_dim
+            for item in (
+                cast(DenseGQAAttention | FA4VarlenGQAAttention, attention)
+                for attention in attentions
+            )
         )
         if min(
             self._image_linear_flops,
@@ -315,7 +330,9 @@ class ActualDitFlopCounter:
     def count(self, inputs: TrainableCompositeInputs) -> int:
         """Return exact forward matmul FLOPs for accepted composite inputs."""
 
-        if not isinstance(inputs, TrainableCompositeInputs):
+        # Defensive runtime guard for untyped callers; the declared
+        # parameter type already pins this for typed code.
+        if not isinstance(inputs, TrainableCompositeInputs):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError("DiT FLOP counting requires TrainableCompositeInputs")
         batch = len(inputs.latents)
         if (
@@ -423,6 +440,14 @@ class RuntimeMeasurement:
     irepa_weighted_per_sample_loss: torch.Tensor
     irepa_cosine: torch.Tensor
     irepa_lambda: float
+    # Opt-in condition-side diagnostics (per-rank JSONL stream): the
+    # SCALAR facts computed in ``measure()`` — mid-update, BEFORE
+    # ``optimizer.step()`` — only when the record cadence is due for this
+    # in-flight update and this is its final microbatch (one recompute per
+    # due update).  No tensor references are retained, so no extra VRAM
+    # residency.  None unless enabled and due; the default path is
+    # byte-identical.
+    condition_diagnostics: dict[str, float | int | None] | None = None
 
     def detached(self) -> RuntimeMeasurement:
         """Drop the autograd graph before handing facts to an async observer."""
@@ -451,6 +476,7 @@ class RuntimeMeasurement:
             irepa_weighted_per_sample_loss=self.irepa_weighted_per_sample_loss.detach(),
             irepa_cosine=self.irepa_cosine.detach(),
             irepa_lambda=self.irepa_lambda,
+            condition_diagnostics=self.condition_diagnostics,
         )
 
 
@@ -630,6 +656,8 @@ class SingleGpuBatchRuntime:
         irepa_gamma: float = 0.6,
         irepa_eps: float = 1e-6,
         irepa_schedule: IRepaLambdaSchedule | None = None,
+        condition_diagnostics_every: int | None = None,
+        condition_diagnostics_should_record: Callable[[int], bool] | None = None,
     ) -> None:
         if device.type != "cuda" or not torch.cuda.is_available():
             raise ValueError("single-GPU production runtime requires CUDA")
@@ -651,6 +679,20 @@ class SingleGpuBatchRuntime:
                 raise ValueError(f"{name} must be a finite TOML float")
         if type(growth_alpha) is not float or not 0.0 <= growth_alpha <= 1.0:
             raise ValueError("growth_alpha must be a float in [0,1]")
+        if (
+            condition_diagnostics_every is not None
+            and (
+                type(condition_diagnostics_every) is not int
+                or condition_diagnostics_every < 1
+            )
+        ):
+            raise ValueError(
+                "condition_diagnostics_every must be None or a positive int"
+            )
+        if condition_diagnostics_should_record is not None and not callable(
+            condition_diagnostics_should_record
+        ):
+            raise ValueError("condition_diagnostics_should_record must be callable")
         if (
             type(torch_compile_enabled) is not bool
             or torch_compile_backend != "inductor"
@@ -726,6 +768,10 @@ class SingleGpuBatchRuntime:
         # set_growth_alpha); 0.0 until the first binding.  A lambda of 0.0
         # still runs the FULL teacher/capture/projector/z-score/cosine path.
         self.irepa_weight = 0.0
+        # Production uses the live sink gate; cadence-only callers retain
+        # their existing API. Both absent = no compute or retention.
+        self.condition_diagnostics_every = condition_diagnostics_every
+        self.condition_diagnostics_should_record = condition_diagnostics_should_record
 
     def set_growth_alpha(self, value: float) -> None:
         """Select the canonical alpha before starting one successful update."""
@@ -925,50 +971,93 @@ class SingleGpuBatchRuntime:
         )
 
     def measure(
-        self, batch: TrainingBatch, *, phase_timer: AnyPhaseTimer | None = None
+        self,
+        batch: TrainingBatch,
+        *,
+        phase_timer: AnyPhaseTimer | None = None,
+        update_number: int | None = None,
+        is_final_microbatch: bool = True,
     ) -> RuntimeMeasurement:
+        # Runtime owns capture during measure, even if a direct caller used
+        # the standalone composite/assembly opt-in before entering runtime.
+        # Clear that state before preparation or eligibility can fail.
+        if self.composite.condition_diagnostics_enabled:
+            self.composite.disable_condition_diagnostics()
         prepared = self.prepare(batch, phase_timer=phase_timer)
         dit_flops = self.dit_flop_counter.count(prepared.inputs)
         # The DDP-wrapped module is the composite itself, so the projector
         # runs INSIDE this forward (never on forward_module.module from the
         # outside) and its parameters are part of the distributed graph.
-        forward_output = self.forward_module(
-            prepared.inputs,
-            phase_timer=phase_timer,
-        )
-        if isinstance(forward_output, TrainableCompositeIRepaOutput):
-            predictions = forward_output.predictions
-            projected = forward_output.projected_student_features
-            if prepared.irepa_targets is None:
+        capture_condition = False
+        should_record = self.condition_diagnostics_should_record
+        # A live recorder owns cadence; stride one only activates this gate.
+        every = self.condition_diagnostics_every if should_record is None else 1
+        if every is not None and is_final_microbatch:
+            if update_number is None:
                 raise RuntimeError(
-                    "iREPA composite output arrived without a teacher target"
+                    "condition diagnostics are enabled but measure() got no"
+                    " update number"
                 )
-        else:
-            predictions = forward_output
-            projected = None
-            if self.irepa_teacher is not None:
-                raise RuntimeError(
-                    "iREPA teacher was configured but the composite has no "
-                    "projector"
-                )
-        if len(predictions) != len(prepared.clean_latents):
-            raise ValueError("DiT prediction count differs from latent batch")
-        if phase_timer is None:
-            loss = self._loss(predictions, prepared, projected)
-        else:
-            with phase_timer.record("loss"):
+            capture_condition = (
+                should_record(update_number)
+                if should_record is not None
+                else update_number % every == 0
+            )
+        if capture_condition:
+            self.composite.enable_condition_diagnostics()
+        try:
+            forward_output = self.forward_module(
+                prepared.inputs,
+                phase_timer=phase_timer,
+            )
+            if isinstance(forward_output, TrainableCompositeIRepaOutput):
+                predictions = forward_output.predictions
+                projected = forward_output.projected_student_features
+                if prepared.irepa_targets is None:
+                    raise RuntimeError(
+                        "iREPA composite output arrived without a teacher target"
+                    )
+            else:
+                predictions = forward_output
+                projected = None
+                if self.irepa_teacher is not None:
+                    raise RuntimeError(
+                        "iREPA teacher was configured but the composite has no "
+                        "projector"
+                    )
+            if len(predictions) != len(prepared.clean_latents):
+                raise ValueError("DiT prediction count differs from latent batch")
+            if phase_timer is None:
                 loss = self._loss(predictions, prepared, projected)
-        image_tokens = (
-            batch.images.shape[0]
-            * (batch.target_height // 16)
-            * (batch.target_width // 16)
-        )
-        text_tokens = sum(batch.main_token_lengths)
-        sample_ids = tuple(
-            str(cast(int, value.item()))
-            for value in batch.sample_ids.detach().cpu().unbind()
-        )
-        shape_key = f"{batch.target_height}x{batch.target_width}x{batch.dense_length}"
+            else:
+                with phase_timer.record("loss"):
+                    loss = self._loss(predictions, prepared, projected)
+            image_tokens = (
+                batch.images.shape[0]
+                * (batch.target_height // 16)
+                * (batch.target_width // 16)
+            )
+            text_tokens = sum(batch.main_token_lengths)
+            sample_ids = tuple(
+                str(cast(int, value.item()))
+                for value in batch.sample_ids.detach().cpu().unbind()
+            )
+            shape_key = f"{batch.target_height}x{batch.target_width}x{batch.dense_length}"
+            # Same-forward, pre-step facts from only the eligible final microbatch.
+            condition_facts: dict[str, float | int | None] | None = None
+            if capture_condition:
+                last_conditioning = self.composite.last_conditioning
+                if last_conditioning is None:
+                    raise RuntimeError(
+                        "condition diagnostics are enabled but the composite "
+                        "captured no condition output for this forward"
+                    )
+                condition_facts = compute_condition_activation_facts(
+                    self.composite, prepared.inputs, last_conditioning
+                )
+        finally:
+            if capture_condition:
+                self.composite.disable_condition_diagnostics()
         return RuntimeMeasurement(
             per_sample_loss=loss.per_sample,
             image_tokens=image_tokens,
@@ -993,6 +1082,7 @@ class SingleGpuBatchRuntime:
             irepa_weighted_per_sample_loss=loss.irepa_weighted_per_sample,
             irepa_cosine=loss.irepa_cosine,
             irepa_lambda=loss.irepa_lambda,
+            condition_diagnostics=condition_facts,
         )
 
     def _loss(
@@ -1264,6 +1354,11 @@ def _run_single_gpu_training(
     backward: Callable[[torch.Tensor], None] | None = None,
     no_sync: Callable[[], AbstractContextManager[None]] | None = None,
     log_updates: bool = True,
+    condition_grad_share: bool | Callable[[int], bool] = False,
+    condition_diagnostic_observer: Callable[[SuccessfulTrainingObservation], None]
+    | None = None,
+    guard_window_observer: Callable[[SuccessfulTrainingObservation], None]
+    | None = None,
 ) -> LoopResult:
     """Run the locked loop after all ownership and assembly objects are ready."""
 
@@ -1331,10 +1426,18 @@ def _run_single_gpu_training(
                     runtime.irepa_schedule.weight_for_update(next_growth_update)
                 )
 
-        def measure_batch(batch: TrainingBatch) -> torch.Tensor:
+        def measure_batch(
+            batch: TrainingBatch, microbatch_index: int
+        ) -> torch.Tensor:
             if active_phase_timer is None:
                 raise RuntimeError("training update phase timer was not initialized")
-            measurement = runtime.measure(batch, phase_timer=active_phase_timer)
+            measurement = runtime.measure(
+                batch,
+                phase_timer=active_phase_timer,
+                update_number=next_growth_update,
+                is_final_microbatch=microbatch_index
+                == config.train.accumulation - 1,
+            )
             pending_measurements.append(measurement.detached())
             return measurement.per_sample_loss
 
@@ -1366,6 +1469,14 @@ def _run_single_gpu_training(
                 gpu_memory_allocated_bytes=allocated,
                 gpu_memory_reserved_bytes=reserved,
             )
+            if condition_diagnostic_observer is not None:
+                # Per-rank condition diagnostics stream: local-first, outside
+                # the rank-0-funneled main observer.
+                condition_diagnostic_observer(emitted)
+            if guard_window_observer is not None:
+                # Per-rank guard window telemetry stream: local-first, same
+                # only-successful-update position as the condition observer.
+                guard_window_observer(emitted)
             successful_update_observer(emitted)
             if log_updates:
                 print(
@@ -1451,6 +1562,7 @@ def _run_single_gpu_training(
             no_sync=no_sync,
             global_clip_norm=config.gradient.clip_norm,
             condition_optimizer=config.optimizer.condition,
+            condition_grad_share=condition_grad_share,
         )
         result = loop.run(stream)
     except BaseException as error:  # noqa: BLE001
@@ -1494,12 +1606,29 @@ def run_single_gpu_training(
     backward: Callable[[torch.Tensor], None] | None = None,
     no_sync: Callable[[], AbstractContextManager[None]] | None = None,
     log_updates: bool = True,
+    condition_grad_share: bool | Callable[[int], bool] = False,
+    condition_diagnostic_observer: Callable[[SuccessfulTrainingObservation], None]
+    | None = None,
+    guard_window_observer: Callable[[SuccessfulTrainingObservation], None]
+    | None = None,
 ) -> LoopResult:
     """Run production training with the exact publisher accepted by preflight."""
 
+    if type(condition_grad_share) is not bool and not callable(condition_grad_share):
+        raise ValueError("condition_grad_share must be a bool or callable")
+    if condition_diagnostic_observer is not None and not callable(
+        condition_diagnostic_observer
+    ):
+        raise ValueError("condition_diagnostic_observer must be callable")
+    if guard_window_observer is not None and not callable(guard_window_observer):
+        raise ValueError("guard_window_observer must be callable")
+
     from sakuramoon.train.preflight import ProductionSingleGpuCheckpointPublisher
 
-    if not isinstance(
+    # Defensive runtime guard for untyped callers; every concrete publisher
+    # in production subclasses this type, so the declared parameter already
+    # pins it for typed code.
+    if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         checkpoint_publisher, ProductionSingleGpuCheckpointPublisher
     ):
         stream = require_accepted_production_batch_stream(batches)
@@ -1534,6 +1663,9 @@ def run_single_gpu_training(
         backward=backward,
         no_sync=no_sync,
         log_updates=log_updates,
+        condition_grad_share=condition_grad_share,
+        condition_diagnostic_observer=condition_diagnostic_observer,
+        guard_window_observer=guard_window_observer,
     )
 
 

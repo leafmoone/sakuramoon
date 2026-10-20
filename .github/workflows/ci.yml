@@ -1,0 +1,115 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    env:
+      # Select CPU wheels explicitly; the default PyPI torch build is large
+      # and the hosted runner has no accelerator.  The full dependency set is
+      # required here: pyright type-checks changed files against the project's
+      # third-party types (torch, transformers, ...), so a dev-only env would
+      # report every training import as missing.
+      UV_TORCH_BACKEND: cpu
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so `origin/dev...HEAD` can compute a merge-base;
+          # a shallow clone makes the diff below fail or silently empty.
+          fetch-depth: 0
+      # astral-sh/setup-uv has no floating `v10` major tag (only v1-v7
+      # float), so the action must be pinned to a concrete version.
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.12"
+      # --no-install-project skips only the editable project link; the
+      # project dependencies themselves must be present for pyright.  The
+      # train/eval extras carry accelerate, torchao, webdataset and the
+      # evaluation stack that the training/production import graph imports.
+      - run: uv sync --no-install-project --group dev --extra train --extra eval
+      - run: uv run --no-sync ruff check .
+      - name: pyright (changed python files)
+        run: |
+          # :(glob) is required: without it `*` does not cross `/` and
+          # `scripts/**/*.py` matches nothing in scripts/ itself.
+          # --diff-filter=d skips removed files; the diff must fail the
+          # job if it cannot be computed, never pass as "no changed files".
+          files=$(git diff --name-only --diff-filter=d origin/dev...HEAD -- \
+            ':(glob)src/**/*.py' ':(glob)tests/**/*.py' ':(glob)scripts/**/*.py')
+          if [ -n "$files" ]; then
+            uv run --no-sync pyright $files
+          else
+            echo "no changed python files"
+          fi
+
+  unit:
+    runs-on: ubuntu-latest
+    env:
+      # Select CPU wheels explicitly; the default PyPI torch build is large
+      # and the hosted runner has no accelerator.
+      UV_TORCH_BACKEND: cpu
+    steps:
+      - uses: actions/checkout@v6
+      # Pinned to a concrete version: see the note in the static job.
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.12"
+      # Same optional deps as the static job: the condition-diagnostics
+      # structural guard imports sakuramoon.train.runtime, whose module
+      # chain needs webdataset/einops (train extra) and pe_spatial deps
+      # (eval extra).  CPU wheel selection comes from the job env above.
+      - run: uv sync --no-install-project --group dev --extra train --extra eval
+      # The optimizer suite is intentionally not in this pytest gate: it
+      # exercises torch.compile/triton paths that must be verified on the
+      # runner before they can become a required check.  The guard window
+      # gloo test is the exception: real CPU optimizer init/step on the
+      # gloo backend only (no triton, no CUDA), verified on this runner.
+      # Integration cases below also use explicit CPU boundaries: real clipping,
+      # grouping and quantized-state restore, but no native CUDA/SR step claim.
+      - run: >-
+          PYTHONPATH=src uv run --no-sync pytest
+          tests/unit/test_training_metrics_audit.py
+          tests/unit/config/test_config_closure.py
+          tests/unit/config/test_condition_diagnostics_config.py
+          tests/unit/config/test_guard_window_config.py
+          tests/unit/train/test_condition_diagnostics_stream.py
+          tests/unit/train/test_condition_diagnostics_production_wiring.py
+          tests/unit/train/test_condition_diagnostics_lifecycle.py
+          tests/unit/telemetry/test_durable_jsonl_sink.py
+          tests/unit/telemetry/test_guard_publish.py
+          tests/unit/train/test_guard_window_stream.py
+          tests/unit/train/test_guard_window_production_wiring.py
+          tests/unit/optim/test_guard_window_gloo.py
+          tests/unit/cli/test_guard_window_merge.py
+          tests/unit/train/test_condition_optimizer_observability.py
+          tests/unit/checkpoint/test_condition_observability_integration.py
+          tests/unit/train/test_condition_dual_stream_integration.py
+          -q
+
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      # `bash -n a.sh b.sh` only checks the first file, so walk each script.
+      - name: shell syntax
+        run: |
+          while IFS= read -r -d '' file; do
+            bash -n "$file"
+          done < <(find scripts -type f -name '*.sh' -print0)
+      - name: config inheritance graph
+        run: python3 scripts/check_configs.py --config-root config
+      # v3 is the Node 24 action.  PR comments are disabled so the job does
+      # not need pull-requests write permission.  GITLEAKS_LICENSE is only
+      # required for organization-owned repositories.
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
