@@ -20,8 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # Full history is required to pin the origin/dev merge-base.
-          # A shallow clone must not silently pass as "no changed files".
+          # Full history is required to pin the origin/dev merge-base and to
+          # resolve a dev-push GITHUB_BEFORE (existence + ancestry checks run
+          # against the cloned objects).  A shallow clone must not silently
+          # pass as "no changed files".
           fetch-depth: 0
       # astral-sh/setup-uv has no floating `v10` major tag (only v1-v7
       # float), so the action must be pinned to a concrete version.
@@ -35,14 +37,26 @@ jobs:
       - run: uv sync --no-install-project --group dev --extra train --extra eval
       - run: uv run --no-sync ruff check .
       - name: pyright (no new diagnostics in changed python files)
+        # GITHUB_BEFORE is not a default GitHub environment variable; map the
+        # push event's pre-push SHA so the selector can validate dev pushes.
+        env:
+          GITHUB_BEFORE: ${{ github.event.before }}
         run: |
           mkdir -p artifacts/pyright
-          base=$(git merge-base origin/dev HEAD)
+          # Fail-closed base selection: a pull request uses its actual target
+          # branch, a feature push uses the origin/dev merge-base, and a dev
+          # push uses GITHUB_BEFORE (the true pre-push SHA) so single, merge
+          # and multi-commit pushes all produce a real diff.  Zero/unknown/
+          # missing/self SHAs and git failures fail this step instead of
+          # passing as an empty "no changed files" run.
+          base=$(uv run --no-sync python dev-tools/select_pyright_base.py)
           test -n "$base"
           # NUL-delimited paths preserve spaces and unusual filenames. Include
           # every changed Python file, including new files; skip deletions only.
           git diff --name-only -z --diff-filter=d "$base" HEAD -- \
             ':(glob)**/*.py' > artifacts/pyright/changed-files
+          FILE_COUNT=$(tr -dc '\0' < artifacts/pyright/changed-files | wc -c)
+          echo "pyright base=$base changed_python_files=$FILE_COUNT"
           PYRIGHT_FILES=artifacts/pyright/changed-files uv run --no-sync python - "$base" <<'PY'
           import collections
           import io
@@ -170,6 +184,7 @@ jobs:
           tests/unit/train/test_condition_optimizer_observability.py
           tests/unit/checkpoint/test_condition_observability_integration.py
           tests/unit/train/test_condition_dual_stream_integration.py
+          tests/unit/train/test_ci_pyright_base.py
           -q
 
   contracts:
