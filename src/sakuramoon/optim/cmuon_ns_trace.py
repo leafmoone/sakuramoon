@@ -5,7 +5,8 @@ settled, "what did the NS iteration do to the exact failing input, in
 which dtype, at which iteration?" It is a second, analysis-only pass over
 a clone of the exact rescue input.
 
-Hard guarantees (see reports/cmuon-fp32-rescue-forensic-audit.md §7):
+Hard guarantees (historical design: commit b15d7eb, original path
+reports/cmuon-fp32-rescue-forensic-audit.md §7):
 
   * The op sequence (casts, transpose-to-wide, Frobenius clamp
     normalization, the quintic addmm iterations) replicates
@@ -19,10 +20,10 @@ Hard guarantees (see reports/cmuon-fp32-rescue-forensic-audit.md §7):
     and the original ``CMuonSafetyError`` is still raised: an analysis
     failure never masks a production failure.
 
-This module is imported only by the forensic dump path of
-``fp32_rescue.py`` and by the developer tools
-(``dev-tools/cmuon_fp32_rescue_replay.py`` /
-``dev-tools/cmuon_fp32_rescue_stress.py``). ``cmuon.py`` is untouched.
+The retained callers are the forensic dump path of ``fp32_rescue.py`` and
+``dev-tools/cmuon_fp32_rescue_replay.py``. The historical synthetic stress
+tool is available in commit b15d7eb at its original path,
+``dev-tools/cmuon_fp32_rescue_stress.py``; it is not a current entry point.
 """
 
 from __future__ import annotations

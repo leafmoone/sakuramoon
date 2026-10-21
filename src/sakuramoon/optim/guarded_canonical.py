@@ -2,8 +2,8 @@
 candidate.
 
 Replaces the PERMANENTLY RETIRED original candidate (``hybrid_cmuon_ns4_core``)
-with four simultaneous fixes for the root-caused failure mode (see
-``reports/cmuon-root-cause.md``):
+with four simultaneous fixes for the historical failure mode (commit
+b15d7eb, original path ``reports/cmuon-root-cause.md``):
 
 A. **Low-signal guard (pre-NS)** — the NS input is the Nesterov matrix
    ``u = (1-mu)·g + mu·m``. When ``rms(u) < guard_ratio · ref`` (per NS
@@ -36,12 +36,14 @@ The signal reference ``ref`` is a per-(FQN, chunk) FP32 scalar:
     inactive: ref_t = ref_{t-1}            (never decays to zero)
 
 initialized by the calibration bootstrap (``[optimizer.cmuon_guard]
-references`` — the P3 shadow-gradient calibration artifact; see
-``reports/cmuon-guarded-canonical-design.md`` §5). S1-b fix A': because
+references`` — the P3 shadow-gradient calibration artifact; historical
+commit b15d7eb, original path ``reports/cmuon-guarded-canonical-design.md``
+§5). S1-b fix A': because
 those bootstrap refs exist at construction, the low-signal skip decision is
 active from observation 1 (the former ``warmup_observations`` skip-gate
 let near-zero-signal NS inputs present at the ckpt fork point feed NS4
-unprotected and crashed S1 4/4 runs; see safety.json). The
+unprotected and crashed S1 4/4 historical runs; see commit b15d7eb,
+original path reports/cmuon-guarded-canonical-safety.json). The
 ``warmup_observations`` config field is kept for compatibility and is
 reported in telemetry but no longer gates the skip decision.
 

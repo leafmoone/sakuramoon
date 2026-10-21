@@ -2,8 +2,8 @@
 
 Candidate name: ``hybrid_cmuon_canonical_ns4_fp32_rescue``.
 
-Mechanism (offline-validated; artifacts-fp32-rescue/, see
-reports/cmuon-fp32-rescue-audit.md):
+Mechanism (historical offline evidence: commit b15d7eb, original path
+reports/cmuon-fp32-rescue-audit.md; not current validation):
 
   1. BF16 NS4 exactly as the guarded canonical production path (canonical
      owner-rank NS, single batched ceiling sync, pre-write fail-closed).
@@ -18,7 +18,8 @@ reports/cmuon-fp32-rescue-audit.md):
      DIAGNOSTIC boundary, not a safety boundary: a finite FP32 delta below
      it (including exactly zero) is accepted UNCHANGED (no clamp, rescale,
      normalization, or fallback) and emits scalar soft-rescue telemetry.
-     Rationale (R2 evidence, reports/cmuon-f2-real-capture-r2.md): the
+     Rationale (historical R2 evidence; its external report
+     cmuon-f2-real-capture-r2.md was not tracked at b15d7eb): the
      production below-floor case was a finite structurally-small update on
      a near-rank-1 input (stable rank 1.001, top32 energy 0.99999,
      LOW_RANK_CONFIRMED) — a zero/small finite parameter update is not a
@@ -28,7 +29,8 @@ reports/cmuon-fp32-rescue-audit.md):
      is NEVER an optimizer failure (no clamp-and-continue, no skip-on-bad,
      no AdamW fallback).
 
-Offline evidence (16-obs shadow at ckpt_97100 + repeats + align + bench):
+Historical offline evidence (not current validation; 16-obs shadow at
+ckpt_97100 + repeats + align + bench):
   - BF16 chaos on the D1 danger class: 15-51% catastrophic per input over
     100 hard-synchronized repeats (delta-rms spikes ~5 orders of magnitude).
   - FP32: 0/700 catastrophic, zero output spread (bit-deterministic).

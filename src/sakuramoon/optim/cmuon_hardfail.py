@@ -9,7 +9,8 @@ artifact:
     input.safetensors | input.pt   (the EXACT BF16 NS input, original dtype)
     metadata.json              (verdict values + diagnostic replay traces)
 
-Guarantees (see reports/cmuon-fp32-rescue-forensic-audit.md §6/§8/§9):
+Guarantees (historical design: commit b15d7eb, original path
+reports/cmuon-fp32-rescue-forensic-audit.md §6/§8/§9):
 
   * Telemetry-only: nothing here feeds back into the verdict, the staged
     delta, momentum, parameters, the owner broadcast, or the commit. It

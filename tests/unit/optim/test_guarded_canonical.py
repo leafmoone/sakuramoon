@@ -1,7 +1,8 @@
 """CPU/HCU unit tests for the Guarded Canonical Hybrid CMuon candidate
 (``hybrid_cmuon_guarded_canonical_ns4``).
 
-Covers (design reports/cmuon-guarded-canonical-design.md §9):
+Covers (historical design: commit b15d7eb, original path
+reports/cmuon-guarded-canonical-design.md §9):
   T1. Owner mapping: deterministic, balanced, world-size sensitive.
   T2. Guard config validation (no preset defaults; explicit calibration).
   T3. Guarded schema/config wiring (OptimizerConfig contract).

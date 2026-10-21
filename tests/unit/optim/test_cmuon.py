@@ -161,7 +161,8 @@ def test_fp32_ns_pure_fp32_finite_orthogonal():
     beyond ~1e-3 relative would indicate an accidental low-precision
     op inside the rescue path (the bug class this function exists to
     prevent). Pathological near-zero-signal inputs are covered by the HCU
-    replay (scripts/fp32_rescue_replay.py), not by CPU unit tests.
+    historical replay (commit b15d7eb, original path
+    scripts/fp32_rescue_replay.py), not by CPU unit tests.
     """
     g = torch.Generator().manual_seed(3)
     for shape in [(64, 16), (16, 64), (32, 32)]:
@@ -867,7 +868,8 @@ def test_kv_adaln_ns5_finite_hcu():
 
     The quintic NS is a BF16 numerical artifact that is spectrum/platform
     context dependent (in exact arithmetic f^5(sigma) converges for every
-    normalized sigma). The 08-28 sweep (reports/cmuon-ns-depth-audit.md,
+    normalized sigma). The historical 08-28 sweep (commit b15d7eb,
+    original path reports/cmuon-ns-depth-audit.md,
     24-seed characterization) documented an ns5 blow-up for the small
     short-edge shapes (k/v, adaln) on the then-current HCU context; the
     08-29 salt1 context (DTK 26.04 / torch 2.9.0) does NOT reproduce it

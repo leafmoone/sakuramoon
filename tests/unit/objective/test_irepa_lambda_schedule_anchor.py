@@ -8,7 +8,8 @@ entry points (``IRepaLambdaSchedule.__post_init__`` and
 ``target_weight == 0.0`` and pre-anchor early returns.  Equality with the
 anchored ramp-in end is the continuous no-hold boundary and stays legal.
 
-Reference schedule (production contract, see reports/):
+Reference schedule (historical contract: commit b15d7eb, original path
+reports/irepa-ramp-out-anchor-fix/merge-readiness.md):
 
     start_successful_update = 113401
     target_weight           = 0.5

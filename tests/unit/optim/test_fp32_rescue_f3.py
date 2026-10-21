@@ -1,6 +1,7 @@
 """F3 soft below-floor FP32 rescue — state-machine tests.
 
-Covers the F3 semantic change (reports/cmuon-f3-soft-below-floor.md):
+Covers the F3 semantic change (historical design: commit b15d7eb,
+original path reports/cmuon-f3-soft-below-floor.md):
   finite FP32 below-floor  -> ACCEPT ORIGINAL DELTA + soft telemetry
   finite zero FP32 delta   -> ACCEPT + zero_delta_soft_rescue
   nonfinite / above ceiling -> hard fail (preserved, unchanged)

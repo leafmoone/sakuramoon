@@ -87,6 +87,20 @@ bash scripts/training_stack.sh start
 
 快照脚本不再包含用户级 Codex 配置，并排除 `.env*`、私钥常见命名、`.ssh`、`.codex`、日志、core dump 和临时文件。这些排除规则不是对任意目录内容的秘密扫描；选择快照源时仍应只包含预期的项目资产。迁移脚本默认只恢复，设置 `START_TRAINING=1` 才会启动训练；发现已有 trainer 时拒绝恢复。
 
+## 本地只读审计 CLI
+
+在已有环境的仓库根目录运行；以下仅为用法示例，不会启动训练。metrics 路径和闭区间端点应按待审计的本地文件选择：
+
+```bash
+PYTHONPATH=src uv run --no-sync python scripts/check_configs.py --config-root config
+PYTHONPATH=src uv run --no-sync python scripts/audit_training_metrics.py /path/to/metrics.jsonl \
+  --start 100 --end 200
+```
+
+`check_configs.py` 检查配置继承图，`config/external-parents.toml` 声明的外部父节点不读取、不遍历；它不验证业务 schema 或运行资产。`audit_training_metrics.py` 接受 `.jsonl` / `.jsonl.gz`，默认统计 `main_loss`，可用 `--loss-field` 指定字段；缺失行只表示遥测缺口，不能推断该 update 未执行。两者默认向 stdout 输出 JSON；可选 `--out` 会写出文件，metrics 审计禁止将其指向输入。检查退出码和错误输出，不能仅凭生成了 JSON 就认定审计通过。
+
+历史用法及当时的验证数字见提交 `b15d7eb` 的原路径 `docs/handover-20261017.md`；它们不是当前检查结果。
+
 ## 验证范围
 
 ```bash
