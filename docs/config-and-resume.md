@@ -168,6 +168,10 @@ checkpoint 与配置之间的绑定分两类：
   保留为模板预设）；`sampling.profile` 按名选择，NFE 由所选 solver/steps 计算。
 - 生成元数据要求显式 `noise_scale` 与 `t_eps`（来自 `[objective]`，不再是代码锁）。
 - 周期采样（`sampling.training`）的 locked 纵向队列保持 `image_count = 60` 不变量。
+- 每次评估重新生成当前模型的特征；真实图像特征只在同一个 evaluator 实例内复用。
+  不读取或写入跨运行的磁盘特征缓存，已有缓存文件不再使用，重启后重新提取真实特征。
+- 本地 teacher / Inception 资产保留文件、大小和适用的结构检查，不计算或校验项目级 SHA。
+  这些检查不保证同大小资产的内容一致；评估结果不再附带验证集 fingerprint。
 
 ## 6. 测试
 

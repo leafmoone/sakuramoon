@@ -20,7 +20,7 @@ Covers the representation-alignment training graph on the real accelerators:
   contract) even on the accelerator path: the projector grad is present as an
   exact-zero tensor, not absent.
 
-The teacher-dependent tests require the fingerprint-bound PE-Spatial-B16-512
+The teacher-dependent tests require the local PE-Spatial-B16-512
 asset and skip only if it is absent from the checkout (a deployment gap, not a
 regression).
 """

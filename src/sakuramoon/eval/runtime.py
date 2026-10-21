@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import math
 import os
 from collections.abc import Callable, Iterator
@@ -35,14 +34,11 @@ from sakuramoon.encoders.qwen import QwenRuntime
 from sakuramoon.eval.features import (
     CLIP_EMBEDDING_DIM,
     CLIP_MODEL_ID,
-    FEATURE_CACHE_SCHEMA_VERSION,
     INCEPTION_FEATURE_DIM,
     INCEPTION_LOGIT_DIM,
-    REAL_PREPROCESSING_ID,
     EvaluationFeatureModels,
     ImageFeatureBatch,
     iter_validation_image_batches,
-    validation_dataset_fingerprint,
 )
 from sakuramoon.eval.metrics import (
     FeatureStats,
@@ -556,192 +552,12 @@ class TrainingEvaluator:
             return values
         return cast(torch.Tensor, self.accelerator.gather(values))
 
-    def _checkpoint_fingerprint(self, update: int) -> str | None:
-        root = repository_directory(self.root, self.config.paths.checkpoint_dir)
-        candidates = tuple(
-            path
-            for path in root.glob(f"ckpt_{update}_*")
-            if path.is_dir()
-            and not path.is_symlink()
-            and (path / "COMPLETE").is_file()
-            and not (path / "COMPLETE").is_symlink()
-            and (path / "manifest.json").is_file()
-            and not (path / "manifest.json").is_symlink()
-        )
-        if len(candidates) != 1:
-            print(
-                f"[eval] update={update} 检查点不唯一，禁用生成特征缓存",
-                flush=True,
-            )
-            return None
-        checkpoint = candidates[0]
-        if (checkpoint / "COMPLETE").read_bytes() != b"complete\n":
-            print(
-                f"[eval] update={update} 检查点不完整，禁用生成特征缓存",
-                flush=True,
-            )
-            return None
-        return hashlib.sha256((checkpoint / "manifest.json").read_bytes()).hexdigest()
-
-    def _generated_cache_path(self, update: int, fingerprint: str) -> Path:
-        return (
-            self.output
-            / "cache"
-            / (
-                f"generated-features-v{FEATURE_CACHE_SCHEMA_VERSION}-step-{update}-"
-                f"{fingerprint[:16]}.pt"
-            )
-        )
-
-    def _load_generated_cache(
-        self,
-        update: int,
-        *,
-        fingerprint: str,
-        prompt_sha256: str,
-    ) -> ImageFeatureBatch | None:
-        path = self._generated_cache_path(update, fingerprint)
-        if not path.exists():
-            return None
-        if not path.is_file() or path.is_symlink():
-            raise EvaluationError("generated feature cache is not a regular file")
-        try:
-            raw = cast(
-                object,
-                torch.load(path, map_location="cpu", weights_only=True),
-            )
-        except (OSError, RuntimeError, ValueError) as error:
-            raise EvaluationError("generated feature cache cannot be loaded") from error
-        if type(raw) is not dict:
-            raise EvaluationError("generated feature cache document is invalid")
-        document = cast(dict[str, object], raw)
-        expected: dict[str, object] = {
-            "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
-            "run_id": self.config.run.run_id,
-            "update": update,
-            "checkpoint_fingerprint": fingerprint,
-            "prompt_sha256": prompt_sha256,
-            "sample_count": self.evaluation.sample_count,
-            "resolution": self.config.train.resolution,
-            "sampling_profile": self.evaluation.sampling_profile,
-            "clip_model_id": CLIP_MODEL_ID,
-            "preprocessing": REAL_PREPROCESSING_ID,
-        }
-        if any(document.get(key) != value for key, value in expected.items()):
-            raise EvaluationError("generated feature cache metadata differs")
-        inception = document.get("inception_features")
-        clip = document.get("clip_features")
-        logits = document.get("inception_logits")
-        if not all(
-            isinstance(value, torch.Tensor) for value in (inception, clip, logits)
-        ):
-            raise EvaluationError("generated feature cache tensors are missing")
-        bundle = ImageFeatureBatch(
-            cast(torch.Tensor, inception),
-            cast(torch.Tensor, clip),
-            cast(torch.Tensor, logits),
-        )
-        if bundle.count != self.evaluation.sample_count:
-            raise EvaluationError("generated feature cache count differs")
-        print(f"[eval] reusing generated feature cache: {path}", flush=True)
-        return bundle.to(self.device)
-
-    def _save_generated_cache(
-        self,
-        update: int,
-        *,
-        fingerprint: str,
-        prompt_sha256: str,
-        features: ImageFeatureBatch,
-    ) -> None:
-        path = self._generated_cache_path(update, fingerprint)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        cpu_features = features.cpu()
-        try:
-            torch.save(
-                {
-                    "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
-                    "run_id": self.config.run.run_id,
-                    "update": update,
-                    "checkpoint_fingerprint": fingerprint,
-                    "prompt_sha256": prompt_sha256,
-                    "sample_count": self.evaluation.sample_count,
-                    "resolution": self.config.train.resolution,
-                    "sampling_profile": self.evaluation.sampling_profile,
-                    "clip_model_id": CLIP_MODEL_ID,
-                    "preprocessing": REAL_PREPROCESSING_ID,
-                    "inception_features": cpu_features.inception_features,
-                    "clip_features": cpu_features.clip_features,
-                    "inception_logits": cpu_features.inception_logits,
-                },
-                temporary,
-            )
-            with temporary.open("rb") as handle:
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
-        print(f"[eval] saved generated feature cache: {path}", flush=True)
-
     def _real(self) -> ImageFeatureBatch:
         if self._real_features is not None:
             return self._real_features
         shard_root = self.root / self.evaluation.validation_shard_root
-        selection_path = self.root / self.config.data.validation.selection_path
-        dataset_fingerprint = validation_dataset_fingerprint(shard_root, selection_path)
         real_sample_count = self.evaluation.resolved_real_sample_count
-        cache = (
-            self.output
-            / "cache"
-            / (
-                f"real-features-v{FEATURE_CACHE_SCHEMA_VERSION}-n"
-                f"{real_sample_count}-r{self.config.train.resolution}-"
-                f"{dataset_fingerprint[:16]}.pt"
-            )
-        )
-        expected: dict[str, object] = {
-            "schema_version": FEATURE_CACHE_SCHEMA_VERSION,
-            "dataset_fingerprint": dataset_fingerprint,
-            "sample_count": real_sample_count,
-            "resolution": self.config.train.resolution,
-            "clip_model_id": CLIP_MODEL_ID,
-            "preprocessing": REAL_PREPROCESSING_ID,
-        }
-        if cache.exists():
-            if not cache.is_file() or cache.is_symlink():
-                raise EvaluationError("real feature cache is not a regular file")
-            try:
-                raw = cast(
-                    object,
-                    torch.load(cache, map_location="cpu", weights_only=True),
-                )
-            except (OSError, RuntimeError, ValueError) as error:
-                raise EvaluationError("real feature cache cannot be loaded") from error
-            if type(raw) is not dict:
-                raise EvaluationError("real feature cache document is invalid")
-            document = cast(dict[str, object], raw)
-            if any(document.get(key) != value for key, value in expected.items()):
-                raise EvaluationError("real feature cache metadata differs")
-            inception = document.get("real_inception_features")
-            clip = document.get("real_clip_features")
-            logits = document.get("real_inception_logits")
-            if not all(
-                isinstance(value, torch.Tensor) for value in (inception, clip, logits)
-            ):
-                raise EvaluationError("real feature cache tensors are missing")
-            loaded = ImageFeatureBatch(
-                cast(torch.Tensor, inception),
-                cast(torch.Tensor, clip),
-                cast(torch.Tensor, logits),
-            )
-            if loaded.count != real_sample_count:
-                raise EvaluationError("real feature cache count differs")
-            self._real_features = loaded.to(self.device)
-            print(f"[eval] using real feature cache: {cache}", flush=True)
-            return self._real_features
-
-        print("[eval] computing one-time real Inception/CLIP/logit cache", flush=True)
+        print("[eval] computing one-time real Inception/CLIP/logit features", flush=True)
         feature_batches: list[ImageFeatureBatch] = []
         completed = 0
         for batch in iter_validation_image_batches(
@@ -761,50 +577,16 @@ class TrainingEvaluator:
         )
         if computed.count != real_sample_count:
             raise EvaluationError("computed real feature count differs")
-        cpu_features = computed.cpu()
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        temporary = cache.with_name(f".{cache.name}.{os.getpid()}.tmp")
-        try:
-            torch.save(
-                {
-                    **expected,
-                    "real_inception_features": cpu_features.inception_features,
-                    "real_clip_features": cpu_features.clip_features,
-                    "real_inception_logits": cpu_features.inception_logits,
-                },
-                temporary,
-            )
-            with temporary.open("rb") as handle:
-                os.fsync(handle.fileno())
-            os.replace(temporary, cache)
-        finally:
-            temporary.unlink(missing_ok=True)
         self._real_features = computed
-        print(f"[eval] saved real feature cache: {cache}", flush=True)
         return self._real_features
 
     def _finalize(
         self,
         update: int,
         features: ImageFeatureBatch,
-        *,
-        fingerprint: str | None,
-        prompt_sha256: str,
-        save_generated_cache: bool,
     ) -> EvaluationResult:
         if features.count != self.evaluation.sample_count:
             raise EvaluationError("generated feature count differs before metrics")
-        if save_generated_cache:
-            if fingerprint is None:
-                raise EvaluationError(
-                    "generated cache publication requires a checkpoint fingerprint"
-                )
-            self._save_generated_cache(
-                update,
-                fingerprint=fingerprint,
-                prompt_sha256=prompt_sha256,
-                features=features,
-            )
         real = self._real()
         generated = FeatureStats.from_features(
             features.inception_features,
@@ -905,186 +687,145 @@ class TrainingEvaluator:
             self._models,
         )
         prompt_path = self.root / self.evaluation.prompt_path
-        prompt_sha256 = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
         cases = _stage_cases(
             prompt_path,
             self.evaluation.sample_count,
             resolution=self.config.train.resolution,
         )
-        fingerprint = self._checkpoint_fingerprint(update)
-        cached = self.progress.run_on_rank(
-            f"evaluation/update-{update}/load-generated-cache",
-            0,
-            lambda: (
-                self._load_generated_cache(
-                    update,
-                    fingerprint=fingerprint,
-                    prompt_sha256=prompt_sha256,
-                )
-                if fingerprint is not None
-                else None
-            ),
-        )
-        cache_flags = self._gather(
-            torch.tensor(
-                [int(cached is not None)],
-                dtype=torch.int64,
-                device=self.device,
-            )
-        )
-        if cache_flags.shape != (self.world_size,):
-            raise EvaluationError("generated cache flags have an invalid shape")
-        if self.world_size > 1 and bool(cache_flags[1:].any().item()):
-            raise EvaluationError("only rank zero may own generated cache state")
-        cache_hit = bool(cache_flags[0].item())
         feature_values: ImageFeatureBatch | None = None
-        if cache_hit:
-            if self.is_main_process:
-                if cached is None:
-                    raise EvaluationError(
-                        "rank zero generated cache state is inconsistent"
-                    )
-                feature_values = cached
-        else:
-            local_start, local_end = _rank_case_bounds(
+        local_start, local_end = _rank_case_bounds(
+            len(cases),
+            self.evaluation.batch_size,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+        local_cases = cases[local_start:local_end]
+
+        def generate_local_features() -> ImageFeatureBatch:
+            groups: dict[tuple[int, int], list[PromptCase]] = {}
+            for case in local_cases:
+                groups.setdefault((case.height, case.width), []).append(case)
+            generated_features: list[ImageFeatureBatch] = []
+            was_training = self.composite.training
+            self.composite.eval()
+            try:
+                completed = 0
+                for group in groups.values():
+                    for start in range(
+                        0,
+                        len(group),
+                        self.evaluation.batch_size,
+                    ):
+                        batch_cases = tuple(
+                            group[start : start + self.evaluation.batch_size]
+                        )
+                        images = _generate(
+                            batch_cases,
+                            config=self.config,
+                            evaluation=self.evaluation,
+                            composite=self.composite,
+                            qwen=self.qwen,
+                            vae=self.vae,
+                            device=self.device,
+                            growth_alpha=self.growth_alpha,
+                        )
+                        generated_features.append(
+                            self._models().extract(images)
+                        )
+                        completed += len(batch_cases)
+                        print(
+                            f"[eval] rank={self.rank} 已处理 "
+                            f"{completed}/{len(local_cases)}",
+                            flush=True,
+                        )
+            finally:
+                self.composite.train(was_training)
+            result = ImageFeatureBatch.concatenate(
+                tuple(generated_features)
+            )
+            if result.count != len(local_cases):
+                raise EvaluationError(
+                    "local generated feature count is invalid"
+                )
+            return result
+
+        local_feature_values = self.progress.run_all(
+            f"evaluation/update-{update}/generate-local-features",
+            generate_local_features,
+        )
+        rank_bounds = tuple(
+            _rank_case_bounds(
                 len(cases),
                 self.evaluation.batch_size,
-                rank=self.rank,
+                rank=process_index,
                 world_size=self.world_size,
             )
-            local_cases = cases[local_start:local_end]
-
-            def generate_local_features() -> ImageFeatureBatch:
-                groups: dict[tuple[int, int], list[PromptCase]] = {}
-                for case in local_cases:
-                    groups.setdefault((case.height, case.width), []).append(case)
-                generated_features: list[ImageFeatureBatch] = []
-                was_training = self.composite.training
-                self.composite.eval()
-                try:
-                    completed = 0
-                    for group in groups.values():
-                        for start in range(
-                            0,
-                            len(group),
-                            self.evaluation.batch_size,
-                        ):
-                            batch_cases = tuple(
-                                group[start : start + self.evaluation.batch_size]
-                            )
-                            images = _generate(
-                                batch_cases,
-                                config=self.config,
-                                evaluation=self.evaluation,
-                                composite=self.composite,
-                                qwen=self.qwen,
-                                vae=self.vae,
-                                device=self.device,
-                                growth_alpha=self.growth_alpha,
-                            )
-                            generated_features.append(
-                                self._models().extract(images)
-                            )
-                            completed += len(batch_cases)
-                            print(
-                                f"[eval] rank={self.rank} 已处理 "
-                                f"{completed}/{len(local_cases)}",
-                                flush=True,
-                            )
-                finally:
-                    self.composite.train(was_training)
-                result = ImageFeatureBatch.concatenate(
-                    tuple(generated_features)
-                )
-                if result.count != len(local_cases):
-                    raise EvaluationError(
-                        "local generated feature count is invalid"
+            for process_index in range(self.world_size)
+        )
+        rank_counts = tuple(end - start for start, end in rank_bounds)
+        max_rank_count = max(rank_counts)
+        padded_inception = functional.pad(
+            local_feature_values.inception_features,
+            (0, 0, 0, max_rank_count - len(local_cases)),
+        )
+        padded_clip = functional.pad(
+            local_feature_values.clip_features,
+            (0, 0, 0, max_rank_count - len(local_cases)),
+        )
+        padded_logits = functional.pad(
+            local_feature_values.inception_logits,
+            (0, 0, 0, max_rank_count - len(local_cases)),
+        )
+        gathered_inception = self._gather(padded_inception)
+        gathered_clip = self._gather(padded_clip)
+        gathered_logits = self._gather(padded_logits)
+        if self.is_main_process:
+            inception_chunks = gathered_inception.reshape(
+                self.world_size,
+                max_rank_count,
+                INCEPTION_FEATURE_DIM,
+            )
+            clip_chunks = gathered_clip.reshape(
+                self.world_size,
+                max_rank_count,
+                CLIP_EMBEDDING_DIM,
+            )
+            logit_chunks = gathered_logits.reshape(
+                self.world_size,
+                max_rank_count,
+                INCEPTION_LOGIT_DIM,
+            )
+            feature_values = ImageFeatureBatch(
+                torch.cat(
+                    tuple(
+                        inception_chunks[index, :count]
+                        for index, count in enumerate(rank_counts)
                     )
-                return result
-
-            local_feature_values = self.progress.run_all(
-                f"evaluation/update-{update}/generate-local-features",
-                generate_local_features,
-            )
-            rank_bounds = tuple(
-                _rank_case_bounds(
-                    len(cases),
-                    self.evaluation.batch_size,
-                    rank=process_index,
-                    world_size=self.world_size,
-                )
-                for process_index in range(self.world_size)
-            )
-            rank_counts = tuple(end - start for start, end in rank_bounds)
-            max_rank_count = max(rank_counts)
-            padded_inception = functional.pad(
-                local_feature_values.inception_features,
-                (0, 0, 0, max_rank_count - len(local_cases)),
-            )
-            padded_clip = functional.pad(
-                local_feature_values.clip_features,
-                (0, 0, 0, max_rank_count - len(local_cases)),
-            )
-            padded_logits = functional.pad(
-                local_feature_values.inception_logits,
-                (0, 0, 0, max_rank_count - len(local_cases)),
-            )
-            gathered_inception = self._gather(padded_inception)
-            gathered_clip = self._gather(padded_clip)
-            gathered_logits = self._gather(padded_logits)
-            if self.is_main_process:
-                inception_chunks = gathered_inception.reshape(
-                    self.world_size,
-                    max_rank_count,
-                    INCEPTION_FEATURE_DIM,
-                )
-                clip_chunks = gathered_clip.reshape(
-                    self.world_size,
-                    max_rank_count,
-                    CLIP_EMBEDDING_DIM,
-                )
-                logit_chunks = gathered_logits.reshape(
-                    self.world_size,
-                    max_rank_count,
-                    INCEPTION_LOGIT_DIM,
-                )
-                feature_values = ImageFeatureBatch(
-                    torch.cat(
-                        tuple(
-                            inception_chunks[index, :count]
-                            for index, count in enumerate(rank_counts)
-                        )
-                    ),
-                    torch.cat(
-                        tuple(
-                            clip_chunks[index, :count]
-                            for index, count in enumerate(rank_counts)
-                        )
-                    ),
-                    torch.cat(
-                        tuple(
-                            logit_chunks[index, :count]
-                            for index, count in enumerate(rank_counts)
-                        )
-                    ),
-                )
-                if feature_values.count != self.evaluation.sample_count:
-                    raise EvaluationError(
-                        "gathered generated feature count differs"
+                ),
+                torch.cat(
+                    tuple(
+                        clip_chunks[index, :count]
+                        for index, count in enumerate(rank_counts)
                     )
+                ),
+                torch.cat(
+                    tuple(
+                        logit_chunks[index, :count]
+                        for index, count in enumerate(rank_counts)
+                    )
+                ),
+            )
+            if feature_values.count != self.evaluation.sample_count:
+                raise EvaluationError(
+                    "gathered generated feature count differs"
+                )
 
         def finalize_on_main() -> EvaluationResult:
             if feature_values is None:
                 raise EvaluationError(
                     "rank zero generated features are unavailable"
                 )
-            return self._finalize(
-                update,
-                feature_values,
-                fingerprint=fingerprint,
-                prompt_sha256=prompt_sha256,
-                save_generated_cache=not cache_hit and fingerprint is not None,
-            )
+            return self._finalize(update, feature_values)
 
         result = self.progress.run_on_rank(
             f"evaluation/update-{update}/finalize-metrics",

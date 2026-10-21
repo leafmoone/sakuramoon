@@ -1,19 +1,19 @@
 """Asset-contract tests for the frozen PE-Spatial-B16-512 iREPA teacher.
 
-Covers: correct fingerprint accepted, wrong hash / size / metadata
-rejected, symlink and path-escape rejected, and absent/disabled iREPA
-performing no asset requirement.  Uses a small deterministic synthetic
-weight file (never the real 346MB asset).
+Covers: local files, size and model metadata checks without weight-content
+reads, symlink and path-escape rejection, and absent/disabled iREPA requiring
+no asset. Uses small synthetic files, never the real teacher weights.
 """
 
 from __future__ import annotations
 
+import io
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
-import torch
 
 from sakuramoon.assets.pe_spatial import (
     PE_SPATIAL_ASSET_METADATA_FILENAME,
@@ -21,7 +21,6 @@ from sakuramoon.assets.pe_spatial import (
     PeSpatialTeacherFingerprint,
     pe_spatial_teacher_required,
     require_local_pe_spatial_teacher,
-    sha256_file,
     verify_pe_spatial_teacher_asset,
     write_pe_spatial_asset_metadata,
 )
@@ -55,7 +54,6 @@ def _fingerprint(
     values: dict[str, Any] = {
         "teacher_id": "facebook/PE-Spatial-B16-512",
         "filename": PE_SPATIAL_TEACHER_FILENAME,
-        "sha256": sha256_file(weight_path),
         "file_size_bytes": weight_path.stat().st_size,
         "patch_size": 16,
         "width": 768,
@@ -70,7 +68,7 @@ def _fingerprint(
 def _make_asset(
     tmp_path: Path,
     *,
-    mutate_meta: Any = None,
+    mutate_meta: Callable[[PeSpatialTeacherFingerprint], PeSpatialTeacherFingerprint] | None = None,
 ) -> tuple[Path, Path, PeSpatialTeacherFingerprint]:
     """Build a valid synthetic asset directory; return (root, dir, fp)."""
 
@@ -78,10 +76,7 @@ def _make_asset(
     asset_dir = root / "model" / "pe_spatial_b16_512"
     asset_dir.mkdir(parents=True)
     weight_path = asset_dir / PE_SPATIAL_TEACHER_FILENAME
-    torch.save(
-        {"state_dict": {"conv1.weight": torch.arange(64.0).reshape(8, 8)}},
-        weight_path,
-    )
+    weight_path.write_bytes(b"synthetic teacher weights")
     fingerprint = _fingerprint(weight_path)
     if mutate_meta is not None:
         fingerprint = mutate_meta(fingerprint)
@@ -97,7 +92,7 @@ def _verify(root: Path, fingerprint: PeSpatialTeacherFingerprint) -> Path:
     )
 
 
-def test_correct_fingerprint_accepted(tmp_path: Path) -> None:
+def test_metadata_without_sha256_accepted(tmp_path: Path) -> None:
     root, asset_dir, fingerprint = _make_asset(tmp_path)
 
     weight_path = _verify(root, fingerprint)
@@ -109,16 +104,18 @@ def test_correct_fingerprint_accepted(tmp_path: Path) -> None:
     assert loaded == weight_path
 
 
-def test_wrong_hash_rejected(tmp_path: Path) -> None:
-    def flip_hash(fp: PeSpatialTeacherFingerprint) -> PeSpatialTeacherFingerprint:
-        return _fingerprint(
-            _weights(tmp_path), sha256="0" * 64
-        )
+@pytest.mark.parametrize("extra_value", [None, "not a digest", {"uninspected": [1, False]}])
+def test_extra_metadata_sha256_is_ignored(tmp_path: Path, extra_value: Any) -> None:
+    root, asset_dir, fingerprint = _make_asset(tmp_path)
+    metadata_path = asset_dir / PE_SPATIAL_ASSET_METADATA_FILENAME
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["sha256"] = extra_value
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    root, _, _ = _make_asset(tmp_path, mutate_meta=flip_hash)
-    actual = _fingerprint(_weights(tmp_path))
-    with pytest.raises(ValueError, match="field sha256"):
-        _verify(root, actual)
+    assert _verify(root, fingerprint) == asset_dir / PE_SPATIAL_TEACHER_FILENAME
+    assert require_local_pe_spatial_teacher(
+        root, "model/pe_spatial_b16_512", expected=fingerprint
+    ) == asset_dir / PE_SPATIAL_TEACHER_FILENAME
 
 
 def _weights(tmp_path: Path) -> Path:
@@ -131,7 +128,7 @@ def _weights(tmp_path: Path) -> Path:
     )
 
 
-def test_wrong_size_rejected(tmp_path: Path) -> None:
+def test_wrong_size_metadata_rejected(tmp_path: Path) -> None:
     root, _, _ = _make_asset(
         tmp_path,
         mutate_meta=lambda fp: _fingerprint(
@@ -142,9 +139,20 @@ def test_wrong_size_rejected(tmp_path: Path) -> None:
         _verify(root, _fingerprint(_weights(tmp_path)))
 
 
+@pytest.mark.parametrize("size_delta", [-1, 1])
+def test_wrong_weight_file_size_rejected(tmp_path: Path, size_delta: int) -> None:
+    root, asset_dir, fingerprint = _make_asset(tmp_path)
+    weight_path = asset_dir / PE_SPATIAL_TEACHER_FILENAME
+    weight_path.write_bytes(b"x" * (fingerprint.file_size_bytes + size_delta))
+
+    with pytest.raises(ValueError, match="teacher weight file size"):
+        _verify(root, fingerprint)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("filename", "other.pt"),
         ("width", 512),
         ("depth", 8),
         ("patch_size", 32),
@@ -164,27 +172,37 @@ def test_wrong_metadata_rejected(
         _verify(root, _fingerprint(_weights(tmp_path)))
 
 
-def test_hash_rejects_file_modified_after_metadata(tmp_path: Path) -> None:
+def test_asset_checks_do_not_read_weight_contents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root, asset_dir, fingerprint = _make_asset(tmp_path)
-    # Corrupt the weight file after the metadata was written: the SHA256
-    # verification must reject the drift even though the metadata is
-    # internally consistent.
     weight_path = asset_dir / PE_SPATIAL_TEACHER_FILENAME
-    weight_path.write_bytes(b"\x00" * weight_path.stat().st_size)
-    with pytest.raises(ValueError, match="SHA256"):
-        _verify(root, fingerprint)
+    original_open = io.open
+
+    def guarded_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if not isinstance(file, int) and Path(file) == weight_path:
+            pytest.fail("asset checks must not open the weight file")
+        return cast("io.IOBase", original_open(file, *args, **kwargs))
+
+    monkeypatch.setattr(io, "open", guarded_open)
+    monkeypatch.setattr("builtins.open", guarded_open)
+
+    assert _verify(root, fingerprint) == weight_path
+    assert require_local_pe_spatial_teacher(
+        root, "model/pe_spatial_b16_512", expected=fingerprint
+    ) == weight_path
 
 
-def test_symlink_weight_rejected(tmp_path: Path) -> None:
-    root, asset_dir, _ = _make_asset(tmp_path)
-    real = asset_dir / "real.pt"
-    real.write_bytes(b"weights")
-    weight_path = asset_dir / PE_SPATIAL_TEACHER_FILENAME
-    weight_path.unlink()
-    weight_path.symlink_to(real)
+@pytest.mark.parametrize(
+    "filename", [PE_SPATIAL_TEACHER_FILENAME, PE_SPATIAL_ASSET_METADATA_FILENAME]
+)
+def test_symlink_file_rejected(tmp_path: Path, filename: str) -> None:
+    root, asset_dir, fingerprint = _make_asset(tmp_path)
+    path = asset_dir / filename
+    real = asset_dir / f"real-{filename}"
+    path.rename(real)
+    path.symlink_to(real)
 
-    fingerprint = _fingerprint(real, file_size_bytes=7)
-    write_pe_spatial_asset_metadata(asset_dir, fingerprint)
     with pytest.raises(ValueError, match="symlink"):
         _verify(root, fingerprint)
 
@@ -195,16 +213,17 @@ def test_path_escape_rejected(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     weight_path = outside / PE_SPATIAL_TEACHER_FILENAME
-    torch.save({"x": torch.zeros(1)}, weight_path)
+    weight_path.write_bytes(b"synthetic teacher weights")
     fingerprint = _fingerprint(weight_path)
     write_pe_spatial_asset_metadata(outside, fingerprint)
 
-    with pytest.raises(ValueError, match="escapes the repository root"):
-        verify_pe_spatial_teacher_asset(
-            Path("a/b/../../outside"),
-            fingerprint,
-            repository_root=root,
-        )
+    for asset_path in (Path("a/b/../../outside"), outside):
+        with pytest.raises(ValueError, match="escapes the repository root"):
+            verify_pe_spatial_teacher_asset(
+                asset_path,
+                fingerprint,
+                repository_root=root,
+            )
 
 
 def test_missing_directory_raises_file_not_found(tmp_path: Path) -> None:
@@ -213,7 +232,6 @@ def test_missing_directory_raises_file_not_found(tmp_path: Path) -> None:
     fingerprint = PeSpatialTeacherFingerprint(
         teacher_id="facebook/PE-Spatial-B16-512",
         filename=PE_SPATIAL_TEACHER_FILENAME,
-        sha256="0" * 64,
         file_size_bytes=1,
         patch_size=16,
         width=768,
@@ -221,6 +239,17 @@ def test_missing_directory_raises_file_not_found(tmp_path: Path) -> None:
         input_normalization="minus_one_to_one",
         source_model="facebook/PE-Spatial-B16-512",
     )
+    with pytest.raises(FileNotFoundError):
+        _verify(root, fingerprint)
+
+
+@pytest.mark.parametrize(
+    "filename", [PE_SPATIAL_TEACHER_FILENAME, PE_SPATIAL_ASSET_METADATA_FILENAME]
+)
+def test_missing_file_raises_file_not_found(tmp_path: Path, filename: str) -> None:
+    root, asset_dir, fingerprint = _make_asset(tmp_path)
+    (asset_dir / filename).unlink()
+
     with pytest.raises(FileNotFoundError):
         _verify(root, fingerprint)
 
@@ -239,7 +268,6 @@ def test_asset_json_roundtrip_matches_spec_fields(tmp_path: Path) -> None:
     assert set(payload) == {
         "teacher_id",
         "filename",
-        "sha256",
         "file_size_bytes",
         "patch_size",
         "width",

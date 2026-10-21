@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import tarfile
 from pathlib import Path
+from typing import cast
 
 import pytest
 import torch
@@ -137,7 +138,7 @@ def test_max_workers_validation(
     with pytest.raises(ValueError, match="worker count"):
         tuple(
             iter_validation_image_batches(
-                shard_root, 1, 1, output_size=8, max_workers=2.0
+                shard_root, 1, 1, output_size=8, max_workers=cast(int, 2.0)
             )
         )
 
@@ -150,3 +151,46 @@ def test_single_worker_smoke(
     )
 
     assert [len(batch.sample_ids) for batch in batches] == [3, 2]
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+@pytest.mark.parametrize("phase", ["scan", "reader"])
+def test_nonregular_tar_is_rejected_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    phase: str,
+) -> None:
+    archive = tmp_path / "a.tar"
+    target = tmp_path / "target"
+    _write_tar(archive, {"image.png": _solid_png((1, 2, 3))})
+    target.write_bytes(archive.read_bytes())
+    original_is_file, original_open = Path.is_file, tarfile.open
+    checks = 0
+    opens: list[Path] = []
+
+    def is_file(path: Path) -> bool:
+        nonlocal checks
+        if path == archive:
+            checks += 1
+            if checks == (1 if phase == "scan" else 2):
+                archive.unlink()
+                if kind == "directory":
+                    archive.mkdir()
+                else:
+                    archive.symlink_to(target)
+        return original_is_file(path)
+
+    def open_tar(path: Path, mode: str) -> tarfile.TarFile:
+        assert mode == "r:*"
+        assert phase == "reader" and not opens, "rejected tar must not be opened"
+        opens.append(path)
+        return original_open(path, "r:*")
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+    monkeypatch.setattr(tarfile, "open", open_tar)
+    with pytest.raises(EvaluationFeatureError, match="not a regular file"):
+        tuple(
+            iter_validation_image_batches(tmp_path, 1, 1, output_size=8, max_workers=1)
+        )
+    assert opens == ([archive] if phase == "reader" else [])

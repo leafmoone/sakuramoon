@@ -1,8 +1,8 @@
 """Frozen PE-Spatial-B16-512 teacher encoder for iREPA (training-only).
 
 Phase 3 integrates the official PE-Spatial-B16-512 vision encoder as a
-frozen teacher: it is loaded from the fingerprint-bound local asset, cast
-to BF16, and run under ``torch.no_grad()`` on the exact final GPU training
+frozen teacher: it is loaded from the size- and metadata-checked local asset,
+cast to BF16, and run under ``torch.no_grad()`` on the exact final GPU training
 image tensor (``[B,3,H,W]`` bfloat16 in ``[-1,1]``, as produced by
 ``SingleGpuBatchRuntime.prepare``).  The teacher is deliberately kept out
 of ``TrainableComposite``: it has no optimizer entry, no DDP wrapping, and
@@ -63,9 +63,9 @@ def _normalize_checkpoint_state_dict(state_dict: dict[str, torch.Tensor]) -> dic
 class FrozenPESpatialEncoder(nn.Module):
     """Frozen, BF16, no-grad PE-Spatial-B16-512 vision teacher.
 
-    Construction is private: use :meth:`load_asset`, which verifies the
-    fingerprint-bound asset, performs a strict (fail-closed) state-dict
-    load, and freezes the module.  Only the single approved model is
+    Construction is private: use :meth:`load_asset`, which checks the
+    local asset's size and model metadata, performs a strict (fail-closed)
+    state-dict load, and freezes the module. Only the single approved model is
     representable: the architecture is fixed to the official
     ``PE-Spatial-B16-512`` configuration.
     """

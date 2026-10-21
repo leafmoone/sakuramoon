@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import os
 import tarfile
@@ -28,7 +27,6 @@ from torchvision.transforms import (  # pyright: ignore[reportMissingTypeStubs]
 from sakuramoon.assets import require_local_clip
 from sakuramoon.data.image_ops import convert_to_rgb
 
-FEATURE_CACHE_SCHEMA_VERSION = 2
 REAL_PREPROCESSING_ID = "alpha-white-rgb-square-stretch-bilinear-v3"
 CLIP_MODEL_ID = "openai/clip-vit-large-patch14-336"
 CLIP_INPUT_SIZE = 336
@@ -43,12 +41,10 @@ _INCEPTION_WEIGHT_FILES = (
     (
         "pt_inception-2015-12-05-6726825d.pth",
         95_628_359,
-        "6726825d0af5f729cebd5821db510b11b1cfad8faad88a03f1befd49fb9129b2",
     ),
     (
         "inception_v3_google-0cc3c7bd.pth",
         108_949_747,
-        "0cc3c7bd75056d25e46cba549dc184522069b81e9787eff6df84f397bd52a5ef",
     ),
 )
 
@@ -155,36 +151,20 @@ class ValidationImageBatch:
             raise EvaluationFeatureError("validation image batch is invalid")
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError as error:
-        raise EvaluationFeatureError(
-            f"evaluation weight cannot be read: {path}"
-        ) from error
-    return digest.hexdigest()
-
-
 def require_local_inception_weights() -> tuple[Path, Path]:
-    """Return fully verified local FID/IS weights without permitting downloads."""
+    """Return local FID/IS weights after file and size checks, without downloads."""
 
     root = Path(torch.hub.get_dir()) / "checkpoints"
     resolved: list[Path] = []
-    for name, expected_size, expected_sha256 in _INCEPTION_WEIGHT_FILES:
+    for name, expected_size in _INCEPTION_WEIGHT_FILES:
         path = root / name
         if not path.is_file() or path.is_symlink():
             raise EvaluationFeatureError(
                 f"required local evaluation weight is missing: {path}"
             )
-        if (
-            path.stat().st_size != expected_size
-            or _file_sha256(path) != expected_sha256
-        ):
+        if path.stat().st_size != expected_size:
             raise EvaluationFeatureError(
-                f"local evaluation weight failed integrity verification: {path}"
+                f"local evaluation weight size differs: {path}"
             )
         resolved.append(path)
     return resolved[0], resolved[1]
@@ -314,28 +294,6 @@ def _require_images(images: torch.Tensor) -> None:
         raise EvaluationFeatureError("feature images must be uint8 [N,3,H,W]")
 
 
-def validation_dataset_fingerprint(
-    shard_root: Path,
-    selection_path: Path,
-) -> str:
-    if not selection_path.is_file() or selection_path.is_symlink():
-        raise EvaluationFeatureError("validation selection is missing or symlinked")
-    archives = sorted(shard_root.rglob("*.tar"))
-    if not archives:
-        raise EvaluationFeatureError(f"validation tar files are absent: {shard_root}")
-    digest = hashlib.sha256()
-    digest.update(selection_path.read_bytes())
-    for archive in archives:
-        if not archive.is_file() or archive.is_symlink():
-            raise EvaluationFeatureError("validation archive is not a regular file")
-        stat = archive.stat()
-        digest.update(archive.relative_to(shard_root).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(stat.st_size).encode("ascii"))
-        digest.update(b"\n")
-    return digest.hexdigest()
-
-
 @dataclass(frozen=True, slots=True)
 class _ValidationImageJob:
     index: int
@@ -397,6 +355,8 @@ def iter_validation_image_batches(
     sample_ids: list[str] = []
     seen: set[str] = set()
     for archive in archives:
+        if not archive.is_file() or archive.is_symlink():
+            raise EvaluationFeatureError("validation archive is not a regular file")
         members: list[tarfile.TarInfo] = []
         with tarfile.open(archive, "r:*") as handle:
             for member in handle:
@@ -439,6 +399,8 @@ def iter_validation_image_batches(
     ) -> None:
         try:
             if job_error[0] is None:
+                if not archive_path.is_file() or archive_path.is_symlink():
+                    raise EvaluationFeatureError("validation archive is not a regular file")
                 with tarfile.open(archive_path, "r:*") as handle:
                     for position, member in enumerate(members):
                         global_index = offset + position
@@ -560,7 +522,6 @@ __all__ = [
     "CLIP_EMBEDDING_DIM",
     "CLIP_INPUT_SIZE",
     "CLIP_MODEL_ID",
-    "FEATURE_CACHE_SCHEMA_VERSION",
     "INCEPTION_FEATURE_DIM",
     "INCEPTION_LOGIT_DIM",
     "REAL_PREPROCESSING_ID",
@@ -571,6 +532,5 @@ __all__ = [
     "ValidationImageBatch",
     "iter_validation_image_batches",
     "require_local_inception_weights",
-    "validation_dataset_fingerprint",
     "validation_image_batches",
 ]

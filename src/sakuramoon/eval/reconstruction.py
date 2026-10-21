@@ -18,7 +18,6 @@ from sakuramoon.encoders.mage_vae import load_local_mage_vae
 from sakuramoon.eval.features import (
     REAL_PREPROCESSING_ID,
     InceptionFeatureModels,
-    validation_dataset_fingerprint,
     validation_image_batches,
 )
 from sakuramoon.eval.metrics import FeatureStats, frechet_inception_distance
@@ -128,10 +127,6 @@ def evaluate_vae_reconstruction(
     experiment_root = output_root / f"n{sample_count}-r{resolution}"
     experiment_root.mkdir(parents=True, exist_ok=False)
     validation_root = repository_root / config.evaluation.validation_shard_root
-    selection_path = repository_root / config.data.validation.selection_path
-    dataset_fingerprint = validation_dataset_fingerprint(
-        validation_root, selection_path
-    )
     batches = validation_image_batches(
         validation_root,
         sample_count * 2,
@@ -276,7 +271,6 @@ def evaluate_vae_reconstruction(
         metadata_path,
         {
             "schema_version": 1,
-            "dataset_fingerprint": dataset_fingerprint,
             "preprocessing": REAL_PREPROCESSING_ID,
             "sample_count": sample_count,
             "resolution": resolution,
@@ -293,7 +287,6 @@ def evaluate_vae_reconstruction(
             "resolution": resolution,
             "batch_size": batch_size,
             "comparison_count": comparison_count,
-            "dataset_fingerprint": dataset_fingerprint,
             "preprocessing": REAL_PREPROCESSING_ID,
             "reconstruction_fid": reconstruction_fid,
             "lpips_alex": lpips_mean,

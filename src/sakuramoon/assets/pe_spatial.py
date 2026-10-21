@@ -1,15 +1,14 @@
-"""Asset contract for the frozen PE-Spatial-B16-512 iREPA teacher.
+"""Local PE-Spatial teacher asset checks for iREPA.
 
-The teacher weights are a local, fingerprint-bound asset
-(``model/pe_spatial_b16_512/`` by default): the SHA256 of the weight file
-and the ``asset.json`` metadata are verified fail-closed at load time.
+The teacher weights are a local asset (``model/pe_spatial_b16_512/`` by
+default): the weight file's presence and size and the ``asset.json`` model
+metadata are checked at load time, without reading the weight contents.
 Absent or disabled iREPA never touches this directory: the checks below
 are only invoked when ``config.irepa.enabled is True``.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,25 +19,15 @@ from sakuramoon.config.schema import IRepaConfig
 PE_SPATIAL_TEACHER_FILENAME = "PE-Spatial-B16-512.pt"
 PE_SPATIAL_ASSET_METADATA_FILENAME = "asset.json"
 
-# Approved upstream asset: Hugging Face facebook/PE-Spatial-B16-512, file
-# PE-Spatial-B16-512.pt, fetched 2025-09-02.  The SHA256 below is the
-# verification constant; a mismatched local file is a hard failure, never
-# an auto-accepted re-download.
-APPROVED_PE_SPATIAL_B16_512_SHA256 = (
-    "86217607f0bb28c0adb5ac3f9b0608ae22f6fb634bf1c16b2316847e8148a2a5"
-)
 APPROVED_PE_SPATIAL_B16_512_SIZE_BYTES = 345_783_707
-
-_SHA256_CHUNK_BYTES = 1 << 20
 
 
 @dataclass(frozen=True)
 class PeSpatialTeacherFingerprint:
-    """Binding between the teacher asset and the approved model identity."""
+    """Expected local asset metadata for the approved teacher model."""
 
     teacher_id: str
     filename: str
-    sha256: str
     file_size_bytes: int
     patch_size: int
     width: int
@@ -50,7 +39,6 @@ class PeSpatialTeacherFingerprint:
 APPROVED_PE_SPATIAL_B16_512 = PeSpatialTeacherFingerprint(
     teacher_id="facebook/PE-Spatial-B16-512",
     filename=PE_SPATIAL_TEACHER_FILENAME,
-    sha256=APPROVED_PE_SPATIAL_B16_512_SHA256,
     file_size_bytes=APPROVED_PE_SPATIAL_B16_512_SIZE_BYTES,
     patch_size=16,
     width=768,
@@ -58,16 +46,6 @@ APPROVED_PE_SPATIAL_B16_512 = PeSpatialTeacherFingerprint(
     input_normalization="minus_one_to_one",
     source_model="facebook/PE-Spatial-B16-512",
 )
-
-
-def sha256_file(path: Path) -> str:
-    """Stream a file's SHA256 in fixed-size chunks without full residency."""
-
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(_SHA256_CHUNK_BYTES):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _require_inside_root(resolved: Path, root: Path, label: str) -> None:
@@ -88,11 +66,11 @@ def verify_pe_spatial_teacher_asset(
     *,
     repository_root: Path | None = None,
 ) -> Path:
-    """Fail-closed verification of a local PE-Spatial teacher asset.
+    """Check the local PE-Spatial teacher files and model metadata.
 
-    Returns the verified weight file path.  Missing files raise
-    ``FileNotFoundError``; any fingerprint, metadata, size, hash, symlink,
-    or path-escape mismatch raises ``ValueError``.
+    Returns the weight file path without reading its contents. Missing
+    files raise ``FileNotFoundError``; metadata, size, symlink, or
+    path-escape mismatches raise ``ValueError``.
     """
 
     if repository_root is None:
@@ -127,7 +105,6 @@ def verify_pe_spatial_teacher_asset(
     for field in (
         "teacher_id",
         "filename",
-        "sha256",
         "file_size_bytes",
         "patch_size",
         "width",
@@ -140,7 +117,7 @@ def verify_pe_spatial_teacher_asset(
         if type(actual) is not type(want) or actual != want:
             raise ValueError(
                 f"teacher asset metadata field {field} does not match the "
-                f"approved fingerprint (expected {want!r}, got {actual!r})"
+                f"approved model specification (expected {want!r}, got {actual!r})"
             )
 
     weight_path = resolved_dir / expected.filename
@@ -152,13 +129,7 @@ def verify_pe_spatial_teacher_asset(
     if size != expected.file_size_bytes:
         raise ValueError(
             "teacher weight file size does not match the approved "
-            f"fingerprint (expected {expected.file_size_bytes}, got {size})"
-        )
-    actual_sha256 = sha256_file(weight_path)
-    if actual_sha256 != expected.sha256:
-        raise ValueError(
-            "teacher weight file SHA256 does not match the approved "
-            f"fingerprint (expected {expected.sha256}, got {actual_sha256})"
+            f"model specification (expected {expected.file_size_bytes}, got {size})"
         )
     return weight_path
 
@@ -173,7 +144,6 @@ def write_pe_spatial_asset_metadata(
     payload = {
         "teacher_id": fingerprint.teacher_id,
         "filename": fingerprint.filename,
-        "sha256": fingerprint.sha256,
         "file_size_bytes": fingerprint.file_size_bytes,
         "patch_size": fingerprint.patch_size,
         "width": fingerprint.width,
@@ -215,14 +185,12 @@ def pe_spatial_teacher_required(irepa: IRepaConfig | None) -> bool:
 
 __all__ = [
     "APPROVED_PE_SPATIAL_B16_512",
-    "APPROVED_PE_SPATIAL_B16_512_SHA256",
     "APPROVED_PE_SPATIAL_B16_512_SIZE_BYTES",
     "PE_SPATIAL_ASSET_METADATA_FILENAME",
     "PE_SPATIAL_TEACHER_FILENAME",
     "PeSpatialTeacherFingerprint",
     "pe_spatial_teacher_required",
     "require_local_pe_spatial_teacher",
-    "sha256_file",
     "verify_pe_spatial_teacher_asset",
     "write_pe_spatial_asset_metadata",
 ]

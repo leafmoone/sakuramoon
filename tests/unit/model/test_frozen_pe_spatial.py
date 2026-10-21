@@ -1,7 +1,7 @@
 """Structural and contract tests for FrozenPESpatialEncoder (no weights).
 
 The real-weight forward/geometry/reference tests live in
-tests/gpu/irepa/ (they require the fingerprint-bound local asset and an
+tests/gpu/irepa/ (they require the local teacher asset and an
 HCU).  Here the module is constructed with random initialization and cast
 to the same BF16/frozen state the asset loader produces.
 """
