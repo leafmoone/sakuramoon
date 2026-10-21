@@ -19,6 +19,7 @@ from sakuramoon.data.caption import (
     CaptionPlan,
     CaptionTag,
     ConditionRequest,
+    NlBranch,
     Tag,
     empty_caption_dropout_hits,
 )
@@ -57,14 +58,21 @@ def _framing() -> FramingContract:
     return FramingContract(34, 5, PAD)
 
 
-def _uncond_plan() -> CaptionPlan:
+def _plan(
+    *,
+    tags: tuple[CaptionTag, ...] = (),
+    condition: ConditionRequest | None = None,
+    nl_text: str | None = None,
+    selected_nl: NlBranch | None = None,
+    all_condition_dropped: bool = False,
+) -> CaptionPlan:
     return CaptionPlan(
-        tags=(),
-        condition=None,
-        nl_text=None,
-        selected_nl=None,
-        all_condition_dropped=True,
-        dropout_hits=empty_caption_dropout_hits(all_condition=True),
+        tags=tags,
+        condition=condition,
+        nl_text=nl_text,
+        selected_nl=selected_nl,
+        all_condition_dropped=all_condition_dropped,
+        dropout_hits=empty_caption_dropout_hits(all_condition=all_condition_dropped),
     )
 
 
@@ -81,7 +89,7 @@ def _caption(
     use_null: bool = False,
 ) -> SerializedCaption:
     return SerializedCaption(
-        plan=_uncond_plan(),
+        plan=_plan(all_condition_dropped=True),
         text="",
         input_ids=input_ids,
         attention_mask=(True,) * len(input_ids),
@@ -171,7 +179,7 @@ def _assert_batch(actual: tuple[Any, ...], expected: tuple[Any, ...]) -> None:
 
 
 def test_uncond_category() -> None:
-    caption = _serialize(_uncond_plan())
+    caption = _serialize(_plan(all_condition_dropped=True))
     actual = batch.conditioning_batch(
         (caption,), pad_token_id=PAD, device=DEVICE
     )
@@ -187,14 +195,7 @@ def test_uncond_category() -> None:
 
 
 def test_nl_category() -> None:
-    plan = CaptionPlan(
-        tags=(),
-        condition=None,
-        nl_text="abc",
-        selected_nl="short_vibes",
-        all_condition_dropped=False,
-        dropout_hits=empty_caption_dropout_hits(),
-    )
+    plan = _plan(nl_text="abc", selected_nl="short_vibes")
     caption = _serialize(plan)
     actual = batch.conditioning_batch(
         (caption,), pad_token_id=PAD, device=DEVICE
@@ -210,14 +211,7 @@ def test_nl_category() -> None:
 
 
 def test_tags_category() -> None:
-    plan = CaptionPlan(
-        tags=(CaptionTag("general", Tag("long_hair", "long_hair")),),
-        condition=None,
-        nl_text=None,
-        selected_nl=None,
-        all_condition_dropped=False,
-        dropout_hits=empty_caption_dropout_hits(),
-    )
+    plan = _plan(tags=(CaptionTag("general", Tag("long_hair", "long_hair")),))
     caption = _serialize(plan)
     body = "long hair"
     actual = batch.conditioning_batch(
@@ -238,15 +232,10 @@ def test_tags_category() -> None:
 
 
 def test_styleartist_category() -> None:
-    plan = CaptionPlan(
-        tags=(),
+    plan = _plan(
         condition=ConditionRequest(
             source="artist_text", role="style", tags=(Tag("artist_name", "artist_name"),)
         ),
-        nl_text=None,
-        selected_nl=None,
-        all_condition_dropped=False,
-        dropout_hits=empty_caption_dropout_hits(),
     )
     caption = _serialize(plan)
     condition_text = "style reference: artist name"
@@ -271,17 +260,12 @@ def test_styleartist_category() -> None:
 
 
 def test_identity_category() -> None:
-    plan = CaptionPlan(
-        tags=(),
+    plan = _plan(
         condition=ConditionRequest(
             source="character_text",
             role="identity",
             tags=(Tag("character_name", "character_name"),),
         ),
-        nl_text=None,
-        selected_nl=None,
-        all_condition_dropped=False,
-        dropout_hits=empty_caption_dropout_hits(),
     )
     caption = _serialize(plan)
     condition_text = "character identity: character name"
@@ -305,28 +289,17 @@ def test_identity_category() -> None:
 
 def test_mixed_variable_and_null_category() -> None:
     mixed = _serialize(
-        CaptionPlan(
+        _plan(
             tags=(CaptionTag("general", Tag("long_hair", "long_hair")),),
             condition=ConditionRequest(
                 source="artist_text", role="style", tags=(Tag("artist_name", "artist_name"),)
             ),
             nl_text="soft lighting",
             selected_nl="short_vibes",
-            all_condition_dropped=False,
-            dropout_hits=empty_caption_dropout_hits(),
         )
     )
-    nl = _serialize(
-        CaptionPlan(
-            tags=(),
-            condition=None,
-            nl_text="abc",
-            selected_nl="short_vibes",
-            all_condition_dropped=False,
-            dropout_hits=empty_caption_dropout_hits(),
-        )
-    )
-    uncond = _serialize(_uncond_plan())
+    nl = _serialize(_plan(nl_text="abc", selected_nl="short_vibes"))
+    uncond = _serialize(_plan(all_condition_dropped=True))
     captions = (mixed, nl, uncond)
     actual = batch.conditioning_batch(captions, pad_token_id=PAD, device=DEVICE)
 
@@ -477,18 +450,16 @@ def test_train_overflow_keeps_original_row_fault_competition() -> None:
 
 def test_train_wrapper_happy_path_matches_reference() -> None:
     mixed = _serialize(
-        CaptionPlan(
+        _plan(
             tags=(CaptionTag("general", Tag("long_hair", "long_hair")),),
             condition=ConditionRequest(
                 source="artist_text", role="style", tags=(Tag("artist_name", "artist_name"),)
             ),
             nl_text="soft lighting",
             selected_nl="short_vibes",
-            all_condition_dropped=False,
-            dropout_hits=empty_caption_dropout_hits(),
         )
     )
-    uncond = _serialize(_uncond_plan())
+    uncond = _serialize(_plan(all_condition_dropped=True))
     actual = train_inputs((mixed, uncond), tokenizer=_Tokenizer(), device=DEVICE)
     mixed_body = "long hair\n\nsoft lighting"
     condition_text = "style reference: artist name"
@@ -541,15 +512,10 @@ def _eval_case() -> PromptCase:
         seed=1,
         height=128,
         width=128,
-        caption_plan=CaptionPlan(
-            tags=(),
+        caption_plan=_plan(
             condition=ConditionRequest(
                 source="artist_text", role="style", tags=(Tag("artist_name", "artist_name"),)
             ),
-            nl_text=None,
-            selected_nl=None,
-            all_condition_dropped=False,
-            dropout_hits=empty_caption_dropout_hits(),
         ),
     )
 
@@ -625,14 +591,7 @@ def _infer_kwargs(encoder: _RecordingEncoder, pad_token_id: Any = PAD) -> dict[s
 
 
 def test_inference_truncation_fails_before_padding() -> None:
-    plan = CaptionPlan(
-        tags=(),
-        condition=None,
-        nl_text="a" * 600,
-        selected_nl="short_vibes",
-        all_condition_dropped=False,
-        dropout_hits=empty_caption_dropout_hits(),
-    )
+    plan = _plan(nl_text="a" * 600, selected_nl="short_vibes")
     encoder = _RecordingEncoder()
     with pytest.raises(ValueError, match="prompt exceeds the model's caption budget"):
         generate_image(plan, **_infer_kwargs(encoder))
@@ -642,12 +601,12 @@ def test_inference_truncation_fails_before_padding() -> None:
 def test_inference_requires_integer_padding_token() -> None:
     encoder = _RecordingEncoder()
     with pytest.raises(ValueError, match="no integer padding token"):
-        generate_image(_uncond_plan(), **_infer_kwargs(encoder, pad_token_id="x"))
+        generate_image(_plan(all_condition_dropped=True), **_infer_kwargs(encoder, pad_token_id="x"))
     assert encoder.calls == 0
 
 
 def test_inference_encoder_fault_precedes_index_materialization() -> None:
     encoder = _RecordingEncoder(fail="qwen-fault")
     with pytest.raises(RuntimeError, match="qwen-fault"):
-        generate_image(_uncond_plan(), **_infer_kwargs(encoder))
+        generate_image(_plan(all_condition_dropped=True), **_infer_kwargs(encoder))
     assert encoder.calls == 1

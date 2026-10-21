@@ -185,6 +185,36 @@ def _diagnostics_stub(payload: dict[str, float]) -> Any:
     return stub
 
 
+def _variant_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    payload: dict[str, float] | None = None,
+    decoded: Any = None,
+    predictions: int = 24,
+) -> tuple[tuple[TrainingSampleItem, ...], TrainingSampler]:
+    monkeypatch.setattr(
+        sampler_cls, "_condition_diagnostics",
+        _diagnostics_stub({} if payload is None else payload),
+    )
+    items = tuple(_item(name, index) for index, name in enumerate(VARIANTS))
+    sampler = _sampler(
+        tmp_path,
+        vae=_VAE(torch.zeros(12, 3, 32, 32) if decoded is None else decoded),
+        composite=_Composite(predictions),
+    )
+    return items, sampler
+
+
+def _bad_profile(velocity: Any, noise: torch.Tensor, *, profile: SamplingProfile) -> Any:
+    return types.SimpleNamespace(state=noise[:, :1])
+
+
+def _bad_euler(velocity: Any, noise: torch.Tensor, *, steps: int) -> Any:
+    velocity(noise, torch.zeros(1, dtype=torch.float32))
+    raise AssertionError("euler must not continue after the guard fault")
+
+
 def _diagnostics_explode(
     self: TrainingSampler, *args: Any, **kwargs: Any
 ) -> dict[str, float]:
@@ -211,13 +241,7 @@ def test_raw_batch_happy_path_n2n(tmp_path: Path) -> None:
 
 
 def test_variant_batch_happy_path_12_24(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        sampler_cls,
-        "_condition_diagnostics",
-        _diagnostics_stub({"text_token_rms": 0.0}),
-    )
-    items = tuple(_item(name, index) for index, name in enumerate(VARIANTS))
-    sampler = _sampler(tmp_path, vae=_VAE(torch.zeros(12, 3, 32, 32)), composite=_Composite(24))
+    items, sampler = _variant_setup(tmp_path, monkeypatch, payload={"text_token_rms": 0.0})
     images, diagnostics = sampler._generate_batch(
         items, shared_seed=7, framing=_framing(), include_fixed_diagnostics=False
     )
@@ -258,13 +282,7 @@ def test_raw_vae_wrong_shape_keeps_original_message(tmp_path: Path) -> None:
 
 
 def test_variant_vae_wrong_shape_keeps_original_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        sampler_cls,
-        "_condition_diagnostics",
-        _diagnostics_stub({}),
-    )
-    items = tuple(_item(name, index) for index, name in enumerate(VARIANTS))
-    sampler = _sampler(tmp_path, vae=_VAE(torch.zeros(11, 3, 32, 32)), composite=_Composite(24))
+    items, sampler = _variant_setup(tmp_path, monkeypatch, decoded=torch.zeros(11, 3, 32, 32))
     with pytest.raises(
         TrainingSamplingError, match="VAE returned an invalid 12-image batch"
     ):
@@ -281,13 +299,9 @@ def test_raw_vae_nonfinite_keeps_original_message(tmp_path: Path) -> None:
 
 
 def test_variant_vae_nonfinite_keeps_original_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        sampler_cls,
-        "_condition_diagnostics",
-        _diagnostics_stub({}),
+    items, sampler = _variant_setup(
+        tmp_path, monkeypatch, decoded=torch.full((12, 3, 32, 32), float("nan"))
     )
-    items = tuple(_item(name, index) for index, name in enumerate(VARIANTS))
-    sampler = _sampler(tmp_path, vae=_VAE(torch.full((12, 3, 32, 32), float("nan"))), composite=_Composite(24))
     with pytest.raises(
         TrainingSamplingError, match="VAE produced nonfinite training samples"
     ):
@@ -306,13 +320,7 @@ def test_raw_dit_count_guard_keeps_original_message(tmp_path: Path) -> None:
 
 
 def test_variant_dit_count_guard_keeps_original_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        sampler_cls,
-        "_condition_diagnostics",
-        _diagnostics_stub({}),
-    )
-    items = tuple(_item(name, index) for index, name in enumerate(VARIANTS))
-    sampler = _sampler(tmp_path, vae=_VAE(torch.zeros(12, 3, 32, 32)), composite=_Composite(23))
+    items, sampler = _variant_setup(tmp_path, monkeypatch, predictions=23)
     with pytest.raises(TrainingSamplingError, match="DiT did not return 24 CFG predictions"):
         sampler._generate_batch(
             items, shared_seed=7, framing=_framing(), include_fixed_diagnostics=False
@@ -322,11 +330,7 @@ def test_variant_dit_count_guard_keeps_original_message(tmp_path: Path, monkeypa
 def test_raw_profile_state_guard_keeps_original_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     items = _raw_items(2)
     sampler = _sampler(tmp_path, vae=_VAE(torch.zeros(2, 3, 32, 32)), composite=_Composite(4))
-
-    def bad_profile(velocity: Any, noise: torch.Tensor, *, profile: SamplingProfile) -> Any:
-        return types.SimpleNamespace(state=noise[:, :1])
-
-    monkeypatch.setattr(sampling, "sample_profile", bad_profile)
+    monkeypatch.setattr(sampling, "sample_profile", _bad_profile)
     with pytest.raises(
         TrainingSamplingError, match="raw sample profile returned an invalid state batch"
     ):
@@ -334,18 +338,8 @@ def test_raw_profile_state_guard_keeps_original_message(tmp_path: Path, monkeypa
 
 
 def test_variant_profile_state_guard_keeps_original_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        sampler_cls,
-        "_condition_diagnostics",
-        _diagnostics_stub({}),
-    )
-    items = tuple(_item(name, index) for index, name in enumerate(VARIANTS))
-    sampler = _sampler(tmp_path, vae=_VAE(torch.zeros(12, 3, 32, 32)), composite=_Composite(24))
-
-    def bad_profile(velocity: Any, noise: torch.Tensor, *, profile: SamplingProfile) -> Any:
-        return types.SimpleNamespace(state=noise[:, :1])
-
-    monkeypatch.setattr(sampling, "sample_profile", bad_profile)
+    items, sampler = _variant_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(sampling, "sample_profile", _bad_profile)
     with pytest.raises(
         TrainingSamplingError, match="sample profile returned an invalid state batch"
     ):
@@ -355,19 +349,8 @@ def test_variant_profile_state_guard_keeps_original_message(tmp_path: Path, monk
 
 
 def test_variant_timestep_guard_keeps_original_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        sampler_cls,
-        "_condition_diagnostics",
-        _diagnostics_stub({}),
-    )
-    items = tuple(_item(name, index) for index, name in enumerate(VARIANTS))
-    sampler = _sampler(tmp_path, vae=_VAE(torch.zeros(12, 3, 32, 32)), composite=_Composite(24))
-
-    def bad_euler(velocity: Any, noise: torch.Tensor, *, steps: int) -> Any:
-        velocity(noise, torch.zeros(1, dtype=torch.float32))
-        raise AssertionError("euler must not continue after the guard fault")
-
-    monkeypatch.setattr(sampling_sampler, "euler", bad_euler)
+    items, sampler = _variant_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(sampling_sampler, "euler", _bad_euler)
     with pytest.raises(TrainingSamplingError, match="sampler state or timestep batch is invalid"):
         sampler._generate_batch(
             items, shared_seed=7, framing=_framing(), include_fixed_diagnostics=False
@@ -377,12 +360,7 @@ def test_variant_timestep_guard_keeps_original_message(tmp_path: Path, monkeypat
 def test_raw_timestep_guard_keeps_original_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     items = _raw_items(2)
     sampler = _sampler(tmp_path, vae=_VAE(torch.zeros(2, 3, 32, 32)), composite=_Composite(4))
-
-    def bad_euler(velocity: Any, noise: torch.Tensor, *, steps: int) -> Any:
-        velocity(noise, torch.zeros(1, dtype=torch.float32))
-        raise AssertionError("euler must not continue after the guard fault")
-
-    monkeypatch.setattr(sampling_sampler, "euler", bad_euler)
+    monkeypatch.setattr(sampling_sampler, "euler", _bad_euler)
     with pytest.raises(TrainingSamplingError, match="raw sampler state or timestep batch is invalid"):
         sampler._generate_raw_batch(items, shared_seed=7, framing=_framing())
 

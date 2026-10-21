@@ -528,24 +528,24 @@ def extract_calibration_binding(
 
 def build_observer_namespace(
     *,
-    production_path: Path,
-    store: Store | None,
+    production_path: Path = DEFAULT_PRODUCTION_PATH,
+    store: Store | None = None,
     progress_namespace: str,
-    rank: int,
-    world_size: int,
+    rank: int = 0,
+    world_size: int = 2,
     clock: Clock,
     update: int,
     events: list[tuple[object, ...]],
-    sampling_enabled: bool,
-    every_updates: int,
+    sampling_enabled: bool = True,
+    every_updates: int = 10,
     growth: Growth,
     sampler: Sampler | None,
     telemetry: Telemetry,
-    evaluator: Evaluator | None,
-    is_splits: int | None,
-    is_main_process: bool,
-    benchmark: object,
-    in_calibration: bool,
+    evaluator: Evaluator | None = None,
+    is_splits: int | None = None,
+    is_main_process: bool = True,
+    benchmark: object = None,
+    in_calibration: bool = False,
 ) -> dict[str, object]:
     """Assemble the closure namespace for the real nested observer."""
     namespace: dict[str, object] = {
@@ -903,23 +903,21 @@ def _matrix_namespace(
     events: list[tuple[object, ...]],
     sampling_due: bool,
     evaluation_due: bool,
-    benchmark: object,
+    benchmark: object = None,
+    telemetry: Telemetry | None = None,
 ) -> dict[str, object]:
     return build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace=progress_namespace,
         rank=rank,
-        world_size=2,
         clock=clock,
         update=update,
         events=events,
-        sampling_enabled=True,
         # enabled in every case; due is driven purely by the modulo
         every_updates=10 if sampling_due else 7,
         growth=Growth(events, 10, 100),
         sampler=Sampler(events, standard_result(update), None, None),
-        telemetry=Telemetry(events, None, None, None),
+        telemetry=Telemetry(events, None, None, None) if telemetry is None else telemetry,
         evaluator=Evaluator(
             events,
             frozenset({update}) if evaluation_due else frozenset(),
@@ -933,7 +931,6 @@ def _matrix_namespace(
         is_splits=1,
         is_main_process=is_main,
         benchmark=benchmark,
-        in_calibration=False,
     )
 
 
@@ -978,7 +975,6 @@ def test_normal_due_matrix(
         events=events1,
         sampling_due=sampling_due,
         evaluation_due=evaluation_due,
-        benchmark=None,
     )
     observation0 = make_observation(events0, update, ())
     observation1 = make_observation(events1, update, ())
@@ -1062,32 +1058,16 @@ def _progress_fault_namespace(
     fault_method: str,
     fault: ProgressBoom,
 ) -> tuple[dict[str, object], FaultyProgress]:
-    namespace = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
+    namespace = _matrix_namespace(
         store=store,
         progress_namespace="d1-pfail",
         rank=0,
-        world_size=2,
+        is_main=True,
         clock=clock,
         update=update,
         events=events,
-        sampling_enabled=True,
-        every_updates=10 if sampling_due else 7,
-        growth=Growth(events, 10, 100),
-        sampler=Sampler(events, standard_result(update), None, None),
-        telemetry=Telemetry(events, None, None, None),
-        evaluator=Evaluator(
-            events,
-            frozenset({update}) if evaluation_due else frozenset(),
-            Evaluation(0.5, 8.0, 0.2, 0.02, 0.001, 1.0, 4, 4),
-            {"a": 1.0},
-            None,
-            None,
-        ),
-        is_splits=1,
-        is_main_process=True,
-        benchmark=None,
-        in_calibration=False,
+        sampling_due=sampling_due,
+        evaluation_due=evaluation_due,
     )
     faulty = FaultyProgress(
         store,
@@ -1274,34 +1254,19 @@ def _wandb_payload_fault_namespace(
     evaluation_due: bool,
     metrics_faults: dict[str, BaseException],
 ) -> tuple[dict[str, object], RecordingProgress]:
-    namespace = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
+    namespace = _matrix_namespace(
         store=store,
         progress_namespace="d1-wandb",
         rank=0,
-        world_size=2,
+        is_main=True,
         clock=clock,
         update=update,
         events=events,
-        sampling_enabled=True,
-        every_updates=10 if sampling_due else 7,
-        growth=Growth(events, 10, 100),
-        sampler=Sampler(events, standard_result(update), None, None),
+        sampling_due=sampling_due,
+        evaluation_due=evaluation_due,
         telemetry=FaultyTelemetry(
             events, None, None, None, metrics_faults
         ),
-        evaluator=Evaluator(
-            events,
-            frozenset({update}) if evaluation_due else frozenset(),
-            Evaluation(0.5, 8.0, 0.2, 0.02, 0.001, 1.0, 4, 4),
-            {"a": 1.0},
-            None,
-            None,
-        ),
-        is_splits=1,
-        is_main_process=True,
-        benchmark=None,
-        in_calibration=False,
     )
     return namespace, cast(RecordingProgress, namespace["progress"])
 
@@ -1397,26 +1362,17 @@ def test_in_calibration_real_or_four_combinations(tmp_path: Path) -> None:
         assert computed is expected
 
         namespace = build_observer_namespace(
-            production_path=DEFAULT_PRODUCTION_PATH,
             store=store,
             progress_namespace=f"d1-or-{index}",
-            rank=0,
-            world_size=2,
             clock=clock,
             update=10,
             events=events,
-            sampling_enabled=True,
-            every_updates=10,
             growth=Growth(events, 10, 100),
             sampler=Sampler(events, standard_result(10), None, None),
             telemetry=Telemetry(events, None, None, None),
-            evaluator=None,
-            is_splits=None,
-            is_main_process=True,
             benchmark=make_benchmark(tmp_path, events, 0)
             if index == 3
             else None,
-            in_calibration=False,
         )
         binding = bind_with_real_or(
             DEFAULT_PRODUCTION_PATH, namespace, cal_value, struct_value
@@ -1475,44 +1431,31 @@ def test_due_update_rank0_full_flow_exact_stages_and_payloads(
         ),
     )
     namespace0 = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-full",
-        rank=0,
-        world_size=2,
         clock=clock,
         update=update,
         events=events0,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events0, 10, 100),
         sampler=sampler0,
         telemetry=Telemetry(events0, None, None, None),
         evaluator=evaluator0,
         is_splits=2,
-        is_main_process=True,
         benchmark=make_benchmark(tmp_path, events0, 0),
-        in_calibration=False,
     )
     namespace1 = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-full",
         rank=1,
-        world_size=2,
         clock=clock,
         update=update,
         events=events1,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events1, 10, 100),
         sampler=Sampler(events1, standard_result(update), None, None),
         telemetry=Telemetry(events1, None, None, None),
         evaluator=evaluator1,
         is_splits=2,
         is_main_process=False,
-        benchmark=None,
-        in_calibration=False,
     )
     observation0 = make_observation(events0, update, microbatches)
     observation1 = make_observation(events1, update, ())
@@ -1631,44 +1574,30 @@ def test_due_update_nonzero_rank_skips_callbacks_stages_participate() -> None:
     )
     evaluator1 = Evaluator(events1, frozenset({update}), None, None, None, None)
     namespace0 = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-nonzero",
-        rank=0,
-        world_size=2,
         clock=clock,
         update=update,
         events=events0,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events0, 10, 100),
         sampler=Sampler(events0, standard_result(update), None, None),
         telemetry=Telemetry(events0, None, None, None),
         evaluator=evaluator0,
         is_splits=1,
-        is_main_process=True,
-        benchmark=None,
-        in_calibration=False,
     )
     namespace1 = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-nonzero",
         rank=1,
-        world_size=2,
         clock=clock,
         update=update,
         events=events1,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events1, 10, 100),
         sampler=sampler1,
         telemetry=telemetry1,
         evaluator=evaluator1,
         is_splits=1,
         is_main_process=False,
-        benchmark=None,
-        in_calibration=False,
     )
     observation0 = make_observation(events0, update, ())
     observation1 = make_observation(events1, update, ())
@@ -1723,44 +1652,26 @@ def test_due_update_eval_disabled_both_ranks() -> None:
     events0: list[tuple[object, ...]] = []
     events1: list[tuple[object, ...]] = []
     namespace0 = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-noeval",
-        rank=0,
-        world_size=2,
         clock=clock,
         update=update,
         events=events0,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events0, 10, 100),
         sampler=Sampler(events0, standard_result(update), None, None),
         telemetry=Telemetry(events0, None, None, None),
-        evaluator=None,
-        is_splits=None,
-        is_main_process=True,
-        benchmark=None,
-        in_calibration=False,
     )
     namespace1 = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-noeval",
         rank=1,
-        world_size=2,
         clock=clock,
         update=update,
         events=events1,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events1, 10, 100),
         sampler=Sampler(events1, standard_result(update), None, None),
         telemetry=Telemetry(events1, None, None, None),
-        evaluator=None,
-        is_splits=None,
         is_main_process=False,
-        benchmark=None,
-        in_calibration=False,
     )
     observation0 = make_observation(events0, update, ())
     observation1 = make_observation(events1, update, ())
@@ -1805,44 +1716,26 @@ def test_update_zero_sampling_not_due() -> None:
     events1: list[tuple[object, ...]] = []
     sampler0 = Sampler(events0, standard_result(1), None, None)
     namespace0 = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-zero",
-        rank=0,
-        world_size=2,
         clock=clock,
         update=update,
         events=events0,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events0, None, None),
         sampler=sampler0,
         telemetry=Telemetry(events0, None, None, None),
-        evaluator=None,
-        is_splits=None,
-        is_main_process=True,
-        benchmark=None,
-        in_calibration=False,
     )
     namespace1 = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-zero",
         rank=1,
-        world_size=2,
         clock=clock,
         update=update,
         events=events1,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events1, None, None),
         sampler=Sampler(events1, standard_result(1), None, None),
         telemetry=Telemetry(events1, None, None, None),
-        evaluator=None,
-        is_splits=None,
         is_main_process=False,
-        benchmark=None,
-        in_calibration=False,
     )
     observation0 = make_observation(events0, update, ())
     observation1 = make_observation(events1, update, ())
@@ -1888,24 +1781,15 @@ def test_calibration_disabled_binds_real_observer_identity() -> None:
     clock = Clock(0.001)
     events: list[tuple[object, ...]] = []
     namespace = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
-        store=None,
         progress_namespace="d1-cal-off",
-        rank=0,
         world_size=1,
         clock=clock,
         update=10,
         events=events,
         sampling_enabled=False,
-        every_updates=10,
         growth=Growth(events, None, None),
         sampler=None,
         telemetry=Telemetry(events, None, None, None),
-        evaluator=None,
-        is_splits=None,
-        is_main_process=True,
-        benchmark=None,
-        in_calibration=False,
     )
     observer = namespace[OBSERVER_FUNCTION]
     binding = namespace[CALIBRATION_BINDING]
@@ -1919,23 +1803,14 @@ def test_calibration_enabled_bypasses_observer_side_effects() -> None:
     sampler = Sampler(events, standard_result(10), None, None)
     telemetry = Telemetry(events, None, None, None)
     namespace = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-cal-on",
-        rank=0,
-        world_size=2,
         clock=clock,
         update=10,
         events=events,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events, 10, 100),
         sampler=sampler,
         telemetry=telemetry,
-        evaluator=None,
-        is_splits=None,
-        is_main_process=True,
-        benchmark=None,
         in_calibration=True,
     )
     binding = cast(Callable[[Observation], None], namespace[CALIBRATION_BINDING])
@@ -1958,22 +1833,14 @@ def test_calibration_enabled_with_benchmark_still_bypasses(tmp_path: Path) -> No
     sampler = Sampler(events, standard_result(10), None, None)
     telemetry = Telemetry(events, None, None, None)
     namespace = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-cal-on-bench",
-        rank=0,
-        world_size=2,
         clock=clock,
         update=10,
         events=events,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events, 10, 100),
         sampler=sampler,
         telemetry=telemetry,
-        evaluator=None,
-        is_splits=None,
-        is_main_process=True,
         benchmark=make_benchmark(tmp_path, events, 0),
         in_calibration=True,
     )
@@ -1994,24 +1861,16 @@ def test_calibration_disabled_with_benchmark_binds_real_observer(
     clock = Clock(0.001)
     events: list[tuple[object, ...]] = []
     namespace = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
-        store=None,
         progress_namespace="d1-cal-off-bench",
-        rank=0,
         world_size=1,
         clock=clock,
         update=10,
         events=events,
         sampling_enabled=False,
-        every_updates=10,
         growth=Growth(events, None, None),
         sampler=None,
         telemetry=Telemetry(events, None, None, None),
-        evaluator=None,
-        is_splits=None,
-        is_main_process=True,
         benchmark=make_benchmark(tmp_path, events, 0),
-        in_calibration=False,
     )
     assert namespace[CALIBRATION_BINDING] is namespace[OBSERVER_FUNCTION]
 
@@ -2034,16 +1893,11 @@ def test_growth_alpha_read_dynamically_at_each_event() -> None:
     sampler = Sampler(events, standard_result(update), None, mutate_after_first_alpha)
     main_evaluation = Evaluation(0.5, 8.0, 0.2, 0.02, 0.001, 1.0, 4, 4)
     namespace = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
-        store=None,
         progress_namespace="d1-alpha",
-        rank=0,
         world_size=1,
         clock=clock,
         update=update,
         events=events,
-        sampling_enabled=True,
-        every_updates=10,
         growth=growth,
         sampler=sampler,
         telemetry=Telemetry(events, None, None, None),
@@ -2051,9 +1905,6 @@ def test_growth_alpha_read_dynamically_at_each_event() -> None:
             events, frozenset({update}), main_evaluation, {"a": 1.0}, None, None
         ),
         is_splits=1,
-        is_main_process=True,
-        benchmark=None,
-        in_calibration=False,
     )
     observation = make_observation(events, update, ())
     cast(Callable[[Observation], None], namespace[OBSERVER_FUNCTION])(observation)
@@ -2076,33 +1927,26 @@ def _single_rank_exception_namespace(
     update: int,
     sampler: Sampler | None,
     telemetry: Telemetry,
-    evaluator: Evaluator | None,
-    is_splits: int | None,
-    sampling_due: bool,
+    evaluator: Evaluator | None = None,
+    is_splits: int | None = None,
+    sampling_due: bool = True,
     growth: Growth | None,
     events: list[tuple[object, ...]],
     clock: Clock,
     store: Store,
 ) -> dict[str, object]:
     return build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-exc",
-        rank=0,
-        world_size=2,
         clock=clock,
         update=update,
         events=events,
-        sampling_enabled=True,
         every_updates=10 if sampling_due else 1000,
         growth=cast(Growth, growth),
         sampler=sampler,
         telemetry=telemetry,
         evaluator=evaluator,
         is_splits=is_splits,
-        is_main_process=True,
-        benchmark=None,
-        in_calibration=False,
     )
 
 
@@ -2118,9 +1962,6 @@ def test_sampler_exception_same_object_and_failed_stage_only() -> None:
         update=update,
         sampler=sampler,
         telemetry=telemetry,
-        evaluator=None,
-        is_splits=None,
-        sampling_due=True,
         growth=Growth(events, 10, 100),
         events=events,
         clock=clock,
@@ -2150,9 +1991,6 @@ def test_missing_sampler_raises_exact_runtime_error() -> None:
         update=update,
         sampler=None,
         telemetry=telemetry,
-        evaluator=None,
-        is_splits=None,
-        sampling_due=True,
         growth=Growth(events, 10, 100),
         events=events,
         clock=clock,
@@ -2181,9 +2019,6 @@ def test_wandb_images_exception_same_object() -> None:
         update=update,
         sampler=sampler,
         telemetry=telemetry,
-        evaluator=None,
-        is_splits=None,
-        sampling_due=True,
         growth=Growth(events, 10, 100),
         events=events,
         clock=clock,
@@ -2213,9 +2048,6 @@ def test_wandb_metrics_exception_same_object_after_images() -> None:
         update=update,
         sampler=sampler,
         telemetry=telemetry,
-        evaluator=None,
-        is_splits=None,
-        sampling_due=True,
         growth=Growth(events, 10, 100),
         events=events,
         clock=clock,
@@ -2246,9 +2078,6 @@ def test_telemetry_observer_exception_same_object() -> None:
         update=update,
         sampler=sampler,
         telemetry=telemetry,
-        evaluator=None,
-        is_splits=None,
-        sampling_due=True,
         growth=Growth(events, 10, 100),
         events=events,
         clock=clock,
@@ -2285,7 +2114,6 @@ def test_evaluator_evaluate_exception_same_object() -> None:
         telemetry=Telemetry(events, None, None, None),
         evaluator=evaluator,
         is_splits=1,
-        sampling_due=True,
         growth=Growth(events, 10, 100),
         events=events,
         clock=clock,
@@ -2327,7 +2155,6 @@ def test_concept_suite_exception_same_object_and_no_eval_payload() -> None:
         telemetry=telemetry,
         evaluator=evaluator,
         is_splits=1,
-        sampling_due=True,
         growth=Growth(events, 10, 100),
         events=events,
         clock=clock,
@@ -2406,9 +2233,6 @@ def test_growth_ramp_origin_error_propagates_before_sampling() -> None:
         update=update,
         sampler=sampler,
         telemetry=Telemetry(events, None, None, None),
-        evaluator=None,
-        is_splits=None,
-        sampling_due=True,
         growth=growth,
         events=events,
         clock=clock,
@@ -2437,44 +2261,26 @@ def test_nonzero_rank_surfaces_owner_failure_as_progress_error() -> None:
     sampler1 = Sampler(events1, standard_result(update), None, None)
     telemetry1 = Telemetry(events1, None, None, None)
     namespace0 = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-fail",
-        rank=0,
-        world_size=2,
         clock=clock,
         update=update,
         events=events0,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events0, 10, 100),
         sampler=sampler0,
         telemetry=Telemetry(events0, None, None, None),
-        evaluator=None,
-        is_splits=None,
-        is_main_process=True,
-        benchmark=None,
-        in_calibration=False,
     )
     namespace1 = build_observer_namespace(
-        production_path=DEFAULT_PRODUCTION_PATH,
         store=store,
         progress_namespace="d1-fail",
         rank=1,
-        world_size=2,
         clock=clock,
         update=update,
         events=events1,
-        sampling_enabled=True,
-        every_updates=10,
         growth=Growth(events1, 10, 100),
         sampler=sampler1,
         telemetry=telemetry1,
-        evaluator=None,
-        is_splits=None,
         is_main_process=False,
-        benchmark=None,
-        in_calibration=False,
     )
     observation0 = make_observation(events0, update, ())
     observation1 = make_observation(events1, update, ())
