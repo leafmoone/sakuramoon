@@ -526,6 +526,9 @@ def build_trainable_composite_from_config(
             )
     elif module.irepa_tap_slot_id is not None:
         raise ValueError("tap is bound while iREPA is absent or disabled")
+    from sakuramoon.model.fusion import configure_fusions
+
+    configure_fusions(module, enabled=config.kernels.equivalent_fusions)
     module.dit.set_activation_checkpoint_mode(config.train.activation_checkpoint_mode)
     if condition_diagnostics:
         # Runtime-only capture flag: applied after the document round-trip

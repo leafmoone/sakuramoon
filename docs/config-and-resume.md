@@ -181,3 +181,62 @@ checkpoint 与配置之间的绑定分两类：
   BENCHMARK 哨兵，加载时必须 fail-closed，属预期）。
 - Windows 本机 `os.O_NOFOLLOW`/`os.O_DIRECTORY`/`fcntl`/符号链接缺失导致的
   少数失败为平台环境差异，非回归（已在 BASE 提交同环境对照确认）。
+
+## Final output norm removal (isolated resume)
+
+`model.dit.final_output_norm = "none"` is the new architecture default. It removes
+only `dit.output_head.norm.weight` and the dense/packed final normalization;
+final scale/shift and the original FP32 projection retain their names and values.
+This deliberately changes the model function. `"rmsnorm"` is retained solely to
+reconstruct/compare old artifacts. An old artifact without the field means
+`"rmsnorm"`, not `"none"`.
+
+The existing strict checkpoint loader accepts this **directional** architecture
+change. It verifies and removes only that declared FQN, remaps optimizer slots
+using saved `param_names`, and preserves retained tensors and metadata. Other
+missing/unexpected names, wrong shapes/dtypes and changed locked group metadata
+remain errors. New saves include the explicit architecture marker. No source
+checkpoint is overwritten and no weight/gamma folding is performed.
+
+The checked-in model has no model-EMA owner or serialized EMA. The strict
+`checkpoint.final_norm.remove_final_norm_named_state` adapter supports an
+externally verified FQN→tensor shadow map without rebuilding its history. If the
+experiment deployment adds EMA, its actual serializer and counter/decay fields
+must be verified and integrated before claiming EMA resume acceptance.
+
+Use an isolated copy of the source checkpoint and an isolated TOML derived from
+the experiment machine's **resolved config**, preserving optimizer/LR/clipping,
+data cursor and backend settings. Set a new `run.run_id`, isolate **all** `paths`
+outputs, and use a new `paths.checkpoint_dir` beneath `output_model/`. Set
+`train.max_updates` to the saved successful update count plus the desired short
+window; it is an absolute endpoint, not a number of additional steps. Start with
+`model.dit.final_output_norm = "none"` and `kernels.equivalent_fusions = false`.
+Do not run the production stack/restart scripts for this experiment.
+
+These are existing executable entrypoints (paths are operator-supplied):
+
+```bash
+PYTHONPATH=src uv run --no-sync python -m sakuramoon.cli.train \
+  --config "$ISOLATED_CONFIG" --config-root "$ISOLATED_CONFIG_ROOT" --root "$ISOLATED_ROOT" \
+  --resume "$ISOLATED_CHECKPOINT_COPY" --preflight-only
+PYTHONPATH=src uv run --no-sync python -m sakuramoon.cli.train \
+  --config "$ISOLATED_CONFIG" --config-root "$ISOLATED_CONFIG_ROOT" --root "$ISOLATED_ROOT" \
+  --resume "$ISOLATED_CHECKPOINT_COPY"
+```
+
+This is compatibility loading, not an offline conversion command. A subsequent
+normal checkpoint save writes the norm-free model and preserved retained optimizer
+state to the isolated output location. Validate a fresh process resume from that
+new save before treating the experiment as accepted.
+
+For asset-free architecture diagnostics (not full-model quality), run:
+
+```bash
+OMP_NUM_THREADS=1 PYTHONPATH=src uv run --no-sync python \
+  -m sakuramoon.cli.validate_final_norm \
+  --config train_g1_hybrid_cmuon_ns4_core.toml --dtype float32
+```
+
+The diagnostic preserves a shared nonzero projection and final modulation across
+old/new heads, reports output RMS, loss and gradient scales, and checks finite
+forward/backward. Synthetic old/new equality is deliberately not an assertion.

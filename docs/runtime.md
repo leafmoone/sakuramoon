@@ -115,3 +115,65 @@ PYTHONPATH=src uv run --no-sync pytest tests/unit/model tests/unit/conditioning 
 仓库已有严格类型检查欠账；没有通过的全库检查不能表述为通过。当前 NVIDIA 证据覆盖真实 checkpoint 推理、注意力隔离/梯度和完整组合模型的小规模前后向；未覆盖 NVIDIA 多卡 DDP、生产 CMuon 长训、最小显存边界或跨厂商逐像素一致性。
 
 旧的 `test_cmuon_fp32_forensic.py` 中仍有按“FP32 below-floor 必须硬失败”编写的断言；当前 F3 逻辑对有限的 below-floor 更新采用软接受，相关 F3 用例已在 NVIDIA 上通过。旧断言与当前语义的冲突应单独维护，不能标作环境性失败或全套测试通过。
+
+## Optional equivalent fusion validation
+
+`[kernels] equivalent_fusions = false` is the default. Opting in enables lazy
+`torch.compile(backend="inductor", fullgraph=True)` boundaries for QK RMSNorm →
+learned gamma → existing 2D RoPE, block RMSNorm + timestep modulation, and gated
+residual additions. No attention algorithm or GEMM boundary changes. Packed
+sample gathers are inside the graph, so the compiler can avoid full modulation
+copies; allocation behavior must still be verified on the target compiler.
+Shared/sample gradients use autograd's reductions. Outer model compilation inlines
+the same operations rather than nesting cached compiler wrappers.
+
+These are real compiled boundaries, not merely module regrouping. They retain
+FP32 statistics and position arithmetic, the NoPE/Y/X split, independent Q/K head
+counts and contiguous RoPE outputs. Explicit casts preserve the reference source
+operations, **not** a bitwise BF16/FMA/reduction-order guarantee. No automatic
+fallback or claimed CUDA/DTK compatibility: an unsupported compiler fails visibly.
+Configure before DDP/outer compile; enabling is not saved as architecture metadata.
+
+For a prepared environment, the asset-free CLI uses dimensions from the specified
+resolved/inherited config and synthetic sample lengths. It checks every output and
+input/parameter gradient, prints the FX graph/compiler kernel metric, and records
+separate warmed reference/compiled profiler traces:
+
+```bash
+OMP_NUM_THREADS=1 TORCHINDUCTOR_COMPILE_THREADS=1 PYTHONPATH=src \
+uv run --no-sync python -m sakuramoon.cli.validate_fusions \
+  --config train_g1_hybrid_cmuon_ns4_core.toml --device cpu --dtype float32 \
+  --sample-lengths 5 3 7 --warmup 3 --iterations 5 --explain \
+  --trace-dir /tmp/sakuramoon-fusion-traces
+# On the verified experiment backend, choose its actual device and sample lengths.
+# BF16 tolerances must be assessed, not silently relaxed to force acceptance:
+OMP_NUM_THREADS=1 TORCHINDUCTOR_COMPILE_THREADS=1 PYTHONPATH=src \
+uv run --no-sync python -m sakuramoon.cli.validate_fusions \
+  --config "$EXPERIMENT_CONFIG" --config-root "$EXPERIMENT_CONFIG_ROOT" --device "$EXPERIMENT_DEVICE" --dtype bfloat16 \
+  --sample-lengths 31 17 9 --atol 0.06 --rtol 0.06 --explain \
+  --trace-dir /tmp/sakuramoon-bf16-traces
+```
+
+`TORCH_LOGS=output_code` additionally exposes generated kernels for allocation and
+rounding inspection. `generated_kernel_count` is a compiler metric; CPU ATen event
+counts are **not GPU kernel launches**. Device trace `kernel` events are counted
+only on a CUDA-compatible profiler runtime. This is a primitive benchmark, not a
+full training-step result. CPU peak GPU memory is reported unavailable.
+
+For complete-step timing, the existing synthetic training harness remains the
+entrypoint. Compare separate otherwise-identical isolated configs with final norm
+removed in both and only `kernels.equivalent_fusions` changed. Its profiler stage
+is separate from timed updates:
+
+```bash
+PYTHONPATH=src uv run --no-sync python scripts/benchmark_training_perf.py \
+  --config "$EXPERIMENT_CONFIG" --config-root "$EXPERIMENT_CONFIG_ROOT" --repository-root "$PWD" \
+  --output-root "$ISOLATED_BENCH_OUTPUT" --gpus 1 \
+  --warmup-updates 5 --measure-updates 10 --profiler
+```
+
+For real DDP use that script's documented `accelerate launch` two-GPU command and
+`--gpus 2`; keep the experiment activation-checkpoint and compile settings. Actual
+attention vendor libraries/assets are required. CPU primitive checks do not accept
+the real packed attention, GPU/DCU DDP or end-to-end performance. Keep the reference
+path unless the verified target demonstrates an actual benefit.

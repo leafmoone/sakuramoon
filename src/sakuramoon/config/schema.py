@@ -1130,6 +1130,7 @@ class KernelsConfig(StrictModel):
     tunableop_tuning: bool = False
     tunableop_record_untuned: bool = False
     tunableop_max_tuning_duration_ms: PositiveInt = 50
+    equivalent_fusions: bool = False
     torch_compile_enabled: bool = False
     torch_compile_backend: Literal["inductor"] = "inductor"
     torch_compile_mode: Literal[
