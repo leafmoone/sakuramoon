@@ -222,3 +222,38 @@ partitions pass finite checks and before either gradient set is scaled; it does
 not change clipping thresholds, gradient values or default behavior. The supplied
 five-file snapshot did not include the experiment clipping implementation, so
 this callback's tested timing contract is not a claim of byte-identical source.
+
+### Isolated DAS/DCU observations (2026-10-28)
+
+Commit `9c9717ad8f2ab7dabc2b5a6a6eaf55171238bb27` was exercised on the
+experiment machine (not the production host), after `source /opt/dtk/env.sh`:
+PyTorch 2.9.0 DAS, two 64-GiB DCUs, native-GQA `das_fa2_varlen`, BF16 and
+activation checkpointing. Short and long primitive checks passed the explicit
+`atol=rtol=0.06` bound; this is **not strict numerical equivalence**. Long
+QK/packed-norm/dense-norm maximum absolute gradient differences were respectively
+1.91333 / 0.938019 / 4.54102, accepted by the relative term. The newly added
+named-gradient relative-L2 diagnostics were not present in this run. Primitive
+kernel/timing reductions do not establish a full-step gain; residual allocation
+peaks increased, and short residual cases were slower.
+
+The real production-composite synthetic full-step harness completed DDP world2,
+local batch1, accumulation1 (global2), with **one warmup and two measured updates**,
+then a separate profiler update:
+
+| Outer-compiled control | Full step ms | Forward ms | Backward ms | Peak allocated bytes/card | Rank0 profiler kernel events |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Existing precision policy, unfused | 1400.557 | 96.219 | 389.452 | 23475604992 | 16587 |
+| Explicit cast-preserving policy, unfused | 1229.012 | 99.783 | 394.561 | 23475177984 | 16587 |
+| Same cast-preserving policy, fused | 1233.029 | 100.642 | 395.453 | 23474871808 | 16587 |
+
+The same-policy fused result was about 0.3% slower, within this very short/noisy
+window: **no full-step fusion benefit was demonstrated; fusion stays off by
+default**. The old-policy run had an anomalously high 720.202-ms optimizer phase,
+so its total is not evidence that the precision option accelerates training.
+Warmup-to-measure compiler counters were stable (old/policy: 1000 calls, 28 graphs;
+fused: 986 calls, 28 graphs). First successful updates took 121.760 / 203.135 /
+87.419 seconds with retained caches: these are not cold-start comparisons. An
+earlier 900-second autotuning timeout was not a compiler incompatibility; cache-
+preserving continuation completed. Real local batch16/accumulation8, cross-control
+full-model gradient comparison, and actual RAW continuation remain separate
+acceptance requirements. No production process or defaults were changed.

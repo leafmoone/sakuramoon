@@ -240,3 +240,45 @@ OMP_NUM_THREADS=1 PYTHONPATH=src uv run --no-sync python \
 The diagnostic preserves a shared nonzero projection and final modulation across
 old/new heads, reports output RMS, loss and gradient scales, and checks finite
 forward/backward. Synthetic old/new equality is deliberately not an assertion.
+
+### Synthetic RAW-state continuation without a data service
+
+When the production data manifest/socket is unavailable, the separate
+`validate_raw_resume` entrypoint can validate **numerical/trainer state only**
+using synthetic batches and the actual model, encoders, optimizer and training
+loop. It is not production-data continuation or a quality evaluation. It uses
+the same strict named checkpoint loader; it does not invent a data cursor or
+rebuild optimizer history. The initial checkpoint must be an isolated copy.
+
+The supported path fails closed on iREPA or an active growth ramp. It checks the
+saved resolved configuration against the current numerical training settings;
+there are no batch-size, learning-rate or optimizer overrides. Local Qwen/VAE
+assets and the configured backend remain required. Set `train.max_updates` high
+enough for both short phases, preserving the original schedule and clipping.
+Output roots must be new, non-overlapping directories beneath `output_model/`.
+The saved artifact explicitly rebinds only its run identity and output paths to
+that root. Completed historical growth metadata is retained. Rank-zero RNG is
+restored; other ranks follow the existing production deterministic restart rule,
+not an all-rank bitwise replay guarantee. Use the original explicit isolated
+`--config` in both phases; the saved resolved sidecar is not a CLI config template.
+
+```bash
+PYTHONPATH=src uv run --no-sync python -m sakuramoon.cli.validate_raw_resume \
+  --config "$ISOLATED_CONFIG" --config-root "$ISOLATED_CONFIG_ROOT" \
+  --root "$ISOLATED_ROOT" --resume "$ISOLATED_CHECKPOINT_COPY" \
+  --output-root "$ISOLATED_ROOT/output_model/synthetic-phase1" \
+  --updates 2 --checkpoint-id synthetic-phase1
+# A NEW process, using the exact saved RAW path printed by phase 1:
+PYTHONPATH=src uv run --no-sync python -m sakuramoon.cli.validate_raw_resume \
+  --config "$ISOLATED_CONFIG" --config-root "$ISOLATED_CONFIG_ROOT" \
+  --root "$ISOLATED_ROOT" --resume "$PHASE1_RAW_PATH" \
+  --output-root "$ISOLATED_ROOT/output_model/synthetic-phase2" \
+  --updates 1 --checkpoint-id synthetic-phase2
+```
+
+For a two-rank configuration, replace `python -m` in **each** command with
+`accelerate launch --multi_gpu --num_processes 2 --num_machines 1
+--mixed_precision no --dynamo_backend no --main_process_port 29512 -m`.
+Do not silently reduce the checkpoint's batch/topology to fit a smoke test.
+Completion of these two phases does not validate external EMA formats or
+production-data replay.
