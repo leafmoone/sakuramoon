@@ -11,6 +11,11 @@ from sakuramoon.model.attention import (
     DenseGQAAttention,
     FA4VarlenGQAAttention,
 )
+from sakuramoon.model.fusion import (
+    compiled,
+    norm_modulation_reference,
+    residual_reference,
+)
 from sakuramoon.model.mlp import SwiGLU
 from sakuramoon.model.norm import RMSNorm
 
@@ -36,6 +41,7 @@ class DiTBlock(nn.Module):
         mlp_dropout: float,
     ) -> None:
         super().__init__()
+        self.fusions_enabled = False
         self.hidden_size = hidden_size
         self.attention_norm = RMSNorm(hidden_size, norm_eps)
         self.mlp_norm = RMSNorm(hidden_size, norm_eps)
@@ -61,6 +67,30 @@ class DiTBlock(nn.Module):
             projection_bias=projection_bias,
             dropout=mlp_dropout,
         )
+
+    def _branch_input(
+        self,
+        tokens: torch.Tensor,
+        norm: RMSNorm,
+        scale: torch.Tensor,
+        shift: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.fusions_enabled:
+            return compiled(norm_modulation_reference)(
+                tokens, norm.weight, scale, shift, norm.eps
+            )
+        return self._modulate(norm(tokens), scale, shift)
+
+    def _residual(
+        self,
+        tokens: torch.Tensor,
+        branch: torch.Tensor,
+        gate: torch.Tensor,
+        growth: float,
+    ) -> torch.Tensor:
+        if self.fusions_enabled:
+            return compiled(residual_reference)(tokens, branch, gate, growth)
+        return tokens + growth * gate.to(tokens.dtype).unsqueeze(1) * branch
 
     def _validate_modulation(
         self,
@@ -109,8 +139,9 @@ class DiTBlock(nn.Module):
         self._validate_modulation(modulation, tokens.shape[0])
         valid = token_mask.unsqueeze(-1)
         tokens = tokens * valid
-        attention_input = self._modulate(
-            self.attention_norm(tokens),
+        attention_input = self._branch_input(
+            tokens,
+            self.attention_norm,
             modulation.attention_scale,
             modulation.attention_shift,
         )
@@ -119,18 +150,19 @@ class DiTBlock(nn.Module):
             attention_mask,
             coordinates,
         )
-        attention_gate = modulation.attention_gate.to(tokens.dtype).unsqueeze(1)
-        tokens = tokens + attention_growth * attention_gate * attention_output
+        tokens = self._residual(
+            tokens, attention_output, modulation.attention_gate, attention_growth
+        )
         tokens = tokens * valid
 
-        mlp_input = self._modulate(
-            self.mlp_norm(tokens),
+        mlp_input = self._branch_input(
+            tokens,
+            self.mlp_norm,
             modulation.mlp_scale,
             modulation.mlp_shift,
         )
         mlp_output = self.mlp(mlp_input)
-        mlp_gate = modulation.mlp_gate.to(tokens.dtype).unsqueeze(1)
-        tokens = tokens + mlp_growth * mlp_gate * mlp_output
+        tokens = self._residual(tokens, mlp_output, modulation.mlp_gate, mlp_growth)
         return tokens * valid
 
 
@@ -157,6 +189,7 @@ class PackedDiTBlock(nn.Module):
         mlp_dropout: float,
     ) -> None:
         super().__init__()
+        self.fusions_enabled = False
         self.hidden_size = hidden_size
         self.attention_norm = RMSNorm(hidden_size, norm_eps)
         self.mlp_norm = RMSNorm(hidden_size, norm_eps)
@@ -237,6 +270,49 @@ class PackedDiTBlock(nn.Module):
         batch = boundaries.batch_size
         if batch <= 0:
             raise ValueError("cu_seqlens must describe at least one sample")
+
+        if self.fusions_enabled:
+            for value in (
+                modulation.attention_scale,
+                modulation.attention_shift,
+                modulation.attention_gate,
+                modulation.mlp_scale,
+                modulation.mlp_shift,
+                modulation.mlp_gate,
+            ):
+                if value.shape != (batch, self.hidden_size):
+                    raise ValueError("selected block modulation tensors must be [B,D]")
+            attention_input = compiled(norm_modulation_reference)(
+                tokens,
+                self.attention_norm.weight,
+                modulation.attention_scale,
+                modulation.attention_shift,
+                self.attention_norm.eps,
+                sample_indices,
+            )
+            attention_output = self.attention(attention_input, boundaries, coordinates)
+            tokens = compiled(residual_reference)(
+                tokens,
+                attention_output,
+                modulation.attention_gate,
+                attention_growth,
+                sample_indices,
+            )
+            mlp_input = compiled(norm_modulation_reference)(
+                tokens,
+                self.mlp_norm.weight,
+                modulation.mlp_scale,
+                modulation.mlp_shift,
+                self.mlp_norm.eps,
+                sample_indices,
+            )
+            return compiled(residual_reference)(
+                tokens,
+                self.mlp(mlp_input),
+                modulation.mlp_gate,
+                mlp_growth,
+                sample_indices,
+            )
 
         attention_scale = self._token_condition(
             modulation.attention_scale, sample_indices, batch

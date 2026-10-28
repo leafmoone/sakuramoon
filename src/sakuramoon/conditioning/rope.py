@@ -138,9 +138,12 @@ class QKRoPE2D(nn.Module):
     ) -> None:
         super().__init__()
         if nope_dim + y_dim + x_dim != head_dim or y_dim != x_dim or y_dim % 2:
-            raise ValueError("RoPE dimensions must partition the head and share even y/x sizes")
+            raise ValueError(
+                "RoPE dimensions must partition the head and share even y/x sizes"
+            )
         if position_scale <= 0.0 or theta <= 0.0:
             raise ValueError("position_scale and theta must be positive")
+        self.fusions_enabled = False
         self.head_dim = head_dim
         self.nope_dim = nope_dim
         self.y_dim = y_dim
@@ -153,14 +156,20 @@ class QKRoPE2D(nn.Module):
         )
         self.register_buffer("frequencies", frequencies, persistent=True)
 
-    def _apply_rope(self, values: torch.Tensor, coordinates: torch.Tensor) -> torch.Tensor:
+    def _apply_rope(
+        self, values: torch.Tensor, coordinates: torch.Tensor
+    ) -> torch.Tensor:
         nope, y_values, x_values = torch.split(
             values,
             [self.nope_dim, self.y_dim, self.x_dim],
             dim=-1,
         )
-        y_angles = coordinates[:, 0, None] * self.position_scale * self.frequencies[None]
-        x_angles = coordinates[:, 1, None] * self.position_scale * self.frequencies[None]
+        y_angles = (
+            coordinates[:, 0, None] * self.position_scale * self.frequencies[None]
+        )
+        x_angles = (
+            coordinates[:, 1, None] * self.position_scale * self.frequencies[None]
+        )
         return torch.cat(
             (nope, _rotate(y_values, y_angles), _rotate(x_values, x_angles)),
             dim=-1,
@@ -174,11 +183,18 @@ class QKRoPE2D(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if query.ndim != 3 or key.ndim != 3:
             raise ValueError("query and key must have shape [tokens, heads, head_dim]")
-        if query.shape[0] != key.shape[0] or query.shape[-1] != self.head_dim or key.shape[-1] != self.head_dim:
+        if (
+            query.shape[0] != key.shape[0]
+            or query.shape[-1] != self.head_dim
+            or key.shape[-1] != self.head_dim
+        ):
             raise ValueError("query/key token counts and head dimensions must match")
         if coordinates.shape != (query.shape[0], 2):
             raise ValueError("coordinates must have shape [tokens,2]")
-        if query.dtype != key.dtype or query.dtype not in (torch.float32, torch.bfloat16):
+        if query.dtype != key.dtype or query.dtype not in (
+            torch.float32,
+            torch.bfloat16,
+        ):
             raise TypeError("query and key must share float32 or bfloat16 dtype")
         if coordinates.dtype != torch.float32:
             raise TypeError("coordinates must use float32")
@@ -187,7 +203,25 @@ class QKRoPE2D(nn.Module):
             or coordinates.device != query.device
             or self.frequencies.device != query.device
         ):
-            raise ValueError("query, key, coordinates, and RoPE frequencies must share one device")
+            raise ValueError(
+                "query, key, coordinates, and RoPE frequencies must share one device"
+            )
+        if self.fusions_enabled:
+            from sakuramoon.model.fusion import compiled, qk_rope_reference
+
+            return compiled(qk_rope_reference)(
+                query,
+                key,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                coordinates,
+                self.frequencies,
+                self.q_norm.eps,
+                self.nope_dim,
+                self.y_dim,
+                self.x_dim,
+                self.position_scale,
+            )
         normalized_query = self.q_norm(query)
         normalized_key = self.k_norm(key)
         return self._apply_rope(normalized_query, coordinates), self._apply_rope(
