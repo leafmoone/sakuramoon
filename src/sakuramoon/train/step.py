@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import sys
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Protocol, cast
 
 import torch
@@ -70,6 +74,147 @@ def _parameter_grad_norm(
     if not found:
         return squared_norm
     return squared_norm.sqrt()
+
+
+class _ConditionSpikeCapture:
+    """Process-local scalar-only capture; never part of a checkpoint."""
+
+    _names = frozenset("condition_tokens." + suffix for suffix in (
+        "layer_embedding", "queries", "null_tokens", "shared_norm.weight",
+        "input_projection.weight", "cross_attention.in_proj_weight",
+        "cross_attention.out_proj.weight", "condition_mlp.norm.weight",
+        "condition_mlp.gate.weight", "condition_mlp.up.weight",
+        "condition_mlp.down.weight", "output_projection.weight",
+    ))
+
+    @staticmethod
+    def _warn(reason: str) -> None:
+        try:
+            print(f"condition spike capture disabled: {reason}", file=sys.stderr)
+        except OSError:
+            pass
+
+    @classmethod
+    def create(
+        cls, destination: str, named: tuple[tuple[str, nn.Parameter], ...],
+        parameters: tuple[nn.Parameter, ...], policy: ConditionOptimizerConfig | None,
+    ) -> _ConditionSpikeCapture | None:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            raw_rank = os.environ.get("RANK", "0")
+            if not raw_rank.isascii() or not raw_rank.isdecimal():
+                cls._warn("not applicable: invalid RANK")
+                return None
+            rank = int(raw_rank)
+            if str(rank) != raw_rank:
+                cls._warn("not applicable: invalid RANK")
+                return None
+        if rank != 0:
+            return None
+        if (
+            policy is None or not policy.independent_clipping
+            or policy.parameter_prefixes != ("condition_tokens",)
+            or policy.clip_norm is None or policy.clip_norm <= 0.0
+        ):
+            cls._warn("not applicable: requires independent positive condition_tokens clipping")
+            return None
+        selected = tuple((name, p) for name, p in named
+                         if parameter_matches_prefix(name, policy.parameter_prefixes))
+        if (
+            len(selected) != 12 or frozenset(name for name, _ in selected) != cls._names
+            or tuple(id(p) for _, p in selected) != tuple(id(p) for p in parameters)
+        ):
+            cls._warn("not applicable: canonical 12-parameter identity mismatch")
+            return None
+        if "\0" in destination:
+            cls._warn("not applicable: invalid output path")
+            return None
+        try:
+            path = Path(destination)
+            if not path.is_absolute() or path.suffix.lower() != ".jsonl":
+                cls._warn("not applicable: requires an absolute external JSONL path")
+                return None
+            path = path.resolve()
+            if path.is_relative_to(Path(__file__).resolve().parents[3]):
+                cls._warn("not applicable: output must be outside the installed repository")
+                return None
+        except OSError as error:
+            cls._warn(str(error))
+            return None
+        return cls(path, selected)
+
+    def __init__(self, path: Path, named: tuple[tuple[str, nn.Parameter], ...]) -> None:
+        self.path = path
+        self.named = named
+        self.baseline_pending = True
+        self.spikes = 0
+        self.enabled = True
+
+    @torch.no_grad()
+    def _rows(self) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for name, parameter in self.named:
+            gradient = parameter.grad
+            row: dict[str, object] = {
+                "fqn": name, "parameter_dtype": str(parameter.dtype),
+                "parameter_numel": parameter.numel(), "grad_present": gradient is not None,
+                "grad_dtype": None,
+                "grad_numel": None, "l2_fp32": None, "max_abs": None,
+                "finite": None, "square_energy_share": None,
+            }
+            if gradient is not None:
+                gradient = gradient.detach()
+                row.update(
+                    grad_dtype=str(gradient.dtype), grad_numel=gradient.numel(),
+                    l2_fp32=float(cast(torch.Tensor, torch.linalg.vector_norm(gradient, 2, dtype=torch.float32)).item()),  # pyright: ignore[reportUnknownMemberType]
+                    max_abs=float(gradient.abs().max().item()) if gradient.numel() else 0.0,
+                    finite=bool(torch.isfinite(gradient).all().item()),
+                )
+            rows.append(row)
+        return rows
+
+    def observe(
+        self, condition: ClipResult, rest: ClipResult, *, threshold: float,
+        attempted_update: int, last_successful_update: int,
+    ) -> None:
+        if not self.enabled:
+            return
+        norm = float(condition.pre_clip_norm.item())
+        baseline = self.baseline_pending
+        if not baseline and norm <= threshold:
+            return
+        rows = self._rows()
+        # Python double sum of measured FP32 per-parameter L2 squared, NOT
+        # the clipper's rounded FP32 aggregate norm squared.
+        energy = sum(cast(float, row["l2_fp32"]) ** 2 for row in rows if row["l2_fp32"] is not None)
+        for row in rows:
+            if energy > 0.0 and row["l2_fp32"] is not None:
+                row["square_energy_share"] = cast(float, row["l2_fp32"]) ** 2 / energy
+        event = {
+            "kind": "baseline" if baseline else "spike", "rank": 0,
+            "attempted_update": attempted_update,
+            "last_successful_update": last_successful_update,
+            "phase": "post_sample_mean_pre_clip", "condition_clip_threshold": threshold,
+            "condition_pre_clip_norm": norm,
+            "rest_pre_clip_norm": float(rest.pre_clip_norm.item()),
+            "norm_scope": "clip._prepare_clip vector_norm/stack before_apply", "norm_dtype": "float32",
+            "energy_scope": "sum_measured_parameter_fp32_l2_squared_python_double",
+            "measured_square_energy": energy,
+            "measured_minus_clip_norm_squared": energy - norm ** 2,
+            "parameters": rows,
+        }
+        try:
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event, allow_nan=False, separators=(",", ":")) + "\n")
+        except OSError as error:
+            self.enabled = False
+            self._warn(str(error))
+            return
+        self.baseline_pending = False
+        if not baseline:
+            self.spikes += 1
+            self.enabled = self.spikes < 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,6 +643,8 @@ class SingleGpuStep:
         self.condition_optimizer = condition_optimizer
         self._condition_parameters: tuple[nn.Parameter, ...] = ()
         self._rest_parameters: tuple[nn.Parameter, ...] = ()
+        canonical_module = module
+        named: tuple[tuple[str, nn.Parameter], ...] = ()
         if condition_optimizer is not None and condition_optimizer.independent_clipping:
             canonical_module = module
             if isinstance(module, nn.parallel.DistributedDataParallel):
@@ -523,6 +670,21 @@ class SingleGpuStep:
             )
             if not self._condition_parameters:
                 raise ValueError("condition partition has no trainable parameters")
+        self._condition_spike_capture: _ConditionSpikeCapture | None = None
+        spike_log = os.environ.get("SAKURAMOON_CONDITION_SPIKE_LOG")
+        if spike_log is not None:
+            owner = canonical_module if condition_optimizer is not None and condition_optimizer.independent_clipping else module
+            cache_name = "_sakuramoon_condition_spike_capture"
+            # The loop constructs a fresh step each update; the canonical model persists.
+            if not hasattr(owner, cache_name):
+                setattr(owner, cache_name, _ConditionSpikeCapture.create(
+                    spike_log,
+                    named if condition_optimizer is not None and condition_optimizer.independent_clipping else (),
+                    self._condition_parameters, condition_optimizer,
+                ))
+            self._condition_spike_capture = cast(
+                _ConditionSpikeCapture | None, getattr(owner, cache_name),
+            )
         self.module = module
         self.optimizer = optimizer
         self.accumulation_steps = accumulation_steps
@@ -773,11 +935,20 @@ class SingleGpuStep:
                 if condition_policy is not None and condition_policy.independent_clipping:
                     assert condition_policy.clip_norm is not None
                     assert condition_policy.rest_clip_norm is not None
+                    capture = self._condition_spike_capture
                     condition_clip, rest_clip = clip_grad_norm_groups_fp32(
                         self._condition_parameters,
                         self._rest_parameters,
                         condition_max_norm=condition_policy.clip_norm,
                         rest_max_norm=condition_policy.rest_clip_norm,
+                        pre_clip_observer=(
+                            lambda condition, rest: capture.observe(
+                                condition, rest,
+                                threshold=cast(float, condition_policy.clip_norm),
+                                attempted_update=self._state.attempted_updates,
+                                last_successful_update=self._state.successful_updates,
+                            )
+                        ) if capture is not None and capture.enabled else None,
                     )
                     # Summary ratio only: no common scale is applied to both
                     # groups. The observer derives any-clipping from group

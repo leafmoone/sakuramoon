@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch import nn
@@ -36,7 +37,7 @@ def _prepare_clip(
         raise ValueError("all gradients must share one device")
     # Preserve the legacy norm reduction at max_norm=1.
     norms = [
-        torch.linalg.vector_norm(gradient, 2, dtype=torch.float32)
+        cast(torch.Tensor, torch.linalg.vector_norm(gradient, 2, dtype=torch.float32))  # pyright: ignore[reportUnknownMemberType]
         for gradient in gradients
     ]
     pre_clip_norm = (
@@ -71,9 +72,9 @@ def _apply_clip(gradients: list[torch.Tensor], coefficient: torch.Tensor) -> Non
         return
     dtypes = {gradient.dtype for gradient in gradients}
     if len(dtypes) == 1:
-        torch._foreach_mul_(gradients, coefficient.to(next(iter(dtypes))))
+        torch._foreach_mul_(gradients, coefficient.to(next(iter(dtypes))))  # pyright: ignore[reportPrivateUsage, reportPrivateImportUsage]
     else:
-        torch._foreach_mul_(
+        torch._foreach_mul_(  # pyright: ignore[reportPrivateUsage, reportPrivateImportUsage]
             gradients,
             [coefficient.to(gradient.dtype) for gradient in gradients],
         )
@@ -103,8 +104,14 @@ def clip_grad_norm_groups_fp32(
     *,
     condition_max_norm: float,
     rest_max_norm: float,
+    pre_clip_observer: Callable[[ClipResult, ClipResult], None] | None = None,
 ) -> tuple[ClipResult, ClipResult]:
-    """Check BOTH partitions before scaling either; absent gradients are zero."""
+    """Check BOTH partitions before scaling either; absent gradients are zero.
+
+    The optional scalar observer receives the exact prepared results only after
+    both finite checks, before either gradient partition is modified. An observer
+    failure aborts clipping; the default path preserves the original math.
+    """
     _validate_max_norm(condition_max_norm)
     _validate_max_norm(rest_max_norm)
     condition = tuple(condition_parameters)
@@ -119,6 +126,8 @@ def clip_grad_norm_groups_fp32(
         condition_gradients, max_norm=condition_max_norm, device=device
     )
     rest_result = _prepare_clip(rest_gradients, max_norm=rest_max_norm, device=device)
+    if pre_clip_observer is not None:
+        pre_clip_observer(condition_result, rest_result)
     if condition_max_norm > 0.0:
         _apply_clip(condition_gradients, condition_result.coefficient)
     if rest_max_norm > 0.0:
