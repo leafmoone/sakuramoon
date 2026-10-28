@@ -588,6 +588,7 @@ class DitModelConfig(StrictModel):
     mlp_dropout: UnitFloat
     projection_bias: bool
     norm_eps: PositiveFloat
+    final_output_norm: Literal["none", "rmsnorm"] = "none"
     norm_accumulation: Literal["float32"]
     activation_dtype: Literal["bfloat16"]
 

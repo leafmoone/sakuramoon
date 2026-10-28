@@ -448,6 +448,7 @@ def trainable_composite_spec(
             "modulation_chunks": condition.block_modulation_chunks,
             "new_slot_ids": list(new_slots),
             "norm_eps": dit.norm_eps,
+            "final_output_norm": dit.final_output_norm,
             "out_channels": head.out_channels,
             "output_bias_zero_init": head.bias_zero_init,
             "output_weight_zero_init": head.weight_zero_init,

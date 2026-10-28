@@ -14,6 +14,7 @@ from torchao.optim.subclass_8bit import (  # pyright: ignore[reportMissingTypeSt
 )
 
 import sakuramoon.checkpoint.load as loader
+from sakuramoon.checkpoint.final_norm import FINAL_NORM_FQN
 from sakuramoon.checkpoint.save import _hybrid_optimizer_schema, _optimizer_schema
 from sakuramoon.checkpoint.schema import CheckpointError, CheckpointIdentity
 from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
@@ -44,7 +45,9 @@ def _build(
                 if quantized and name.endswith("weight")
                 else torch.zeros(4)
             ),
-            "matrix_decay" if name.endswith("weight") else "sensitive_no_decay",
+            "matrix_decay"
+            if name.endswith("weight") and name != FINAL_NORM_FQN
+            else "sensitive_no_decay",
             0.0,
         )
         for name in names
@@ -351,3 +354,71 @@ def test_condition_adamw_to_hybrid_fails_before_loading(tmp_path: Path) -> None:
         loader._load_adamw_transition_state(
             tmp_path, {}, current, current.sr_rng.state_dict(), 3
         )
+
+
+@pytest.mark.parametrize("selected", [None, SELECTED])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_final_norm_hybrid_drop_preserves_later_moments_and_cmuon(
+    tmp_path: Path, selected: frozenset[str] | None, quantized: bool
+) -> None:
+    old = _build(selected, names=(*NAMES[:4], FINAL_NORM_FQN, *NAMES[4:]), quantized=quantized)
+    _seed(old, quantized=quantized)
+    before = cast(dict[str, Any], old.state_dict())
+    schema = _hybrid_optimizer_schema(old)
+    torch.save(before, tmp_path / "optimizer.pt")
+    current = _build(selected, quantized=quantized)
+    loader._load_hybrid_state_exact(
+        tmp_path, schema, current, old.sr_rng.state_dict(), 3,
+        dropped_fqns=frozenset({FINAL_NORM_FQN}),
+    )
+    after = cast(dict[str, Any], current.state_dict())
+    expected = _by_name(before["optimizer"])
+    del expected[FINAL_NORM_FQN]
+    assert set(_by_name(after["optimizer"])) == set(expected)
+    for name, entry in expected.items():
+        for key, tensor in entry.items():
+            actual = _by_name(after["optimizer"])[name][key]
+            if isinstance(tensor, OptimState8bit):
+                for field in ("codes", "qmap", "scale"):
+                    assert torch.equal(getattr(tensor, field), getattr(actual, field))
+            else:
+                assert torch.equal(tensor, actual)
+    for name, momentum in before["cmuon"]["momenta"].items():
+        assert torch.equal(momentum, after["cmuon"]["momenta"][name])
+    assert torch.equal(before["sr_rng"]["state"], after["sr_rng"]["state"])
+    # Fresh restore of the already-normalized checkpoint must require no drops.
+    torch.save(after, tmp_path / "optimizer.pt")
+    fresh = _build(selected, quantized=quantized)
+    loader._load_hybrid_state_exact(
+        tmp_path, _hybrid_optimizer_schema(current), fresh, current.sr_rng.state_dict(), 3
+    )
+    _assert_moments(after["optimizer"], cast(dict[str, Any], fresh.state_dict())["optimizer"])
+
+
+@pytest.mark.parametrize("selected", [None, SELECTED])
+def test_final_norm_pure_adamw_drop_is_named_and_locked(
+    selected: frozenset[str] | None,
+) -> None:
+    old = _build(selected, names=(*NAMES[:4], FINAL_NORM_FQN, *NAMES[4:]))
+    _seed(old)
+    current = _build(selected).adamw
+    schema = _optimizer_schema(old.adamw)
+    dropped = frozenset({FINAL_NORM_FQN})
+    loader._validate_optimizer_schema(
+        schema, current, CheckpointIdentity("synthetic", 3), dropped_fqns=dropped
+    )
+    before = old.optimizer.state_dict()
+    prepared = loader._prepare_condition_optimizer_state(
+        schema, before, current, dropped_fqns=dropped
+    )
+    assert prepared is not None
+    loader._validate_optimizer_state(prepared, current, 3)
+    expected = _by_name(before)
+    del expected[FINAL_NORM_FQN]
+    assert set(_by_name(prepared)) == set(expected)
+    for name, entry in expected.items():
+        for key, tensor in entry.items():
+            assert tensor is _by_name(prepared)[name][key]
+    before["param_groups"][0]["eps"] = 0.1
+    with pytest.raises(CheckpointError, match="differs: eps"):
+        loader._prepare_condition_optimizer_state(schema, before, current, dropped_fqns=dropped)

@@ -129,8 +129,8 @@ def _packed_checkpoint_operation(
     coordinates: torch.Tensor,
     sample_indices: torch.Tensor,
     *,
-    attention_growth: float,
-    mlp_growth: float,
+    attention_growth: float | torch.Tensor,
+    mlp_growth: float | torch.Tensor,
 ) -> Callable[..., torch.Tensor]:
     def operation(
         tokens: torch.Tensor,
@@ -221,6 +221,7 @@ class DenseDiT(nn.Module):
         mlp_dropout: float,
         output_weight_zero_init: bool,
         output_bias_zero_init: bool,
+        final_output_norm: str = "none",
     ) -> None:
         super().__init__()
         slots = (
@@ -263,6 +264,7 @@ class DenseDiT(nn.Module):
             "condition_token_count": condition_token_count,
             "depth": depth,
             "final_modulation_size": final_modulation_size,
+            "final_output_norm": final_output_norm,
             "head_dim": head_dim,
             "hidden_size": hidden_size,
             "input_channels": input_channels,
@@ -337,6 +339,7 @@ class DenseDiT(nn.Module):
             projection_dtype=sensitive_dtype,
             weight_zero_init=output_weight_zero_init,
             bias_zero_init=output_bias_zero_init,
+            final_output_norm=final_output_norm,
         )
 
     @property
@@ -662,6 +665,7 @@ class PackedDiT(nn.Module):
         mlp_dropout: float,
         output_weight_zero_init: bool,
         output_bias_zero_init: bool,
+        final_output_norm: str = "none",
     ) -> None:
         super().__init__()
         slots = (
@@ -704,6 +708,7 @@ class PackedDiT(nn.Module):
             "condition_token_count": condition_token_count,
             "depth": depth,
             "final_modulation_size": final_modulation_size,
+            "final_output_norm": final_output_norm,
             "head_dim": head_dim,
             "hidden_size": hidden_size,
             "input_channels": input_channels,
@@ -778,6 +783,7 @@ class PackedDiT(nn.Module):
             projection_dtype=sensitive_dtype,
             weight_zero_init=output_weight_zero_init,
             bias_zero_init=output_bias_zero_init,
+            final_output_norm=final_output_norm,
         )
 
     @property

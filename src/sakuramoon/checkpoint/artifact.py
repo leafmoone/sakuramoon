@@ -182,7 +182,11 @@ def build_trainable_composite(
         irepa_in_channels = _decode_irepa_auxiliary(document["training_auxiliaries"])
     else:
         raise ValueError("model architecture schema version is unsupported")
-    dit_config = _mapping(document["dit"], "DiT architecture")
+    # Missing marker means the historical normalized head, never the new architecture.
+    document = dict(document)
+    dit_config = dict(_mapping(document["dit"], "DiT architecture"))
+    dit_config.setdefault("final_output_norm", "rmsnorm")
+    document["dit"] = dit_config
     recorded_slots = dit_config.get("active_slot_ids")
     if not isinstance(recorded_slots, list) or not all(
         type(slot) is int for slot in cast(list[object], recorded_slots)
@@ -260,6 +264,7 @@ def is_canonical_v4_irepa_document(document: object) -> bool:
 
     if not isinstance(document, dict):
         return False
+    document = cast(dict[str, object], document)
     if (
         document.get("schema_version") != _ARCHITECTURE_SCHEMA_VERSION_V4
         or document.get("class") != "TrainableComposite"
@@ -267,10 +272,10 @@ def is_canonical_v4_irepa_document(document: object) -> bool:
     ):
         return False
     auxiliary = document.get("training_auxiliaries")
-    if not isinstance(auxiliary, dict) or set(auxiliary) != {"irepa"}:
+    if not isinstance(auxiliary, dict) or set(cast(dict[str, object], auxiliary)) != {"irepa"}:
         return False
     try:
-        irepa_auxiliary_fqns(auxiliary["irepa"])
+        irepa_auxiliary_fqns(cast(dict[str, object], auxiliary)["irepa"])
     except ValueError:
         return False
     return True
@@ -304,6 +309,7 @@ def architectures_share_parameter_contract(
     right: object,
     *,
     allow_irepa_auxiliary_drop: bool = False,
+    allow_final_norm_drop: bool = False,
 ) -> bool:
     """Compare artifacts while treating parameter-free attention backends alike.
 
@@ -337,6 +343,14 @@ def architectures_share_parameter_contract(
         right_dit = _mapping(right_document.get("dit"), "right DiT architecture")
     except TypeError:
         return False
+    left_dit = {"final_output_norm": "rmsnorm", **left_dit}
+    right_dit = {"final_output_norm": "rmsnorm", **right_dit}
+    if (
+        allow_final_norm_drop
+        and left_dit["final_output_norm"] == "none"
+        and right_dit["final_output_norm"] == "rmsnorm"
+    ):
+        right_dit = {**right_dit, "final_output_norm": "none"}
     left_backend = left_dit.get("attention_backend")
     right_backend = right_dit.get("attention_backend")
     if (

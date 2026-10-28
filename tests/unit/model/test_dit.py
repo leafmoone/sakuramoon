@@ -241,7 +241,7 @@ def test_output_head_restores_heterogeneous_packed_image_spans() -> None:
     )
 
     assert tuple(sample.shape for sample in output) == ((4, 2, 2), (4, 2, 3))
-    expected = head.projection(head.norm(image_hidden).float())
+    expected = head.projection(image_hidden.float())
     torch.testing.assert_close(output[0].flatten(1).transpose(0, 1), expected[:4])
     torch.testing.assert_close(output[1].flatten(1).transpose(0, 1), expected[4:])
 

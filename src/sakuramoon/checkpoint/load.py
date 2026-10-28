@@ -22,6 +22,7 @@ from sakuramoon.checkpoint.artifact import (
     is_canonical_v4_irepa_document,
     validate_optimizer_coverage,
 )
+from sakuramoon.checkpoint.final_norm import FINAL_NORM_FQN
 from sakuramoon.checkpoint.rng import restore_rank_rng, validate_rank_rng
 from sakuramoon.checkpoint.schema import (
     CheckpointError,
@@ -352,6 +353,20 @@ def _declared_dropped_auxiliary_fqns(
     return dropped
 
 
+def _declared_dropped_final_norm_fqns(
+    module: nn.Module, architecture: object
+) -> frozenset[str]:
+    current = export_trainable_composite(module)
+    source_dit = _mapping(_mapping(architecture, "model architecture")["dit"], "DiT")
+    target_dit = _mapping(current["dit"], "target DiT")
+    if (
+        target_dit.get("final_output_norm") == "none"
+        and source_dit.get("final_output_norm", "rmsnorm") == "rmsnorm"
+    ):
+        return frozenset({FINAL_NORM_FQN})
+    return frozenset()
+
+
 # Element sizes of the safetensors dtypes that may appear in the locked
 # iREPA auxiliary (projector weight = BF16, bias = F32).
 _SAFE_DTYPE_ELEMENT_SIZES = {
@@ -375,7 +390,9 @@ def _validate_model_tensors(
     kind: CheckpointKind,
 ) -> tuple[dict[str, str], dict[str, torch.Tensor], frozenset[str]]:
     architecture = _validate_model_config(model_dir / "config.json", expected, kind)
-    dropped_fqns = _declared_dropped_auxiliary_fqns(module, architecture)
+    dropped_fqns = _declared_dropped_auxiliary_fqns(module, architecture) | (
+        _declared_dropped_final_norm_fqns(module, architecture)
+    )
     try:
         # Direct ON->OFF resume: the no-iREPA module may drop exactly the
         # declared iREPA auxiliary from a v4 artifact.  The opt-in is safe
@@ -385,6 +402,7 @@ def _validate_model_tensors(
             export_trainable_composite(module),
             architecture,
             allow_irepa_auxiliary_drop=True,
+            allow_final_norm_drop=True,
         ):
             raise CheckpointError("model architecture differs from artifact")
     except (TypeError, ValueError):
@@ -438,6 +456,15 @@ def _validate_model_tensors(
                         # with the parameter; only the declared byte size is
                         # accounted against the index total.
                         view = handle.get_slice(name)
+                        if name == FINAL_NORM_FQN:
+                            source_dit = _mapping(
+                                _mapping(architecture, "architecture")["dit"], "DiT"
+                            )
+                            if (
+                                view.get_dtype() != "F32"
+                                or view.get_shape() != [source_dit["hidden_size"]]
+                            ):
+                                raise CheckpointError("deleted final norm shape or dtype differs")
                         element_size = _SAFE_DTYPE_ELEMENT_SIZES.get(view.get_dtype())
                         if element_size is None:
                             raise CheckpointError(
@@ -486,6 +513,7 @@ def _validate_optimizer_schema(
     expected: CheckpointIdentity,
     *,
     new_fqns: frozenset[str] = frozenset(),
+    dropped_fqns: frozenset[str] = frozenset(),
 ) -> None:
     """Validate saved canonical groups against the current optimizer.
 
@@ -525,7 +553,7 @@ def _validate_optimizer_schema(
     if _has_condition_lr_groups(optimizer):
         saved = _coalesce_condition_groups(saved)
         current = _coalesce_condition_groups(current)
-    _verify_group_diff(saved, current, new_fqns)
+    _verify_group_diff(saved, current, new_fqns, dropped_fqns)
 
 
 def _load_optimizer_state(path: Path) -> dict[str, object]:
@@ -716,7 +744,8 @@ def _prepare_condition_optimizer_state(
             raise CheckpointError(
                 "condition LR checkpoint cannot resume into legacy optimizer groups"
             )
-        return None
+        if FINAL_NORM_FQN not in dropped_fqns:
+            return None
     _exact_keys(document, {"state", "param_groups"}, "optimizer state")
     if not isinstance(raw_groups, list) or not isinstance(document["state"], dict):
         raise CheckpointError("optimizer state groups or state mapping is invalid")
@@ -1695,7 +1724,7 @@ def load_raw_checkpoint(
         else:
             raise CheckpointError("hybrid optimizer requires schema v1 or v2")
     else:
-        if dropped_fqns:
+        if dropped_fqns - {FINAL_NORM_FQN}:
             raise CheckpointError(
                 "iREPA auxiliary drop requires the hybrid CMuon optimizer "
                 "(the auxiliary parameters live in the hybrid AdamW part)"
@@ -1705,7 +1734,8 @@ def load_raw_checkpoint(
                 "schema v2 checkpoint requires the hybrid CMuon optimizer"
             )
         _validate_optimizer_schema(
-            schema, optimizer, expected, new_fqns=cutover_new_fqns
+            schema, optimizer, expected, new_fqns=cutover_new_fqns,
+            dropped_fqns=dropped_fqns,
         )
         optimizer_state = _load_optimizer_state(train_state / "optimizer.pt")
         current_groups = cast(
@@ -1717,16 +1747,18 @@ def load_raw_checkpoint(
             optimizer_state,
             optimizer,
             new_fqns=cutover_new_fqns,
+            dropped_fqns=dropped_fqns,
         )
         if condition_state is not None:
             optimizer_state = condition_state
-        elif cutover_new_fqns:
+        elif cutover_new_fqns or dropped_fqns:
             # Re-key the saved state into the current id space by FQN name
             # (torch's positional remap is unsafe across a growth cutover);
             # the remapped document is then validated state-exact.
             optimizer_state = _remap_state_to_current_ids(
                 optimizer_state,
                 [cast(dict[str, object], group) for group in current_groups],
+                dropped_fqns,
             )
         _validate_optimizer_state(optimizer_state, optimizer, successful_updates)
         saved_groups = cast(list[object], optimizer_state["param_groups"])

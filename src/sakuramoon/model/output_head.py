@@ -18,6 +18,7 @@ class FinalOutputHead(nn.Module):
         projection_dtype: torch.dtype,
         weight_zero_init: bool,
         bias_zero_init: bool,
+        final_output_norm: str = "none",
     ) -> None:
         super().__init__()
         if hidden_size <= 0 or out_channels <= 0:
@@ -28,7 +29,12 @@ class FinalOutputHead(nn.Module):
             raise ValueError("the output projection weight and bias must start at zero")
         self.hidden_size = hidden_size
         self.out_channels = out_channels
-        self.norm = RMSNorm(hidden_size, norm_eps)
+        if final_output_norm not in {"none", "rmsnorm"}:
+            raise ValueError("final_output_norm must be none or rmsnorm")
+        self.final_output_norm = final_output_norm
+        # Legacy artifact reconstruction only; the new architecture owns no norm weight.
+        if final_output_norm == "rmsnorm":
+            self.norm = RMSNorm(hidden_size, norm_eps)
         self.projection = nn.Linear(
             hidden_size,
             out_channels,
@@ -56,7 +62,11 @@ class FinalOutputHead(nn.Module):
         height, width = image_shape
         if height <= 0 or width <= 0 or image_tokens != height * width:
             raise ValueError("image token count must equal the latent image shape")
-        normalized = self.norm(image_hidden)
+        normalized = (
+            self.norm(image_hidden)
+            if self.final_output_norm == "rmsnorm"
+            else image_hidden
+        )
         conditioned = (
             1.0 + final_scale.to(normalized.dtype).unsqueeze(1)
         ) * normalized + final_shift.to(normalized.dtype).unsqueeze(1)
@@ -102,7 +112,11 @@ class FinalOutputHead(nn.Module):
         if sum(image_lengths) != image_hidden.shape[0]:
             raise ValueError("packed image token count must equal all image grid areas")
 
-        normalized = self.norm(image_hidden)
+        normalized = (
+            self.norm(image_hidden)
+            if self.final_output_norm == "rmsnorm"
+            else image_hidden
+        )
         scale = final_scale.index_select(0, image_sample_indices).to(normalized.dtype)
         shift = final_shift.index_select(0, image_sample_indices).to(normalized.dtype)
         prediction = self.projection(((1.0 + scale) * normalized + shift).float())

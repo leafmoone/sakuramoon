@@ -311,14 +311,14 @@ def test_irepa_projector_is_constructed_on_requested_device(tmp_path: Path) -> N
 
     The architecture document comes from the real frozen production input
     chain (train_g1_cmuon_production.toml + the [irepa] overlay), so the
-    asserted topology is the production one: 289 + 2 = 291 trainable
+    asserted topology is the production one: 288 + 2 = 290 trainable (final output norm removed)
     parameters.
     """
     document = _production_v4_document(tmp_path)
     requested = torch.device("cuda", 0)
     module = build_trainable_composite(document, device=requested)
     trainable = [p for p in module.parameters() if p.requires_grad]
-    assert len(trainable) == 291
+    assert len(trainable) == 290
     assert {p.device for p in trainable} == {requested}
     assert module.irepa_alignment is not None
     alignment = module.irepa_alignment
