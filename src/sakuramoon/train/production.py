@@ -1640,6 +1640,7 @@ def _run_accepted_lifecycle(
             backend=config.kernels.torch_compile_backend,
             mode=config.kernels.torch_compile_mode,
             dynamic=config.kernels.torch_compile_dynamic,
+            emulate_precision_casts=config.kernels.torch_compile_emulate_precision_casts,
         )
         if is_main_process:
             _log(

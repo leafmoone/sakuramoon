@@ -311,6 +311,7 @@ def assemble_benchmark(
             backend=config.kernels.torch_compile_backend,
             mode=config.kernels.torch_compile_mode,
             dynamic=config.kernels.torch_compile_dynamic,
+            emulate_precision_casts=config.kernels.torch_compile_emulate_precision_casts,
         )
         _record_startup_mark(startup_marks, "compile_installed")
 

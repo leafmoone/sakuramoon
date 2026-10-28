@@ -118,6 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--rtol", type=float, default=2e-4)
     parser.add_argument("--trace-dir", type=Path)
     parser.add_argument("--explain", action="store_true", help="print pre-Inductor FX graph; use TORCH_LOGS=output_code for generated kernels")
+    parser.add_argument("--only", nargs="+", choices=("qk_rope", "packed_norm_modulation", "packed_residual", "dense_norm_modulation", "dense_residual"), help="run selected cases only; omitted cases remain unvalidated")
     args = parser.parse_args(argv)
     if min(args.sample_lengths) <= 0 or args.warmup < 1 or args.iterations < 1:
         parser.error("sample lengths, warmup and iterations must be positive")
@@ -146,6 +147,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("dense_residual", residual_reference, [random(batch, max(args.sample_lengths), dit.hidden_size), random(batch, max(args.sample_lengths), dit.hidden_size), parameter(batch, dit.hidden_size), 0.7]),
     ]
     for name, function, inputs in cases:
+        if args.only and name not in args.only:
+            print(f"{name}: not selected, unvalidated")
+            continue
         _compare(name, function, inputs, args, device)
     return 0
 

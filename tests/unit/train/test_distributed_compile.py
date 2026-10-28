@@ -166,32 +166,31 @@ def test_regional_compile_preserves_parameters_and_state_keys(
         module._compiled_call_impl = module.forward
 
     monkeypatch.setattr(nn.Module, "compile", fake_compile)
-    monkeypatch.setattr(dynamo_config, "suppress_errors", False)
-    monkeypatch.setattr(dynamo_config, "fail_on_recompile_limit_hit", False)
+    with dynamo_config.patch(suppress_errors=False, fail_on_recompile_limit_hit=False):  # pyright: ignore[reportUnknownMemberType]
 
-    blocks = compile_packed_dit_blocks(
-        composite,
-        backend="inductor",
-        mode="default",
-        dynamic=True,
-    )
-
-    assert blocks == tuple(composite.dit.blocks.values())
-    assert before_parameter_ids == tuple(id(item) for item in composite.parameters())
-    assert before_state_keys == tuple(composite.state_dict())
-    assert dynamo_config.fail_on_recompile_limit_hit is True
-    assert observed == [
-        (
-            block,
-            {
-                "backend": "inductor",
-                "mode": "default",
-                "fullgraph": False,
-                "dynamic": True,
-            },
+        blocks = compile_packed_dit_blocks(
+            composite,
+            backend="inductor",
+            mode="default",
+            dynamic=True,
         )
-        for block in blocks
-    ]
+
+        assert blocks == tuple(composite.dit.blocks.values())
+        assert before_parameter_ids == tuple(id(item) for item in composite.parameters())
+        assert before_state_keys == tuple(composite.state_dict())
+        assert dynamo_config.fail_on_recompile_limit_hit is True
+        assert observed == [
+            (
+                block,
+                {
+                    "backend": "inductor",
+                    "mode": "default",
+                    "fullgraph": False,
+                    "dynamic": True,
+                },
+            )
+            for block in blocks
+        ]
 
 
 def test_regional_compile_requires_dynamic_shapes() -> None:
@@ -210,9 +209,10 @@ def test_regional_compile_rejects_python_forward_hooks(
     composite = _composite()
     first = next(iter(composite.dit.blocks.values()))
     first.register_forward_pre_hook(lambda _module, _inputs: None)
-    monkeypatch.setattr(dynamo_config, "suppress_errors", False)
-
-    with pytest.raises(RuntimeError, match="must not carry Python forward hooks"):
+    with (
+        dynamo_config.patch(suppress_errors=False),  # pyright: ignore[reportUnknownMemberType]
+        pytest.raises(RuntimeError, match="must not carry Python forward hooks"),
+    ):
         compile_packed_dit_blocks(
             composite,
             backend="inductor",
@@ -279,3 +279,33 @@ def test_runtime_source_contains_no_whole_model_compile_path() -> None:
 
     assert "_compiled_dit_forward" not in source
     assert "torch.compile(" not in source
+
+
+@pytest.mark.parametrize("fused", [False, True])
+def test_fused_regional_compile_preserves_selected_mode_and_bf16_casts(
+    monkeypatch: pytest.MonkeyPatch, fused: bool,
+) -> None:
+    from sakuramoon.model.fusion import configure_fusions, precision_compile_options
+
+    composite = _composite()
+    configure_fusions(composite, enabled=fused)
+    observed: list[dict[str, object]] = []
+
+    def fake_compile(module: nn.Module, **kwargs: object) -> None:
+        observed.append(kwargs)
+        module._compiled_call_impl = module.forward  # pyright: ignore[reportPrivateUsage]
+
+    monkeypatch.setattr(nn.Module, "compile", fake_compile)
+    with dynamo_config.patch(suppress_errors=False):  # pyright: ignore[reportUnknownMemberType]
+        blocks = compile_packed_dit_blocks(
+            composite, backend="inductor", mode="max-autotune-no-cudagraphs", dynamic=True,
+            emulate_precision_casts=not fused,
+        )
+        expected = precision_compile_options("max-autotune-no-cudagraphs")
+        assert expected["emulate_precision_casts"] is True
+        assert len(observed) == len(blocks)
+        for call in observed:
+            assert "mode" not in call
+            assert call["options"] == expected
+            assert call["fullgraph"] is False
+            assert call["dynamic"] is True

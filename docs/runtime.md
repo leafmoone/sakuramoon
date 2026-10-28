@@ -177,3 +177,48 @@ For real DDP use that script's documented `accelerate launch` two-GPU command an
 attention vendor libraries/assets are required. CPU primitive checks do not accept
 the real packed attention, GPU/DCU DDP or end-to-end performance. Keep the reference
 path unless the verified target demonstrates an actual benefit.
+
+### BF16 cast policy and separate controls
+
+Compiled fusion explicitly requests Inductor `emulate_precision_casts=true`.
+Without it, a compiler can elide BF16 downcast/upcast pairs, including products
+before the shared norm-weight gradient reduction. A near-cancellation regression
+at hidden size 2560 and packed lengths 31/17/9 rejects that behavior without
+loosening the original error bound. Unsupported vendor options fail visibly.
+
+For outer regional compilation, the selected mode's actual options are retained
+and the precision option is added. This affects the **whole compiled block**, not
+only the new primitives; it may change unrelated intermediate rounding relative
+to the previous compiled reference. It does not promise bitwise equality or a
+speedup. Keep these controls distinct when testing the real backend:
+
+| Control | `equivalent_fusions` | `torch_compile_enabled` | `torch_compile_emulate_precision_casts` |
+| --- | --- | --- | --- |
+| Eager reference | false | false | false |
+| Existing compiled reference | false | true | false |
+| Precision-policy-only control | false | true | true |
+| Fused candidate | true | true | true (also enforced by fusion) |
+
+All three kernel flags default false; the existing compiler remains unchanged
+when fusion and the explicit precision-policy control are both disabled. Do not
+silently change the reference policy to claim parity. Compare forward/backward,
+actual DDP/activation-checkpoint behavior and full-step timing before adoption.
+`validate_fusions --only packed_norm_modulation` can replay one failing primitive
+with the same seeded inputs as the full invocation; omitted cases are printed as
+unvalidated, not passed. Run remaining cases before accepting the complete path.
+
+### Experiment source reconciliation
+
+The supplied experiment source used earlier optimizer-construction and inline
+observer forms, removed the optional diagnostics/guard APIs, and added an opt-in
+condition-gradient spike capture. The merged code retains current GitHub
+consolidation, type/device guards and default-off diagnostic APIs; it does not
+claim those retained APIs were experiment additions. The extra spike capture is
+retained through `SAKURAMOON_CONDITION_SPIKE_LOG`, requiring an absolute external
+JSONL path, rank zero and the canonical independently clipped condition-token
+partition. It records scalar pre-clip facts, not weights or gradients. No
+variable means no capture. The additive clipping callback runs only after both
+partitions pass finite checks and before either gradient set is scaled; it does
+not change clipping thresholds, gradient values or default behavior. The supplied
+five-file snapshot did not include the experiment clipping implementation, so
+this callback's tested timing contract is not a claim of byte-identical source.

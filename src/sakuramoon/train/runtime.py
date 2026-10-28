@@ -52,6 +52,7 @@ from sakuramoon.model.attention import (
 )
 from sakuramoon.model.block import DiTBlock, PackedDiTBlock
 from sakuramoon.model.dit import DenseDiT, PackedDiT
+from sakuramoon.model.fusion import precision_compile_options
 from sakuramoon.objective.flow import (
     flow_matching_loss,
     interpolate_state,
@@ -131,6 +132,7 @@ def compile_packed_dit_blocks(
     backend: str,
     mode: str,
     dynamic: bool,
+    emulate_precision_casts: bool = False,
 ) -> tuple[PackedDiTBlock, ...]:
     """Install fail-closed regional compilation after DDP construction."""
 
@@ -138,6 +140,7 @@ def compile_packed_dit_blocks(
         backend != "inductor"
         or mode not in {"default", "reduce-overhead", "max-autotune-no-cudagraphs"}
         or type(dynamic) is not bool
+        or type(emulate_precision_casts) is not bool
     ):
         raise ValueError("regional torch.compile configuration is invalid")
     if not dynamic:
@@ -169,12 +172,22 @@ def compile_packed_dit_blocks(
     parameter_ids = tuple(id(parameter) for parameter in composite.parameters())
     state_keys = tuple(composite.state_dict())
     for block in blocks:
-        block.compile(  # pyright: ignore[reportUnknownMemberType]
-            backend=backend,
-            mode=mode,
-            fullgraph=False,
-            dynamic=dynamic,
-        )
+        if getattr(block, "fusions_enabled", False) or emulate_precision_casts:
+            # An outer graph owns the inlined fusion primitives: preserve their
+            # BF16 rounding here too, without discarding the selected mode.
+            block.compile(  # pyright: ignore[reportUnknownMemberType]
+                backend=backend,
+                options=precision_compile_options(mode),
+                fullgraph=False,
+                dynamic=dynamic,
+            )
+        else:
+            block.compile(  # pyright: ignore[reportUnknownMemberType]
+                backend=backend,
+                mode=mode,
+                fullgraph=False,
+                dynamic=dynamic,
+            )
     if any(getattr(block, "_compiled_call_impl", None) is None for block in blocks):
         raise RuntimeError("regional torch.compile was not installed on every block")
     if parameter_ids != tuple(id(parameter) for parameter in composite.parameters()):
