@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import importlib
+import inspect
 import json
 import time
 from collections.abc import Callable, Sequence
@@ -39,6 +40,45 @@ def _synchronize(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def _tensor_error_metrics(
+    reference: torch.Tensor, actual: torch.Tensor, *, atol: float, rtol: float,
+) -> dict[str, float]:
+    """Diagnostic only: FP64 host reductions, outside all measured regions.
+
+    rel_l2 = ||actual-reference||2 / ||reference||2 (0/0 -> 0).
+    floored_max_rel = max(abs(error)/max(abs(reference), relative_floor)).
+    The floor is atol/rtol, the crossover of the mixed acceptance bound, or
+    atol for absolute-only checks. It never changes assert_close or its inputs.
+    Near-zero absolute error/count remain visible rather than being discarded.
+    """
+    if reference.shape != actual.shape or reference.numel() == 0:
+        raise ValueError("diagnostics require matching nonempty tensor shapes")
+    ref = reference.detach().to(device="cpu", dtype=torch.float64)
+    observed = actual.detach().to(device="cpu", dtype=torch.float64)
+    error = (observed - ref).abs()
+    ref_l2 = float(cast(Any, torch.linalg).vector_norm(ref))
+    error_l2 = float(cast(Any, torch.linalg).vector_norm(error))
+    relative_floor = max(atol / rtol if rtol > 0 else atol, torch.finfo(torch.float64).tiny)
+    near_zero = ref.abs() <= relative_floor
+    return {
+        "max_abs_error": float(error.max()),
+        "error_l2": error_l2,
+        "reference_l2": ref_l2,
+        "reference_max_abs": float(ref.abs().max()),
+        "relative_l2": error_l2 / ref_l2 if ref_l2 else (0.0 if error_l2 == 0 else float("inf")),
+        "relative_floor": relative_floor,
+        "floored_max_relative": float((error / ref.abs().clamp_min(relative_floor)).max()),
+        "near_zero_count": float(near_zero.sum()),
+        "near_zero_max_abs_error": float(torch.where(near_zero, error, 0.0).max()),
+    }
+
+
+def _gradient_names(function: Callable[..., Any], inputs: list[Any]) -> list[str]:
+    names = tuple(inspect.signature(function).parameters)
+    return [names[index] for index, item in enumerate(inputs)
+            if isinstance(item, torch.Tensor) and item.requires_grad]
+
+
 def _compare(name: str, function: Callable[..., Any], inputs: list[Any], args: argparse.Namespace, device: torch.device) -> None:
     if args.explain:
         explanation = importlib.import_module("torch._dynamo").explain(function)(*inputs)
@@ -53,9 +93,18 @@ def _compare(name: str, function: Callable[..., Any], inputs: list[Any], args: a
     actual, actual_grad = _run(candidate, inputs)
     print(f"{name}: Inductor generated_kernel_count={metrics.generated_kernel_count} (compiler metric, not runtime launches)")
     for kind, expected, observed in (("forward", reference, actual), ("backward", reference_grad, actual_grad)):
-        max_error = max(float((left.float() - right.float()).abs().max().detach()) for left, right in zip(expected, observed, strict=True))
+        labels = (_gradient_names(function, inputs) if kind == "backward"
+                  else [f"output_{index}" for index in range(len(expected))])
+        diagnostics: list[dict[str, float]] = []
+        for label, left, right in zip(labels, expected, observed, strict=True):
+            values = _tensor_error_metrics(left, right, atol=args.atol, rtol=args.rtol)
+            diagnostics.append(values)
+            print(f"{name} {kind}[{label}]: " + ", ".join(
+                f"{key}={value:.8g}" for key, value in values.items()))
+        # Diagnostics never substitute for or loosen the original acceptance.
         for left, right in zip(expected, observed, strict=True):
             torch.testing.assert_close(left, right, atol=args.atol, rtol=args.rtol)
+        max_error = max(values["max_abs_error"] for values in diagnostics)
         print(f"{name} {kind}: max_abs_error={max_error:.8g}")
     # Measure only after both forward and backward compilation/warmup.
     for label, operation in (("reference", function), ("inductor", candidate)):
@@ -139,6 +188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"torch={torch.__version__}; device={device}; CUDA={torch.version.cuda}; HIP={torch.version.hip}; dtype={dtype}")
     print(f"config dimensions: hidden={dit.hidden_size}, Q/K={dit.q_heads}/{dit.kv_heads}, head={dit.head_dim}; synthetic lengths={args.sample_lengths}")
     print("Primitive forward/backward benchmark only: NOT a full training-step or attention-backend acceptance result.")
+    print("Diagnostics: relative_l2 is error L2/reference L2; floored_max_relative uses the printed atol/rtol crossover floor. Near-zero absolute errors remain reported. Passing tolerance is not strict equivalence.")
     cases: list[tuple[str, Callable[..., Any], list[Any]]] = [
         ("qk_rope", qk_rope_reference, [random(tokens, dit.q_heads, dit.head_dim), random(tokens, dit.kv_heads, dit.head_dim), parameter(dit.head_dim), parameter(dit.head_dim), coordinates, frequencies, dit.norm_eps, rope.nope_dim, rope.y_dim, rope.x_dim, rope.position_scale]),
         ("packed_norm_modulation", norm_modulation_reference, [random(tokens, dit.hidden_size), parameter(dit.hidden_size), parameter(batch, dit.hidden_size), parameter(batch, dit.hidden_size), dit.norm_eps, indices]),
