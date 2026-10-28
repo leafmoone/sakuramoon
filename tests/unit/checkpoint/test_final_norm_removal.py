@@ -177,3 +177,72 @@ def test_deleted_norm_does_not_hide_corrupt_tensors(tmp_path: Path, case: str) -
     index_path.write_text(json.dumps(index))
     with pytest.raises(CheckpointError):
         loader._validate_model_tensors(model_dir, target, identity, CheckpointKind.MODEL_ONLY)
+
+
+def test_public_raw_resume_preserves_named_state_and_saves_separate_copy(tmp_path: Path) -> None:
+    from sakuramoon.checkpoint.save import save_raw_checkpoint
+    from sakuramoon.checkpoint.schema import (
+        CheckpointCadence,
+        GrowthCheckpointState,
+        RawCheckpointState,
+        StageBudgetCheckpointState,
+    )
+    from sakuramoon.optim.adamw8bit import IsolatedAdamW8bit
+    from sakuramoon.optim.groups import ParameterAudit, ParameterSpec
+    from sakuramoon.optim.stochastic_rounding import StochasticRoundingRNG
+    from sakuramoon.train.step import SingleGpuUpdateState
+
+    def optimizer_for(module: TrainableComposite) -> IsolatedAdamW8bit:
+        # CPU serialization harness: real AdamW wrapper, not a GPU/TorchAO kernel test.
+        specs = tuple(
+            ParameterSpec(name, parameter, "sensitive_no_decay", 0.0)
+            for name, parameter in sorted(module.named_parameters())
+        )
+        assert all(spec.parameter.numel() < 4096 for spec in specs)
+        inner = torch.optim.AdamW([
+            {"params": [], "param_names": [], "group_name": "matrix_decay"},
+            {"params": [spec.parameter for spec in specs],
+             "param_names": [spec.name for spec in specs], "group_name": "sensitive_no_decay"},
+        ], lr=1e-4, weight_decay=0.0)
+        return IsolatedAdamW8bit(
+            inner, ParameterAudit(specs),
+            StochasticRoundingRNG(torch.device("cuda:0"), torch.arange(16, dtype=torch.uint8)),
+        )
+
+    source, target = _composite("rmsnorm"), _composite("none")
+    old_optimizer, new_optimizer = optimizer_for(source), optimizer_for(target)
+    for index, spec in enumerate(old_optimizer.audit.specs):
+        old_optimizer.optimizer.state[spec.parameter] = {
+            "step": torch.tensor(1.0),
+            "exp_avg": torch.full_like(spec.parameter, index + 0.25),
+            "exp_avg_sq": torch.full_like(spec.parameter, index + 0.75),
+        }
+    state = RawCheckpointState(
+        SingleGpuUpdateState(1, 1, 2),
+        GrowthCheckpointState((0,), 1.0, "synthetic", 1, 8, None, None),
+        StageBudgetCheckpointState(0, 3), CheckpointCadence(1, 1.0, 1),
+    )
+    identity = CheckpointIdentity("synthetic-old", 1)
+    original = save_raw_checkpoint(
+        tmp_path / "output_model", identity, source, old_optimizer, state,
+        resolved_config=b'[model.dit]\nfinal_output_norm="rmsnorm"\n',
+    ).path
+    original_bytes = {path.relative_to(original): path.read_bytes() for path in original.rglob("*") if path.is_file()}
+    restored = loader.load_raw_checkpoint(original, target, new_optimizer, identity)
+    assert restored == state
+    old_by_name = {spec.name: old_optimizer.optimizer.state[spec.parameter] for spec in old_optimizer.audit.specs}
+    for spec in new_optimizer.audit.specs:
+        for key, value in old_by_name[spec.name].items():
+            assert torch.equal(value, new_optimizer.optimizer.state[spec.parameter][key])
+        assert torch.equal(source.state_dict()[spec.name], spec.parameter)
+    new_identity = CheckpointIdentity("synthetic-new", 1)
+    separate = save_raw_checkpoint(
+        tmp_path / "output_model", new_identity, target, new_optimizer, restored,
+        resolved_config=b'[model.dit]\nfinal_output_norm="none"\n',
+    ).path
+    assert original != separate
+    assert original_bytes == {path.relative_to(original): path.read_bytes() for path in original.rglob("*") if path.is_file()}
+    fresh = _composite("none")
+    fresh_optimizer = optimizer_for(fresh)
+    assert loader.load_raw_checkpoint(separate, fresh, fresh_optimizer, new_identity) == state
+    assert all(torch.equal(tensor, fresh.state_dict()[name]) for name, tensor in target.state_dict().items())
