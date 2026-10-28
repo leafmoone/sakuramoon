@@ -236,7 +236,7 @@ named-gradient relative-L2 diagnostics were not present in this run. Primitive
 kernel/timing reductions do not establish a full-step gain; residual allocation
 peaks increased, and short residual cases were slower.
 
-The real production-composite synthetic full-step harness completed DDP world2,
+The real production-composite synthetic full-step harness completed DDP world 2,
 local batch1, accumulation1 (global2), with **one warmup and two measured updates**,
 then a separate profiler update:
 
@@ -254,6 +254,29 @@ Warmup-to-measure compiler counters were stable (old/policy: 1000 calls, 28 grap
 fused: 986 calls, 28 graphs). First successful updates took 121.760 / 203.135 /
 87.419 seconds with retained caches: these are not cold-start comparisons. An
 earlier 900-second autotuning timeout was not a compiler incompatibility; cache-
-preserving continuation completed. Real local batch16/accumulation8, cross-control
-full-model gradient comparison, and actual RAW continuation remain separate
-acceptance requirements. No production process or defaults were changed.
+preserving continuation completed. The subsequent actual RAW continuation below
+used local batch 16/accumulation 8, but full-batch warmed performance and cross-control
+full-model gradient comparison remain unmeasured. No production process or defaults
+were changed.
+
+### Actual isolated RAW continuation (2026-10-28)
+
+Commit `190ad8e682654d1d0a2f56d5081e9c1d71b0a4dd` passed the documented
+synthetic RAW continuation on the same DAS/DCU experiment backend: resolution 1024,
+local batch 16, accumulation 8, world 2, global 256; original LR, clipping, compile and
+activation-checkpoint settings, with fusions off. Two updates from 302400 saved
+302402; a fresh OS process restored that new RAW and saved 302403 after one update.
+Both phases exited 0; loss, gradients and all model parameters at save were finite.
+
+| Update | Synthetic loss | Pre-clip gradient norm |
+| --- | ---: | ---: |
+| 302401 | 844.95294 | 33743.574 |
+| 302402 | 649.74341 | 24404.441 |
+| 302403 | 489.36768 | 19666.285 |
+
+These three synthetic observations establish bounded execution/state validation,
+not quality, long-run stability or a scientific benefit from decreasing loss.
+Stage elapsed 538 s / 188 s includes loading, compilation and saving, not steady-step
+performance. No external EMA serializer was verified (the repository has no native
+model EMA), no full-batch warmed benchmark or cross-control full-gradient comparison
+was run, and no production deployment/restart occurred.

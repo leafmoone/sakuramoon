@@ -282,3 +282,22 @@ For a two-rank configuration, replace `python -m` in **each** command with
 Do not silently reduce the checkpoint's batch/topology to fit a smoke test.
 Completion of these two phases does not validate external EMA formats or
 production-data replay.
+
+#### Observed compatibility result
+
+On the experiment backend, commit `190ad8e682654d1d0a2f56d5081e9c1d71b0a4dd`
+completed the above two-phase command at actual global batch 256. Separate process
+IDs 92680 and 109158 advanced attempted/successful updates 302400 → 302402 → 302403 and
+effective samples 176251200 → 176251712 → 176251968. Model keys 309 → 308 removed only
+`dit.output_head.norm.weight`; captured optimizer named parameters 127 → 126 retained
+all other names/order across four groups. New metadata records
+`final_output_norm=none`, model schema 1, architecture 3, optimizer 2 and trainer/growth 4.
+
+The new RAW directories are under
+`/root/sakuramoon-raw-validation-190ad8e6/output_model/`:
+`synthetic-phase1/ckpt_302402_synthetic-phase1` and
+`synthetic-phase2/ckpt_302403_synthetic-phase2`. Original checkpoint file sizes and
+mtimes were unchanged; no full-file hashes or source overwrites were performed.
+Results were recorded in `raw-results.json` and logs; both owned runs terminated.
+This is strict synthetic-state continuation, not production-data replay or
+external-EMA acceptance; see the numerical observations and limits in `runtime.md`.
