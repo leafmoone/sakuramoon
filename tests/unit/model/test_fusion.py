@@ -108,7 +108,9 @@ def test_modulation_residual_compiled_sample_reductions(
 
 
 def test_compiled_boundary_inside_outer_compile_and_checkpoint() -> None:
-    from torch.utils.checkpoint import checkpoint  # pyright: ignore[reportUnknownVariableType]
+    from torch.utils.checkpoint import (
+        checkpoint,  # pyright: ignore[reportUnknownVariableType]
+    )
 
     torch.manual_seed(5)
     x = torch.randn(2, 3, 16, requires_grad=True)

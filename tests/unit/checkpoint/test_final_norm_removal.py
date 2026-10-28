@@ -153,7 +153,10 @@ def test_named_ema_shadow_preserves_objects_and_rejects_other_deltas() -> None:
 def test_deleted_norm_does_not_hide_corrupt_tensors(tmp_path: Path, case: str) -> None:
     import json
 
-    from safetensors.torch import load_file, save_file  # pyright: ignore[reportUnknownVariableType]
+    from safetensors.torch import (
+        load_file,  # pyright: ignore[reportUnknownVariableType]
+        save_file,  # pyright: ignore[reportUnknownVariableType]
+    )
 
     source, target = _composite("rmsnorm"), _composite("none")
     identity = CheckpointIdentity("synthetic", 1)
