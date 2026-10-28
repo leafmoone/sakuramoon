@@ -2,8 +2,10 @@
 
 No parameters or state_dict keys are introduced. Autograd owns all reductions,
 including repeated packed sample indices and shared per-head gamma. Explicit
-casts preserve the *source* rounding points, but Inductor may change BF16
-rounding, FMA and reduction order; validate on the actual training backend.
+casts and the eager-precision compiler policy retain BF16 operator rounding
+(including backward products before shared reductions). Reduction scheduling
+can still differ; validate on the actual training backend. Outer compilers must
+use precision_compile_options() too: nested calls are inlined into their graph.
 Compilation errors propagate: silently falling back is not proof of fusion.
 """
 
@@ -11,9 +13,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import cache
-from typing import TypeVar, cast
+from typing import Any, TypeVar, cast
 
 import torch
+import torch._inductor as inductor
 from torch import nn
 
 F = TypeVar("F", bound=Callable[..., object])
@@ -102,10 +105,34 @@ def qk_rope_reference(
     return apply(query, q_weight), apply(key, k_weight)
 
 
+def precision_compile_options(mode: str | None = None) -> dict[str, Any]:
+    """Eager BF16 rounding is part of this optimization's numerical contract.
+
+    In eager execution each BF16 pointwise op rounds before its consumer. The
+    default Inductor lowering removes these downcast/upcast pairs, including
+    backward products preceding gamma/sample reductions. Cancellation can then
+    turn small per-token differences into large relative parameter-grad errors.
+    This supported Inductor option (PyTorch >=2.9) retains those round trips
+    *inside* fused kernels; it neither inserts an eager fallback nor changes
+    tolerances. It can cost throughput, so remeasure on the target backend.
+
+    Pass this policy to any enclosing torch.compile call as well. Unsupported
+    vendor compilers must fail explicitly rather than silently drop the policy.
+    """
+    options: dict[str, Any] = dict(inductor.list_mode_options(mode or "default"))
+    options["emulate_precision_casts"] = True
+    return options
+
+
 @cache
 def _compiled(function: Callable[..., object]) -> Callable[..., object]:
     """Lazy compilation; actual device/compiler support is checked on first call."""
-    return torch.compile(function, backend="inductor", fullgraph=True)  # pyright: ignore[reportUnknownMemberType]
+    return torch.compile(  # pyright: ignore[reportUnknownMemberType]
+        function,
+        backend="inductor",
+        fullgraph=True,
+        options=precision_compile_options(),
+    )
 
 
 def compiled(function: F) -> F:

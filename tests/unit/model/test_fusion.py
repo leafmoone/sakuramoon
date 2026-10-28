@@ -14,6 +14,7 @@ from sakuramoon.model.fusion import (
     compiled,
     configure_fusions,
     norm_modulation_reference,
+    precision_compile_options,
     residual_reference,
 )
 
@@ -125,7 +126,12 @@ def test_compiled_boundary_inside_outer_compile_and_checkpoint() -> None:
     ) -> torch.Tensor:
         return compiled(norm_modulation_reference)(x, w, s, sh, 1e-6)
 
-    outer = torch.compile(operation, backend="inductor", fullgraph=True)
+    outer = torch.compile(
+        operation,
+        backend="inductor",
+        fullgraph=True,
+        options=precision_compile_options(),
+    )
     expected = norm_modulation_reference(*inputs, 1e-6)
     actual = checkpoint(outer, *clones, use_reentrant=False)  # pyright: ignore[reportUnknownVariableType]
     assert isinstance(actual, torch.Tensor)
@@ -195,3 +201,42 @@ def test_dense_block_fusion_wiring_and_all_parameter_gradients() -> None:
         strict=True,
     ):
         torch.testing.assert_close(left.grad, right.grad, atol=3e-5, rtol=3e-5)
+
+
+def test_precision_policy_preserves_mode_without_global_mutation() -> None:
+    import torch._inductor as inductor
+    from torch._inductor import config
+
+    previous = config.emulate_precision_casts
+    expected = dict(inductor.list_mode_options("reduce-overhead"))
+    expected["emulate_precision_casts"] = True
+    assert precision_compile_options("reduce-overhead") == expected
+    assert precision_compile_options()["emulate_precision_casts"] is True
+    assert config.emulate_precision_casts == previous
+
+
+def test_bf16_packed_gamma_gradient_rounding_before_shared_reduction() -> None:
+    # Actual production hidden size + reported multi-sample lengths. A long,
+    # sign-changing cotangent stresses cancellation in the shared gamma grad.
+    # The old default Inductor path differs by 0.125 in gamma grad on CPU for
+    # this fixture, despite seemingly small per-token rounding differences.
+    torch.manual_seed(1729)
+    x = torch.randn(57, 2560, dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(2560, requires_grad=True)
+    scale = torch.randn(3, 2560, requires_grad=True)
+    shift = torch.randn(3, 2560, requires_grad=True)
+    indices = torch.repeat_interleave(torch.arange(3), torch.tensor([31, 17, 9]))
+    inputs = (x, weight, scale, shift)
+    clones = tuple(value.detach().clone().requires_grad_() for value in inputs)
+    expected = norm_modulation_reference(*inputs, 1e-6, indices)
+    xc, wc, sc, shc = clones
+    actual = compiled(norm_modulation_reference)(xc, wc, sc, shc, 1e-6, indices)
+    probe = torch.linspace(-0.7, 0.9, x.numel()).reshape(x.shape)
+    gradients = torch.autograd.grad((expected.float() * probe).sum(), inputs)
+    observed = torch.autograd.grad((actual.float() * probe).sum(), clones)
+    torch.testing.assert_close(expected, actual, atol=0.06, rtol=0.06)
+    for left, right in zip(gradients, observed, strict=True):
+        torch.testing.assert_close(left, right, atol=0.06, rtol=0.06)
+    # CPU-specific deterministic fixture: enforce the actual rounding contract,
+    # not just the broad hardware acceptance tolerance used above.
+    torch.testing.assert_close(gradients[1], observed[1], atol=0, rtol=0)
